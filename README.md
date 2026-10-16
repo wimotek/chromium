@@ -43,7 +43,7 @@ docker run -d \
   minimal-chromium-web
 
 
-'''YAML
+```YAML
 services:
   chromium:
     image: minimal-chromium-web
