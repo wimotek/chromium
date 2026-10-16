@@ -58,9 +58,9 @@ docker run -d \
   -v chromium_data:/data \
   your-username/minimal-chromium:latest \
   https://www.google.com
-
+```
 #### 2. 使用 docker-compose.yml
-```bash
+```Yaml
 services:
   chromium:
     image: your-username/your-repo:latest
@@ -79,11 +79,14 @@ services:
 
 volumes:
   chromium_data:
+```
 Web 访问地址：https://<服务器IP>:8444
+
 默认账号密码：admin / MySecurePassword123
+
 剪贴板同步：首次进入页面浏览器提示“请求剪贴板权限”时点击允许，即可使用 Ctrl+C / Ctrl+V。
 
-###  方案 B：Alpine noVNC 版
+##  方案 B：Alpine noVNC 版
 ```bash
 docker run -d \
   --name chromium-novnc \
@@ -95,18 +98,18 @@ docker run -d \
   -v chromium_data:/data \
   your-username/your-repo:novnc \
   https://www.bing.com
+```
 HTTP 访问：http://<服务器IP>:6080
 HTTPS 访问：https://<服务器IP>:6443（支持原生无缝剪贴板）
 
-###   🤖 AI Agent 与 CDP 自动化接入
+##   🤖 AI Agent 与 CDP 自动化接入
 
 ###  1. 验证 CDP 状态（宿主机终端执行）
 ```bash
-Bash
 curl http://127.0.0.1:9222/json/version
 2. Python (Playwright / Agent) 连接示例
-```bash
-Python
+```
+```Python
 import asyncio
 from playwright.async_api import async_playwright
 
@@ -125,6 +128,7 @@ async def main():
         print("Title:", await page.title())
 
 asyncio.run(main())
+```
 
 ###  3. 本地远程访问公网服务器的 CDP（安全隧道）
 严禁将 9222 直接开放给公网 0.0.0.0。推荐在本地电脑通过 SSH 建立加密通道：
@@ -132,19 +136,21 @@ asyncio.run(main())
 Bash
 ssh -N -L 9222:127.0.0.1:9222 root@<公网服务器IP>
 随后本地代码连接 http://127.0.0.1:9222 即可。
+```
+
+## ⚙️ 环境变量列表
+
+| 变量名 | 默认值 | 说明 |
+| :--- | :--- | :--- |
+| `RESOLUTION` | `1920x1080` | 屏幕分辨率（如 1280x800, 2560x1440） |
+| `DEPTH` | `24` | 色深（推荐保持 24） |
+| `VNC_USER` | `admin` | KasmVNC 登录用户名（仅限 KasmVNC 版） |
+| `VNC_PASSWORD`| *无*（空） | Web 访问密码（**公网部署强烈建议设置**） |
+| `HOMEPAGE` | `about:blank` | 容器启动时默认打开的网址 |
+| `CHROME_ARGS` | *无*（空） | 注入 Chromium 的额外参数（如 `--incognito`） |
 
 
-###   ⚙️ 环境变量列表
-变量名	默认值	说明
-RESOLUTION	1920x1080	屏幕分辨率（如 1280x800, 2560x1440）
-DEPTH	24	色深（推荐保持 24）
-VNC_USER	admin	KasmVNC 登录用户名（仅限 KasmVNC 版）
-VNC_PASSWORD	无（空）	Web 访问密码（公网部署强烈建议设置）
-HOMEPAGE	about:blank	容器启动时默认打开的网址
-CHROME_ARGS	无（空）	注入 Chromium 的额外参数（如 --incognito）
-
-
-###  💡 命令行动态传参示例
+##  💡 命令行动态传参示例
 可以在 docker run 命令末尾直接附加网址或参数：
 ```bash
 Bash
@@ -153,10 +159,10 @@ docker run -d -p 8444:8444 your-username/your-repo:latest https://news.ycombinat
 
 # 启动时以无痕模式打开多个标签页
 docker run -d -p 8444:8444 your-username/your-repo:latest --incognito https://github.com https://google.com
+```
 
 
-
-### 📄 License
+## 📄 License
 本项目基于 MIT 许可证 开源。
 
 
