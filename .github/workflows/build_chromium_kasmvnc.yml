@@ -51,3 +51,13 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      # 【核心新增】将项目根目录的 README.md 同步到 Docker Hub 主页
+      - name: Update Docker Hub Description
+        uses: peter-evans/dockerhub-description@v4
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          repository: ${{ env.IMAGE_NAME }}
+          readme-filepath: ./README.md                          # 指定 README 文件路径
+          short-description: "Minimal Chromium with KasmVNC/noVNC, CDP, and Clipboard sync" # 列表副标题简介
