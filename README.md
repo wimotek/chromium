@@ -43,7 +43,7 @@ docker run -d \
   minimal-chromium-web
 
 
-```YAML
+* **docker-compse.yml中使用
 services:
   chromium:
     image: minimal-chromium-web
