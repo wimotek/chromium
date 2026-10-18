@@ -41,7 +41,6 @@ network:
     pem_certificate: ${SSL_CERT}
     pem_key: ${SSL_CERT}
   websocket_port: 8444
-  web_dir: /usr/share/kasmvnc/www
 desktop:
   allow_resize: true
 EOF
