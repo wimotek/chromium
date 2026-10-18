@@ -56,14 +56,14 @@ docker run -d \
   -e VNC_PASSWORD="MySecurePassword123" \
   -e RESOLUTION=1920x1080 \
   -v chromium_data:/data \
-  your-username/minimal-chromium:latest \
+  wimotek/imnimal-chromium:latest \
   https://www.google.com
 ```
 #### 2. 使用 docker-compose.yml
 ```Yaml
 services:
   chromium:
-    image: your-username/your-repo:latest
+    image: wimotek/imnimal-chromium:latest
     container_name: chromium
     ports:
       - "8444:8444"            # KasmVNC Web 端 (HTTPS)
@@ -96,7 +96,7 @@ docker run -d \
   -e VNC_PASSWORD="MySecurePassword123" \
   -e RESOLUTION=1920x1080 \
   -v chromium_data:/data \
-  your-username/your-repo:novnc \
+  wimotek/imnimal-chromium:novnc \
   https://www.bing.com
 ```
 HTTP 访问：http://<服务器IP>:6080
@@ -155,10 +155,10 @@ ssh -N -L 9222:127.0.0.1:9222 root@<公网服务器IP>
 ```bash
 Bash
 # 启动时打开指定网址
-docker run -d -p 8444:8444 your-username/your-repo:latest https://news.ycombinator.com
+docker run -d -p 8444:8444 wimotek/imnimal-chromium:latest https://news.ycombinator.com
 
 # 启动时以无痕模式打开多个标签页
-docker run -d -p 8444:8444 your-username/your-repo:latest --incognito https://github.com https://google.com
+docker run -d -p 8444:8444 wimotek/imnimal-chromium:latest --incognito https://github.com https://google.com
 ```
 
 
