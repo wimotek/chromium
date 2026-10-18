@@ -37,6 +37,7 @@ jobs:
         with:
           images: ${{ env.IMAGE_NAME }}
           tags: |
+            type=raw,value=latest
             type=raw,value=novnc
             type=semver,pattern={{version}}-novnc
 
