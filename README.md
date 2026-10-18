@@ -107,9 +107,10 @@ HTTPS 访问：https://<服务器IP>:6443（支持原生无缝剪贴板）
 ###  1. 验证 CDP 状态（宿主机终端执行）
 ```bash
 curl http://127.0.0.1:9222/json/version
-2. Python (Playwright / Agent) 连接示例
 ```
-```Python
+###  2. Python (Playwright / Agent) 连接示例
+```bash
+Python
 import asyncio
 from playwright.async_api import async_playwright
 
