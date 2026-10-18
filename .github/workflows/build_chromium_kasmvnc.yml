@@ -37,7 +37,6 @@ jobs:
         with:
           images: ${{ env.IMAGE_NAME }}
           tags: |
-            type=raw,value=latest
             type=raw,value=kasmvnc
             type=semver,pattern={{version}}-kasmvnc
 
