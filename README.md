@@ -14,8 +14,8 @@
 ## 🌟 核心特性
 
 * **双引擎架构**：
-  * **KasmVNC 版（默认推荐，`:latest` / `:kasmvnc`）**：采用流媒体级动态编码（WebP / H.264），支持 60FPS 丝滑体验与原生浏览器剪贴板无缝同步。
-  * **noVNC 备用版（`:novnc`）**：经典轻量化实现，同时支持 HTTP (`6080`) 与 HTTPS (`6443`) 双端口。
+  * **noVNC 默认minimal版（`:latest` /`:novnc`）**：经典轻量化实现，同时支持 HTTP (`6080`) 与 HTTPS (`6443`) 双端口。
+  * **KasmVNC 版（`:kasmvnc`）**：采用流媒体级动态编码（WebP / H.264），支持 60FPS 丝滑体验与原生浏览器剪贴板无缝同步。
 * **原生剪贴板双向同步**：宿主机与容器内的 `Ctrl+C / Ctrl+V` 实时无缝互通，彻底摒弃多余的侧边栏中转。
 * **CDP 自动化就绪**：预置穿透端口转发与 `--remote-allow-origins=*`，解决高版本 Chromium 强制绑定 `127.0.0.1` 和跨域 403 问题。
 * **AI Agent 深度调优**：
@@ -31,7 +31,7 @@
 ## 📊 双版本对比与选型指南
 
 
-| 对比维度 | KasmVNC 版 (`:latest` / `:kasmvnc`) | noVNC 备用版 (`:novnc`) |
+| 对比维度 | KasmVNC 版 (`:latest` / `:kasmvnc`) | noVNC minimal版 (`:novnc`) |
 | :--- | :--- | :--- |
 | **底包系统** | Debian 12 (Bookworm) Slim | Alpine Linux 3.20 |
 | **画质与流畅度** | **60 FPS**（流媒体编码，滑动/视频极顺滑） | 15~25 FPS（传统图片块传输） |
@@ -43,7 +43,7 @@
 
 ## 🚀 快速启动
 
-### 方案 A：KasmVNC 旗舰版（强烈推荐）
+### 方案 A：KasmVNC 旗舰版
 
 #### 1. 使用 `docker run` 直接运行
 ```bash
