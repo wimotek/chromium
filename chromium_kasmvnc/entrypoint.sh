@@ -8,11 +8,24 @@ VNC_PASSWORD="${VNC_PASSWORD:-admin123}"
 HOMEPAGE="${HOMEPAGE:-about:blank}"
 CHROME_ARGS="${CHROME_ARGS:-}"
 
-# 1. 配置 KasmVNC 访问密码
+# 1. 清理可能残留的锁文件，并创建 .Xauthority 文件消除警告
+rm -rf /tmp/.X1-lock /tmp/.X11-unix/X1 /home/appuser/.vnc/*.pid /home/appuser/.vnc/*.log
 mkdir -p /home/appuser/.vnc
+touch /home/appuser/.Xauthority
+
+# 2. 配置 KasmVNC 访问密码
 echo -e "${VNC_PASSWORD}\n${VNC_PASSWORD}" | vncpasswd -u "${VNC_USER}" -w -r
 
-# 2. 准备自签名证书（如用户未挂载，自动生成）
+# 3. 【核心修复】自动生成 xstartup 脚本并赋予执行权限，避免触发交互选择
+cat << 'EOF' > /home/appuser/.vnc/xstartup
+#!/bin/sh
+unset SESSION_MANAGER
+unset DBUS_SESSION_BUS_ADDRESS
+openbox &
+EOF
+chmod +x /home/appuser/.vnc/xstartup
+
+# 4. 准备 SSL 证书 (若持久化目录不存在则自动签发)
 SSL_CERT="/home/appuser/.vnc/self.pem"
 if [ ! -f "$SSL_CERT" ]; then
     openssl req -new -x509 -days 3650 -nodes \
@@ -20,7 +33,7 @@ if [ ! -f "$SSL_CERT" ]; then
         -subj "/CN=localhost" 2>/dev/null
 fi
 
-# 3. 准备 KasmVNC 最小化配置文件
+# 5. 生成 KasmVNC 配置文件
 cat <<EOF > /home/appuser/.vnc/kasmvnc.yaml
 network:
   ssl:
@@ -32,9 +45,8 @@ desktop:
   allow_resize: true
 EOF
 
-# 4. 启动 KasmVNC 服务（作为后台 X-Server 运行在 :1）
-vncserver :1 -geometry "${RESOLUTION}" -depth "${DEPTH}"
-
+# 6. 【核心修复】添加 -select-de manual，强制使用准备好的 xstartup，跳过 select-de 脚本
+vncserver :1 -select-de manual -geometry "${RESOLUTION}" -depth "${DEPTH}"
 export DISPLAY=:1
 
 # 等待 X 服务就绪
@@ -42,19 +54,16 @@ until [ -e /tmp/.X11-unix/X1 ]; do
     sleep 0.1
 done
 
-# 5. 启动极简窗口管理器 Openbox
-openbox &
-
-# 6. 启动 CDP 9222 -> 9223 转发（隔离网络，解决 127.0.0.1 访问问题）
+# 7. 启动 CDP 9222 -> 9223 转发
 socat TCP-LISTEN:9222,fork,reuseaddr TCP:127.0.0.1:9223 &
 
-# 7. 处理首页参数逻辑
+# 8. 处理首页参数逻辑
 CHROME_RES=$(echo "$RESOLUTION" | tr 'x' ',')
 if [ $# -eq 0 ]; then
     set -- "$HOMEPAGE"
 fi
 
-# 8. 循环守护启动 Chromium（关闭后 1 秒自愈，防止黑屏）
+# 9. 循环守护启动 Chromium
 echo "Starting Chromium under KasmVNC with args: $CHROME_ARGS $@"
 while true; do
     rm -f /data/SingletonLock /data/SingletonCookie /data/SingletonSocket
