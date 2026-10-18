@@ -109,8 +109,7 @@ HTTPS 访问：https://<服务器IP>:6443（支持原生无缝剪贴板）
 curl http://127.0.0.1:9222/json/version
 ```
 ###  2. Python (Playwright / Agent) 连接示例
-```bash
-Python
+```Python
 import asyncio
 from playwright.async_api import async_playwright
 
