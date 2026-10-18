@@ -28,6 +28,11 @@ chmod +x /home/appuser/.vnc/xstartup
 # 4. 准备 SSL 证书 (若持久化目录不存在则自动签发)
 SSL_CERT="/home/appuser/.vnc/self.pem"
 if [ ! -f "$SSL_CERT" ]; then
+    echo "Generating standard SAN self-signed certificate..."
+    openssl req -new -x509 -days 3650 -nodes \
+        -out "$SSL_CERT" -keyout "$SSL_CERT" \
+        -subj "/CN=KasmVNC" \
+        -addext "subjectAltName=DNS:localhost,IP:127.0.0.1,IP:0.0.0.0" 2>/dev/null || \
     openssl req -new -x509 -days 3650 -nodes \
         -out "$SSL_CERT" -keyout "$SSL_CERT" \
         -subj "/CN=localhost" 2>/dev/null
