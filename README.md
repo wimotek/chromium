@@ -30,7 +30,6 @@
 
 ## 📊 双版本对比与选型指南
 
-> **注**：请将下文中的 `your-username` 替换为你实际的 Docker Hub 用户名。
 
 | 对比维度 | KasmVNC 版 (`:latest` / `:kasmvnc`) | noVNC 备用版 (`:novnc`) |
 | :--- | :--- | :--- |
@@ -110,8 +109,7 @@ curl http://127.0.0.1:9222/json/version
 ```
 ###  2. Python (Playwright / Agent) 连接示例
 ```Python
-import asyncio
-from playwright.async_api import async_playwright
+import asyncio from playwright.async_api import async_playwright
 
 async def main():
     async with async_playwright() as p:
