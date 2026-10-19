@@ -6,6 +6,7 @@ on:
     paths:
       - 'chromium_novnc/**'                          # 仅当 novnc 目录变动时触发
       - '.github/workflows/build-novnc.yml'
+      - 'README.md'
     tags: [ 'v*.*.*' ]
   workflow_dispatch:                        # 支持网页手动单独点击触发
 
