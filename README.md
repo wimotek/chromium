@@ -55,7 +55,7 @@ docker run -d \
   -v chromium_data:/data \
   --shm-size="1gb" \
   --restart unless-stopped \
-  wimotek/imnimal-chromium:novnc \
+  wimotek/minimal-chromium:novnc \
   https://www.bing.com
 ```
 HTTP 访问：http://<服务器IP>:6080
