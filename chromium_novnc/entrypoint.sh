@@ -1,16 +1,16 @@
-#!/bin/sh
+#!/bin/bash
 set -e
 
 # ==========================================
-# 阶段 1：Root 权限自愈与降权 (由 su-exec 处理)
+# 阶段 1：Root 权限自愈与降权 (由 gosu 处理)
 # ==========================================
 if [ "$(id -u)" = "0" ]; then
-    # 自动将宿主机挂载的 /data 目录归属过户给 appuser，清理锁文件
+    # 自动将宿主机挂载的 /data 目录过户给 appuser，清理锁文件
     chown -R appuser:appuser /data /home/appuser /tmp/.X11-unix 2>/dev/null || true
     rm -rf /tmp/.X0-lock /tmp/.X11-unix/X0 /data/SingletonLock /data/SingletonCookie /data/SingletonSocket
     
-    # 降权为 appuser (UID 1000) 重新执行本脚本
-    exec su-exec appuser "$0" "$@"
+    # 降权为 appuser (UID 1000) 执行本脚本
+    exec gosu appuser "$0" "$@"
 fi
 
 # ==========================================
@@ -32,7 +32,7 @@ done
 # 2. 启动轻量窗口管理器 Openbox
 openbox &
 
-# 3. 启动 x11vnc (支持动态密码认证)
+# 3. 启动 x11vnc (支持密码认证)
 if [ -n "$VNC_PASSWORD" ]; then
     echo "Enabling VNC password authentication..."
     x11vnc -display :0 -rfbport 5900 -passwd "$VNC_PASSWORD" -forever -shared -listen 127.0.0.1 &
@@ -44,7 +44,7 @@ fi
 # 4.1 启动 HTTP Web 访问 (端口 6080)
 websockify --web=/usr/share/novnc 6080 127.0.0.1:5900 &
 
-# 4.2 准备带 SAN 扩展的自签名证书，启动 HTTPS (端口 6443)
+# 4.2 准备带 SAN 扩展的标准证书，启动 HTTPS (端口 6443)
 SSL_CERT="${SSL_CERT:-/data/novnc.pem}"
 if [ ! -f "$SSL_CERT" ]; then
     echo "Generating standard SAN self-signed certificate for HTTPS..."
@@ -68,32 +68,31 @@ if [ $# -eq 0 ]; then
     set -- "$HOMEPAGE"
 fi
 
-# 6. 循环守护启动 Chromium（已删除导致崩溃的 --disable-software-rasterizer）
+# 6. 循环守护启动 Chromium (Debian glibc 版，天生兼容标准 Seccomp)
 echo "Starting Chromium under noVNC with args: $CHROME_ARGS $@"
 while true; do
     rm -f /data/SingletonLock /data/SingletonCookie /data/SingletonSocket
 
-    chromium-browser \
+    chromium \
         --no-sandbox \
         --test-type \
         --disable-infobars \
         --disable-dev-shm-usage \
         --disable-gpu \
-        --disable-breakpad \
-        --use-gl=swiftshader \
-        --disable-features=Vulkan,WebGPU,OptimizationHints,Translate \
+        --ignore-certificate-errors \
+        --allow-running-insecure-content \
         --disable-sync \
         --disable-background-networking \
         --disable-default-apps \
-        --log-level=1 \
+        --disable-extensions \
+        --no-first-run \
+        --no-default-browser-check \
         --remote-debugging-port=9223 \
         --remote-allow-origins=* \
         --window-size="${CHROME_RES}" \
         --window-position=0,0 \
         --start-maximized \
         --user-data-dir=/data \
-        --no-first-run \
-        --no-default-browser-check \
         $CHROME_ARGS \
         "$@" || true
 
