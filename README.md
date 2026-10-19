@@ -53,11 +53,11 @@ docker run -d \
   -p 127.0.0.1:9222:9222 \
   -e VNC_PASSWORD="MySecurePassword123" \
   -e RESOLUTION=1920x1080 \
-  -v /home/docker/chromium:/data \
+  -v chromium_data:/data \
   --shm-size="2gb" \
   --restart unless-stopped \
   wimotek/minimal-chromium:novnc \
-  https://gdgz.eu.org
+  https://www.bing.com
 ```
 HTTP 访问：http://<服务器IP>:6080
 
