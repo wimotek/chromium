@@ -5,17 +5,27 @@ set -e
 # 阶段 1：Root 权限自愈与降权 (由 gosu 处理)
 # ==========================================
 if [ "$(id -u)" = "0" ]; then
-    # 自动将宿主机挂载的 /data 目录过户给 appuser，清理锁文件
     chown -R appuser:appuser /data /home/appuser /tmp/.X11-unix 2>/dev/null || true
     rm -rf /tmp/.X0-lock /tmp/.X11-unix/X0 /data/SingletonLock /data/SingletonCookie /data/SingletonSocket
     
-    # 降权为 appuser (UID 1000) 执行本脚本
+    # 核心：重设 HOME 和用户环境，避免降权后残留 /root
+    export HOME=/home/appuser
+    export USER=appuser
+    export LOGNAME=appuser
     exec gosu appuser "$0" "$@"
 fi
 
 # ==========================================
 # 阶段 2：以普通用户 appuser 正式启动服务
 # ==========================================
+# 显式设定 appuser 的标准环境变量，解决 Crashpad 找不到数据库的问题
+export HOME=/home/appuser
+export USER=appuser
+export LOGNAME=appuser
+export XDG_CONFIG_HOME=/home/appuser/.config
+export XDG_CACHE_HOME=/home/appuser/.cache
+mkdir -p /home/appuser/.config /home/appuser/.cache /tmp/crashpad
+
 RESOLUTION="${RESOLUTION:-1280x800}"
 DEPTH="${DEPTH:-24}"
 HOMEPAGE="${HOMEPAGE:-about:blank}"
@@ -68,7 +78,7 @@ if [ $# -eq 0 ]; then
     set -- "$HOMEPAGE"
 fi
 
-# 6. 循环守护启动 Chromium (Debian glibc 版，天生兼容标准 Seccomp)
+# 6. 循环守护启动 Chromium
 echo "Starting Chromium under noVNC with args: $CHROME_ARGS $@"
 while true; do
     rm -f /data/SingletonLock /data/SingletonCookie /data/SingletonSocket
@@ -79,6 +89,7 @@ while true; do
         --disable-infobars \
         --disable-dev-shm-usage \
         --disable-gpu \
+        --crash-dumps-dir=/tmp/crashpad \
         --ignore-certificate-errors \
         --allow-running-insecure-content \
         --disable-sync \
