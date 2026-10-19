@@ -1,8 +1,8 @@
 # Minimal Chromium (Web UI + CDP + Clipboard Sync)
 
-[![Docker Image Size](https://img.shields.io/docker/image-size/your-username/minimal-chromium/latest?style=flat-square)](https://hub.docker.com/r/your-username/minimal-chromium)
-[![Docker Pulls](https://img.shields.io/docker/pulls/your-username/minimal-chromium?style=flat-square)](https://hub.docker.com/r/your-username/minimal-chromium)
-[![Supported Architectures](https://img.shields.io/badge/arch-amd64%20%7C%20arm64-blue?style=flat-square)](https://hub.docker.com/r/your-username/minimal-chromium)
+[![Docker Image Size](https://img.shields.io/docker/image-size/wimotek/minimal-chromium/latest?style=flat-square)](https://hub.docker.com/r/wimotek/minimal-chromium)
+[![Docker Pulls](https://img.shields.io/docker/pulls/wimotek/minimal-chromium?style=flat-square)](https://hub.docker.com/r/wimotek/minimal-chromium)
+[![Supported Architectures](https://img.shields.io/badge/arch-amd64%20%7C%20arm64-blue?style=flat-square)](https://hub.docker.com/r/wimotek/minimal-chromium)
 [![License](https://img.shields.io/badge/license-MIT-green?style=flat-square)](LICENSE)
 
 专为 **AI Agent（Claude Computer Use / AutoGPT / Browser-Use）、自动化测试（Playwright / Puppeteer）与远程云桌面** 设计的高性能轻量 Chromium 容器镜像。
@@ -14,8 +14,8 @@
 ## 🌟 核心特性
 
 * **双引擎架构**：
-  * **noVNC 默认minimal版（`:latest` /`:novnc`）**：经典轻量化实现，同时支持 HTTP (`6080`) 与 HTTPS (`6443`) 双端口。
-  * **KasmVNC 版（`:kasmvnc`）**：采用流媒体级动态编码（WebP / H.264），支持 60FPS 丝滑体验与原生浏览器剪贴板无缝同步。
+  * **KasmVNC 旗舰版（`:kasmvnc`）**：采用流媒体级动态编码（WebP / H.264），支持 60FPS 丝滑体验与原生浏览器剪贴板无缝同步。
+  * **noVNC 极简版（`:latest` / `:novnc`）**：开箱即用轻量化实现，同时支持 HTTP (`6080`) 与 HTTPS (`6443`) 双端口。
 * **原生剪贴板双向同步**：宿主机与容器内的 `Ctrl+C / Ctrl+V` 实时无缝互通，彻底摒弃多余的侧边栏中转。
 * **CDP 自动化就绪**：预置穿透端口转发与 `--remote-allow-origins=*`，解决高版本 Chromium 强制绑定 `127.0.0.1` 和跨域 403 问题。
 * **AI Agent 深度调优**：
@@ -30,33 +30,34 @@
 
 ## 📊 双版本对比与选型指南
 
-
-| 对比维度 | KasmVNC 版 ( `:kasmvnc`) | noVNC minimal版 (`:latest` /`:novnc`) |
+| 对比维度 | KasmVNC 旗舰版 (`:kasmvnc`) | noVNC 极简版 (`:latest` / `:novnc`) |
 | :--- | :--- | :--- |
-| **底包系统** | Debian 12 (Bookworm) Slim | Alpine Linux 3.20 |
+| **底包系统** | Debian 12 (Bookworm) Slim | Debian 12 (Bookworm) Slim |
 | **画质与流畅度** | **60 FPS**（流媒体编码，滑动/视频极顺滑） | 15~25 FPS（传统图片块传输） |
 | **剪贴板体验** | **原生无缝秒同步**（无需任何侧边栏） | HTTPS 原生同步；HTTP 需使用侧边栏 |
 | **默认 Web 端口** | HTTPS: `8444` | HTTP: `6080` / HTTPS: `6443` |
-| **推荐适用场景** | **日常使用、长时间交互、AI Agent 视觉调试** | minimal版本 适用小主机 |
+| **推荐适用场景** | **日常使用、长时间交互、AI Agent 视觉调试** | 极简双端口访问、轻量化挂机 |
 
 ---
 
 ## 🚀 快速启动
 
-##  方案 A：Alpine noVNC 版
+### 方案 A：noVNC 极简版（双端口）
+
+#### 1. 使用 `docker run` 运行
 ```bash
 docker run -d \
   --name chromium-novnc \
-  -p 6080:6080 \
-  -p 6443:6443 \
+  -p 3000:6080 \
+  -p 3001:6443 \
   -p 127.0.0.1:9222:9222 \
   -e VNC_PASSWORD="MySecurePassword123" \
   -e RESOLUTION=1920x1080 \
-  -v chromium_data:/data \
-  --shm-size="1gb" \
+  -v /home/docker/chromium:/data \
+  --shm-size="2gb" \
   --restart unless-stopped \
   wimotek/minimal-chromium:novnc \
-  https://www.bing.com
+  https://gdgz.eu.org
 ```
 HTTP 访问：http://<服务器IP>:6080
 
@@ -74,14 +75,14 @@ docker run -d \
   -e VNC_PASSWORD="MySecurePassword123" \
   -e RESOLUTION=1920x1080 \
   -v chromium_data:/data \
-  wimotek/minimal-chromium:kasmvnc:latest \
+  wimotek/minimal-chromium:kasmvnc \
   https://www.google.com
 ```
 #### 2. 使用 docker-compose.yml
 ```Yaml
 services:
   chromium:
-    image: wimotek/imnimal-chromium:kasmvnc:latest
+    image: wimotek/minimal-chromium:kasmvnc
     container_name: chromium
     ports:
       - "8444:8444"            # KasmVNC Web 端 (HTTPS)
@@ -110,6 +111,7 @@ Web 访问地址：https://<服务器IP>:8444
 ```bash
 curl http://127.0.0.1:9222/json/version
 ```
+
 ###  2. Python (Playwright / Agent) 连接示例
 ```Python
 import asyncio from playwright.async_api import async_playwright
