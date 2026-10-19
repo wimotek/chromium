@@ -21,13 +21,13 @@ done
 # 3. 启动轻量窗口管理器 Openbox
 openbox &
 
-# 4. 启动 x11vnc (支持动态密码认证)
+# 4. 启动 x11vnc (加入 -noxdamage 和 -wait 50，防止频繁闪烁重连崩溃)
 if [ -n "$VNC_PASSWORD" ]; then
     echo "Enabling VNC password authentication..."
-    x11vnc -display :0 -rfbport 5900 -passwd "$VNC_PASSWORD" -forever -shared -listen 127.0.0.1 &
+    x11vnc -display :0 -rfbport 5900 -passwd "$VNC_PASSWORD" -forever -shared -listen 127.0.0.1 -noxdamage -wait 50 &
 else
     echo "WARNING: Running without VNC password!"
-    x11vnc -display :0 -rfbport 5900 -nopw -forever -shared -listen 127.0.0.1 &
+    x11vnc -display :0 -rfbport 5900 -nopw -forever -shared -listen 127.0.0.1 -noxdamage -wait 50 &
 fi
 
 # 5.1 启动 HTTP Web 访问 (端口 6080)
@@ -71,7 +71,7 @@ while true; do
         --disable-dev-shm-usage \
         --disable-gpu \
         --disable-gpu-compositing \
-        --disable-software-rasterizer \
+        --use-gl=swiftshader
         --disable-features=Vulkan,WebGPU,OnDeviceModel,OptimizationGuideModelDownloading \
         --disable-sync \
         --disable-background-networking \
