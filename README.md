@@ -31,19 +31,36 @@
 ## 📊 双版本对比与选型指南
 
 
-| 对比维度 | KasmVNC 版 (`:latest` / `:kasmvnc`) | noVNC minimal版 (`:novnc`) |
+| 对比维度 | KasmVNC 版 ( `:kasmvnc`) | noVNC minimal版 (`:latest` /`:novnc`) |
 | :--- | :--- | :--- |
 | **底包系统** | Debian 12 (Bookworm) Slim | Alpine Linux 3.20 |
 | **画质与流畅度** | **60 FPS**（流媒体编码，滑动/视频极顺滑） | 15~25 FPS（传统图片块传输） |
 | **剪贴板体验** | **原生无缝秒同步**（无需任何侧边栏） | HTTPS 原生同步；HTTP 需使用侧边栏 |
 | **默认 Web 端口** | HTTPS: `8444` | HTTP: `6080` / HTTPS: `6443` |
-| **推荐适用场景** | **日常使用、长时间交互、AI Agent 视觉调试** | 仅做轻量挂机、需要内网纯 HTTP 环境 |
+| **推荐适用场景** | **日常使用、长时间交互、AI Agent 视觉调试** | minimal版本 适用小主机 |
 
 ---
 
 ## 🚀 快速启动
 
-### 方案 A：KasmVNC 旗舰版
+##  方案 A：Alpine noVNC 版
+```bash
+docker run -d \
+  --name chromium-novnc \
+  -p 6080:6080 \
+  -p 6443:6443 \
+  -p 127.0.0.1:9222:9222 \
+  -e VNC_PASSWORD="MySecurePassword123" \
+  -e RESOLUTION=1920x1080 \
+  -v chromium_data:/data \
+  wimotek/imnimal-chromium:novnc \
+  https://www.bing.com
+```
+HTTP 访问：http://<服务器IP>:6080
+
+HTTPS 访问：https://<服务器IP>:6443（支持原生无缝剪贴板）
+
+### 方案 B：KasmVNC 旗舰版
 
 #### 1. 使用 `docker run` 直接运行
 ```bash
@@ -55,14 +72,14 @@ docker run -d \
   -e VNC_PASSWORD="MySecurePassword123" \
   -e RESOLUTION=1920x1080 \
   -v chromium_data:/data \
-  wimotek/imnimal-chromium:latest \
+  wimotek/minimal-chromium:kasmvnc:latest \
   https://www.google.com
 ```
 #### 2. 使用 docker-compose.yml
 ```Yaml
 services:
   chromium:
-    image: wimotek/imnimal-chromium:latest
+    image: wimotek/imnimal-chromium:kasmvnc:latest
     container_name: chromium
     ports:
       - "8444:8444"            # KasmVNC Web 端 (HTTPS)
@@ -84,22 +101,6 @@ Web 访问地址：https://<服务器IP>:8444
 默认账号密码：admin / MySecurePassword123
 
 剪贴板同步：首次进入页面浏览器提示“请求剪贴板权限”时点击允许，即可使用 Ctrl+C / Ctrl+V。
-
-##  方案 B：Alpine noVNC 版
-```bash
-docker run -d \
-  --name chromium-novnc \
-  -p 6080:6080 \
-  -p 6443:6443 \
-  -p 127.0.0.1:9222:9222 \
-  -e VNC_PASSWORD="MySecurePassword123" \
-  -e RESOLUTION=1920x1080 \
-  -v chromium_data:/data \
-  wimotek/imnimal-chromium:novnc \
-  https://www.bing.com
-```
-HTTP 访问：http://<服务器IP>:6080
-HTTPS 访问：https://<服务器IP>:6443（支持原生无缝剪贴板）
 
 ##   🤖 AI Agent 与 CDP 自动化接入
 
