@@ -79,7 +79,9 @@ while true; do
         --disable-infobars \
         --disable-dev-shm-usage \
         --disable-gpu \
-        --disable-features=Vulkan,WebGPU,OnDeviceModel \
+        --disable-breakpad \
+        --use-gl=swiftshader \
+        --disable-features=Vulkan,WebGPU,OptimizationHints,Translate \
         --disable-sync \
         --disable-background-networking \
         --disable-default-apps \
