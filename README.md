@@ -53,6 +53,8 @@ docker run -d \
   -e VNC_PASSWORD="MySecurePassword123" \
   -e RESOLUTION=1920x1080 \
   -v chromium_data:/data \
+  --shm-size="1gb" \
+  --restart unless-stopped \
   wimotek/imnimal-chromium:novnc \
   https://www.bing.com
 ```
