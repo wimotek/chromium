@@ -8,7 +8,6 @@ if [ "$(id -u)" = "0" ]; then
     chown -R appuser:appuser /data /home/appuser /tmp/.X11-unix 2>/dev/null || true
     rm -rf /tmp/.X0-lock /tmp/.X11-unix/X0 /data/SingletonLock /data/SingletonCookie /data/SingletonSocket
     
-    # 核心：重设 HOME 和用户环境，避免降权后残留 /root
     export HOME=/home/appuser
     export USER=appuser
     export LOGNAME=appuser
@@ -18,12 +17,14 @@ fi
 # ==========================================
 # 阶段 2：以普通用户 appuser 正式启动服务
 # ==========================================
-# 显式设定 appuser 的标准环境变量，解决 Crashpad 找不到数据库的问题
 export HOME=/home/appuser
 export USER=appuser
 export LOGNAME=appuser
 export XDG_CONFIG_HOME=/home/appuser/.config
 export XDG_CACHE_HOME=/home/appuser/.cache
+# 【提速关键 1】禁用 Linux 无障碍桥接，消除 D-Bus 超时卡顿
+export NO_AT_BRIDGE=1
+
 mkdir -p /home/appuser/.config /home/appuser/.cache /tmp/crashpad
 
 RESOLUTION="${RESOLUTION:-1280x800}"
@@ -54,10 +55,9 @@ fi
 # 4.1 启动 HTTP Web 访问 (端口 6080)
 websockify --web=/usr/share/novnc 6080 127.0.0.1:5900 &
 
-# 4.2 准备带 SAN 扩展的标准证书，启动 HTTPS (端口 6443)
+# 4.2 准备证书并启动 HTTPS (端口 6443)
 SSL_CERT="${SSL_CERT:-/data/novnc.pem}"
 if [ ! -f "$SSL_CERT" ]; then
-    echo "Generating standard SAN self-signed certificate for HTTPS..."
     openssl req -new -x509 -days 3650 -nodes \
         -out "$SSL_CERT" -keyout "$SSL_CERT" \
         -subj "/CN=noVNC" \
@@ -73,12 +73,11 @@ socat TCP-LISTEN:9222,fork,reuseaddr TCP:127.0.0.1:9223 &
 
 CHROME_RES=$(echo "$RESOLUTION" | tr 'x' ',')
 
-# 命令行未传参时，默认打开 HOMEPAGE
 if [ $# -eq 0 ]; then
     set -- "$HOMEPAGE"
 fi
 
-# 6. 循环守护启动 Chromium
+# 6. 循环守护启动 Chromium (全方位速度调优版)
 echo "Starting Chromium under noVNC with args: $CHROME_ARGS $@"
 while true; do
     rm -f /data/SingletonLock /data/SingletonCookie /data/SingletonSocket
@@ -87,15 +86,18 @@ while true; do
         --no-sandbox \
         --test-type \
         --disable-infobars \
-        --disable-dev-shm-usage \
         --disable-gpu \
         --crash-dumps-dir=/tmp/crashpad \
+        --password-store=basic \
+        --num-raster-threads=4 \
+        --enable-zero-copy \
         --ignore-certificate-errors \
         --allow-running-insecure-content \
         --disable-sync \
         --disable-background-networking \
         --disable-default-apps \
         --disable-extensions \
+        --disable-component-extensions-with-background-pages \
         --no-first-run \
         --no-default-browser-check \
         --remote-debugging-port=9223 \
