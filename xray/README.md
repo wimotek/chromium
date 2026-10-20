@@ -16,7 +16,36 @@
 
 ## 🚀 快速开始
 
-### 1. 启动服务
+### 方式 A：使用 Docker Compose（推荐）
+
+### 1. 准备配置文件
+
+在目录中创建 `docker-compose.yml`：
+
+```yaml
+services:
+  xray:
+    image: ghcr.io/wimotek/xray:latest
+    # 若使用 Docker Hub 镜像可切换为: wimotek/xray:latest
+    container_name: xray-service
+    restart: unless-stopped
+    network_mode: "host"
+    environment:
+      - TZ=Asia/Shanghai
+      - AUTO_UPDATE=true        # 每次重启容器时自动检查并热更新到官方最新版
+      - PORT=443               # 监听端口
+      - DEST=www.apple.com:443 # REALITY 伪装目标地址与端口
+      - SERVER_NAMES=www.apple.com,apple.com
+    volumes:
+      - ./data:/etc/xray
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+```
+
+### 2. 启动服务
 
 在项目目录下执行：
 
@@ -24,7 +53,43 @@
 docker compose up -d
 ```
 
-### 2. 获取节点连接信息
+### 方式 B：使用 Docker Run 命令行
+无需创建配置文件，直接在终端执行以下命令启动：
+* 选项 1：Host 网络模式（Linux 首选，吞吐最佳）
+  
+ 直接复用宿主机网络栈，能最大化 TCP/UDP 传输性能：
+```bash
+docker run -d \
+  --name xray-service \
+  --restart unless-stopped \
+  --network host \
+  -v $(pwd)/data:/etc/xray \
+  -e TZ=Asia/Shanghai \
+  -e AUTO_UPDATE=true \
+  -e PORT=443 \
+  -e DEST=www.apple.com:443 \
+  -e SERVER_NAMES=www.apple.com,apple.com \
+  ghcr.io/wimotek/xray:latest
+```
+* 选项 2：端口映射模式（跨平台 / 非 Host 环境）
+  
+  适用于 macOS、Windows Docker Desktop 或需要固定暴露端口的环境：
+```bash
+docker run -d \
+  --name xray-service \
+  --restart unless-stopped \
+  -p 443:443/tcp \
+  -p 443:443/udp \
+  -v $(pwd)/data:/etc/xray \
+  -e TZ=Asia/Shanghai \
+  -e AUTO_UPDATE=true \
+  -e PORT=443 \
+  -e DEST=www.apple.com:443 \
+  -e SERVER_NAMES=www.apple.com,apple.com \
+  ghcr.io/wimotek/xray:latest
+```
+
+### 获取节点连接信息
 
 容器启动后会自动生成配置并打印节点链接，执行以下命令查看：
 
