@@ -1,0 +1,92 @@
+{
+  "log": {
+    "loglevel": "debug"
+  },
+  "inbounds": [
+    {
+      "tag": "dokodemo-in",
+      "port": 443,
+      "protocol": "dokodemo-door",
+      "settings": {
+        "address": "0.0.0.0",
+        "port": 4431,
+        "network": "tcp"
+      },
+      "sniffing": {
+        "enabled": true,
+        "destOverride": [
+          "tls"
+        ],
+        "routeOnly": true
+      }
+    },
+    {
+      "listen": "0.0.0.0",
+      "port": 4431,
+      "protocol": "vless",
+      "settings": {
+        "clients": [
+          {
+            "id": "34433504-10de-41b3-82f3-ca34c30f83bb",
+            "flow": "xtls-rprx-vision",
+            "email": "admin@xray.node"
+          }
+        ],
+        "decryption": "none"
+      },
+      "streamSettings": {
+        "network": "tcp",
+        "security": "reality",
+        "realitySettings": {
+          "dest": "www.samsung.com:443",
+          "serverNames": [
+            "www.samsung.com"
+          ],
+          "privateKey": "mH2_R_vj5cdsdTcGW1X7hSOh03RUwO4ufXLk0JQffAw",
+          "shortIds": [
+            "",
+            "0123456789abcdef"
+          ]
+        }
+      },
+      "sniffing": {
+        "enabled": true,
+        "destOverride": [
+          "http",
+          "tls",
+          "quic"
+        ],
+        "routeOnly": true
+      }
+    }
+  ],
+  "outbounds": [
+    {
+      "protocol": "freedom",
+      "tag": "direct"
+    },
+    {
+      "protocol": "blackhole",
+      "tag": "block"
+    }
+  ],
+  "routing": {
+    "rules": [
+      {
+        "inboundTag": [
+          "dokodemo-in"
+        ],
+        "domain": [
+          "www.samsung.com"
+        ],
+        "outboundTag": "direct"
+      },
+      {
+        "inboundTag": [
+          "dokodemo-in"
+        ],
+        "outboundTag": "block"
+      }
+    ]
+  }
+}
