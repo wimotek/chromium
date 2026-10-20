@@ -1,60 +1,141 @@
-# Xray 极简免配置容器 & 网页管理多用户租用系统
+# Xray-core 极简独立部署套件 (REALITY 自动最新版)
 
-本项目提供一个**体积小于 18MB**、**免配置**、支持**双层端口防探测架构 (Dokodemo 443 ⇄ Reality 4431)** 的 Xray 代理容器与多用户租用管理 Web 面板。
-
----
-
-## 📁 容器核心文件清单
-
-- `Dockerfile`: 基于 Alpine 3.20 的多阶段极简构建文件，产物镜像仅 ~17.8MB。
-- `docker-compose.yml`: 一键同时编排 Xray 代理核心与网页管理后台。
-- `entrypoint.sh`: 免配置核心启动脚本。如果未挂载任何配置，自动生成 X25519 密钥对、UUID、ShortID 并就绪启动。
-- `config.json`: 您指定的标准双层防嗅探配置模板。
-- `setup.sh`: 全新 VPS 终端 1 键自动化部署脚本（自动装 Docker、开启 BBR、拉起容器）。
+这是一个完全解耦、开箱即用的 Xray 服务端 Docker 部署套件。默认采用目前抗封锁与传输性能最佳的 **VLESS + XTLS + REALITY (Vision 流控)** 架构，无需自行申请或维护 SSL 证书。
 
 ---
 
-## 🚀 部署方式
+## ✨ 核心特性
 
-### 方式一：一键自动脚本（最推荐）
+- **官方最新核心**：构建镜像与容器运行时均支持自动直连 GitHub 获取官方最新 Release，杜绝频控限制与版本滞后。
+- **全自动化初始化**：初次启动自动生成高强度 UUID、x25519 密钥对和 ShortId，一机一密。
+- **即启即用**：启动后直接在终端日志与本地文件中输出标准客户端导入链接（`vless://`）。
+- **轻量与多架构**：基于 Alpine Linux 构建，原生适配 `amd64`、`arm64`、`armv7` 等硬件架构。
+- **高性能网络**：默认推荐 Host 网络栈，全面兼容系统原生 TCP BBR 拥塞控制算法。
 
-在你的 Linux VPS 终端运行：
-```bash
-bash setup.sh
-```
+---
 
-### 方式二：Docker Compose 编排启动
+## 🚀 快速开始
 
-```bash
+### 1. 启动服务
+
+在项目目录下执行：
+
+``'bash
 docker compose up -d
-```
-启动后：
-- Xray 代理监听：`443`（外层 dokodemo-door）与 `4431`（内层 Reality）
-- 网页管理后台：访问 `http://你的IP:3000`
+``'
 
-### 方式三：直接构建并运行单容器
+### 2. 获取节点连接信息
 
-```bash
-# 1. 构建镜像（体积 < 18MB）
-docker build -t xray-reality:alpine .
+容器启动后会自动生成配置并打印节点链接，执行以下命令查看：
 
-# 2. 运行容器（推荐 host 模式）
-docker run -d \
-  --name xray-reality-core \
-  --restart always \
-  --net=host \
-  -v $(pwd)/config.json:/etc/xray/config.json \
-  xray-reality:alpine
-```
+``'bash
+docker logs xray-service
+``'
+
+终端将输出类似以下内容：
+
+``'text
+======================================================
+              Xray Reality 节点配置信息
+======================================================
+IP / 地址:        198.51.100.???
+端口:             443
+UUID:             ????????-????-????-????-????????????
+流控 (flow):      xtls-rprx-vision
+传输协议:         tcp
+安全类型:         reality
+SNI / 伪装域名:   www.apple.com
+公钥 (PublicKey): ????????????????????????????????????????????
+ShortId:          ????????????????
+Fingerprint:      chrome
+
+客户端导入链接:
+vless://???@198.51.100.???:443?security=reality&encryption=none&pbk=???&headerType=none&fp=chrome&type=tcp&flow=xtls-rprx-vision&sni=www.apple.com&sid=???#Xray-Reality
+======================================================
+``'
+
+也可以随时在宿主机查看持久化的节点信息：
+
+``'bash
+cat ./data/client_info.txt
+``'
 
 ---
 
-## 🌐 网页管理多用户租用系统功能
+## 🔄 核心更新机制
 
-1. **租户全生命周期管控**：实时增删改查租户，到期/超额自动禁用。
-2. **多客户端格式导出**：
-   - 一键生成并复制 `vless://` 链接与二维码。
-   - Clash Meta (Mihomo) YAML 配置。
-   - Sing-Box 1.8+ JSON 配置。
-   - 真实的订阅接口：`/api/sub/:token`。
-3. **Reality 伪装站点检测**：内置 Samsung、Cloudflare Speed、Microsoft 等站点的 TLS 1.3 探测。
+### 方式一：容器重启时自动更新（推荐）
+在 `docker-compose.yml` 中已默认配置环境变量 `AUTO_UPDATE=true`。每次重启容器时，脚本会自动检测官方最新 Release，如有更新则自动拉取替换：
+
+``'bash
+docker compose restart xray
+``'
+
+### 方式二：容器内热更新（无需重新构建镜像）
+执行内置的热更新命令，直接拉取官方最新二进制：
+
+``'bash
+docker exec -it xray-service update-xray
+docker compose restart xray
+``'
+
+### 方式三：强制无缓存重新构建
+``'bash
+docker compose build --no-cache
+docker compose up -d
+``'
+
+---
+
+## 🛠️ 环境变量说明
+
+可通过修改 `docker-compose.yml` 中的 `environment` 自定义各项参数：
+
+| 环境变量 | 默认值 | 说明 |
+| :--- | :--- | :--- |
+| `AUTO_UPDATE` | `true` | 容器启动时是否自动检查并更新 Xray 官方最新版 |
+| `PORT` | `443` | 监听端口 |
+| `DEST` | `www.apple.com:443` | REALITY 目标回落与伪装地址 |
+| `SERVER_NAMES` | `www.apple.com,apple.com` | REALITY 伪装 SNI 域名列表（逗号分隔） |
+| `SERVER_IP` | 自动获取 | 客户端连接的目标公网 IP，多网卡时建议手动指定 |
+| `UUID` | 自动生成 | 自定义客户端用户 ID |
+| `PRIVATE_KEY` | 自动生成 | 自定义 REALITY 服务端私钥（需与 `PUBLIC_KEY` 匹配） |
+| `PUBLIC_KEY` | 自动生成 | 自定义 REALITY 客户端公钥 |
+| `SHORT_ID` | 自动生成 | 自定义十六进制 ShortId |
+
+---
+
+## 📱 客户端支持
+
+复制控制台生成的 `vless://???` 链接，直接粘贴导入主流客户端：
+
+- **Windows**: v2rayN / Nekoray / Sing-box
+- **Android**: v2rayNG / NekoBox / Sing-box
+- **iOS / macOS**: Shadowrocket / Loon / Sing-box / FoXray
+- **Linux**: Clash-Meta (Mihomo) / Sing-box 核心
+
+---
+
+## ⚡ 系统底层性能优化 (BBR)
+
+建议在 Linux 宿主机上开启 BBR 拥塞控制算法以获得更高吞吐量与抗丢包表现：
+
+``'bash
+echo "net.core.default_qdisc=fq" >> /etc/sysctl.conf
+echo "net.ipv4.tcp_congestion_control=bbr" >> /etc/sysctl.conf
+sysctl -p
+``'
+
+检查 BBR 是否成功生效：
+``'bash
+sysctl net.ipv4.tcp_congestion_control
+# 输出应包含: bbr
+``'
+
+---
+
+## 📂 文件持久化说明
+
+- `./data/config.json`: 当前运行的 Xray 服务端核心配置。
+- `./data/client_info.txt`: 当前节点的公私钥及 `vless://???` 导入链接备份。
+- 如需重新生成全新的 UUID 与密钥对，只需停止容器，删除 `./data/config.json` 后重新启动容器即可。
