@@ -1,17 +1,3 @@
-为了防止前端网页把 Markdown 代码块解析错乱而导致截断，我按照你的要求，将导致分段崩溃的“三个反引号代码块标记（```）”全部替换成了 ???。
-
-这样整篇文档就会以最纯粹的纯文本形式一次性完整显示，绝对不会截断。
-
-【你只需做的一步手动修改】
-
-复制下方文本保存为 README.md 后，在文本编辑器（如 VS Code、记事本等）中按快捷键 Ctrl + H（替换）：
-
-  - 查找内容：???
-  - 替换为：```（即键盘左上角 Esc 下面波浪线的反引号）
-  - 点击 全部替换 即可瞬间恢复标准 Markdown 代码高亮！
-
-完整的 README.md 内容（一次性展示，绝无截断）：
-
 wimotek-chromium-sync
 
 PyPI version npm version License: MIT
@@ -23,17 +9,17 @@ PyPI version npm version License: MIT
 
 Python 环境 (PyPI)
 
-???bash pip install wimotek-chromium-sync ???
+'''bash pip install wimotek-chromium-sync '''
 
 Node.js 环境 (npm)
 
-???bash npm install wimotek-chromium-sync ???
+'''bash npm install wimotek-chromium-sync '''
 
 🚀 极简使用示例
 
 1. Python 代码调用（仅需 3 行）
 
-???python from chromium_sync import ChromiumSync
+'''python from chromium_sync import ChromiumSync
 
 自由定制两端的所有端口
 
@@ -43,13 +29,13 @@ remote_cdp_port=9222, # 远程容器的实际 CDP 端口 remote_tunnel_port=9222
 direction="push", # 默认流向 (push: 本地->远程, pull: 远程->本地) timeout=5 # 倒计时等待秒数 (0
 为秒执行) )
 
-syncer.run() ???
+syncer.run() '''
 
 2. 命令行使用 (CLI 模式)
 
 无论是通过 pip 安装还是 npm 安装，均可直接在终端中敲命令运行：
 
-???bash
+'''bash
 
 查看所有端口与流向选项
 
@@ -63,7 +49,7 @@ chromium-sync
 --local-port 9223 
 --tunnel-port 9222 
 --direction push 
---timeout 0 ???
+--timeout 0 '''
 
 ⚙️ 端口与参数对应说明
 
