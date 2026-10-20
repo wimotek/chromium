@@ -4,9 +4,17 @@
 [![npm version](https://img.shields.io/npm/v/wimotek-chromium-sync.svg?style=flat-square)](https://www.npmjs.com/package/wimotek-chromium-sync)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg?style=flat-square)](LICENSE)
 
-专为 Chromium / Chrome 设计的**通用会话与 Cookie 穿透热同步工具**。全端口可配置，支持在本地容器与远程服务器容器之间双向热同步登录凭证，支持按需拉起带心跳保活的 SSH 隧道。
-
+专为 Chromium / Chrome 设计的通用会话与 Cookie 穿透热同步工具。
+支持在本地容器与远程服务器容器之间双向热同步登录凭证（Cookie + LocalStorage），全端口可参数化自定义，内置智能流向识别与带心跳保活的 SSH 隧道自愈管理。
 ---
+
+## 🌟 核心特性
+
+* 全端口自由定义：本地容器端口、远程实际端口、本地隧道映射端口及 SSH 端口均可自由配置或通过环境变量覆盖。
+* 智能双向流向探测 (auto)：连通后自动探测两端 Cookie 数量与页面状态，支持智能推荐、人工交互确认或全自动执行。
+* 内置心跳保活隧道：内置 ServerAliveInterval=15 与端口占用检测，已存在则自动复用，不存在则自动拉起，绝不产生假死僵尸连接。
+* 无 TTY 环境自适应：在 Linux Crontab 定时任务、无图形后台或 CI 流程中自动回退，不因无键盘输入而崩溃。
+* 双生态支持：同时发布于 PyPI 与 npm，支持 Python 代码导入与命令行跨语言一键执行。
 
 ## 📦 安装
 
@@ -36,7 +44,7 @@ remote_ssh_port=22, # SSH 连接端口
 local_cdp_port=16002, # 本地容器的 CDP 端口
 remote_cdp_port=9222, # 远程容器的实际
 CDP 端口 remote_tunnel_port=9222, # 本地用于接收隧道的端口
-direction="push", # 默认流向 (push: 本地->远程, pull: 远程->本地)
+direction="auto", # 智能判断: 自动往缺少凭证的一端同步
 timeout=15 # 倒计时等待秒数 (0 为秒执行) )
 
 syncer.run() 
@@ -72,7 +80,7 @@ chromium-sync
 | local\_cdp\_port     | \--local-port  | CHROMIUM\_LOCAL\_PORT       | 16002                   | 运行在本机的容器 CDP 端口      |
 | remote\_cdp\_port    | \--remote-port | CHROMIUM\_REMOTE\_CDP\_PORT | 9222                   | 运行在远端服务器上的容器实际端口     |
 | remote\_tunnel\_port | \--tunnel-port | CHROMIUM\_TUNNEL\_PORT      | 9222                   | SSH 隧道映射到本机的监听端口     |
-| direction            | \--direction   | CHROMIUM\_DIRECTION         | push                   | 默认同步流向 (push 或 pull) |
+| direction            | \--direction   | CHROMIUM\_DIRECTION         | push                   | 默认同步流向 (push 或 pull 或 auto) |
 | timeout              | \--timeout     | CHROMIUM\_TIMEOUT           | 15                      | 倒计时交互等待秒数，0 为免打扰秒执行  |
 | auto\_close\_tunnel  | \--auto-close  | \-                          | False                  | 任务完成后是否关闭创建的 SSH 隧道  |
 
