@@ -14,8 +14,9 @@
 ## 🌟 核心特性
 
 * **双引擎架构**：
-  * **noVNC 极简版（`:latest` / `:novnc`）**：开箱即用轻量化实现，同时支持 HTTP (`6080`) 与 HTTPS (`6443`) 双端口,可选映射自有证书.默认自签证书。
+  * **noVNC 极简版（`:latest` / `:novnc`）**：开箱即用轻量化实现，同时支持 HTTP (`6080`) 与 HTTPS (`6443`) 双端口。
   * **KasmVNC （`:kasmvnc`）**：采用流媒体级动态编码（WebP / H.264），支持 60FPS 丝滑体验与原生浏览器剪贴板无缝同步。
+* **可选映射自有证书.默认自签证书.
 * **原生剪贴板双向同步**：宿主机与容器内的 `Ctrl+C / Ctrl+V` 实时无缝互通，彻底摒弃多余的侧边栏中转。
 * **CDP 自动化就绪**：预置穿透端口转发与 `--remote-allow-origins=*`，解决高版本 Chromium 强制绑定 `127.0.0.1` 和跨域 403 问题。
 * **AI Agent 深度调优**：
@@ -95,6 +96,7 @@ services:
       - HOMEPAGE=https://www.google.com
     volumes:
       - chromium_data:/data
+      - /etc/letsencrypt/live/yourdomain.com:/certs:ro    #可选域名证书. 不设置默认使用自签证书
     restart: unless-stopped
 
 volumes:
