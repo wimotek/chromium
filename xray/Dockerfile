@@ -1,11 +1,9 @@
 FROM --platform=$TARGETPLATFORM alpine:3.21
 
 ARG TARGETARCH
-# 默认为 latest，也可在 build 时通过 --build-arg XRAY_VERSION=v25.1.30 指定固定版本
 ARG XRAY_VERSION=latest
 
 LABEL maintainer="Wimotek <i@wimotek.com>"
-LABEL description="Optimized Standalone Xray Server with Auto-Update"
 
 RUN apk add --no-cache \
     ca-certificates \
@@ -15,7 +13,6 @@ RUN apk add --no-cache \
     openssl \
     bind-tools
 
-# 根据架构确定下载名称并拉取官方最新 Release
 RUN set -ex && \
     case "${TARGETARCH}" in \
         "amd64") XRAY_ARCH="64" ;; \
@@ -25,12 +22,18 @@ RUN set -ex && \
         *) echo "Unsupported target architecture: ${TARGETARCH}" && exit 1 ;; \
     esac && \
     mkdir -p /tmp/xray /usr/share/xray /etc/xray && \
-    if [ "${XRAY_VERSION}" = "latest" ]; then \
+    if [ "${XRAY_VERSION}" = "latest" ] || [ -z "${XRAY_VERSION}" ]; then \
         DOWNLOAD_URL="https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-${XRAY_ARCH}.zip"; \
     else \
-        DOWNLOAD_URL="https://github.com/XTLS/Xray-core/releases/download/${XRAY_VERSION}/Xray-linux-${XRAY_ARCH}.zip"; \
+        # 如果版本号没有带 v，自动补全 v（例如 25.1.30 -> v25.1.30）
+        TAG_VER="${XRAY_VERSION}"; \
+        case "$TAG_VER" in \
+            v*) ;; \
+            *) TAG_VER="v${TAG_VER}" ;; \
+        esac; \
+        DOWNLOAD_URL="https://github.com/XTLS/Xray-core/releases/download/${TAG_VER}/Xray-linux-${XRAY_ARCH}.zip"; \
     fi && \
-    echo "Downloading Xray-core from: ${DOWNLOAD_URL}" && \
+    echo "Downloading from: ${DOWNLOAD_URL}" && \
     curl -fSL "${DOWNLOAD_URL}" -o /tmp/xray/xray.zip && \
     unzip -q /tmp/xray/xray.zip -d /tmp/xray && \
     mv /tmp/xray/xray /usr/bin/xray && \
@@ -47,8 +50,6 @@ COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 COPY config.template.json /etc/xray/config.template.json
 
 RUN chmod +x /usr/local/bin/entrypoint.sh
-
-# 创建软链接，方便随时使用 update-xray 指令手动更新
 RUN ln -s /usr/local/bin/entrypoint.sh /usr/local/bin/update-xray
 
 VOLUME ["/etc/xray"]
