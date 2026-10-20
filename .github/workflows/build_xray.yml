@@ -1,0 +1,122 @@
+name: Build Xray Docker Image
+
+on:
+  push:
+    paths:
+      - 'xray/**'
+      - '.github/workflows/build_xray.yml'
+    branches:
+      - main
+  schedule:
+    # 每周日 00:00 UTC 自动检测并构建官方最新版
+    - cron: '0 0 * * 0'
+  workflow_dispatch:
+    inputs:
+      xray_version:
+        description: 'Xray 版本 (留空或填 auto 则自动获取最新版；亦可指定版本号如 25.1.30)'
+        required: false
+        default: 'auto'
+      push_image:
+        description: '是否推送镜像'
+        required: true
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      # 1. 自动获取官方最新 Release 版本号
+      - name: Fetch Latest Xray Version
+        id: get_version
+        run: |
+          INPUT_VER="${{ github.event.inputs.xray_version }}"
+          if [ -n "$INPUT_VER" ] && [ "$INPUT_VER" != "auto" ] && [ "$INPUT_VER" != "latest" ]; then
+            VERSION="$INPUT_VER"
+          else
+            echo "Fetching latest version from XTLS/Xray-core..."
+            # 优先使用 GitHub API 获取最新 tag_name
+            VERSION=$(curl -sSL -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" https://api.github.com/repos/XTLS/Xray-core/releases/latest | jq -r .tag_name | sed 's/^v//')
+            
+            # 备用方案：若 API 异常，利用 302 跳转获取最新版本号
+            if [ -z "$VERSION" ] || [ "$VERSION" = "null" ]; then
+              VERSION=$(curl -sSI https://github.com/XTLS/Xray-core/releases/latest | grep -i "^location:" | sed -n 's/.*tag\/v*\([0-9.]*\).*/\1/p' | tr -d '\r\n')
+            fi
+          fi
+
+          if [ -z "$VERSION" ]; then
+            echo "Failed to detect version, falling back to 'latest'"
+            VERSION="latest"
+          fi
+
+          echo "Target Xray Version: $VERSION"
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # 2. 登录 GHCR (GitHub Packages)
+      - name: Log in to GHCR
+        if: github.event.inputs.push_image != 'false'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # 3. 登录 Docker Hub (若配置了 Secret)
+      - name: Log in to Docker Hub
+        if: github.event.inputs.push_image != 'false' && secrets.DOCKERHUB_USERNAME != ''
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # 4. 生成多标签（latest + 官方版本号标签）
+      - name: Extract Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: |
+            ghcr.io/${{ github.repository_owner }}/xray
+            ${{ secrets.DOCKERHUB_USERNAME != '' && format('{0}/xray', secrets.DOCKERHUB_USERNAME) || '' }}
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=raw,value=${{ steps.get_version.outputs.version }},enable=${{ steps.get_version.outputs.version != 'latest' }}
+
+      # 5. 构建并推送多架构镜像
+      - name: Build and Push Multi-Arch Image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./xray
+          file: ./xray/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: ${{ github.event.inputs.push_image != 'false' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            XRAY_VERSION=${{ steps.get_version.outputs.version }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # 6. 同步上传 README 到 Docker Hub 详情页
+      - name: Update Docker Hub Description
+        if: github.event.inputs.push_image != 'false' && secrets.DOCKERHUB_USERNAME != '' && secrets.DOCKERHUB_TOKEN != ''
+        uses: peter-evans/dockerhub-description@v4
+        continue-on-error: true
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          repository: ${{ secrets.DOCKERHUB_USERNAME }}/xray
+          readme-filepath: ./xray/README.md
+          short-description: "Optimized Standalone Xray Server with REALITY and Auto-Update"
