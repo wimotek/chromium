@@ -30,7 +30,7 @@ Node.js 环境 (npm)
 npm install wimotek-chromium-sync 
 ```
 
-##🚀 极简使用示例
+## 🚀 极简使用示例
 
 ### 1. Python 代码调用（仅需 3 行）
 
@@ -71,7 +71,7 @@ chromium-sync
 --timeout 0 
 ```
 
-##⚙️ 端口与参数对应说明
+## ⚙️ 端口与参数对应说明
 
 | 参数名称                 | 命令行选项          | 对应环境变量                      | 默认值                    | 详细说明                 |
 | :------------------- | :------------- | :-------------------------- | :--------------------- | :------------------- |
@@ -84,6 +84,15 @@ chromium-sync
 | timeout              | \--timeout     | CHROMIUM\_TIMEOUT           | 15                      | 倒计时交互等待秒数，0 为免打扰秒执行  |
 | auto\_close\_tunnel  | \--auto-close  | \-                          | False                  | 任务完成后是否关闭创建的 SSH 隧道  |
 
-##📄 License
+## 🤖 自动化与定时任务配置示例
+配合 Linux Crontab，每天凌晨自动将本地维护好的登录态推送到云端远程容器：
+```bash
+编辑定时任务
+crontab -e
+添加此行：每天凌晨 3:00 自动执行同步且不弹任何提示
+0 3 * * * /usr/local/bin/chromium-sync --direction push --timeout 0 --auto-close >> /tmp/chromium_sync.log 2>&1
+```
+
+## 📄 License
 
 MIT License
