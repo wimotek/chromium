@@ -1,129 +1,131 @@
-#!/bin/bash
+#!/bin/sh
 set -e
 
 CONFIG_FILE="/etc/xray/config.json"
+TEMPLATE_FILE="/etc/xray/config.template.json"
+CLIENT_INFO_FILE="/etc/xray/client_info.txt"
 
-echo "========================================================"
-echo "  ⚡ Xray Zero-Config Container Starting...            "
-echo "========================================================"
+# 自动更新函数
+update_xray() {
+    echo "==> Checking for latest Xray-core..."
+    ARCH=$(uname -m)
+    case "$ARCH" in
+        "x86_64")  XRAY_ARCH="64" ;;
+        "aarch64") XRAY_ARCH="arm64-v8a" ;;
+        "armv7l")  XRAY_ARCH="arm32-v7a" ;;
+        "i386"|"i686") XRAY_ARCH="32" ;;
+        *) echo "[!] Unsupported architecture: $ARCH, skip auto-update."; return 0 ;;
+    esac
 
-# 若不存在配置文件，则执行免配置自动初始化
-if [ ! -f "$CONFIG_FILE" ]; then
-    echo "[!] 未检测到配置文件，正在自动生成高强度免配置参数..."
-
-    # 1. 自动生成客户端 UUID
-    UUID=$(xray uuid)
-    echo "[+] 自动生成租户 UUID: $UUID"
-
-    # 2. 自动生成 X25519 密钥对
-    X25519_OUTPUT=$(xray x25519)
-    PRIV_KEY=$(echo "$X25519_OUTPUT" | grep -i "Private key" | awk -F ': ' '{print $2}' | tr -d ' \r\n')
-    PUB_KEY=$(echo "$X25519_OUTPUT" | grep -i "Public key" | awk -F ': ' '{print $2}' | tr -d ' \r\n')
+    TMP_DIR=$(mktemp -d)
+    DOWNLOAD_URL="https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-${XRAY_ARCH}.zip"
     
-    if [ -z "$PRIV_KEY" ]; then
-        PRIV_KEY="mH2_R_vj5cdsdTcGW1X7hSOh03RUwO4ufXLk0JQffAw"
-        PUB_KEY="uMHXUmaq0myzdh3SGjzdlSvzdAY3uStNKspuoFDuCGo"
+    echo "==> Downloading latest release from $DOWNLOAD_URL ..."
+    if curl -fSL "$DOWNLOAD_URL" -o "$TMP_DIR/xray.zip"; then
+        unzip -q -o "$TMP_DIR/xray.zip" -d "$TMP_DIR"
+        chmod +x "$TMP_DIR/xray"
+        mv "$TMP_DIR/xray" /usr/bin/xray
+        [ -f "$TMP_DIR/geosite.dat" ] && mv "$TMP_DIR/geosite.dat" /usr/share/xray/geosite.dat
+        [ -f "$TMP_DIR/geoip.dat" ] && mv "$TMP_DIR/geoip.dat" /usr/share/xray/geoip.dat
+        rm -rf "$TMP_DIR"
+        echo "==> [Success] Xray-core updated to: $(/usr/bin/xray version | head -n 1)"
+    else
+        echo "[!] Update failed or network error, continuing with current version."
+        rm -rf "$TMP_DIR"
     fi
-
-    # 3. 自动生成 16 进制 Short ID
-    SHORT_ID=$(openssl rand -hex 8)
-    echo "[+] 自动生成 Short ID: $SHORT_ID"
-
-    # 4. 生成双层 dokodemo 443 + reality 4431 配置
-    mkdir -p /etc/xray
-    cat <<EOF > "$CONFIG_FILE"
-{
-  "log": {
-    "loglevel": "info"
-  },
-  "inbounds": [
-    {
-      "tag": "dokodemo-in",
-      "port": 443,
-      "protocol": "dokodemo-door",
-      "settings": {
-        "address": "0.0.0.0",
-        "port": 4431,
-        "network": "tcp"
-      },
-      "sniffing": {
-        "enabled": true,
-        "destOverride": ["tls"],
-        "routeOnly": true
-      }
-    },
-    {
-      "listen": "0.0.0.0",
-      "port": 4431,
-      "protocol": "vless",
-      "settings": {
-        "clients": [
-          {
-            "id": "$UUID",
-            "flow": "xtls-rprx-vision",
-            "email": "admin@xray.node"
-          }
-        ],
-        "decryption": "none"
-      },
-      "streamSettings": {
-        "network": "tcp",
-        "security": "reality",
-        "realitySettings": {
-          "dest": "www.samsung.com:443",
-          "serverNames": [
-            "www.samsung.com"
-          ],
-          "privateKey": "$PRIV_KEY",
-          "shortIds": [
-            "",
-            "$SHORT_ID"
-          ]
-        }
-      },
-      "sniffing": {
-        "enabled": true,
-        "destOverride": ["http", "tls", "quic"],
-        "routeOnly": true
-      }
-    }
-  ],
-  "outbounds": [
-    {
-      "protocol": "freedom",
-      "tag": "direct"
-    },
-    {
-      "protocol": "blackhole",
-      "tag": "block"
-    }
-  ],
-  "routing": {
-    "rules": [
-      {
-        "inboundTag": ["dokodemo-in"],
-        "domain": ["www.samsung.com"],
-        "outboundTag": "direct"
-      },
-      {
-        "inboundTag": ["dokodemo-in"],
-        "outboundTag": "block"
-      }
-    ]
-  }
 }
-EOF
 
-    echo "========================================================"
-    echo "🎉 免配置初始化完成！默认管理员节点连接信息:"
-    SERVER_IP=$(curl -s https://api.ipify.org || echo "YOUR_SERVER_IP")
-    echo "VLESS Reality 链接:"
-    echo "vless://$UUID@$SERVER_IP:443?security=reality&encryption=none&pbk=$PUB_KEY&headerType=none&type=tcp&flow=xtls-rprx-vision&sni=www.samsung.com&sid=$SHORT_ID&fp=chrome#Xray-Reality-Default"
-    echo "========================================================"
-else
-    echo "[✓] 检测到现有配置文件: $CONFIG_FILE"
+# 支持单独执行 update-xray 命令
+if [ "$1" = "update" ] || [ "$(basename "$0")" = "update-xray" ]; then
+    update_xray
+    exit 0
 fi
 
-# 启动 Xray 核心代理
-echo "[*] 启动 Xray-core 守护进程..."
-exec /usr/local/bin/xray run -config "$CONFIG_FILE"
+# 如果开启了 AUTO_UPDATE 环境变量，启动时自动更新
+if [ "${AUTO_UPDATE}" = "true" ] || [ "${AUTO_UPDATE}" = "1" ]; then
+    update_xray
+fi
+
+# 打印当前使用的 Xray 版本
+echo "==> Current version: $(/usr/bin/xray version | head -n 1)"
+
+# 默认网络与域名设置
+PORT="${PORT:-443}"
+DEST="${DEST:-www.apple.com:443}"
+SERVER_NAMES="${SERVER_NAMES:-www.apple.com,apple.com}"
+FIRST_SERVER_NAME=$(echo "$SERVER_NAMES" | cut -d',' -f1)
+
+# 获取外部访问 IP
+if [ -z "$SERVER_IP" ]; then
+    SERVER_IP=$(curl -s4 --max-time 3 https://api.ipify.org || curl -s4 --max-time 3 https://ifconfig.me || echo "YOUR_SERVER_IP")
+fi
+
+# 首次启动生成安全凭证与配置
+if [ ! -f "$CONFIG_FILE" ]; then
+    echo "==> [Init] /etc/xray/config.json not found, generating new configuration..."
+
+    UUID="${UUID:-$(/usr/bin/xray uuid)}"
+    
+    if [ -z "$PRIVATE_KEY" ] || [ -z "$PUBLIC_KEY" ]; then
+        KEY_PAIR=$(/usr/bin/xray x25519)
+        PRIVATE_KEY=$(echo "$KEY_PAIR" | grep "PrivateKey:" | awk '{print $2}')
+        PUBLIC_KEY=$(echo "$KEY_PAIR" | grep "PublicKey:" | awk '{print $2}')
+    fi
+
+    SHORT_ID="${SHORT_ID:-$(openssl rand -hex 8)}"
+
+    SERVER_NAMES_JSON=$(echo "$SERVER_NAMES" | awk -F',' '{
+        printf "["
+        for(i=1; i<=NF; i++) {
+            printf "\"%s\"", $i
+            if(i<NF) printf ","
+        }
+        printf "]"
+    }')
+
+    jq \
+      --arg port "$PORT" \
+      --arg uuid "$UUID" \
+      --arg dest "$DEST" \
+      --arg privkey "$PRIVATE_KEY" \
+      --arg shortid "$SHORT_ID" \
+      --argjson servernames "$SERVER_NAMES_JSON" \
+      '
+      .inbounds[0].port = ($port | tonumber) |
+      .inbounds[0].settings.clients[0].id = $uuid |
+      .inbounds[0].streamSettings.realitySettings.dest = $dest |
+      .inbounds[0].streamSettings.realitySettings.serverNames = $servernames |
+      .inbounds[0].streamSettings.realitySettings.privateKey = $privkey |
+      .inbounds[0].streamSettings.realitySettings.shortIds = [$shortid]
+      ' "$TEMPLATE_FILE" > "$CONFIG_FILE"
+
+    VLESS_URL="vless://${UUID}@${SERVER_IP}:${PORT}?security=reality&encryption=none&pbk=${PUBLIC_KEY}&headerType=none&fp=chrome&type=tcp&flow=xtls-rprx-vision&sni=${FIRST_SERVER_NAME}&sid=${SHORT_ID}#Xray-Reality"
+
+    cat <<EOF > "$CLIENT_INFO_FILE"
+======================================================
+              Xray Reality 节点配置信息
+======================================================
+IP / 地址:        ${SERVER_IP}
+端口:             ${PORT}
+UUID:             ${UUID}
+流控 (flow):      xtls-rprx-vision
+传输协议:         tcp
+安全类型:         reality
+SNI / 伪装域名:   ${FIRST_SERVER_NAME}
+公钥 (PublicKey): ${PUBLIC_KEY}
+ShortId:          ${SHORT_ID}
+Fingerprint:      chrome
+
+客户端导入链接:
+${VLESS_URL}
+======================================================
+EOF
+    echo "==> [Init] Configuration generated successfully."
+fi
+
+if [ -f "$CLIENT_INFO_FILE" ]; then
+    cat "$CLIENT_INFO_FILE"
+fi
+
+echo "==> Starting Xray-core..."
+exec /usr/bin/xray "$@"
