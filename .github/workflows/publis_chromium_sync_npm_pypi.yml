@@ -1,15 +1,20 @@
-name: Publish to PyPI and npm
+name: Publish chromium-sync to PyPI and npm
 
 on:
   push:
+    paths:
+      - 'chromium-sync/**'
+      - '.github/workflows/publis_chromium_sync_npm_pypi.yml'
     tags:
+      - 'sync-v*.*.*'
       - 'v*.*.*'
   workflow_dispatch:
 
+defaults:
+  run:
+    working-directory: ./chromium-sync
+
 jobs:
-  # ==========================================
-  # 任务 1：自动打包发布到 PyPI
-  # ==========================================
   publish-pypi:
     runs-on: ubuntu-latest
     steps:
@@ -35,9 +40,6 @@ jobs:
           TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
         run: python -m twine upload dist/*
 
-  # ==========================================
-  # 任务 2：自动发布到 npm
-  # ==========================================
   publish-npm:
     runs-on: ubuntu-latest
     steps:
