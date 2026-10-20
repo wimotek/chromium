@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "wimotek-chromium-sync"
+version = "1.0.0"
+description = "Universal Chromium Session & Cookie Synchronizer with SSH Tunnel"
+readme = "README.md"
+requires-python = ">=3.8"
+license = { text = "MIT" }
+authors = [{ name = "wimotek" }]
+keywords = ["chromium", "cdp", "playwright", "ssh-tunnel", "cookie-sync", "session-manager"]
+dependencies = [
+    "playwright>=1.30.0"
+]
+
+[project.scripts]
+chromium-sync = "chromium_sync.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["chromium_sync*"]
