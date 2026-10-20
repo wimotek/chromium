@@ -20,21 +20,21 @@
 
 在项目目录下执行：
 
-``'bash
+```bash
 docker compose up -d
-``'
+```
 
 ### 2. 获取节点连接信息
 
 容器启动后会自动生成配置并打印节点链接，执行以下命令查看：
 
-``'bash
+```bash
 docker logs xray-service
-``'
+```
 
 终端将输出类似以下内容：
 
-``'text
+```text
 ======================================================
               Xray Reality 节点配置信息
 ======================================================
@@ -52,13 +52,13 @@ Fingerprint:      chrome
 客户端导入链接:
 vless://???@198.51.100.???:443?security=reality&encryption=none&pbk=???&headerType=none&fp=chrome&type=tcp&flow=xtls-rprx-vision&sni=www.apple.com&sid=???#Xray-Reality
 ======================================================
-``'
+```
 
 也可以随时在宿主机查看持久化的节点信息：
 
-``'bash
+```bash
 cat ./data/client_info.txt
-``'
+```
 
 ---
 
@@ -67,23 +67,23 @@ cat ./data/client_info.txt
 ### 方式一：容器重启时自动更新（推荐）
 在 `docker-compose.yml` 中已默认配置环境变量 `AUTO_UPDATE=true`。每次重启容器时，脚本会自动检测官方最新 Release，如有更新则自动拉取替换：
 
-``'bash
+```bash
 docker compose restart xray
-``'
+```
 
 ### 方式二：容器内热更新（无需重新构建镜像）
 执行内置的热更新命令，直接拉取官方最新二进制：
 
-``'bash
+```bash
 docker exec -it xray-service update-xray
 docker compose restart xray
-``'
+```
 
 ### 方式三：强制无缓存重新构建
-``'bash
+```bash
 docker compose build --no-cache
 docker compose up -d
-``'
+```
 
 ---
 
@@ -120,17 +120,17 @@ docker compose up -d
 
 建议在 Linux 宿主机上开启 BBR 拥塞控制算法以获得更高吞吐量与抗丢包表现：
 
-``'bash
+```bash
 echo "net.core.default_qdisc=fq" >> /etc/sysctl.conf
 echo "net.ipv4.tcp_congestion_control=bbr" >> /etc/sysctl.conf
 sysctl -p
-``'
+```
 
 检查 BBR 是否成功生效：
-``'bash
+```bash
 sysctl net.ipv4.tcp_congestion_control
 # 输出应包含: bbr
-``'
+```
 
 ---
 
