@@ -8,12 +8,11 @@ on:
     branches:
       - main
   schedule:
-    # 每周日 00:00 UTC 自动检测并构建官方最新版
     - cron: '0 0 * * 0'
   workflow_dispatch:
     inputs:
       xray_version:
-        description: 'Xray 版本 (留空或填 auto 则自动获取最新版；亦可指定版本号如 25.1.30)'
+        description: 'Xray 版本 (留空或填 auto 则自动获取最新版)'
         required: false
         default: 'auto'
       push_image:
@@ -42,17 +41,16 @@ jobs:
             VERSION="$INPUT_VER"
           else
             echo "Fetching latest version from XTLS/Xray-core..."
-            # 优先使用 GitHub API 获取最新 tag_name
-            VERSION=$(curl -sSL -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" https://api.github.com/repos/XTLS/Xray-core/releases/latest | jq -r .tag_name | sed 's/^v//')
+            # 使用内置 github.token 避免 API 频控限制
+            VERSION=$(curl -sSL -H "Authorization: Bearer ${{ github.token }}" https://api.github.com/repos/XTLS/Xray-core/releases/latest | jq -r .tag_name | sed 's/^v//')
             
-            # 备用方案：若 API 异常，利用 302 跳转获取最新版本号
+            # 备用方案：利用 302 重定向解析
             if [ -z "$VERSION" ] || [ "$VERSION" = "null" ]; then
               VERSION=$(curl -sSI https://github.com/XTLS/Xray-core/releases/latest | grep -i "^location:" | sed -n 's/.*tag\/v*\([0-9.]*\).*/\1/p' | tr -d '\r\n')
             fi
           fi
 
           if [ -z "$VERSION" ]; then
-            echo "Failed to detect version, falling back to 'latest'"
             VERSION="latest"
           fi
 
@@ -65,16 +63,16 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      # 2. 登录 GHCR (GitHub Packages)
+      # 2. 登录 GHCR (直接使用内置系统变量 github.token)
       - name: Log in to GHCR
         if: github.event.inputs.push_image != 'false'
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          password: ${{ github.token }}
 
-      # 3. 登录 Docker Hub (若配置了 Secret)
+      # 3. 登录 Docker Hub (仅在配置了用户自定义 Secret 时触发)
       - name: Log in to Docker Hub
         if: github.event.inputs.push_image != 'false' && secrets.DOCKERHUB_USERNAME != ''
         uses: docker/login-action@v3
@@ -82,7 +80,7 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      # 4. 生成多标签（latest + 官方版本号标签）
+      # 4. 生成多标签
       - name: Extract Docker metadata
         id: meta
         uses: docker/metadata-action@v5
@@ -109,7 +107,7 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      # 6. 同步上传 README 到 Docker Hub 详情页
+      # 6. 上传 README 到 Docker Hub
       - name: Update Docker Hub Description
         if: github.event.inputs.push_image != 'false' && secrets.DOCKERHUB_USERNAME != '' && secrets.DOCKERHUB_TOKEN != ''
         uses: peter-evans/dockerhub-description@v4
