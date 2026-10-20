@@ -86,4 +86,49 @@ jobs:
       - name: Compute Image Tags
         id: tags
         run: |
-          OWNER=
+          OWNER="${{ steps.prep.outputs.owner_lc }}"
+          VER="${{ steps.prep.outputs.version }}"
+          
+          # GHCR 默认必打标签
+          TAG_LIST="ghcr.io/${OWNER}/xray:latest"
+          if [ -n "$VER" ] && [ "$VER" != "latest" ]; then
+            TAG_LIST="${TAG_LIST},ghcr.io/${OWNER}/xray:${VER}"
+          fi
+
+          # 如果配置了 Docker Hub，追加 Docker Hub 标签
+          DH_USER="${{ secrets.DOCKERHUB_USERNAME }}"
+          if [ -n "$DH_USER" ]; then
+            DH_USER_LC=$(echo "$DH_USER" | tr '[:upper:]' '[:lower:]')
+            TAG_LIST="${TAG_LIST},${DH_USER_LC}/xray:latest"
+            if [ -n "$VER" ] && [ "$VER" != "latest" ]; then
+              TAG_LIST="${TAG_LIST},${DH_USER_LC}/xray:${VER}"
+            fi
+          fi
+
+          echo "tags=$TAG_LIST" >> $GITHUB_OUTPUT
+
+      # 5. 构建并推送多架构镜像
+      - name: Build and Push Multi-Arch Image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./xray
+          file: ./xray/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.tags.outputs.tags }}
+          build-args: |
+            XRAY_VERSION=${{ steps.prep.outputs.download_tag }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # 6. 上传 README 到 Docker Hub 详情页
+      - name: Update Docker Hub Description
+        if: secrets.DOCKERHUB_USERNAME != '' && secrets.DOCKERHUB_TOKEN != ''
+        uses: peter-evans/dockerhub-description@v4
+        continue-on-error: true
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          repository: ${{ secrets.DOCKERHUB_USERNAME }}/xray
+          readme-filepath: ./xray/README.md
+          short-description: "Optimized Standalone Xray Server with REALITY and Auto-Update"
