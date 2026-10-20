@@ -19,4 +19,5 @@ dependencies = [
 chromium-sync = "chromium_sync.cli:main"
 
 [tool.setuptools.packages.find]
+where = ["."]
 include = ["chromium_sync*"]
