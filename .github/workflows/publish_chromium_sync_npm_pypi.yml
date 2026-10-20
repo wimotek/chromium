@@ -4,7 +4,7 @@ on:
   push:
     paths:
       - 'chromium_sync/**'
-      - '.github/workflows/publis_chromium_sync_npm_pypi.yml'
+      - '.github/workflows/publish_chromium_sync_npm_pypi.yml'
     tags:
       - 'sync-v*.*.*'
       - 'v*.*.*'
@@ -12,7 +12,7 @@ on:
 
 defaults:
   run:
-    working-directory: ./chromium-sync
+    working-directory: ./chromium_sync
 
 jobs:
   publish-pypi:
