@@ -161,10 +161,10 @@ ssh -N -L 9222:127.0.0.1:9222 root@<公网服务器IP>
 ```bash
 Bash
 # 启动时打开指定网址
-docker run -d -p 8444:8444 wimotek/imnimal-chromium:latest https://news.ycombinator.com
+docker run -d -p 8444:8444 wimotek/minimal-chromium:latest https://news.ycombinator.com
 
 # 启动时以无痕模式打开多个标签页
-docker run -d -p 8444:8444 wimotek/imnimal-chromium:latest --incognito https://github.com https://google.com
+docker run -d -p 8444:8444 wimotek/minimal-chromium:latest --incognito https://github.com https://google.com
 ```
 
 
