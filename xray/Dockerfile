@@ -1,39 +1,58 @@
-# ========================================================
-# 超轻量级免配置 Xray-core Reality 容器 Dockerfile (< 18MB)
-# 基于 Alpine Linux，体积极致优化，无冗余依赖
-# ========================================================
-FROM alpine:3.20 AS builder
-
-RUN apk add --no-cache curl unzip
+FROM --platform=$TARGETPLATFORM alpine:3.21
 
 ARG TARGETARCH
-ARG XRAY_VERSION=v25.1.30
+# 默认为 latest，也可在 build 时通过 --build-arg XRAY_VERSION=v25.1.30 指定固定版本
+ARG XRAY_VERSION=latest
 
-# 自动适配 amd64 / arm64 架构并提取 xray 二进制
+LABEL maintainer="Wimotek <i@wimotek.com>"
+LABEL description="Optimized Standalone Xray Server with Auto-Update"
+
+RUN apk add --no-cache \
+    ca-certificates \
+    tzdata \
+    jq \
+    curl \
+    openssl \
+    bind-tools
+
+# 根据架构确定下载名称并拉取官方最新 Release
 RUN set -ex && \
-    ARCH="64" && \
-    if [ "$TARGETARCH" = "arm64" ]; then ARCH="arm64-v8a"; fi && \
-    curl -sSL -o /tmp/xray.zip https://github.com/XTLS/Xray-core/releases/download/${XRAY_VERSION}/Xray-linux-${ARCH}.zip && \
-    mkdir -p /app/bin && \
-    unzip /tmp/xray.zip xray -d /app/bin/ && \
-    chmod +x /app/bin/xray
+    case "${TARGETARCH}" in \
+        "amd64") XRAY_ARCH="64" ;; \
+        "arm64") XRAY_ARCH="arm64-v8a" ;; \
+        "arm")   XRAY_ARCH="arm32-v7a" ;; \
+        "386")   XRAY_ARCH="32" ;; \
+        *) echo "Unsupported target architecture: ${TARGETARCH}" && exit 1 ;; \
+    esac && \
+    mkdir -p /tmp/xray /usr/share/xray /etc/xray && \
+    if [ "${XRAY_VERSION}" = "latest" ]; then \
+        DOWNLOAD_URL="https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-${XRAY_ARCH}.zip"; \
+    else \
+        DOWNLOAD_URL="https://github.com/XTLS/Xray-core/releases/download/${XRAY_VERSION}/Xray-linux-${XRAY_ARCH}.zip"; \
+    fi && \
+    echo "Downloading Xray-core from: ${DOWNLOAD_URL}" && \
+    curl -fSL "${DOWNLOAD_URL}" -o /tmp/xray/xray.zip && \
+    unzip -q /tmp/xray/xray.zip -d /tmp/xray && \
+    mv /tmp/xray/xray /usr/bin/xray && \
+    mv /tmp/xray/geosite.dat /usr/share/xray/geosite.dat && \
+    mv /tmp/xray/geoip.dat /usr/share/xray/geoip.dat && \
+    chmod +x /usr/bin/xray && \
+    rm -rf /tmp/xray
 
-# 最终运行镜像 (仅含 ca-certificates 与 xray 静态二进制)
-FROM alpine:3.20
+ENV XRAY_LOCATION_ASSET=/usr/share/xray \
+    TZ=Asia/Shanghai
 
-RUN apk add --no-cache ca-certificates tzdata bash openssl && \
-    mkdir -p /etc/xray /var/log/xray
+WORKDIR /root
+COPY entrypoint.sh /usr/local/bin/entrypoint.sh
+COPY config.template.json /etc/xray/config.template.json
 
-COPY --from=builder /app/bin/xray /usr/local/bin/xray
-COPY entrypoint.sh /entrypoint.sh
-COPY config.json /etc/xray/config.json
-RUN chmod +x /entrypoint.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh
 
-# 暴露外层 dokodemo 端口 (443) 和内层 reality 端口 (4431)
-EXPOSE 443 4431
-
-ENV XRAY_CONFIG_DIR=/etc/xray
+# 创建软链接，方便随时使用 update-xray 指令手动更新
+RUN ln -s /usr/local/bin/entrypoint.sh /usr/local/bin/update-xray
 
 VOLUME ["/etc/xray"]
+EXPOSE 443/tcp 443/udp
 
-ENTRYPOINT ["/entrypoint.sh"]
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
+CMD ["run", "-config", "/etc/xray/config.json"]
