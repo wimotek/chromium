@@ -1,0 +1,18 @@
+{
+  "name": "wimotek-chromium-sync",
+  "version": "1.0.0",
+  "description": "Universal Chromium Session & Cookie Synchronizer with SSH Tunnel",
+  "main": "chromium_sync/__init__.py",
+  "bin": {
+    "chromium-sync": "./bin/cli.js"
+  },
+  "files": [
+    "chromium_sync",
+    "bin",
+    "README.md",
+    "LICENSE"
+  ],
+  "keywords": ["chromium", "cdp", "cookie-sync", "playwright", "ssh-tunnel"],
+  "author": "wimotek",
+  "license": "MIT"
+}
