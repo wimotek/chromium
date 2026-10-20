@@ -5,6 +5,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg?style=flat-square)](LICENSE)
 
 专为 Chromium / Chrome 设计的通用会话与 Cookie 穿透热同步工具。
+
 支持在本地容器与远程服务器容器之间双向热同步登录凭证（Cookie + LocalStorage），全端口可参数化自定义，内置智能流向识别与带心跳保活的 SSH 隧道自愈管理。
 ---
 
