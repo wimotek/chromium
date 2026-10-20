@@ -15,7 +15,7 @@
 
 * **双引擎架构**：
   * **noVNC 极简版（`:latest` / `:novnc`）**：开箱即用轻量化实现，同时支持 HTTP (`6080`) 与 HTTPS (`6443`) 双端口。
-  * **KasmVNC （`:kasmvnc`）**：采用流媒体级动态编码（WebP / H.264），支持 60FPS 丝滑体验与原生浏览器剪贴板无缝同步。
+  * **KasmVNC 版 （`:kasmvnc`）**：采用流媒体级动态编码（WebP / H.264），支持 60FPS 丝滑体验与原生浏览器剪贴板无缝同步。
 * **可选映射自有证书.默认自签证书.
 * **原生剪贴板双向同步**：宿主机与容器内的 `Ctrl+C / Ctrl+V` 实时无缝互通，彻底摒弃多余的侧边栏中转。
 * **CDP 自动化就绪**：预置穿透端口转发与 `--remote-allow-origins=*`，解决高版本 Chromium 强制绑定 `127.0.0.1` 和跨域 403 问题。
@@ -31,7 +31,7 @@
 
 ## 📊 双版本对比与选型指南
 
-| 对比维度 | KasmVNC 旗舰版 (`:kasmvnc`) | noVNC 极简版 (`:latest` / `:novnc`) |
+| 对比维度 | KasmVNC 版 (`:kasmvnc`) | noVNC 极简版 (`:latest` / `:novnc`) |
 | :--- | :--- | :--- |
 | **底包系统** | Debian 12 (Bookworm) Slim | Debian 12 (Bookworm) Slim |
 | **画质与流畅度** | **60 FPS**（流媒体编码，滑动/视频极顺滑） | 15~25 FPS（传统图片块传输） |
@@ -65,7 +65,7 @@ HTTP 访问：http://<服务器IP>:6080
 
 HTTPS 访问：https://<服务器IP>:6443（支持原生无缝剪贴板）
 
-### 方案 B：KasmVNC
+### 方案 B：KasmVNC 版
 
 #### 1. 使用 `docker run` 直接运行
 ```bash
