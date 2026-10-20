@@ -3,7 +3,7 @@ name: Publish chromium-sync to PyPI and npm
 on:
   push:
     paths:
-      - 'chromium-sync/**'
+      - 'chromium_sync/**'
       - '.github/workflows/publis_chromium_sync_npm_pypi.yml'
     tags:
       - 'sync-v*.*.*'
