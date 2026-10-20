@@ -64,7 +64,7 @@ HTTP 访问：http://<服务器IP>:6080
 
 HTTPS 访问：https://<服务器IP>:6443（支持原生无缝剪贴板）
 
-### 方案 B：KasmVNC 旗舰版
+### 方案 B：KasmVNC
 
 #### 1. 使用 `docker run` 直接运行
 ```bash
