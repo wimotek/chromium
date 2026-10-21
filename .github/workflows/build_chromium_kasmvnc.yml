@@ -1,16 +1,18 @@
-name: Build chromium_kasmvnc Edition
+name: Build and Push KasmVNC Edition
 
 on:
   push:
     branches: [ "main", "master" ]
     paths:
-      - 'chromium_kasmvnc/**'                         # 仅当 kasmvnc 目录变动时触发
-      - '.github/workflows/build-kasmvnc.yml'
+      - 'chromium_kasmvnc/**'
+      - '.github/workflows/*kasm*.yml'
     tags: [ 'v*.*.*' ]
-  workflow_dispatch:                         # 支持网页手动单独点击触发
+  workflow_dispatch:
 
-env:
-  IMAGE_NAME: ${{ secrets.DOCKERHUB_USERNAME }}/minimal-chromium
+# 必须赋予 packages: write 权限才能推送到 ghcr.io
+permissions:
+  contents: read
+  packages: write
 
 jobs:
   build-kasmvnc:
@@ -25,25 +27,38 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
+      # 1. 登录到 Docker Hub
       - name: Log in to Docker Hub
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
+      # 2. 登录到 GitHub Packages (GHCR)
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # 3. 提取标签元数据（同时生成 Docker Hub 和 GHCR 的双端标签）
       - name: Extract metadata
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ env.IMAGE_NAME }}
+          images: |
+            ${{ secrets.DOCKERHUB_USERNAME }}/minimal-chromium
+            ghcr.io/${{ github.repository_owner }}/minimal-chromium
           tags: |
             type=raw,value=kasmvnc
             type=semver,pattern={{version}}-kasmvnc
 
+      # 4. 执行多架构构建并双端同时推送
       - name: Build and push KasmVNC
         uses: docker/build-push-action@v6
         with:
-          context: ./chromium_kasmvnc                 # 指定构建目录为 kasmvnc
+          context: ./chromium_kasmvnc
           platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ steps.meta.outputs.tags }}
@@ -51,12 +66,12 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      # 【核心新增】将项目根目录的 README.md 同步到 Docker Hub 主页
+      # 5. 更新 Docker Hub 主页的 README 说明文档
       - name: Update Docker Hub Description
         uses: peter-evans/dockerhub-description@v4
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
-          repository: ${{ env.IMAGE_NAME }}
-          readme-filepath: ./README.md                          # 指定 README 文件路径
-          short-description: "Minimal Chromium with KasmVNC/noVNC, CDP, and Clipboard sync" # 列表副标题简介
+          repository: ${{ secrets.DOCKERHUB_USERNAME }}/minimal-chromium
+          readme-filepath: ./README.md
+          short-description: "Chromium in Docker with KasmVNC (60FPS), CDP and Clipboard sync"
