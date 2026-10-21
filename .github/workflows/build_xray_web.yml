@@ -1,0 +1,147 @@
+name: Build and Push Xray Web Image
+
+on:
+  push:
+    paths:
+      - 'xray/xray_web/**'
+      - '.github/workflows/build_xray_web.yml'
+    branches:
+      - main
+  schedule:
+    # 每周日 00:00 UTC 自动检测并打包最新官方内核
+    - cron: '0 0 * * 0'
+  workflow_dispatch:
+    inputs:
+      xray_version:
+        description: 'Xray 核心版本 (默认 auto 自动获取最新版)'
+        required: false
+        default: 'auto'
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      # 1. 环境准备：解析官方最新版本、小写用户名防报错、检查 Docker Hub 密钥
+      - name: Prepare Environment & Version
+        id: prep
+        env:
+          DH_USER: ${{ secrets.DOCKERHUB_USERNAME }}
+          DH_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          # 1.1 检查是否配置了 Docker Hub 凭据
+          if [ -n "$DH_USER" ] && [ -n "$DH_TOKEN" ]; then
+            echo "has_dockerhub=true" >> $GITHUB_OUTPUT
+            echo "dh_user=$(echo "$DH_USER" | tr '[:upper:]' '[:lower:]')" >> $GITHUB_OUTPUT
+            echo "Docker Hub credentials configured."
+          else
+            echo "has_dockerhub=false" >> $GITHUB_OUTPUT
+            echo "dh_user=" >> $GITHUB_OUTPUT
+            echo "Docker Hub credentials missing, skipping Docker Hub push."
+          fi
+
+          # 1.2 强制仓库属主转小写 (防止 Docker 命名因大写报错)
+          REPO_OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          echo "owner_lc=$REPO_OWNER" >> $GITHUB_OUTPUT
+
+          # 1.3 自动检测 XTLS/Xray-core 官方最新 Release
+          RAW_VER=$(curl -sSL -H "Authorization: Bearer ${{ github.token }}" https://api.github.com/repos/XTLS/Xray-core/releases/latest | jq -r .tag_name)
+          if [ -z "$RAW_VER" ] || [ "$RAW_VER" = "null" ]; then
+            RAW_VER=$(curl -sSI https://github.com/XTLS/Xray-core/releases/latest | grep -i "^location:" | sed -n 's/.*tag\/\([^\r\n]*\).*/\1/p' | tr -d '\r\n')
+          fi
+
+          # 支持手动指定覆盖
+          INPUT_VER="${{ github.event.inputs.xray_version }}"
+          if [ -n "$INPUT_VER" ] && [ "$INPUT_VER" != "auto" ]; then
+            RAW_VER="$INPUT_VER"
+          fi
+
+          # 格式化版本号：下载必须带 v，Tag 纯数字
+          case "$RAW_VER" in
+            v*) TAG_NAME="$RAW_VER"; CLEAN_VER="${RAW_VER#v}" ;;
+            *)  TAG_NAME="v$RAW_VER"; CLEAN_VER="$RAW_VER" ;;
+          esac
+
+          echo "Target Xray Version: $TAG_NAME"
+          echo "download_tag=$TAG_NAME" >> $GITHUB_OUTPUT
+          echo "version=$CLEAN_VER" >> $GITHUB_OUTPUT
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # 2. 登录 GHCR
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      # 3. 登录 Docker Hub (若配置了 Secret)
+      - name: Log in to Docker Hub
+        if: steps.prep.outputs.has_dockerhub == 'true'
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # 4. 生成统一仓库名下的 Web 专属标签
+      - name: Compute Image Tags
+        id: tags
+        run: |
+          OWNER="${{ steps.prep.outputs.owner_lc }}"
+          VER="${{ steps.prep.outputs.version }}"
+          HAS_DH="${{ steps.prep.outputs.has_dockerhub }}"
+          DH_USER="${{ steps.prep.outputs.dh_user }}"
+          
+          # GHCR 标签（发布到 ghcr.io/<owner>/xray:web 系列）
+          TAG_LIST="ghcr.io/${OWNER}/xray:web,ghcr.io/${OWNER}/xray:web-latest"
+          if [ -n "$VER" ] && [ "$VER" != "latest" ]; then
+            TAG_LIST="${TAG_LIST},ghcr.io/${OWNER}/xray:web-${VER}"
+          fi
+
+          # Docker Hub 标签（发布到 <user>/xray:web 系列）
+          if [ "$HAS_DH" = "true" ]; then
+            TAG_LIST="${TAG_LIST},${DH_USER}/xray:web,${DH_USER}/xray:web-latest"
+            if [ -n "$VER" ] && [ "$VER" != "latest" ]; then
+              TAG_LIST="${TAG_LIST},${DH_USER}/xray:web-${VER}"
+            fi
+          fi
+
+          echo "Computed Tags: $TAG_LIST"
+          echo "tags=$TAG_LIST" >> $GITHUB_OUTPUT
+
+      # 5. 构建并推送多架构镜像 (linux/amd64, linux/arm64)
+      - name: Build and Push Multi-Arch Image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./xray/xray_web
+          file: ./xray/xray_web/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.tags.outputs.tags }}
+          build-args: |
+            XRAY_VERSION=${{ steps.prep.outputs.download_tag }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # 6. 同步更新 Docker Hub 描述
+      - name: Update Docker Hub Description
+        if: steps.prep.outputs.has_dockerhub == 'true'
+        uses: peter-evans/dockerhub-description@v4
+        continue-on-error: true
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          repository: ${{ steps.prep.outputs.dh_user }}/xray
+          readme-filepath: ./xray/xray_core/README.md
+          short-description: "Xray REALITY with Modern Vue 3 & FastAPI Web Management System"

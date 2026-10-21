@@ -156,17 +156,21 @@ docker compose up -d
 
 可通过修改 `docker-compose.yml` 中的 `environment` 自定义各项参数：
 
-| 环境变量 | 默认值 | 说明 |
-| :--- | :--- | :--- |
-| `AUTO_UPDATE` | `true` | 容器启动时是否自动检查并更新 Xray 官方最新版 |
-| `PORT` | `443` | 监听端口 |
-| `DEST` | `www.apple.com:443` | REALITY 目标回落与伪装地址 |
-| `SERVER_NAMES` | `www.apple.com,apple.com` | REALITY 伪装 SNI 域名列表（逗号分隔） |
-| `SERVER_IP` | 自动获取 | 客户端连接的目标公网 IP，多网卡时建议手动指定 |
-| `UUID` | 自动生成 | 自定义客户端用户 ID |
-| `PRIVATE_KEY` | 自动生成 | 自定义 REALITY 服务端私钥（需与 `PUBLIC_KEY` 匹配） |
-| `PUBLIC_KEY` | 自动生成 | 自定义 REALITY 客户端公钥 |
-| `SHORT_ID` | 自动生成 | 自定义十六进制 ShortId |
+| 环境变量 | 默认值 | 纯内核版 (`:latest`) | Web 管理版 (`:web`) | 说明 |
+| :--- | :--- | :---: | :---: | :--- |
+| `AUTO_UPDATE` | `true` | ✔ | ✔ | 容器启动时是否自动检查并更新 Xray 官方最新版 |
+| `PORT` | `443` | ✔ | ✔ | REALITY 入站监听端口 |
+| `DEST` | `www.apple.com:443` | ✔ | ✔ | REALITY 目标回落与伪装握手地址 |
+| `SERVER_NAMES` | `www.apple.com,apple.com` | ✔ | ✔ | REALITY 可信伪装 SNI 域名列表（逗号分隔） |
+| `SERVER_IP` | 自动获取 | ✔ | ✔ | 客户端连接的目标公网 IP，多网卡时建议手动指定 |
+| `UUID` | 自动生成 | ✔ | ✔ | 自定义客户端连接 UUID（Web 版作为初始用户 ID） |
+| `PRIVATE_KEY` | 自动生成 | ✔ | ✔ | 自定义 REALITY 服务端私钥（需与 `PUBLIC_KEY` 匹配） |
+| `PUBLIC_KEY` | 自动生成 | ✔ | ✔ | 自定义 REALITY 客户端公钥 |
+| `SHORT_ID` | 自动生成 | ✔ | ✔ | 自定义十六进制 ShortId |
+| `WEB_ENABLE` | `true` | ✖ | ✔ | 是否启动内置 Web 控制台 |
+| `WEB_PORT` | `8080` | ✖ | ✔ | Web 控制台访问端口 |
+| `WEB_PASSWORD` | 首次随机生成 | ✖ | ✔ | Web 控制台管理员登录密码 |
+| `USER_COUNT` | `2` | ✖ | ✔ | 首次初始化时自动创建的用户数（Web 版多用户支持） |
 
 ---
 

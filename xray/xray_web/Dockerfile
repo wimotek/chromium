@@ -1,3 +1,4 @@
+# Stage 1: 编译 Vue 3 静态前端
 FROM node:20-alpine AS frontend-builder
 WORKDIR /build
 COPY frontend/package*.json ./
@@ -5,17 +6,22 @@ RUN npm install
 COPY frontend/ ./
 RUN npm run build
 
+# Stage 2: 组装 Alpine 轻量运行环境
 FROM alpine:3.21
 
 ARG TARGETARCH
 ARG XRAY_VERSION=latest
 
 LABEL maintainer="Wimotek <i@wimotek.com>"
+LABEL description="Xray REALITY with Vue 3 and FastAPI Web Management"
 
+# 安装基础依赖与 Python 异步运行时 (兼容 Alpine 官方包名)
 RUN apk add --no-cache \
     ca-certificates tzdata jq curl openssl bind-tools \
-    python3 py3-pip py3-fastapi py3-uvicorn
+    python3 py3-pip && \
+    (apk add --no-cache py3-fastapi uvicorn || pip install --no-cache-dir --break-system-packages fastapi "uvicorn[standard]")
 
+# 拉取官方指定/最新 Xray 核心
 RUN set -ex && \
     case "${TARGETARCH}" in \
         "amd64") XRAY_ARCH="64" ;; \
@@ -45,6 +51,7 @@ ENV XRAY_LOCATION_ASSET=/usr/share/xray \
 
 WORKDIR /app
 COPY backend/ /app/backend/
+# 从构建阶段拷入编译好的静态前端
 COPY --from=frontend-builder /build/dist/ /app/backend/static/
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 COPY config.template.json /etc/xray/config.template.json
