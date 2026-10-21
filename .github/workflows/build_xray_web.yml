@@ -122,7 +122,7 @@ jobs:
 
       # 5. 构建并推送多架构镜像 (linux/amd64, linux/arm64)
       - name: Build and Push Multi-Arch Image
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@v6
         with:
           context: ./xray/xray_web
           file: ./xray/xray_web/Dockerfile

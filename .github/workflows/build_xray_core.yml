@@ -4,7 +4,7 @@ on:
   push:
     paths:
       - 'xray/xray_core/**'
-      - '.github/workflows/build_xray.yml'
+      - '.github/workflows/build_xray_core.yml'
     branches:
       - main
   schedule:
@@ -123,7 +123,7 @@ jobs:
 
       # 5. 构建并推送多架构镜像
       - name: Build and Push Multi-Arch Image
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@v6
         with:
           context: ./xray/xray_core
           file: ./xray/xray_core/Dockerfile
