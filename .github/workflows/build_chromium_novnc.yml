@@ -4,11 +4,15 @@ on:
   push:
     branches: [ "main", "master" ]
     paths:
-      - 'chromium_novnc/**'                          # 仅当 novnc 目录变动时触发
-      - '.github/workflows/build-novnc.yml'
+      - 'chromium_novnc/**'
+      - '.github/workflows/build_chromium_novnc.yml'
       - 'README.md'
     tags: [ 'v*.*.*' ]
-  workflow_dispatch:                        # 支持网页手动单独点击触发
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
 
 env:
   IMAGE_NAME: ${{ secrets.DOCKERHUB_USERNAME }}/minimal-chromium
@@ -32,11 +36,20 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Extract metadata
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ env.IMAGE_NAME }}
+          images: |
+            ${{ env.IMAGE_NAME }}
+            ghcr.io/${{ github.repository_owner }}/minimal-chromium
           tags: |
             type=raw,value=latest
             type=raw,value=novnc
@@ -45,7 +58,7 @@ jobs:
       - name: Build and push noVNC
         uses: docker/build-push-action@v6
         with:
-          context: ./chromium_novnc                   # 指定构建目录为 novnc
+          context: ./chromium_novnc
           platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ steps.meta.outputs.tags }}
@@ -53,12 +66,11 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-        # 【核心新增】将项目根目录的 README.md 同步到 Docker Hub 主页
       - name: Update Docker Hub Description
         uses: peter-evans/dockerhub-description@v4
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
           repository: ${{ env.IMAGE_NAME }}
-          readme-filepath: ./README.md                          # 指定 README 文件路径
-          short-description: "Minimal Chromium with KasmVNC/noVNC, CDP, and Clipboard sync" # 列表副标题简介
+          readme-filepath: ./README.md
+          short-description: "Minimal Chromium with KasmVNC/noVNC, CDP, and Clipboard sync"
