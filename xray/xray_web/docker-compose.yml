@@ -1,0 +1,26 @@
+services:
+  xray:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: wimotek/xray-vue:latest
+    container_name: xray-vue-service
+    restart: unless-stopped
+    network_mode: "host"
+    environment:
+      - TZ=Asia/Shanghai
+      - AUTO_UPDATE=true
+      - PORT=443
+      - DEST=www.apple.com:443
+      - SERVER_NAMES=www.apple.com,apple.com
+      - USER_COUNT=2
+      - WEB_ENABLE=true
+      - WEB_PORT=8080
+      - WEB_PASSWORD=admin888
+    volumes:
+      - ./data:/etc/xray
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
