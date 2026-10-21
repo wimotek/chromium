@@ -4,7 +4,7 @@ on:
   push:
     branches: [ "main", "master" ]
     paths:
-      - 'chromium_kasmvnc/**'
+      - 'chromium/chromium_kasmvnc/**'
       - '.github/workflows/*kasm*.yml'
     tags: [ 'v*.*.*' ]
   workflow_dispatch:
@@ -58,7 +58,7 @@ jobs:
       - name: Build and push KasmVNC
         uses: docker/build-push-action@v6
         with:
-          context: ./chromium_kasmvnc
+          context: .chromium/chromium_kasmvnc
           platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ steps.meta.outputs.tags }}
