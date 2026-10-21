@@ -4,7 +4,7 @@ on:
   push:
     branches: [ "main", "master" ]
     paths:
-      - 'chromium_novnc/**'
+      - 'chromium/chromium_novnc/**'
       - '.github/workflows/build_chromium_novnc.yml'
       - 'README.md'
     tags: [ 'v*.*.*' ]
@@ -58,7 +58,7 @@ jobs:
       - name: Build and push noVNC
         uses: docker/build-push-action@v6
         with:
-          context: ./chromium_novnc
+          context: .chromium/chromium_novnc
           platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ steps.meta.outputs.tags }}
