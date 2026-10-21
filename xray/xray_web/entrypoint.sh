@@ -1,9 +1,13 @@
 #!/bin/sh
 set -e
 
-CONFIG_FILE="/etc/xray/config.json"
+# 模板读取原位（容器内部只读，外部看不见也覆盖不到）
 TEMPLATE_FILE="/etc/xray/config.template.json"
-CLIENT_INFO_FILE="/etc/xray/client_info.txt"
+# 运行时数据与账密信息存放在 /data（映射到宿主机）
+CONFIG_FILE="/data/config.json"
+CLIENT_INFO_FILE="/data/client_info.txt"
+
+mkdir -p /data
 
 update_xray() {
     echo "==> Checking for latest Xray-core..."
@@ -56,8 +60,9 @@ if [ -z "$SERVER_IP" ]; then
     SERVER_IP=$(curl -s4 --max-time 3 https://api.ipify.org || curl -s4 --max-time 3 https://ifconfig.me || echo "YOUR_SERVER_IP")
 fi
 
+# 检查 /data/config.json 是否存在，不存在则现场生成
 if [ ! -f "$CONFIG_FILE" ]; then
-    echo "==> [Init] Generating new configuration..."
+    echo "==> [Init] /data/config.json not found, generating from template..."
 
     if [ -z "$PRIVATE_KEY" ] || [ -z "$PUBLIC_KEY" ]; then
         KEY_PAIR=$(/usr/bin/xray x25519)
@@ -69,7 +74,7 @@ if [ ! -f "$CONFIG_FILE" ]; then
     SERVER_NAMES_JSON=$(echo "$SERVER_NAMES" | awk -F',' '{
         printf "["
         for(i=1; i<=NF; i++) {
-            printf ""%s"", $i
+            printf "\"%s\"", $i
             if(i<NF) printf ","
         }
         printf "]"
@@ -133,6 +138,7 @@ export SERVER_IP
 export WEB_PASSWORD
 export WEB_PORT
 
+# 启动 Web 后端服务
 if [ "$WEB_ENABLE" = "true" ]; then
     uvicorn backend.main:app --host 0.0.0.0 --port "$WEB_PORT" --app-dir /app &
     WEB_PID=$!
@@ -141,9 +147,10 @@ fi
 
 trap 'kill $(cat /var/run/xray.pid 2>/dev/null); kill $(cat /var/run/web_admin.pid 2>/dev/null); exit 0' TERM INT
 
-echo "==> Starting Xray-core daemon..."
+# Xray 启动读取 /data/config.json
+echo "==> Starting Xray-core daemon using /data/config.json..."
 while true; do
-    /usr/bin/xray run -config /etc/xray/config.json &
+    /usr/bin/xray run -config /data/config.json &
     XRAY_PID=$!
     echo "$XRAY_PID" > /var/run/xray.pid
     wait "$XRAY_PID" || true

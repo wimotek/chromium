@@ -37,7 +37,7 @@ services:
       - DEST=www.apple.com:443 # REALITY 伪装目标地址与端口
       - SERVER_NAMES=www.apple.com,apple.com
     volumes:
-      - ./data:/etc/xray
+      - ./data:/data
     logging:
       driver: "json-file"
       options:
@@ -63,7 +63,7 @@ docker run -d \
   --name xray-service \
   --restart unless-stopped \
   --network host \
-  -v $(pwd)/data:/etc/xray \
+  -v $(pwd)/data:/data \
   -e TZ=Asia/Shanghai \
   -e AUTO_UPDATE=true \
   -e PORT=443 \
@@ -80,7 +80,7 @@ docker run -d \
   --restart unless-stopped \
   -p 443:443/tcp \
   -p 443:443/udp \
-  -v $(pwd)/data:/etc/xray \
+  -v $(pwd)/data:/data \
   -e TZ=Asia/Shanghai \
   -e AUTO_UPDATE=true \
   -e PORT=443 \

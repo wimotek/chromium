@@ -1,10 +1,7 @@
 services:
-  xray:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    image: wimotek/xray-vue:latest
-    container_name: xray-vue-service
+  xray-web:
+    image: wimotek/xray:web
+    container_name: xray-web
     restart: unless-stopped
     network_mode: "host"
     environment:
@@ -13,12 +10,12 @@ services:
       - PORT=443
       - DEST=www.apple.com:443
       - SERVER_NAMES=www.apple.com,apple.com
-      - USER_COUNT=2
       - WEB_ENABLE=true
-      - WEB_PORT=8080
+      - WEB_PORT=3000
       - WEB_PASSWORD=admin888
     volumes:
-      - ./data:/etc/xray
+      # 宿主机 ./data 映射到容器内部 /data（宿主机绝不会出现模板文件）
+      - ./data:/data
     logging:
       driver: "json-file"
       options:
