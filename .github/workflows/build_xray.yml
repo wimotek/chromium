@@ -3,7 +3,7 @@ name: Build Xray Docker Image
 on:
   push:
     paths:
-      - 'xray/**'
+      - 'xray/xray_core/**'
       - '.github/workflows/build_xray.yml'
     branches:
       - main
@@ -125,8 +125,8 @@ jobs:
       - name: Build and Push Multi-Arch Image
         uses: docker/build-push-action@v5
         with:
-          context: ./xray
-          file: ./xray/Dockerfile
+          context: ./xray/xray_core
+          file: ./xray/xray_core/Dockerfile
           platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ steps.tags.outputs.tags }}
