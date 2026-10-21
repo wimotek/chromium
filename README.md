@@ -9,9 +9,8 @@
 
 支持纯 Web 浏览器访问图形界面、双向原生剪贴板秒同步、开启 9222 端口 Chrome DevTools Protocol (CDP)，并内置防崩溃/防关闭自愈守护机制。
 
-配套提供了通用的会话热同步工具，支持在本地容器与云端远程容器之间**双向无感热同步登录状态（Cookie + LocalStorage）**，无需重新手动扫码登录。
+配套提供了通用的会话热同步工具(该模块已同步发布至 [PyPI](https://pypi.org/project/wimotek-chromium-sync/) 与 [npm](https://www.npmjs.com/package/wimotek-chromium-sync))，支持在本地容器与云端远程容器之间**双向无感热同步登录状态（Cookie + LocalStorage）**，无需重新手动扫码登录。
 
-该模块已同步发布至 [PyPI](https://pypi.org/project/wimotek-chromium-sync/) 与 [npm](https://www.npmjs.com/package/wimotek-chromium-sync)。
 
 ---
 
