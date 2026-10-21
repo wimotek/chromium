@@ -144,5 +144,5 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
           repository: ${{ steps.prep.outputs.dh_user }}/xray
-          readme-filepath: ./xray/README.md
+          readme-filepath: ./xray/xray_core/README.md
           short-description: "Optimized Standalone Xray Server with REALITY and Auto-Update"
