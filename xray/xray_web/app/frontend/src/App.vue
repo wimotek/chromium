@@ -16,7 +16,7 @@
     </header>
 
     <main class="main-body">
-      <!-- 1. 登录 / 注册模块 (暗黑毛玻璃卡片) -->
+      <!-- 1. 登录 / 注册模块 -->
       <div v-if="!currentUser.username" class="auth-center">
         <div class="cyber-card auth-box">
           <h2 class="card-title">{{ isPureAdmin ? '管理员认证' : (isRegister ? '新用户接入' : '节点控制台登录') }}</h2>
@@ -39,9 +39,8 @@
         </div>
       </div>
 
-      <!-- 2. 普通用户端：高档暗黑仪表盘 -->
+      <!-- 2. 普通用户端仪表盘 -->
       <div v-else-if="currentUser.role === 'user'" class="dashboard-grid">
-        <!-- 流量与有效期状态卡 -->
         <div class="cyber-card">
           <div class="card-header">
             <h3>📊 流量监控与配额</h3>
@@ -68,7 +67,6 @@
           </div>
         </div>
 
-        <!-- 卡密自主充值卡 -->
         <div class="cyber-card">
           <div class="card-header">
             <h3>🎟️ 卡密充值续费</h3>
@@ -80,22 +78,18 @@
           </div>
         </div>
 
-        <!-- 节点配置与密钥 -->
         <div class="cyber-card col-span-2">
           <div class="card-header">
             <h3>🔗 REALITY 节点订阅凭据</h3>
           </div>
-          
           <div class="node-field">
             <label>REALITY PUBLIC KEY (公钥):</label>
             <div class="code-display text-green">{{ currentUser.public_key || '正在提取公钥...' }}</div>
           </div>
-
           <div class="node-field">
             <label>VLESS REALITY 订阅配置链接:</label>
             <div class="code-display text-cyan">{{ currentUser.sub_link }}</div>
           </div>
-
           <div class="btn-group">
             <button class="btn-cyber-primary" @click="copyText(currentUser.sub_link)">📋 一键复制节点</button>
             <button class="btn-cyber-action" @click="openQrModal(currentUser.sub_link)">📱 弹出二维码扫码</button>
@@ -103,7 +97,7 @@
         </div>
       </div>
 
-      <!-- 3. 管理员控制台 (APP_MODE 为 all/admin 时开放) -->
+      <!-- 3. 管理员控制台 -->
       <div v-else-if="currentUser.role === 'admin'" class="admin-grid">
         <div class="cyber-card col-span-2">
           <div class="card-header"><h3>🛠️ 商业运营制卡中心</h3></div>
@@ -145,13 +139,19 @@
           </div>
         </div>
 
-        <!-- 用户列表 -->
+        <!-- 用户列表 (包含提权 / 降权操作) -->
         <div class="cyber-card col-span-2">
-          <div class="card-header"><h3>👥 全站接入用户监控</h3></div>
+          <div class="card-header"><h3>👥 全站接入用户监控与权限治理</h3></div>
           <div class="table-container">
             <table class="cyber-table">
               <thead>
-                <tr><th>用户账号</th><th>流量使用情况</th><th>过期时限</th><th>系统角色</th></tr>
+                <tr>
+                  <th>用户账号</th>
+                  <th>流量使用情况</th>
+                  <th>过期时限</th>
+                  <th>系统角色</th>
+                  <th style="width: 140px;">权限管理</th>
+                </tr>
               </thead>
               <tbody>
                 <tr v-for="u in adminUsers" :key="u.username">
@@ -159,6 +159,23 @@
                   <td>{{ u.used_mb }} MB / {{ u.traffic_limit_mb }} MB</td>
                   <td>{{ u.expire_date }}</td>
                   <td><span class="role-badge" :class="u.role">{{ u.role }}</span></td>
+                  <td>
+                    <!-- 提权按钮 -->
+                    <button
+                      v-if="u.role === 'user'"
+                      class="btn-sm btn-promote"
+                      @click="handleRoleChange(u.username, 'admin')">
+                      ⚡ 设为管理员
+                    </button>
+                    <!-- 降权按钮 -->
+                    <button
+                      v-else-if="u.username !== currentUser.username"
+                      class="btn-sm btn-demote"
+                      @click="handleRoleChange(u.username, 'user')">
+                      降为普通用户
+                    </button>
+                    <span v-else class="text-muted">当前账号</span>
+                  </td>
                 </tr>
               </tbody>
             </table>
@@ -209,7 +226,6 @@ onMounted(async () => {
 
 const trafficPercent = computed(() => currentUser.limit_mb ? Math.min(100, Math.round((currentUser.used_mb / currentUser.limit_mb) * 100)) : 0)
 
-// 弹出二维码函数
 const openQrModal = async (link) => {
   if (!link) return ElMessage.warning('链接无效')
   try {
@@ -220,7 +236,6 @@ const openQrModal = async (link) => {
   }
 }
 
-// 兼容非 HTTPS 环境一键复制
 const copyText = async (text) => {
   if (!text) return ElMessage.warning('内容为空')
   if (navigator.clipboard && window.isSecureContext) {
@@ -307,18 +322,39 @@ const generateCards = async () => {
   }
 }
 
+// 核心功能：点击按钮提权/降权
+const handleRoleChange = async (targetUser, newRole) => {
+  const actionText = newRole === 'admin' ? '提升为系统管理员' : '降级为普通用户'
+  if (!confirm(`确定要将用户 [${targetUser}] ${actionText}吗？`)) return
+
+  try {
+    const res = await axios.post('/api/admin/users/role', {
+      admin_user: authForm.username,
+      admin_pwd: authForm.password,
+      target_user: targetUser,
+      role: newRole
+    })
+    if (res.data.code === 200) {
+      ElMessage.success(res.data.msg)
+      loadAdminData() // 刷新用户列表
+    } else {
+      ElMessage.error(res.data.msg)
+    }
+  } catch (err) {
+    ElMessage.error('操作失败，网络或权限异常')
+  }
+}
+
 const logout = () => location.reload()
 </script>
 
 <style scoped>
-/* 全局暗黑科技风质感 */
 .dark-theme {
   min-height: 100vh;
   background-color: #080c14;
   color: #e2e8f0;
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, monospace;
 }
-
 .cyber-header {
   border-bottom: 1px solid rgba(255, 255, 255, 0.08);
   background: rgba(13, 19, 33, 0.85);
@@ -332,15 +368,10 @@ const logout = () => location.reload()
   justify-content: space-between;
   align-items: center;
 }
-.brand-title {
-  font-size: 18px;
-  font-weight: 800;
-  letter-spacing: 1.5px;
-}
+.brand-title { font-size: 18px; font-weight: 800; letter-spacing: 1.5px; }
 .highlight { color: #38bdf8; text-shadow: 0 0 10px rgba(56, 189, 248, 0.5); }
 .user-status { display: flex; align-items: center; gap: 12px; }
 
-/* 科技卡片风格 */
 .main-body { max-width: 1000px; margin: 30px auto; padding: 0 16px; }
 .dashboard-grid, .admin-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
 .col-span-2 { grid-column: span 2; }
@@ -355,7 +386,6 @@ const logout = () => location.reload()
 .card-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; }
 .card-header h3 { margin: 0; font-size: 16px; color: #f1f5f9; }
 
-/* 仪表与进度 */
 .traffic-meter { margin: 15px 0; }
 .meter-info { display: flex; justify-content: space-between; margin-bottom: 8px; }
 .data-val { font-size: 22px; font-weight: 700; color: #38bdf8; }
@@ -365,7 +395,6 @@ const logout = () => location.reload()
 .expiry-notice { font-size: 13px; color: #94a3b8; }
 .highlight-date { color: #f59e0b; }
 
-/* 控件 */
 .cyber-input {
   width: 100%;
   background: #1e293b;
@@ -385,7 +414,6 @@ const logout = () => location.reload()
 .btn-cyber-success { background: #059669; color: white; border: none; padding: 10px 20px; border-radius: 6px; cursor: pointer; }
 .btn-cyber-action { background: #334155; color: white; border: none; padding: 10px 20px; border-radius: 6px; cursor: pointer; }
 
-/* 节点代码展示区 */
 .node-field { margin-bottom: 14px; }
 .node-field label { display: block; font-size: 12px; color: #94a3b8; margin-bottom: 6px; }
 .code-display {
@@ -396,13 +424,11 @@ const logout = () => location.reload()
 .text-cyan { color: #38bdf8; }
 .btn-group { display: flex; gap: 12px; margin-top: 16px; }
 
-/* 弹窗 Modal */
 .modal-backdrop { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.75); display: flex; justify-content: center; align-items: center; z-index: 1000; }
 .cyber-modal { background: #0f172a; border: 1px solid #38bdf8; border-radius: 12px; padding: 24px; text-align: center; max-width: 340px; }
 .qr-box { background: white; padding: 12px; border-radius: 8px; display: inline-block; margin-top: 10px; }
 .modal-tip { font-size: 12px; color: #94a3b8; margin: 6px 0 12px 0; }
 
-/* 表格与徽章 */
 .table-container { overflow-x: auto; }
 .cyber-table { width: 100%; border-collapse: collapse; font-size: 13px; text-align: left; }
 .cyber-table th, .cyber-table td { padding: 10px; border-bottom: 1px solid #1e293b; }
@@ -414,6 +440,15 @@ const logout = () => location.reload()
 .role-badge.admin { background: #dc2626; color: white; }
 .role-badge.user { background: #2563eb; color: white; }
 .btn-logout { background: transparent; border: 1px solid #475569; color: #94a3b8; padding: 4px 10px; border-radius: 4px; cursor: pointer; }
+
+/* 提权/降权小按钮样式 */
+.btn-sm { padding: 4px 8px; font-size: 11px; border-radius: 4px; border: none; cursor: pointer; }
+.btn-promote { background: #f59e0b; color: #000; font-weight: 700; }
+.btn-promote:hover { background: #d97706; }
+.btn-demote { background: #475569; color: #fff; }
+.btn-demote:hover { background: #334155; }
+.text-muted { font-size: 11px; color: #64748b; }
+
 .auth-box { max-width: 400px; margin: 50px auto; }
 .form-item { margin-bottom: 16px; }
 .form-item label { display: block; font-size: 12px; color: #94a3b8; margin-bottom: 6px; }

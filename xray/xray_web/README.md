@@ -38,25 +38,27 @@
 ```yaml
 services:
   xray-web:
-    image: wimotek/xray:web
-    # 亦可选用 GitHub 镜像源: ghcr.io/wimotek/xray:web
+    build:
+      context: .
+      dockerfile: Dockerfile
     container_name: xray-web
     restart: unless-stopped
     network_mode: "host"
     environment:
       - TZ=Asia/Shanghai
-      - APP_MODE=user               # 运行模式: user(默认纯用户前台防扫) | admin(仅管理后台) | all(全功能)
-      - WEB_ENABLE=true             # 是否开启内置 Web 页面
-      - WEB_PORT=3000               # Web 面板访问端口
-      - WEB_PASSWORD=admin888       # 管理员登录密码（APP_MODE 为 admin/all 时生效）
-      - PORT=8443                   # Xray REALITY 节点网络监听端口（若 443 冲突可随意更换）
-      - DEST=www.microsoft.com:443  # REALITY 可信伪装与 TLS 回落目标
+      # 1. 运行模式: 生产默认使用 user (防公网扫描)，制卡维护时切为 all
+      - APP_MODE=user
+      - WEB_ENABLE=true
+      - WEB_PORT=3000
+      # 2. Xray 节点监听端口 (若 443 被占可任意修改为 8443)
+      - PORT=8443
+      - DEST=www.microsoft.com:443
       - SERVER_NAMES=www.microsoft.com,microsoft.com
-      - USER_COUNT=2                # 首次初始化自动生成的默认体验用户数
-      - AUTO_UPDATE=true            # 重启容器时是否自动检查并热更新官方最新核心
-      # - REALITY_PRIVATE_KEY=xxx   # 可选: 留空则由系统首次启动时自动生成并固化至 /data
+      - AUTO_UPDATE=true
+      # 3. 初始管理员账号密码 (首次创建完成后，可将这两行直接删掉)
+      - ADMIN_USERNAME=my_private_admin
+      - ADMIN_PASSWORD=SuperStrongPassword#2026
     volumes:
-      # 统一持久化挂载至宿主机 ./data，绝不泄漏或冲掉镜像内部模板
       - ./data:/data
     logging:
       driver: "json-file"
@@ -125,18 +127,26 @@ environment:
 
 ## 🛠️ 环境变量详细说明
 
-| 环境变量 | 默认值 | 作用说明 |
-| :--- | :--- | :--- |
-| `APP_MODE` | `user` | **权限模式**：`user`（仅开放用户端，管理端 404 隐藏）/ `admin`（仅管理端）/ `all`（全开） |
-| `WEB_ENABLE` | `true` | 是否启用内置 Web 控制台服务（设为 `false` 则仅运行代理内核） |
-| `WEB_PORT` | `3000` | Web 网页访问端口 |
-| `WEB_PASSWORD` | 首次随机生成 / `admin888` | 管理员后台登录密码 |
-| `PORT` | `443` 或 `8443` | Xray REALITY 节点网络监听端口 |
-| `DEST` | `www.microsoft.com:443` | REALITY 伪装与 TLS 回落目标 |
-| `SERVER_NAMES` | `www.microsoft.com,microsoft.com` | REALITY 可信伪装 SNI 域名列表（逗号分隔） |
-| `SERVER_IP` | 自动识别外网 IP | 客户端连接目标公网 IP（多网卡可手动指定） |
-| `USER_COUNT` | `2` | 首次初始化时自动写入数据库的用户数量 |
-| `AUTO_UPDATE` | `true` | 容器重启时是否自动检查并热更新官方最新 Xray 核心 |
+---
+
+###   `xray_core` vs `xray_web` 环境变量与特性对比矩阵
+
+| 对比维度 / 变量 | `xray_core` (纯核心版) | `xray_web` (可视化商业运营版) | 默认推荐值 | 架构与功能差异说明 |
+| :--- | :---: | :---: | :--- | :--- |
+| **定位与适用群体** | 单一轻量代理 | 多用户商业/团队运营 | - | `xray_core` 适用于无面板个人自用；`xray_web` 具备用户计费与卡密体系。 |
+| **`PORT` (代理端口)** | ✅ 支持 | ✅ 支持 | `8443` 或 `443` | 两个版本均支持修改环境变量后自动免删数据热补丁同步。 |
+| **`DEST` / `SERVER_NAMES`** | ✅ 支持 | ✅ 支持 | `www.microsoft.com:443` | REALITY 伪装配置，逻辑保持 1:1 统一。 |
+| **`SERVER_IP`** | ✅ 支持 | ✅ 支持 | 自动识别 | 自动从 `api.ipify.org` 提取，组装客户端链接。 |
+| **`AUTO_UPDATE`** | ✅ 支持 | ✅ 支持 | `true` | 支持重启热更新 Xray 内核。 |
+| **`WEB_ENABLE`** | ❌ **无此概念** | ✅ **支持** | `true` | `xray_web` 可随时通过置 `false` 降级为与 `xray_core` 相同的无头代理模式。 |
+| **`WEB_PORT`** | ❌ **无此概念** | ✅ **支持** | `3000` | **端口完全解耦**：代理跑 `PORT`，网页跑 `WEB_PORT`，彻底避免端口冲突。 |
+| **`APP_MODE`** | ❌ **无此概念** | ✅ **核心安全参数** | `user` | **防爆破机制**：`user` 模式下管理 API 物理 404 熔断，外部扫描器无法探知后台。 |
+| **`ADMIN_USERNAME` / `PASSWORD`** | ❌ **无此概念** | ✅ **可选种子配置** | 自定义强密码 | 仅作首次建库时的引导凭据，提权专属账号后可完全从配置文件抹除。 |
+| **数据持久化形式** | 单 JSON 配置文件 | **SQLite3 数据库驱动** | `/data/xray_web.db` | `xray_core` 依靠静态文本；`xray_web` 依靠 SQLite 记录配额、到期日与卡密。 |
+| **REALITY 密钥提取** | 写入文本日志 | **自动推导 + 动态修复** | 固化于 `/data` | `xray_web` 具备私钥反推兜底机制，彻底解决前端公钥显示空白问题。 |
+| **剪贴板复制机制** | 控制台手动复制 | **HTTP 降级自适应** | - | `xray_web` 兼容非 HTTPS 环境，点击一键复制 100% 成功，支持二维码扫码。 |
+| **内存常驻开销** | 极低 (~15MB) | 轻量级 (~40MB) | - | `xray_web` 采用单容器托管 Vue 3 静态编译产物 + 极简 API，整机内存消耗极小。 |
+
 
 ---
 
