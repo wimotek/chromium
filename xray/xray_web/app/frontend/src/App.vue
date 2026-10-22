@@ -302,7 +302,7 @@
 <script setup>
 import { ref, reactive, computed, onMounted } from 'vue'
 import axios from 'axios'
-import QRCode from 'qrcode'
+import QRCode from 'qrcode/build/qrcode.min.js'
 import { ElMessage } from 'element-plus'
 
 const loading = ref(false)
