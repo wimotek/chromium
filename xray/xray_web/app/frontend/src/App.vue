@@ -39,7 +39,7 @@
         </div>
       </div>
 
-      <!-- 2. 普通用户端：高档暗黑仪表盘 -->
+      <!-- 2. 普通用户端仪表盘 -->
       <div v-else-if="currentUser.role === 'user'" class="dashboard-grid">
         <div class="cyber-card">
           <div class="card-header">
@@ -97,9 +97,8 @@
         </div>
       </div>
 
-      <!-- 3. 管理员控制台：重叠式卡片切换布局 (拒绝混乱平铺) -->
+      <!-- 3. 管理员控制台 (卡片切换) -->
       <div v-else-if="currentUser.role === 'admin'" class="admin-wrapper">
-        <!-- 顶部卡片切换按钮组 -->
         <div class="card-tabs-nav">
           <button
             class="tab-card-btn"
@@ -126,7 +125,7 @@
           </button>
         </div>
 
-        <!-- 视图 A：全站用户管理卡片 -->
+        <!-- 选项卡 1: 用户管理 -->
         <div v-if="activeTab === 'users'" class="cyber-card tab-content-card">
           <div class="card-header">
             <h3>👥 接入用户治理列表</h3>
@@ -165,8 +164,6 @@
                   <td>
                     <div class="action-btn-row">
                       <button class="btn-sm btn-edit" @click="openEditModal(u)">✏️ 改配额</button>
-                      
-                      <!-- 封禁 / 解封 -->
                       <button
                         v-if="u.status === 1"
                         class="btn-sm btn-demote"
@@ -180,8 +177,6 @@
                         @click="handleStatusToggle(u.username, 1)">
                         🟢 解封
                       </button>
-
-                      <!-- 提权 / 降权 -->
                       <button
                         v-if="u.role === 'user'"
                         class="btn-sm btn-promote"
@@ -194,8 +189,6 @@
                         @click="handleRoleChange(u.username, 'user')">
                         降权
                       </button>
-
-                      <!-- 删除 -->
                       <button
                         class="btn-sm btn-del"
                         :disabled="u.username === currentUser.username"
@@ -210,7 +203,7 @@
           </div>
         </div>
 
-        <!-- 视图 B：卡密与发卡中心卡片 -->
+        <!-- 选项卡 2: 卡密管理 -->
         <div v-else-if="activeTab === 'cards'" class="cyber-card tab-content-card">
           <div class="card-header">
             <h3>🛠️ 商业发卡制卡面板</h3>
@@ -259,13 +252,13 @@
       </div>
     </main>
 
-    <!-- 弹窗 1：二维码与节点分享 Modal (用户端/管理端通用) -->
+    <!-- 弹窗 1：SVG 高清二维码弹窗 -->
     <div v-if="showQrModal" class="modal-backdrop" @click="showQrModal = false">
       <div class="cyber-modal" @click.stop>
         <h3>📱 [{{ targetModalUser }}] 节点连接凭证</h3>
-        <p class="modal-tip">手机客户端相机直接扫码，或复制链接导入：</p>
+        <p class="modal-tip">手机相机或客户端扫码即可导入：</p>
         <div class="qr-box">
-          <img :src="qrCodeDataUrl" alt="QR Code" />
+          <img :src="'/api/qrcode?text=' + encodeURIComponent(targetModalLink)" alt="QR Code" style="width: 220px; height: 220px; display: block;" />
         </div>
         <div class="node-field" style="margin-top: 15px; text-align: left;">
           <div class="code-display text-cyan" style="max-height: 80px; overflow-y: auto;">{{ targetModalLink }}</div>
@@ -277,7 +270,7 @@
       </div>
     </div>
 
-    <!-- 弹窗 2：管理员修改用户配额与到期时间 Modal -->
+    <!-- 弹窗 2：配额与到期时限修改 -->
     <div v-if="showEditModal" class="modal-backdrop" @click="showEditModal = false">
       <div class="cyber-modal" style="max-width: 420px; text-align: left;" @click.stop>
         <h3>✏️ 调整用户 [{{ editForm.username }}] 属性</h3>
@@ -302,18 +295,16 @@
 <script setup>
 import { ref, reactive, computed, onMounted } from 'vue'
 import axios from 'axios'
-import QRCode from 'qrcode/build/qrcode.min.js'
 import { ElMessage } from 'element-plus'
 
 const loading = ref(false)
 const isRegister = ref(false)
 const isPureAdmin = ref(false)
 const rechargeCode = ref('')
-const activeTab = ref('users') // 'users' | 'cards' 控制卡片重叠切换
+const activeTab = ref('users')
 
-// 弹窗状态控制
+// 弹窗状态
 const showQrModal = ref(false)
-const qrCodeDataUrl = ref('')
 const targetModalUser = ref('')
 const targetModalLink = ref('')
 
@@ -336,19 +327,13 @@ onMounted(async () => {
 const trafficPercent = computed(() => currentUser.limit_mb ? Math.min(100, Math.round((currentUser.used_mb / currentUser.limit_mb) * 100)) : 0)
 
 // 弹出对应用户的专属二维码弹窗
-const openQrModal = async (link, uname) => {
+const openQrModal = (link, uname) => {
   if (!link) return ElMessage.warning('链接无效或公钥未初始化')
-  try {
-    targetModalUser.value = uname
-    targetModalLink.value = link
-    qrCodeDataUrl.value = await QRCode.toDataURL(link, { width: 240, margin: 2, color: { dark: '#000000', light: '#ffffff' } })
-    showQrModal.value = true
-  } catch (err) {
-    ElMessage.error('二维码渲染失败')
-  }
+  targetModalUser.value = uname
+  targetModalLink.value = link
+  showQrModal.value = true
 }
 
-// 弹出用户属性调整弹窗
 const openEditModal = (u) => {
   editForm.username = u.username
   editForm.limit_mb = u.traffic_limit_mb
@@ -377,7 +362,6 @@ const submitUserEdit = async () => {
   }
 }
 
-// 封禁 / 解封操作
 const handleStatusToggle = async (targetUser, newStatus) => {
   const tip = newStatus === 0 ? '封禁' : '解封'
   if (!confirm(`确定要${tip}用户 [${targetUser}] 吗？`)) return
@@ -399,7 +383,6 @@ const handleStatusToggle = async (targetUser, newStatus) => {
   }
 }
 
-// 删除用户
 const handleDeleteUser = async (targetUser) => {
   if (!confirm(`⚠️ 警告：确定要彻底删除用户 [${targetUser}] 吗？数据无法恢复！`)) return
   try {
@@ -419,7 +402,6 @@ const handleDeleteUser = async (targetUser) => {
   }
 }
 
-// 提权 / 降权
 const handleRoleChange = async (targetUser, newRole) => {
   const actionText = newRole === 'admin' ? '提升为管理员' : '降级为普通用户'
   if (!confirm(`确定要将 [${targetUser}] ${actionText}吗？`)) return
@@ -558,7 +540,7 @@ const logout = () => location.reload()
 .dashboard-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
 .col-span-2 { grid-column: span 2; }
 
-/* 核心优化：重叠卡片式标签切换导航 */
+/* 卡片选项卡导航 */
 .admin-wrapper { width: 100%; }
 .card-tabs-nav {
   display: flex;
@@ -647,7 +629,6 @@ const logout = () => location.reload()
   background: linear-gradient(135deg, #0284c7, #2563eb);
   color: white; border: none; padding: 10px 20px; border-radius: 6px; font-weight: 700; cursor: pointer;
 }
-/* 解决“立即激活”换行被挤扁的问题 */
 .redeem-box {
   display: flex;
   gap: 10px;
@@ -682,6 +663,39 @@ const logout = () => location.reload()
 .text-cyan { color: #38bdf8; }
 .btn-group { display: flex; gap: 12px; margin-top: 16px; }
 
-/* 弹窗通用 */
 .modal-backdrop { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.8); display: flex; justify-content: center; align-items: center; z-index: 1000; }
-.cyber-modal { background: #0f172a; border: 1px solid #38bdf8; border-radius: 12px; padding: 24px; max-width: 360px; box-shadow: 0 0 30
+.cyber-modal { background: #0f172a; border: 1px solid #38bdf8; border-radius: 12px; padding: 24px; max-width: 360px; box-shadow: 0 0 30px rgba(56, 189, 248, 0.25); }
+.qr-box { background: white; padding: 12px; border-radius: 8px; display: inline-block; margin: 10px 0; }
+.modal-tip { font-size: 12px; color: #94a3b8; margin: 4px 0 10px 0; }
+
+.table-container { overflow-x: auto; margin-top: 10px; }
+.cyber-table { width: 100%; border-collapse: collapse; font-size: 13px; text-align: left; }
+.cyber-table th, .cyber-table td { padding: 12px 10px; border-bottom: 1px solid #1e293b; }
+.cyber-table th { color: #64748b; font-weight: 600; }
+.table-progress { background: #1e293b; height: 4px; border-radius: 2px; overflow: hidden; margin-top: 4px; width: 100px; }
+.table-glow { background: #38bdf8; height: 100%; }
+
+.badge { padding: 2px 8px; border-radius: 4px; font-size: 11px; }
+.badge-ready { background: rgba(16, 185, 129, 0.2); color: #34d399; }
+.badge-used { background: rgba(239, 68, 68, 0.2); color: #f87171; }
+.role-badge { padding: 3px 8px; border-radius: 4px; font-size: 11px; font-weight: 700; }
+.role-badge.admin { background: #dc2626; color: white; }
+.role-badge.user { background: #2563eb; color: white; }
+.btn-logout { background: transparent; border: 1px solid #475569; color: #94a3b8; padding: 4px 10px; border-radius: 4px; cursor: pointer; }
+
+.action-btn-row { display: flex; gap: 6px; align-items: center; }
+.btn-sm { padding: 4px 8px; font-size: 11px; border-radius: 4px; border: none; cursor: pointer; white-space: nowrap; }
+.btn-action { background: #0284c7; color: white; }
+.btn-edit { background: #4f46e5; color: white; }
+.btn-promote { background: #f59e0b; color: #000; font-weight: 700; }
+.btn-demote { background: #475569; color: #fff; }
+.btn-del { background: #b91c1c; color: white; }
+.btn-del:disabled, .btn-demote:disabled { opacity: 0.3; cursor: not-allowed; }
+
+.auth-box { max-width: 400px; margin: 50px auto; }
+.form-item { margin-bottom: 16px; }
+.form-item label { display: block; font-size: 12px; color: #94a3b8; margin-bottom: 6px; }
+.auth-toggle { text-align: center; margin-top: 16px; font-size: 13px; }
+.auth-toggle a { color: #38bdf8; text-decoration: none; }
+.gen-form { display: grid; grid-template-columns: 1fr 1fr 1fr auto; gap: 10px; align-items: flex-end; }
+</style>

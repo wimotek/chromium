@@ -1,13 +1,17 @@
+import os
+import io
 import uuid
 import datetime
-from flask import Flask, request, jsonify, send_from_directory, abort
+import qrcode
+import qrcode.image.svg
+from flask import Flask, request, jsonify, send_from_directory, abort, send_file
 from config import Config
 from db import init_db, get_db, hash_pwd
 from xray import get_reality_public_key, query_user_traffic, build_vless_link
 
 app = Flask(__name__, static_folder='../frontend/dist', static_url_path='/')
 
-# 启动初始化并对现有数据库自动热补丁 status 字段
+# 启动初始化并对现有数据库做 status 字段热兼容
 init_db()
 def patch_db():
     conn = get_db()
@@ -34,7 +38,26 @@ def system_info():
         }
     })
 
-# ==================== 用户端路由 ====================
+# ==================== 核心新增：纯 Python 矢量二维码生成接口 ====================
+
+@app.route('/api/qrcode', methods=['GET'])
+def get_qrcode_svg():
+    """
+    纯 Python 内存生成超高清 SVG 矢量二维码接口
+    零 C 库依赖，零 Pillow 依赖，杜绝前端任何打包报错
+    """
+    text = request.args.get('text', '').strip()
+    if not text:
+        abort(400)
+    
+    # 使用纯 Python 的 SVG Path 工厂生成矢量图
+    img = qrcode.make(text, image_factory=qrcode.image.svg.SvgPathImage)
+    buf = io.BytesIO()
+    img.save(buf)
+    buf.seek(0)
+    return send_file(buf, mimetype='image/svg+xml')
+
+# ==================== 用户端路由 (User APIs) ====================
 
 @app.route('/api/register', methods=['POST'])
 def register():
@@ -73,10 +96,11 @@ def login():
     if not user:
         return jsonify({"code": 401, "msg": "账号或密码错误"})
 
-    # 禁用状态检查
+    # 用户账号封禁状态拦截
     if user['status'] == 0:
         return jsonify({"code": 403, "msg": "该账号已被管理员封禁停用，无法登录！"})
 
+    # APP_MODE 为 user 时物理拦截管理员登录（防公网扫描爆破）
     if Config.APP_MODE == 'user' and user['role'] == 'admin':
         return jsonify({"code": 403, "msg": "本节点为纯用户端，已关闭管理员登录"})
 
@@ -122,7 +146,7 @@ def recharge():
     conn.close()
     return jsonify({"code": 200, "msg": f"充值成功！增加 {card['traffic_gb']}GB 流量，延长 {card['days']} 天"})
 
-# ==================== 管理员全量治理路由 ====================
+# ==================== 管理员全量治理路由 (Admin APIs) ====================
 
 @app.route('/api/admin/cards/generate', methods=['POST'])
 def admin_generate():
@@ -161,7 +185,7 @@ def admin_data():
         d = dict(r)
         d['used_mb'] = query_user_traffic(d['username'])
         d['status'] = 1 if d.get('status') is None else d['status']
-        # 为每个用户直接实时构造其专属 VLESS 节点链接
+        # 后端直接为每一个用户计算出该用户的专属 VLESS 节点链接
         d['sub_link'] = build_vless_link(d['uuid'], pbk, f"{d['username']}-Reality")
         users.append(d)
     conn.close()
@@ -187,7 +211,7 @@ def update_user_status():
     action = "解封启用" if status == 1 else "封禁停用"
     return jsonify({"code": 200, "msg": f"用户 [{target_user}] 已成功{action}"})
 
-# 2. 修改用户流量与有效期
+# 2. 修改用户流量与到期时间
 @app.route('/api/admin/users/edit', methods=['POST'])
 def edit_user_quota():
     if Config.APP_MODE == 'user': abort(404)
@@ -205,7 +229,7 @@ def edit_user_quota():
     conn.close()
     return jsonify({"code": 200, "msg": f"用户 [{target_user}] 配额与到期时间修改成功！"})
 
-# 3. 物理删除用户
+# 3. 彻底删除用户
 @app.route('/api/admin/users/delete', methods=['POST'])
 def delete_user():
     if Config.APP_MODE == 'user': abort(404)
@@ -228,12 +252,15 @@ def delete_user():
 def update_user_role():
     if Config.APP_MODE == 'user': abort(404)
     data = request.json or {}
-    if not check_admin(data.get('admin_user'), data.get('admin_pwd')): return jsonify({"code": 403, "msg": "无权限"})
+    admin_user = data.get('admin_user')
+    admin_pwd = data.get('admin_pwd')
+    if not check_admin(admin_user, admin_pwd):
+        return jsonify({"code": 403, "msg": "无管理员权限"})
 
     target_user = data.get('target_user')
     new_role = data.get('role', 'admin')
-    if target_user == data.get('admin_user') and new_role == 'user':
-        return jsonify({"code": 400, "msg": "不能降权当前登录的管理员自己！"})
+    if target_user == admin_user and new_role == 'user':
+        return jsonify({"code": 400, "msg": "安全保护：不能降权当前登录的管理员自己！"})
 
     conn = get_db()
     c = conn.cursor()
