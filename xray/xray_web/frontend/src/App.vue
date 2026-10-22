@@ -6,7 +6,7 @@
         <div class="text-center mb-8">
           <div class="inline-flex w-14 h-14 rounded-2xl bg-gradient-to-tr from-emerald-500 to-cyan-500 items-center justify-center text-3xl shadow-lg shadow-emerald-500/20 mb-3">⚡</div>
           <h1 class="text-xl font-bold bg-gradient-to-r from-emerald-400 to-cyan-400 bg-clip-text text-transparent">Xray REALITY 控制台</h1>
-          <p class="text-xs text-slate-400 mt-1">现代化多用户管理后台</p>
+          <p class="text-xs text-slate-400 mt-1">SQLite3 数据库驱动版</p>
         </div>
         <form @submit.prevent="handleLogin" class="space-y-4">
           <div>
@@ -57,9 +57,9 @@
             <div class="mt-1 text-xs text-slate-500">流控: xtls-rprx-vision</div>
           </div>
           <div class="bg-slate-900 border border-slate-800 rounded-2xl p-5">
-            <div class="text-xs text-slate-400 font-medium">活动用户数</div>
+            <div class="text-xs text-slate-400 font-medium">数据库用户总数</div>
             <div class="mt-2 text-2xl font-black text-white">{{ users.length }}</div>
-            <div class="mt-1 text-xs text-slate-500">REALITY 多端独立 UUID</div>
+            <div class="mt-1 text-xs text-slate-500">数据持久化于 /data/xray_web.db</div>
           </div>
           <div class="bg-slate-900 border border-slate-800 rounded-2xl p-5">
             <div class="text-xs text-slate-400 font-medium">ShortId</div>
@@ -68,7 +68,7 @@
           </div>
         </div>
 
-        <!-- 公钥卡片 -->
+        <!-- 详细公钥卡 -->
         <div class="bg-slate-900/60 border border-slate-800 rounded-xl p-4 text-xs font-mono flex flex-wrap justify-between items-center gap-2">
           <span class="text-slate-400">REALITY Public Key: <strong class="text-slate-200 select-all">{{ status.publicKey }}</strong></span>
           <button @click="copyText(status.publicKey)" class="text-emerald-400 hover:underline">复制公钥</button>
@@ -79,7 +79,7 @@
           <div class="p-5 border-b border-slate-800 flex justify-between items-center">
             <div>
               <h2 class="text-base font-bold text-white">用户配置列表</h2>
-              <p class="text-xs text-slate-400">管理每个连接凭据独立的 VLESS 导入配置</p>
+              <p class="text-xs text-slate-400">SQLite3 数据库实时双向热同步</p>
             </div>
             <button @click="showAddModal = true" class="px-3.5 py-2 bg-emerald-500 hover:bg-emerald-600 text-white text-xs font-semibold rounded-xl shadow-lg shadow-emerald-500/20 transition">
               + 添加用户
@@ -92,28 +92,34 @@
                 <tr>
                   <th class="py-3 px-6">备注名</th>
                   <th class="py-3 px-6">UUID</th>
-                  <th class="py-3 px-6">流控</th>
+                  <th class="py-3 px-6">状态</th>
+                  <th class="py-3 px-6">创建时间</th>
                   <th class="py-3 px-6 text-right">操作</th>
                 </tr>
               </thead>
               <tbody class="divide-y divide-slate-800">
-                <tr v-for="user in users" :key="user.id" class="hover:bg-slate-800/40 transition">
+                <tr v-for="user in users" :key="user.uuid" class="hover:bg-slate-800/40 transition">
                   <td class="py-3.5 px-6 font-medium text-white flex items-center space-x-2">
                     <span class="w-7 h-7 rounded-lg bg-emerald-500/10 text-emerald-400 flex items-center justify-center font-bold text-xs">
                       {{ (user.email || 'U')[0].toUpperCase() }}
                     </span>
                     <span>{{ user.email || '未命名' }}</span>
                   </td>
-                  <td class="py-3.5 px-6 font-mono text-xs text-slate-300">{{ user.id }}</td>
+                  <td class="py-3.5 px-6 font-mono text-xs text-slate-300">{{ user.uuid }}</td>
                   <td class="py-3.5 px-6">
-                    <span class="px-2 py-0.5 text-xs font-mono bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 rounded">
-                      {{ user.flow || 'xtls-rprx-vision' }}
+                    <span :class="user.enabled ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20' : 'bg-red-500/10 text-red-400 border-red-500/20'" 
+                          class="px-2 py-0.5 text-xs font-mono border rounded">
+                      {{ user.enabled ? '已启用' : '已停用' }}
                     </span>
                   </td>
+                  <td class="py-3.5 px-6 text-xs text-slate-400">{{ user.created_at || '-' }}</td>
                   <td class="py-3.5 px-6 text-right space-x-2">
+                    <button @click="toggleUser(user)" class="px-2.5 py-1 bg-slate-800 hover:bg-slate-700 text-xs text-slate-200 rounded-lg border border-slate-700 transition">
+                      {{ user.enabled ? '停用' : '启用' }}
+                    </button>
                     <button @click="copyVless(user)" class="px-2.5 py-1 bg-slate-800 hover:bg-slate-700 text-xs text-slate-200 rounded-lg border border-slate-700 transition">复制链接</button>
                     <button @click="openQr(user)" class="px-2.5 py-1 bg-cyan-500/10 hover:bg-cyan-500/20 text-xs text-cyan-300 rounded-lg border border-cyan-500/30 transition">二维码</button>
-                    <button @click="deleteUser(user.id)" class="px-2.5 py-1 bg-red-500/10 hover:bg-red-500/20 text-xs text-red-400 rounded-lg border border-red-500/30 transition">删除</button>
+                    <button @click="deleteUser(user.uuid)" class="px-2.5 py-1 bg-red-500/10 hover:bg-red-500/20 text-xs text-red-400 rounded-lg border border-red-500/30 transition">删除</button>
                   </td>
                 </tr>
               </tbody>
@@ -215,7 +221,8 @@ async function fetchData() {
 
 function getVlessUrl(user) {
   const m = status.value
-  return `vless://${user.id}@${m.ip}:${m.port}?security=reality&encryption=none&pbk=${m.publicKey}&headerType=none&fp=chrome&type=tcp&flow=xtls-rprx-vision&sni=${m.sni}&sid=${m.shortId}#${encodeURIComponent(user.email || 'Xray')}`
+  const uid = user.uuid || user.id
+  return `vless://${uid}@${m.ip}:${m.port}?security=reality&encryption=none&pbk=${m.publicKey}&headerType=none&fp=chrome&type=tcp&flow=xtls-rprx-vision&sni=${m.sni}&sid=${m.shortId}#${encodeURIComponent(user.email || 'Xray')}`
 }
 
 function copyVless(user) {
@@ -244,9 +251,15 @@ async function addUser() {
   await fetchData()
 }
 
-async function deleteUser(id) {
+async function deleteUser(uuid) {
   if (!confirm('确认删除？')) return
-  await api.post('/users/delete', { id })
+  await api.post('/users/delete', { id: uuid })
+  await fetchData()
+}
+
+async function toggleUser(user) {
+  const newStatus = user.enabled ? 0 : 1
+  await api.post('/users/toggle', { id: user.uuid, enabled: newStatus })
   await fetchData()
 }
 

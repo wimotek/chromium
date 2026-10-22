@@ -13,15 +13,13 @@ ARG TARGETARCH
 ARG XRAY_VERSION=latest
 
 LABEL maintainer="Wimotek <i@Wimotek.com>"
-LABEL description="Xray REALITY with Vue 3 & FastAPI Web Admin"
 
-# 安装基础工具与 Python 异步运行时
+# 关键：apk 安装 py3-sqlite3 与 sqlite，提供底层 SQLite3 支持
 RUN apk add --no-cache \
     ca-certificates tzdata jq curl openssl bind-tools \
-    python3 py3-pip && \
+    python3 py3-pip py3-sqlite3 sqlite && \
     (apk add --no-cache py3-fastapi uvicorn || pip install --no-cache-dir --break-system-packages fastapi "uvicorn[standard]")
 
-# 拉取官方最新/指定 Xray 核心及规则库
 RUN set -ex && \
     case "${TARGETARCH}" in \
         "amd64") XRAY_ARCH="64" ;; \
@@ -53,14 +51,11 @@ WORKDIR /app
 COPY backend/ /app/backend/
 COPY --from=frontend-builder /build/dist/ /app/backend/static/
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
-
-# 模板文件保持在原生位置 /etc/xray/，外部映射不影响它
 COPY config.template.json /etc/xray/config.template.json
 
 RUN chmod +x /usr/local/bin/entrypoint.sh
 RUN ln -s /usr/local/bin/entrypoint.sh /usr/local/bin/update-xray
 
-# 外部持久化挂载卷声明为 /data
 VOLUME ["/data"]
 EXPOSE 443/tcp 443/udp 8080/tcp
 

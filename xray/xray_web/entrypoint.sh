@@ -1,9 +1,7 @@
 #!/bin/sh
 set -e
 
-# 模板读取原位（容器内部只读，外部看不见也覆盖不到）
 TEMPLATE_FILE="/etc/xray/config.template.json"
-# 运行时数据与账密信息存放在 /data（映射到宿主机）
 CONFIG_FILE="/data/config.json"
 CLIENT_INFO_FILE="/data/client_info.txt"
 
@@ -48,8 +46,8 @@ fi
 echo "==> Current version: $(/usr/bin/xray version | head -n 1)"
 
 PORT="${PORT:-443}"
-DEST="${DEST:-www.apple.com:443}"
-SERVER_NAMES="${SERVER_NAMES:-www.apple.com,apple.com}"
+DEST="${DEST:-www.microsoft.com:443}"
+SERVER_NAMES="${SERVER_NAMES:-www.microsoft.com,microsoft.com}"
 FIRST_SERVER_NAME=$(echo "$SERVER_NAMES" | cut -d',' -f1)
 USER_COUNT="${USER_COUNT:-2}"
 WEB_ENABLE="${WEB_ENABLE:-true}"
@@ -60,9 +58,19 @@ if [ -z "$SERVER_IP" ]; then
     SERVER_IP=$(curl -s4 --max-time 3 https://api.ipify.org || curl -s4 --max-time 3 https://ifconfig.me || echo "YOUR_SERVER_IP")
 fi
 
-# 检查 /data/config.json 是否存在，不存在则现场生成
-if [ ! -f "$CONFIG_FILE" ]; then
-    echo "==> [Init] /data/config.json not found, generating from template..."
+SERVER_NAMES_JSON=$(echo "$SERVER_NAMES" | awk -F',' '{
+    printf "["
+    for(i=1; i<=NF; i++) {
+        printf "\"%s\"", $i
+        if(i<NF) printf ","
+    }
+    printf "]"
+}')
+
+# ================= 核心防暴毙逻辑：0 字节检查 =================
+# 使用 ! -s 判断。若文件不存在 或 大小为 0 字节，均必须重新渲染！
+if [ ! -s "$CONFIG_FILE" ]; then
+    echo "==> [Init] /data/config.json is missing or 0 bytes, generating..."
 
     if [ -z "$PRIVATE_KEY" ] || [ -z "$PUBLIC_KEY" ]; then
         KEY_PAIR=$(/usr/bin/xray x25519)
@@ -70,15 +78,6 @@ if [ ! -f "$CONFIG_FILE" ]; then
         PUBLIC_KEY=$(echo "$KEY_PAIR" | grep "PublicKey:" | awk '{print $2}')
     fi
     SHORT_ID="${SHORT_ID:-$(openssl rand -hex 8)}"
-
-    SERVER_NAMES_JSON=$(echo "$SERVER_NAMES" | awk -F',' '{
-        printf "["
-        for(i=1; i<=NF; i++) {
-            printf "\"%s\"", $i
-            if(i<NF) printf ","
-        }
-        printf "]"
-    }')
 
     CLIENTS_JSON="["
     for i in $(seq 1 "$USER_COUNT"); do
@@ -88,7 +87,17 @@ if [ ! -f "$CONFIG_FILE" ]; then
     done
     CLIENTS_JSON="${CLIENTS_JSON}]"
 
-    jq \
+    # 若模板丢失，启用内置兜底模板
+    if [ ! -f "$TEMPLATE_FILE" ]; then
+        echo "[WARN] $TEMPLATE_FILE missing, using internal fallback template."
+        TEMPLATE_DATA='{"log":{"loglevel":"warning"},"inbounds":[{"port":443,"protocol":"vless","settings":{"clients":[],"decryption":"none"},"streamSettings":{"network":"tcp","security":"reality","realitySettings":{"show":false,"dest":"www.microsoft.com:443","xver":0,"serverNames":["www.microsoft.com"],"privateKey":"","shortIds":[""]}},"sniffing":{"enabled":true,"destOverride":["http","tls","quic"],"routeOnly":true}}],"outbounds":[{"protocol":"freedom","tag":"direct"},{"protocol":"blackhole","tag":"block"}],"routing":{"domainStrategy":"IPIfNonMatch","rules":[{"type":"field","ip":["geoip:private"],"outboundTag":"block"}]}}'
+    else
+        TEMPLATE_DATA=$(cat "$TEMPLATE_FILE")
+    fi
+
+    # 原子写入：输出至临时文件，确认大小非 0 后才移动，绝不留下 0 字节文件
+    TMP_CONFIG="/tmp/config.init.tmp.json"
+    echo "$TEMPLATE_DATA" | jq \
       --arg port "$PORT" \
       --argjson clients "$CLIENTS_JSON" \
       --arg dest "$DEST" \
@@ -102,7 +111,15 @@ if [ ! -f "$CONFIG_FILE" ]; then
       .inbounds[0].streamSettings.realitySettings.serverNames = $servernames |
       .inbounds[0].streamSettings.realitySettings.privateKey = $privkey |
       .inbounds[0].streamSettings.realitySettings.shortIds = [$shortid]
-      ' "$TEMPLATE_FILE" > "$CONFIG_FILE"
+      ' > "$TMP_CONFIG"
+
+    if [ -s "$TMP_CONFIG" ]; then
+        mv "$TMP_CONFIG" "$CONFIG_FILE"
+        echo "==> [Init] /data/config.json successfully generated."
+    else
+        echo "[FATAL] Failed to render valid JSON config!"
+        exit 1
+    fi
 
     FIRST_UUID=$(jq -r '.inbounds[0].settings.clients[0].id' "$CONFIG_FILE")
     VLESS_URL="vless://${FIRST_UUID}@${SERVER_IP}:${PORT}?security=reality&encryption=none&pbk=${PUBLIC_KEY}&headerType=none&fp=chrome&type=tcp&flow=xtls-rprx-vision&sni=${FIRST_SERVER_NAME}&sid=${SHORT_ID}#user1"
@@ -127,6 +144,29 @@ Vue 3 管理面板:   http://${SERVER_IP}:${WEB_PORT}
 ${VLESS_URL}
 ======================================================
 EOF
+
+# ================= 核心自动更新逻辑：改端口免删 data =================
+else
+    echo "==> [Sync] Existing config detected. Syncing PORT and SNI from environment..."
+    TMP_SYNC="/tmp/config.sync.tmp.json"
+    jq \
+      --arg port "$PORT" \
+      --arg dest "$DEST" \
+      --argjson servernames "$SERVER_NAMES_JSON" \
+      '
+      .inbounds[0].port = ($port | tonumber) |
+      .inbounds[0].streamSettings.realitySettings.dest = $dest |
+      .inbounds[0].streamSettings.realitySettings.serverNames = $servernames
+      ' "$CONFIG_FILE" > "$TMP_SYNC"
+
+    if [ -s "$TMP_SYNC" ]; then
+        mv "$TMP_SYNC" "$CONFIG_FILE"
+        echo "==> [Sync] Configuration successfully updated with port: $PORT."
+    fi
+
+    if [ -f "$CLIENT_INFO_FILE" ]; then
+        sed -i "s/^端口:.*/端口:             ${PORT}/" "$CLIENT_INFO_FILE"
+    fi
 fi
 
 if [ -f "$CLIENT_INFO_FILE" ]; then
@@ -147,7 +187,6 @@ fi
 
 trap 'kill $(cat /var/run/xray.pid 2>/dev/null); kill $(cat /var/run/web_admin.pid 2>/dev/null); exit 0' TERM INT
 
-# Xray 启动读取 /data/config.json
 echo "==> Starting Xray-core daemon using /data/config.json..."
 while true; do
     /usr/bin/xray run -config /data/config.json &
