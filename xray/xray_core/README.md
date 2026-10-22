@@ -201,6 +201,15 @@ sysctl net.ipv4.tcp_congestion_control
 # 输出应包含: bbr
 ```
 
+## 💡 附带的 Warning 优化建议
+日志中还有两行黄色警告：
+```code
+REALITY: Choosing apple, icloud, etc. as the target may get your IP blocked by the GFW
+```
+这是新版 Xray-core 的温馨提示：近年来 Apple / iCloud 域名的 SNI 握手特征在部分地区容易被重点关注。
+
+建议将 docker-compose.yml 中的伪装目标换成更通用的域名（如微软、亚马逊等）：
+
 ---
 
 ## 📂 文件持久化说明
