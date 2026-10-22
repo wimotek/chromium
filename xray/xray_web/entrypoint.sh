@@ -198,7 +198,7 @@ else
 fi
 
 # 信号捕获与平滑退出
-trap 'echo "Stopping services..."; [ -n "$XRAY_PID" ] && kill $XRAY_PID 2>/dev/null; [ -n "$WEB_PID" ] && kill $WEB_PID 2>/dev/null; exit 0' SIGTERM SIGINT
+trap 'echo "Stopping services..."; [ -n "$XRAY_PID" ] && kill $XRAY_PID 2>/dev/null; [ -n "$WEB_PID" ] && kill $WEB_PID 2>/dev/null; exit 0' TERM INT
 
 if [ -n "$XRAY_PID" ]; then
     wait $XRAY_PID
