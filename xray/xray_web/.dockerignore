@@ -1,8 +1,32 @@
-frontend/node_modules/
-frontend/dist/
-backend/static/
+# 忽略 Git 仓库元数据
+.git
+.gitignore
+
+# 忽略持久化数据（不能把宿主机当前的数据固化进基础镜像中）
 data/
-*.pid
-*.zip
-__pycache__/
-.git/
+data/*
+
+# 忽略本地可能已经安装的前端依赖和构建产物（构建由容器内 node 处理）
+node_modules
+app/frontend/node_modules
+app/frontend/dist
+dist
+
+# 忽略 Python 缓存与本地虚拟环境
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+venv
+.venv
+env
+*.db
+*.sqlite3
+
+# 忽略文档、说明与杂项
+README.md
+*.md
+.dockerignore
+.idea
+.vscode
+.DS_Store
