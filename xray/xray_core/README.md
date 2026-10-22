@@ -156,21 +156,35 @@ docker compose up -d
 
 可通过修改 `docker-compose.yml` 中的 `environment` 自定义各项参数：
 
-| 环境变量 | 默认值 | 纯内核版 (`:latest`) | Web 管理版 (`:web`) | 说明 |
-| :--- | :--- | :---: | :---: | :--- |
-| `AUTO_UPDATE` | `true` | ✔ | ✔ | 容器启动时是否自动检查并更新 Xray 官方最新版 |
-| `PORT` | `443` | ✔ | ✔ | REALITY 入站监听端口 |
-| `DEST` | `www.apple.com:443` | ✔ | ✔ | REALITY 目标回落与伪装握手地址 |
-| `SERVER_NAMES` | `www.apple.com,apple.com` | ✔ | ✔ | REALITY 可信伪装 SNI 域名列表（逗号分隔） |
-| `SERVER_IP` | 自动获取 | ✔ | ✔ | 客户端连接的目标公网 IP，多网卡时建议手动指定 |
-| `UUID` | 自动生成 | ✔ | ✔ | 自定义客户端连接 UUID（Web 版作为初始用户 ID） |
-| `PRIVATE_KEY` | 自动生成 | ✔ | ✔ | 自定义 REALITY 服务端私钥（需与 `PUBLIC_KEY` 匹配） |
-| `PUBLIC_KEY` | 自动生成 | ✔ | ✔ | 自定义 REALITY 客户端公钥 |
-| `SHORT_ID` | 自动生成 | ✔ | ✔ | 自定义十六进制 ShortId |
-| `WEB_ENABLE` | `true` | ✖ | ✔ | 是否启动内置 Web 控制台 |
-| `WEB_PORT` | `8080` | ✖ | ✔ | Web 控制台访问端口 |
-| `WEB_PASSWORD` | 首次随机生成 | ✖ | ✔ | Web 控制台管理员登录密码 |
-| `USER_COUNT` | `2` | ✖ | ✔ | 首次初始化时自动创建的用户数（Web 版多用户支持） |
+为您整理了 **`xray_core`（纯核心版）** 与 **`xray_web`（可视化商业版）** 的环境变量详细对比表格，可直接复制粘贴到 `README.md` 中：
+
+---
+
+### 📊 环境变量对比矩阵 (`xray_core` vs `xray_web`)
+
+| 环境变量 | `xray_core` (纯核心版) | `xray_web` (可视化商业版) | 默认推荐值 | 功能说明与行为差异 |
+| :--- | :---: | :---: | :--- | :--- |
+| **`PORT`** | ✅ 支持 | ✅ 支持 | `8443` 或 `443` | **Xray 节点入站监听端口**。<br>两个版本均支持动态更改，重启自动应用。 |
+| **`DEST`** | ✅ 支持 | ✅ 支持 | `www.microsoft.com:443` | **REALITY 伪装握手与 TLS 回落目标目标**。 |
+| **`SERVER_NAMES`** | ✅ 支持 | ✅ 支持 | `www.microsoft.com,microsoft.com` | **REALITY 可信伪装 SNI 列表**（逗号分隔）。 |
+| **`SERVER_IP`** | ✅ 支持 | ✅ 支持 | `自动获取公网 IP` | 节点对外连接公网 IP（多网卡机器可手动指定）。 |
+| **`REALITY_PRIVATE_KEY`** | ❌ 仅写入文件 | ✅ 环境变量+持久化 | `留空自动生成` | 服务端 X25519 私钥。<br>`xray_web` 支持自动反推公钥并固化到 `/data/public_key.txt`。 |
+| **`REALITY_SHORT_ID`** | ❌ 静态固定 | ✅ 环境变量注入 | `123456` | REALITY 客户端握手识别 ID。 |
+| **`AUTO_UPDATE`** | ✅ 支持 | ✅ 支持 | `true` | 重启容器时是否自动拉取并热更新官方最新 Xray-core。 |
+| **`TZ`** | ✅ 支持 | ✅ 支持 | `Asia/Shanghai` | 容器运行时区配置。 |
+| **`USER_COUNT`** | ❌ 仅单用户/静态 | ✅ 支持 | `2` | **初始用户数**。<br>`xray_web` 会自动存入 SQLite 并初始化对应体验配额。 |
+| **`WEB_ENABLE`** | ❌ **不支持** | ✅ **核心参数** | `true` | **Web 服务总开关**。<br>设为 `false` 时，`xray_web` 可一键降级为纯核心代理模式，零多余内存开销。 |
+| **`APP_MODE`** | ❌ **不支持** | ✅ **核心参数** | `user` | **权限与防扫模式控制**：<br>• `user`：**默认安全模式**，仅开放用户端（查流量/卡密充值），管理接口物理 404 隐藏防扫描；<br>• `admin`：纯管理后台（不启动 Xray，适合内网独立机）；<br>• `all`：单机全功能（前台+管理后台一体）。 |
+| **`WEB_PORT`** | ❌ **不支持** | ✅ **核心参数** | `3000` (或 `8080`) | 前端 Vue 3 及 API 后端对外网页访问端口。 |
+| **`WEB_PASSWORD`** | ❌ **不支持** | ✅ **核心参数** | `admin888` | 管理员控制台密码（在 `APP_MODE` 为 `admin` 或 `all` 时生效）。 |
+| **`DB_PATH`** | ❌ **不支持** | ✅ **核心参数** | `/data/xray_web.db` | SQLite3 商业数据库持久化路径，记录账号、配额、到期日与卡密库存。 |
+
+---
+
+### 💡 版本选型建议
+
+* **`xray_core` 适用场景**：个人轻量单一节点、配置固定、追求极致精简（仅依靠静态配置文件或无 Web 界面需求）。
+* **`xray_web` 适用场景**：多用户分发、商业运营/发卡变现（卡密充值）、防止公网恶意扫描管理后台、需要实时监控用户上传/下载流量及自动到期拦截。
 
 ---
 
