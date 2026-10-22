@@ -3,18 +3,49 @@ import json
 import os
 from config import Config
 
-def get_cached_public_key() -> str:
+def get_reality_public_key() -> str:
+    """双保险获取 REALITY Public Key (优先读文件，若异常则直接从 config.json 私钥动态反推)"""
     key_path = "/data/public_key.txt"
+    
+    # 1. 尝试直接读取已缓存的公钥
     if os.path.exists(key_path):
         with open(key_path, "r", encoding="utf-8") as f:
             pk = f.read().strip()
-            if pk:
+            # 过滤掉以前 awk 误抓取的 "(PublicKey):"
+            if pk and len(pk) > 20 and not pk.startswith("("):
                 return pk
-    return "公钥生成中或未挂载/data"
+
+    # 2. 兜底自愈：直接从 /data/config.json 读取私钥反推公钥
+    config_path = "/data/config.json"
+    if os.path.exists(config_path):
+        try:
+            with open(config_path, "r", encoding="utf-8") as f:
+                cfg = json.load(f)
+            
+            priv_key = ""
+            for inbound in cfg.get("inbounds", []):
+                reality = inbound.get("streamSettings", {}).get("realitySettings", {})
+                if reality.get("privateKey"):
+                    priv_key = reality["privateKey"]
+                    break
+
+            if priv_key and "CHANGE" not in priv_key:
+                res = subprocess.check_output(f'echo "{priv_key}" | /usr/bin/xray x25519 -i', shell=True, text=True)
+                for line in res.splitlines():
+                    if "Public key:" in line:
+                        pk = line.split("Public key:")[1].strip()
+                        # 重新写回应有的文件
+                        with open(key_path, "w", encoding="utf-8") as fw:
+                            fw.write(pk)
+                        return pk
+        except Exception:
+            pass
+
+    return ""
 
 def query_user_traffic(email: str) -> float:
     try:
-        cmd = ["xray", "api", "statsquery", f"--server={Config.XRAY_API_SERVER}", "-pattern", f"user>>>{email}>>>traffic"]
+        cmd = ["/usr/bin/xray", "api", "statsquery", f"--server={Config.XRAY_API_SERVER}", "-pattern", f"user>>>{email}>>>traffic"]
         output = subprocess.check_output(cmd, stderr=subprocess.DEVNULL, text=True)
         data = json.loads(output)
         total_bytes = sum(int(item.get("value", 0)) for item in data.get("stat", []))
