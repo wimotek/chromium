@@ -454,6 +454,28 @@ const logout = () => location.reload()
 .form-item label { display: block; font-size: 12px; color: #94a3b8; margin-bottom: 6px; }
 .auth-toggle { text-align: center; margin-top: 16px; font-size: 13px; }
 .auth-toggle a { color: #38bdf8; text-decoration: none; }
-.redeem-box { display: flex; gap: 10px; }
+.redeem-box {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+}
+
+.redeem-box .cyber-input {
+  flex: 1;
+  min-width: 0; /* 防止输入框撑破父级容器 */
+}
+
+/* 核心修复：强制不换行 + 禁止被 flex 挤压 */
+.btn-cyber-success {
+  background: #059669;
+  color: white;
+  border: none;
+  padding: 10px 18px;
+  border-radius: 6px;
+  cursor: pointer;
+  white-space: nowrap; /* 强制文字不换行 */
+  flex-shrink: 0;      /* 绝不允许被缩小挤压 */
+  font-weight: 600;
+}
 .gen-form { display: grid; grid-template-columns: 1fr 1fr 1fr auto; gap: 10px; align-items: flex-end; }
 </style>
