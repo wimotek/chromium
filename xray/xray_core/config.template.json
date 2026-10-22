@@ -20,9 +20,9 @@
         "security": "reality",
         "realitySettings": {
           "show": false,
-          "dest": "www.apple.com:443",
+          "dest": "www.microsoft.com:443",
           "xver": 0,
-          "serverNames": ["www.apple.com"],
+          "serverNames": ["www.microsoft.com"],
           "privateKey": "CHANGE_PRIVATE_KEY",
           "shortIds": ["CHANGE_SHORT_ID"]
         }

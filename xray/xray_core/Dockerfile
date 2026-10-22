@@ -6,7 +6,7 @@ ARG XRAY_VERSION=latest
 LABEL maintainer="Wimotek <i@Wimotek.com>"
 LABEL description="Xray REALITY Core (Headless & Slim)"
 
-# 安装必要系统工具
+# 安装基础系统依赖
 RUN apk add --no-cache \
     ca-certificates tzdata jq curl openssl bind-tools
 
@@ -41,13 +41,13 @@ ENV XRAY_LOCATION_ASSET=/usr/share/xray \
 WORKDIR /root
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 
-# 模板文件保持在原生位置 /etc/xray/ 不动
+# 模板保持在容器原生位置 /etc/xray/，外部挂载不影响它
 COPY config.template.json /etc/xray/config.template.json
 
 RUN chmod +x /usr/local/bin/entrypoint.sh
 RUN ln -s /usr/local/bin/entrypoint.sh /usr/local/bin/update-xray
 
-# 外部持久化卷统一指定为 /data
+# 外部数据卷统一指定为 /data
 VOLUME ["/data"]
 EXPOSE 443/tcp 443/udp
 
