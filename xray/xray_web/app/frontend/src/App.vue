@@ -1,5 +1,6 @@
 <template>
   <div class="dark-theme">
+    <!-- 顶部科技导航 -->
     <header class="cyber-header">
       <div class="header-content">
         <div class="brand">
@@ -20,6 +21,7 @@
         <div class="cyber-card auth-box">
           <h2 class="card-title">{{ authCardTitle }}</h2>
 
+          <!-- A. 登录表单 -->
           <template v-if="authMode === 'login'">
             <div class="form-item">
               <label>ACCOUNT / 用户名 或 注册邮箱</label>
@@ -38,6 +40,7 @@
             </div>
           </template>
 
+          <!-- B. 注册表单 -->
           <template v-else-if="authMode === 'register'">
             <div class="form-item">
               <label>USER IDENTIFIER / 设置用户名</label>
@@ -68,6 +71,7 @@
             </div>
           </template>
 
+          <!-- C. 忘记密码表单 -->
           <template v-else-if="authMode === 'forgot'">
             <div class="form-item">
               <label>REGISTERED EMAIL / 绑定的注册邮箱</label>
@@ -96,7 +100,7 @@
         </div>
       </div>
 
-      <!-- 2. 普通用户端仪表盘 (支持不限流量与永久有效) -->
+      <!-- 2. 普通用户端仪表盘 (流式全屏) -->
       <div v-else-if="currentUser.role === 'user'" class="dashboard-grid">
         <div class="cyber-card">
           <div class="card-header">
@@ -120,7 +124,7 @@
             <div class="expiry-notice">
               <span>套餐有效期：</span>
               <strong class="highlight-date">
-                {{ currentUser.expire_date.startsWith('2099') ? '♾️ 永久有效' : currentUser.expire_date }}
+                {{ (currentUser.expire_date && currentUser.expire_date.startsWith('2099')) ? '♾️ 永久有效' : currentUser.expire_date }}
               </strong>
             </div>
           </div>
@@ -213,8 +217,9 @@
         </div>
       </div>
 
-      <!-- 3. 管理员控制台 (全屏流式缩放) -->
+      <!-- 3. 管理员控制台：全屏动态自适应 -->
       <div v-else-if="currentUser.role === 'admin'" class="admin-wrapper">
+        <!-- 顶部主卡片切换导航 -->
         <div class="card-tabs-nav">
           <button class="tab-card-btn" :class="{ active: activeTab === 'users' }" @click="activeTab = 'users'">
             <span class="tab-icon">👥</span>
@@ -278,7 +283,7 @@
                     <div>{{ u.used_mb }} / {{ u.traffic_limit_mb === 0 ? '♾️ 不限' : u.traffic_limit_mb + ' MB' }}</div>
                     <div class="table-progress"><div class="table-glow" :style="{ width: calcProgress(u.used_mb, u.traffic_limit_mb) + '%' }"></div></div>
                   </td>
-                  <td>{{ u.expire_date.startsWith('2099') ? '♾️ 永久有效' : u.expire_date }}</td>
+                  <td>{{ (u.expire_date && u.expire_date.startsWith('2099')) ? '♾️ 永久有效' : u.expire_date }}</td>
                   <td><span class="role-badge user">{{ u.notify_type }}</span></td>
                   <td>
                     <button class="btn-sm btn-action" @click="openQrModal(u.sub_link, u.username)">📱 凭证/二维码</button>
@@ -300,11 +305,18 @@
 
         <!-- 主选项卡 2: 卡密管理 -->
         <div v-else-if="activeTab === 'cards'" class="cyber-card tab-content-card">
+          <!-- 子卡片分类切换器 -->
           <div class="sub-tab-nav">
-            <button class="sub-tab-btn" :class="{ active: cardSubTab === 'inventory' }" @click="cardSubTab = 'inventory'">
+            <button
+              class="sub-tab-btn"
+              :class="{ active: cardSubTab === 'inventory' }"
+              @click="cardSubTab = 'inventory'">
               📦 卡密制卡与库存管理
             </button>
-            <button class="sub-tab-btn" :class="{ active: cardSubTab === 'api' }" @click="cardSubTab = 'api'">
+            <button
+              class="sub-tab-btn"
+              :class="{ active: cardSubTab === 'api' }"
+              @click="cardSubTab = 'api'">
               🔌 API自动发卡
             </button>
           </div>
@@ -335,6 +347,7 @@
               <button class="btn-cyber-refresh" @click="loadAdminData">🔄 刷新列表</button>
             </div>
 
+            <!-- 导出工具栏 -->
             <div class="export-toolbar">
               <div class="date-filter-group">
                 <span class="filter-label">📅 日期范围:</span>
@@ -427,7 +440,7 @@
           </div>
         </div>
 
-        <!-- 主选项卡 3: 系统发信与定时任务设置 (核心友好度提升) -->
+        <!-- 主选项卡 3: 系统发信与定时任务设置 -->
         <div v-else-if="activeTab === 'settings'" class="cyber-card tab-content-card">
           <div class="card-header">
             <h3>⚙️ 节点连接地址、系统发信与定时预警设置</h3>
@@ -480,11 +493,10 @@
               </div>
             </div>
 
-            <!-- 模块 B: SMTP 邮件配置 (增加状态展示与密码防清空保护) -->
+            <!-- 模块 B: SMTP 邮件配置 -->
             <div class="settings-section">
               <h4>📧 SMTP 邮件服务器参数配置</h4>
               
-              <!-- 友好状态指示灯 -->
               <div class="smtp-status-box" :class="settingsForm.is_smtp_configured ? 'smtp-ready' : 'smtp-empty'">
                 <span>{{ settingsForm.is_smtp_configured ? '🟢 SMTP 发信通道：已配置就绪（可正常发送邮件）' : '⚪ SMTP 发信通道：尚未完整配置（无法发送邮件与验证码）' }}</span>
               </div>
@@ -560,7 +572,7 @@
       </div>
     </div>
 
-    <!-- 弹窗 2：管理员修改用户配额 (增加快捷设为不限流量/永久有效) -->
+    <!-- 弹窗 2：管理员修改用户配额 -->
     <div v-if="showEditModal" class="modal-backdrop" @click="showEditModal = false">
       <div class="cyber-modal" style="max-width: 440px; text-align: left;" @click.stop>
         <h3>✏️ 调整用户 [{{ editForm.username }}] 属性</h3>
@@ -692,7 +704,7 @@ const countdownText = computed(() => {
 })
 
 const trafficPercent = computed(() => {
-  if (!currentUser.limit_mb) return 100 // 不限流量时进度条满格高亮
+  if (!currentUser.limit_mb) return 100
   return Math.min(100, Math.round((currentUser.used_mb / currentUser.limit_mb) * 100))
 })
 
@@ -736,6 +748,7 @@ const generateRandomToken = () => {
   ElMessage.success('已随机生成新出卡 Token，请记得点击保存')
 }
 
+// 统一导出底层
 const executeExport = async (payload, successTip) => {
   try {
     const adminUser = currentUser.username || authForm.username
@@ -758,11 +771,13 @@ const executeExport = async (payload, successTip) => {
   }
 }
 
+// 唯一保留：导出勾选卡密
 const exportSelectedCards = () => {
   if (selectedCards.value.length === 0) return ElMessage.warning('请先在表格左侧勾选要导出的卡密')
   executeExport({ selected_codes: selectedCards.value }, '已复制选中的卡密')
 }
 
+// 唯一保留：按日期范围导出
 const exportByDateRange = () => {
   if (!exportFilter.startDate && !exportFilter.endDate) {
     return ElMessage.warning('请先选择开始日期或结束日期')
@@ -773,6 +788,7 @@ const exportByDateRange = () => {
   }, '已导出指定日期范围内的未售卡密')
 }
 
+// 唯一保留：导出全部未售卡密 (彻底消除了重复定义)
 const exportAllUnusedCards = () => {
   executeExport({}, '已复制全部未售卡密')
 }
@@ -1036,7 +1052,6 @@ const downloadWindowsClient = () => {
 const openSettingsTab = async () => {
   activeTab.value = 'settings'
   try {
-    // 修复：优先使用已确定的管理员用户名鉴权
     const adminUser = currentUser.username || authForm.username
     const res = await axios.get(`/api/admin/settings?admin_user=${encodeURIComponent(adminUser)}&admin_pwd=${encodeURIComponent(authForm.password)}`)
     if (res.data.code === 200) {
@@ -1044,7 +1059,7 @@ const openSettingsTab = async () => {
       settingsForm.smtp_host = d.smtp_host || ''
       settingsForm.smtp_port = d.smtp_port || '465'
       settingsForm.smtp_user = d.smtp_user || ''
-      settingsForm.smtp_pass = '' // 出于安全不回传明文，留空
+      settingsForm.smtp_pass = ''
       settingsForm.has_smtp_pass = d.has_smtp_pass || false
       settingsForm.is_smtp_configured = d.is_smtp_configured || false
       settingsForm.smtp_sender = d.smtp_sender || ''
@@ -1074,7 +1089,7 @@ const saveAllSettings = async () => {
     })
     if (res.data.code === 200) {
       ElMessage.success(res.data.msg)
-      openSettingsTab() // 刷新最新状态
+      openSettingsTab()
     } else {
       ElMessage.error(res.data.msg)
     }
@@ -1148,25 +1163,6 @@ const copyText = async (text) => {
     ElMessage.error('快捷复制失败，请手动长按复制')
   }
   document.body.removeChild(ta)
-}
-
-const exportSelectedCards = () => {
-  if (selectedCards.value.length === 0) return ElMessage.warning('请先在表格左侧勾选要导出的卡密')
-  executeExport({ selected_codes: selectedCards.value }, '已复制选中的卡密')
-}
-
-const exportByDateRange = () => {
-  if (!exportFilter.startDate && !exportFilter.endDate) {
-    return ElMessage.warning('请先选择开始日期或结束日期')
-  }
-  executeExport({
-    start_date: exportFilter.startDate,
-    end_date: exportFilter.endDate
-  }, '已导出指定日期范围内的未售卡密')
-}
-
-const exportAllUnusedCards = () => {
-  executeExport({}, '已复制全部未售卡密')
 }
 
 const handleAuth = async () => {
@@ -1370,7 +1366,6 @@ const logout = () => location.reload()
 .card-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; }
 .card-header h3 { margin: 0; font-size: 16px; color: #f1f5f9; }
 
-/* 状态指示条 */
 .smtp-status-box {
   padding: 10px 14px;
   border-radius: 6px;
