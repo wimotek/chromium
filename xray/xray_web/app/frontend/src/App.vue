@@ -19,10 +19,7 @@
       <!-- 1. 登录 / 注册 / 找回密码 模块 -->
       <div v-if="!currentUser.username" class="auth-center">
         <div class="cyber-card auth-box">
-          <!-- 动态卡片标题 -->
-          <h2 class="card-title">
-            {{ isPureAdmin ? '管理员认证' : (authMode === 'login' ? '控制台账号接入' : (authMode === 'register' ? '新用户激活注册' : '🔐 找回 / 重置密码')) }}
-          </h2>
+          <h2 class="card-title">{{ authCardTitle }}</h2>
 
           <!-- A. 登录表单 -->
           <template v-if="authMode === 'login'">
@@ -58,7 +55,7 @@
               <div class="code-send-group">
                 <input v-model="authForm.code" type="text" class="cyber-input" placeholder="6 位验证码" />
                 <button class="btn-cyber-code" :disabled="countdown > 0 || sendingCode" @click="sendRegisterCode">
-                  {{ countdown > 0 ? `${countdown}s 后重试` : (sendingCode ? '发送中...' : '获取验证码') }}
+                  {{ countdownText }}
                 </button>
               </div>
             </div>
@@ -85,7 +82,7 @@
               <div class="code-send-group">
                 <input v-model="forgotForm.code" type="text" class="cyber-input" placeholder="6 位重置码" />
                 <button class="btn-cyber-code" :disabled="countdown > 0 || sendingCode" @click="sendForgotCode">
-                  {{ countdown > 0 ? `${countdown}s 后重试` : (sendingCode ? '发送中...' : '获取重置码') }}
+                  {{ countdownText }}
                 </button>
               </div>
             </div>
@@ -142,7 +139,6 @@
           </div>
         </div>
 
-        <!-- 节点配置与密钥 -->
         <div class="cyber-card col-span-2">
           <div class="card-header">
             <h3>🔗 REALITY 节点订阅凭据</h3>
@@ -161,7 +157,6 @@
           </div>
         </div>
 
-        <!-- 用户通知偏好与安全设置 -->
         <div class="cyber-card col-span-2">
           <div class="card-header">
             <h3>🔔 告警通知偏好与安全中心</h3>
@@ -195,7 +190,6 @@
               </div>
             </div>
 
-            <!-- 用户自主修改密码模块 -->
             <div class="settings-section">
               <h4>2. 修改账户登录密码</h4>
               <div class="form-item">
@@ -216,7 +210,7 @@
         </div>
       </div>
 
-      <!-- 3. 管理员控制台：重叠式卡片切换布局 -->
+      <!-- 3. 管理员控制台 -->
       <div v-else-if="currentUser.role === 'admin'" class="admin-wrapper">
         <div class="card-tabs-nav">
           <button class="tab-card-btn" :class="{ active: activeTab === 'users' }" @click="activeTab = 'users'">
@@ -279,7 +273,7 @@
                   </td>
                   <td>
                     <div>{{ u.used_mb }} / {{ u.traffic_limit_mb }} MB</div>
-                    <div class="table-progress"><div class="table-glow" :style="{ width: Math.min(100, (u.used_mb / u.traffic_limit_mb) * 100) + '%' }"></div></div>
+                    <div class="table-progress"><div class="table-glow" :style="{ width: calcProgress(u.used_mb, u.traffic_limit_mb) + '%' }"></div></div>
                   </td>
                   <td>{{ u.expire_date }}</td>
                   <td><span class="role-badge user">{{ u.notify_type }}</span></td>
@@ -401,13 +395,13 @@
       </div>
     </main>
 
-    <!-- 弹窗 1：SVG 高清二维码弹窗 -->
+    <!-- 弹窗 1：SVG 高清二维码弹窗 (使用 Computed URL，零行内表达式错误) -->
     <div v-if="showQrModal" class="modal-backdrop" @click="showQrModal = false">
       <div class="cyber-modal" @click.stop>
         <h3>📱 [{{ targetModalUser }}] 节点连接凭证</h3>
         <p class="modal-tip">手机相机或客户端扫码即可导入：</p>
         <div class="qr-box">
-          <img :src="'/api/qrcode?text=' + encodeURIComponent(targetModalLink)" alt="QR Code" style="width: 220px; height: 220px; display: block;" />
+          <img :src="qrCodeImgUrl" alt="QR Code" style="width: 220px; height: 220px; display: block;" />
         </div>
         <div class="node-field" style="margin-top: 15px; text-align: left;">
           <div class="code-display text-cyan" style="max-height: 80px; overflow-y: auto;">{{ targetModalLink }}</div>
@@ -509,9 +503,39 @@ onMounted(async () => {
   } catch (_) {}
 })
 
-const trafficPercent = computed(() => currentUser.limit_mb ? Math.min(100, Math.round((currentUser.used_mb / currentUser.limit_mb) * 100)) : 0)
+// 标题计算属性（消除模板内深层三元运算符）
+const authCardTitle = computed(() => {
+  if (isPureAdmin.value) return '管理员认证'
+  if (authMode.value === 'login') return '控制台账号接入'
+  if (authMode.value === 'register') return '新用户激活注册'
+  return '🔐 找回 / 重置密码'
+})
 
-// 启动倒计时计时器
+// 倒计时按钮文字计算属性
+const countdownText = computed(() => {
+  if (countdown.value > 0) return countdown.value + 's 后重试'
+  if (sendingCode.value) return '发送中...'
+  return '获取验证码'
+})
+
+// 流量百分比
+const trafficPercent = computed(() => {
+  if (!currentUser.limit_mb) return 0
+  return Math.min(100, Math.round((currentUser.used_mb / currentUser.limit_mb) * 100))
+})
+
+// 表格流量计算安全函数（消除模板内 Math.min）
+const calcProgress = (used, total) => {
+  if (!total) return 0
+  return Math.min(100, Math.round((used / total) * 100))
+}
+
+// 二维码计算属性（消除模板内 encodeURIComponent 调用）
+const qrCodeImgUrl = computed(() => {
+  if (!targetModalLink.value) return ''
+  return '/api/qrcode?text=' + encodeURIComponent(targetModalLink.value)
+})
+
 const startCountdown = () => {
   countdown.value = 60
   const timer = setInterval(() => {
@@ -520,7 +544,6 @@ const startCountdown = () => {
   }, 1000)
 }
 
-// 发送注册邮箱验证码
 const sendRegisterCode = async () => {
   if (!authForm.email || !authForm.email.includes('@')) {
     return ElMessage.warning('请先输入合法的电子邮箱')
@@ -541,7 +564,6 @@ const sendRegisterCode = async () => {
   }
 }
 
-// 发送找回密码验证码
 const sendForgotCode = async () => {
   if (!forgotForm.email || !forgotForm.email.includes('@')) {
     return ElMessage.warning('请输入绑定的注册电子邮箱')
@@ -562,7 +584,6 @@ const sendForgotCode = async () => {
   }
 }
 
-// 提交找回密码重置
 const submitForgotPassword = async () => {
   if (!forgotForm.email || !forgotForm.code || !forgotForm.new_password) {
     return ElMessage.warning('请完整填写邮箱、重置码与新密码')
@@ -740,7 +761,6 @@ const testUserNotify = async () => {
   }
 }
 
-// 用户自主修改密码
 const submitChangePassword = async () => {
   if (!pwdForm.old_pwd || !pwdForm.new_pwd) {
     return ElMessage.warning('请输入当前旧密码和新密码')
@@ -771,7 +791,6 @@ const submitChangePassword = async () => {
   }
 }
 
-// 管理员配置 SMTP
 const openSettingsTab = async () => {
   activeTab.value = 'settings'
   try {
@@ -1060,7 +1079,6 @@ const logout = () => location.reload()
 .text-cyan { color: #38bdf8; }
 .btn-group { display: flex; gap: 12px; margin-top: 16px; }
 
-/* 设置区域 */
 .settings-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; margin-top: 10px; }
 .settings-section { background: #0a0f1d; border: 1px solid #1e293b; padding: 20px; border-radius: 8px; }
 .settings-section h4 { margin-top: 0; margin-bottom: 16px; color: #f1f5f9; font-size: 14px; border-bottom: 1px solid #1e293b; padding-bottom: 8px; }
@@ -1069,5 +1087,42 @@ const logout = () => location.reload()
 .input-hint { font-size: 11px; color: #94a3b8; margin-top: 6px; line-height: 1.5; }
 .cyber-link { color: #38bdf8; text-decoration: underline; }
 
-/* 弹窗 */
-.modal-backdrop { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.8); display
+.modal-backdrop { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.8); display: flex; justify-content: center; align-items: center; z-index: 1000; }
+.cyber-modal { background: #0f172a; border: 1px solid #38bdf8; border-radius: 12px; padding: 24px; max-width: 360px; box-shadow: 0 0 30px rgba(56, 189, 248, 0.25); }
+.qr-box { background: white; padding: 12px; border-radius: 8px; display: inline-block; margin: 10px 0; }
+.modal-tip { font-size: 12px; color: #94a3b8; margin: 4px 0 10px 0; }
+
+.table-container { overflow-x: auto; margin-top: 10px; }
+.cyber-table { width: 100%; border-collapse: collapse; font-size: 13px; text-align: left; }
+.cyber-table th, .cyber-table td { padding: 12px 10px; border-bottom: 1px solid #1e293b; }
+.cyber-table th { color: #64748b; font-weight: 600; }
+.table-progress { background: #1e293b; height: 4px; border-radius: 2px; overflow: hidden; margin-top: 4px; width: 100px; }
+.table-glow { background: #38bdf8; height: 100%; }
+
+.badge { padding: 2px 8px; border-radius: 4px; font-size: 11px; }
+.badge-ready { background: rgba(16, 185, 129, 0.2); color: #34d399; }
+.badge-used { background: rgba(239, 68, 68, 0.2); color: #f87171; }
+.role-badge { padding: 3px 8px; border-radius: 4px; font-size: 11px; font-weight: 700; }
+.role-badge.admin { background: #dc2626; color: white; }
+.role-badge.user { background: #2563eb; color: white; }
+.btn-logout { background: transparent; border: 1px solid #475569; color: #94a3b8; padding: 4px 10px; border-radius: 4px; cursor: pointer; }
+
+.action-btn-row { display: flex; gap: 6px; align-items: center; }
+.btn-sm { padding: 4px 8px; font-size: 11px; border-radius: 4px; border: none; cursor: pointer; white-space: nowrap; }
+.btn-action { background: #0284c7; color: white; }
+.btn-reset { background: #d97706; color: white; font-weight: 600; }
+.btn-edit { background: #4f46e5; color: white; }
+.btn-promote { background: #f59e0b; color: #000; font-weight: 700; }
+.btn-demote { background: #475569; color: #fff; }
+.btn-del { background: #b91c1c; color: white; }
+.btn-del:disabled, .btn-demote:disabled { opacity: 0.3; cursor: not-allowed; }
+
+.auth-box { max-width: 420px; margin: 40px auto; }
+.form-item { margin-bottom: 16px; }
+.form-item label { display: block; font-size: 12px; color: #94a3b8; margin-bottom: 6px; }
+.auth-nav-links { display: flex; justify-content: space-between; margin-top: 16px; font-size: 13px; }
+.auth-nav-links a { color: #38bdf8; text-decoration: none; }
+.auth-nav-links a.text-warning { color: #f59e0b; }
+.auth-nav-links a:hover { text-decoration: underline; }
+.gen-form { display: grid; grid-template-columns: 1fr 1fr 1fr auto; gap: 10px; align-items: flex-end; }
+</style>
