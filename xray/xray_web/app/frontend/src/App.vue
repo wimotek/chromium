@@ -210,7 +210,7 @@
         </div>
       </div>
 
-      <!-- 3. 管理员控制台 -->
+      <!-- 3. 管理员控制台：卡片切换布局 -->
       <div v-else-if="currentUser.role === 'admin'" class="admin-wrapper">
         <div class="card-tabs-nav">
           <button class="tab-card-btn" :class="{ active: activeTab === 'users' }" @click="activeTab = 'users'">
@@ -234,14 +234,14 @@
           <button class="tab-card-btn" :class="{ active: activeTab === 'settings' }" @click="openSettingsTab">
             <span class="tab-icon">⚙️</span>
             <div class="tab-text">
-              <div class="tab-title">系统与发信参数设置</div>
-              <div class="tab-sub">SMTP 邮件服务器配置、发信连接测试</div>
+              <div class="tab-title">系统发信与定时任务设置</div>
+              <div class="tab-sub">SMTP 配置、定时流量到期提醒与手动推送</div>
             </div>
             <span class="count-tag">配置</span>
           </button>
         </div>
 
-        <!-- 选项卡 1: 用户管理 -->
+        <!-- 选项卡 1: 用户管理 (已彻底移除提权功能) -->
         <div v-if="activeTab === 'users'" class="cyber-card tab-content-card">
           <div class="card-header">
             <h3>👥 接入用户治理列表</h3>
@@ -255,9 +255,9 @@
                   <th>状态</th>
                   <th>流量配额</th>
                   <th>到期时间</th>
-                  <th>通知</th>
+                  <th>通知通道</th>
                   <th>专属凭证</th>
-                  <th style="width: 320px;">治理操作</th>
+                  <th style="width: 250px;">治理操作</th>
                 </tr>
               </thead>
               <tbody>
@@ -285,9 +285,7 @@
                       <button class="btn-sm btn-reset" @click="openResetPwdModal(u.username)">🔑 重置密码</button>
                       <button class="btn-sm btn-edit" @click="openEditModal(u)">✏️ 改配额</button>
                       <button v-if="u.status === 1" class="btn-sm btn-demote" :disabled="u.username === currentUser.username" @click="handleStatusToggle(u.username, 0)">🛑 封禁</button>
-                      <button v-else class="btn-sm btn-promote" @click="handleStatusToggle(u.username, 1)">🟢 解封</button>
-                      <button v-if="u.role === 'user'" class="btn-sm btn-promote" @click="handleRoleChange(u.username, 'admin')">⚡ 提权</button>
-                      <button v-else-if="u.username !== currentUser.username" class="btn-sm btn-demote" @click="handleRoleChange(u.username, 'user')">降权</button>
+                      <button v-else class="btn-sm btn-unban" @click="handleStatusToggle(u.username, 1)">🟢 解封</button>
                       <button class="btn-sm btn-del" :disabled="u.username === currentUser.username" @click="handleDeleteUser(u.username)">🗑️</button>
                     </div>
                   </td>
@@ -344,58 +342,97 @@
           </div>
         </div>
 
-        <!-- 选项卡 3: 系统与 SMTP 邮件设置 -->
+        <!-- 选项卡 3: 系统发信与定时任务设置 -->
         <div v-else-if="activeTab === 'settings'" class="cyber-card tab-content-card">
           <div class="card-header">
-            <h3>⚙️ SMTP 发信服务器参数配置 (用于用户激活与到期提醒)</h3>
+            <h3>⚙️ 系统发信与定时自动预警任务设置</h3>
           </div>
           <div class="settings-grid">
+            <!-- 模块 A: 定时任务设置 -->
             <div class="settings-section">
+              <h4>⏰ 定时自动检测与通知推送任务</h4>
+              <div class="form-item">
+                <label class="radio-label">
+                  <input type="checkbox" v-model="settingsForm.task_notify_enable" /> 启用后台定时自动轮询与智能预警
+                </label>
+              </div>
+
+              <div class="form-item">
+                <label>轮询检测执行周期 (小时)</label>
+                <input v-model.number="settingsForm.task_interval_hours" type="number" class="cyber-input" placeholder="默认 12 小时执行一次" />
+              </div>
+
+              <div class="form-item">
+                <label>流量不足告警阈值 (%)</label>
+                <input v-model.number="settingsForm.task_traffic_threshold" type="number" class="cyber-input" placeholder="例如已用达 80% 触发" />
+                <span class="input-hint">用户已用流量达到该百分比时，自动推送微信/邮件提醒</span>
+              </div>
+
+              <div class="form-item">
+                <label>套餐到期告警阈值 (天)</label>
+                <input v-model.number="settingsForm.task_expire_days" type="number" class="cyber-input" placeholder="例如到期前 3 天触发" />
+                <span class="input-hint">距离到期时间不足设定天数时，自动推送续费提醒</span>
+              </div>
+
+              <div class="form-item" style="margin-top: 15px; border-top: 1px dashed #1e293b; padding-top: 10px;">
+                <div style="font-size: 12px; color: #94a3b8; margin-bottom: 8px;">
+                  最近自动扫描完成时间：<b class="text-cyan">{{ settingsForm.task_last_run }}</b>
+                </div>
+                <button class="btn-cyber-primary" :disabled="triggeringTask" @click="triggerManualTask">
+                  {{ triggeringTask ? '正在扫描并推送...' : '⚡ 立即执行一次检测推送' }}
+                </button>
+              </div>
+            </div>
+
+            <!-- 模块 B: SMTP 邮件配置 -->
+            <div class="settings-section">
+              <h4>📧 SMTP 邮件服务器参数配置</h4>
               <div class="form-item">
                 <label>SMTP 服务器地址</label>
-                <input v-model="smtpForm.smtp_host" type="text" class="cyber-input" placeholder="例如: smtp.qq.com / smtp.163.com" />
+                <input v-model="settingsForm.smtp_host" type="text" class="cyber-input" placeholder="例如: smtp.qq.com / smtp.163.com" />
               </div>
               <div class="form-item">
                 <label>端口 (SSL 常用 465, STARTTLS 常用 587)</label>
-                <input v-model="smtpForm.smtp_port" type="text" class="cyber-input" placeholder="465" />
+                <input v-model="settingsForm.smtp_port" type="text" class="cyber-input" placeholder="465" />
               </div>
               <div class="form-item">
                 <label>发信邮箱账号 (User)</label>
-                <input v-model="smtpForm.smtp_user" type="text" class="cyber-input" placeholder="service@example.com" />
+                <input v-model="settingsForm.smtp_user" type="text" class="cyber-input" placeholder="service@example.com" />
               </div>
               <div class="form-item">
                 <label>邮箱授权码 / 密码 (Password)</label>
-                <input v-model="smtpForm.smtp_pass" type="password" class="cyber-input" placeholder="第三方客户端独立授权码" />
+                <input v-model="settingsForm.smtp_pass" type="password" class="cyber-input" placeholder="第三方客户端授权码" />
               </div>
               <div class="form-item">
                 <label>发件人显示名称 (Sender Name)</label>
-                <input v-model="smtpForm.smtp_sender" type="text" class="cyber-input" placeholder="Xray 节点中心" />
+                <input v-model="settingsForm.smtp_sender" type="text" class="cyber-input" placeholder="Xray 节点中心" />
               </div>
               <div class="form-item">
                 <label class="radio-label">
-                  <input type="checkbox" v-model="smtpForm.smtp_ssl" /> 启用 SSL 安全加密连接 (推荐 465 端口开启)
+                  <input type="checkbox" v-model="settingsForm.smtp_ssl" /> 启用 SSL 安全加密连接 (推荐开启)
                 </label>
               </div>
-              <button class="btn-cyber-success" @click="saveSmtpSettings">保存邮件服务器参数</button>
-            </div>
 
-            <div class="settings-section">
-              <h4>📧 发信连通性一键测试</h4>
-              <p class="card-desc">输入接收测试邮件的邮箱，验证服务器是否能正常发送：</p>
-              <div class="form-item">
-                <label>收件人测试邮箱</label>
-                <input v-model="testEmailTo" type="email" class="cyber-input" placeholder="test@your-domain.com" />
+              <div class="btn-group" style="margin-top: 15px;">
+                <button class="btn-cyber-success" @click="saveAllSettings">保存全部参数设置</button>
               </div>
-              <button class="btn-cyber-primary" :disabled="testingEmail" @click="sendTestEmail">
-                {{ testingEmail ? '正在发信...' : '发送测试邮件' }}
-              </button>
+
+              <div class="form-item" style="margin-top: 20px; border-top: 1px dashed #1e293b; padding-top: 12px;">
+                <label>发信连通性验证 (收件邮箱)</label>
+                <div style="display: flex; gap: 8px;">
+                  <input v-model="testEmailTo" type="email" class="cyber-input" placeholder="test@example.com" />
+                  <button class="btn-cyber-action" :disabled="testingEmail" @click="sendTestEmail">
+                    {{ testingEmail ? '发送中...' : '测试发信' }}
+                  </button>
+                </div>
+              </div>
             </div>
           </div>
         </div>
       </div>
     </main>
 
-    <!-- 弹窗 1：SVG 高清二维码弹窗 (使用 Computed URL，零行内表达式错误) -->
+    <!-- 弹窗 1：SVG 高清二维码弹窗 -->
     <div v-if="showQrModal" class="modal-backdrop" @click="showQrModal = false">
       <div class="cyber-modal" @click.stop>
         <h3>📱 [{{ targetModalUser }}] 节点连接凭证</h3>
@@ -488,10 +525,24 @@ const cardGenForm = reactive({ traffic_gb: 50, days: 30, count: 5 })
 const notifyForm = reactive({ notify_type: 'email', serverchan_key: '' })
 const pwdForm = reactive({ old_pwd: '', new_pwd: '', confirm_pwd: '' })
 
-// 管理员 SMTP 设置
-const smtpForm = reactive({ smtp_host: '', smtp_port: '465', smtp_user: '', smtp_pass: '', smtp_sender: '', smtp_ssl: true })
+// 系统与发信/任务设置表单
+const settingsForm = reactive({
+  smtp_host: '',
+  smtp_port: '465',
+  smtp_user: '',
+  smtp_pass: '',
+  smtp_sender: '',
+  smtp_ssl: true,
+  task_notify_enable: true,
+  task_interval_hours: 12,
+  task_traffic_threshold: 80,
+  task_expire_days: 3,
+  task_last_run: '尚未执行'
+})
+
 const testEmailTo = ref('')
 const testingEmail = ref(false)
+const triggeringTask = ref(false)
 
 const adminCards = ref([])
 const adminUsers = ref([])
@@ -503,7 +554,6 @@ onMounted(async () => {
   } catch (_) {}
 })
 
-// 标题计算属性（消除模板内深层三元运算符）
 const authCardTitle = computed(() => {
   if (isPureAdmin.value) return '管理员认证'
   if (authMode.value === 'login') return '控制台账号接入'
@@ -511,26 +561,22 @@ const authCardTitle = computed(() => {
   return '🔐 找回 / 重置密码'
 })
 
-// 倒计时按钮文字计算属性
 const countdownText = computed(() => {
   if (countdown.value > 0) return countdown.value + 's 后重试'
   if (sendingCode.value) return '发送中...'
   return '获取验证码'
 })
 
-// 流量百分比
 const trafficPercent = computed(() => {
   if (!currentUser.limit_mb) return 0
   return Math.min(100, Math.round((currentUser.used_mb / currentUser.limit_mb) * 100))
 })
 
-// 表格流量计算安全函数（消除模板内 Math.min）
 const calcProgress = (used, total) => {
   if (!total) return 0
   return Math.min(100, Math.round((used / total) * 100))
 }
 
-// 二维码计算属性（消除模板内 encodeURIComponent 调用）
 const qrCodeImgUrl = computed(() => {
   if (!targetModalLink.value) return ''
   return '/api/qrcode?text=' + encodeURIComponent(targetModalLink.value)
@@ -710,27 +756,6 @@ const handleDeleteUser = async (targetUser) => {
   }
 }
 
-const handleRoleChange = async (targetUser, newRole) => {
-  const actionText = newRole === 'admin' ? '提升为管理员' : '降级为普通用户'
-  if (!confirm(`确定要将 [${targetUser}] ${actionText}吗？`)) return
-  try {
-    const res = await axios.post('/api/admin/users/role', {
-      admin_user: authForm.username,
-      admin_pwd: authForm.password,
-      target_user: targetUser,
-      role: newRole
-    })
-    if (res.data.code === 200) {
-      ElMessage.success(res.data.msg)
-      loadAdminData()
-    } else {
-      ElMessage.error(res.data.msg)
-    }
-  } catch (_) {
-    ElMessage.error('操作失败')
-  }
-}
-
 const saveNotifySettings = async () => {
   try {
     const res = await axios.post('/api/user/notify_settings', {
@@ -753,376 +778,4 @@ const testUserNotify = async () => {
     const res = await axios.post('/api/user/test_notify', { username: currentUser.username })
     if (res.data.code === 200) {
       ElMessage.success(res.data.msg)
-    } else {
-      ElMessage.error(res.data.msg)
-    }
-  } catch (_) {
-    ElMessage.error('测试发送失败')
-  }
-}
-
-const submitChangePassword = async () => {
-  if (!pwdForm.old_pwd || !pwdForm.new_pwd) {
-    return ElMessage.warning('请输入当前旧密码和新密码')
-  }
-  if (pwdForm.new_pwd.length < 6) {
-    return ElMessage.warning('新密码长度不能少于 6 位')
-  }
-  if (pwdForm.new_pwd !== pwdForm.confirm_pwd) {
-    return ElMessage.warning('两次输入的新密码不一致')
-  }
-  try {
-    const res = await axios.post('/api/user/change_password', {
-      username: currentUser.username,
-      old_password: pwdForm.old_pwd,
-      new_password: pwdForm.new_pwd
-    })
-    if (res.data.code === 200) {
-      ElMessage.success(res.data.msg)
-      pwdForm.old_pwd = ''
-      pwdForm.new_pwd = ''
-      pwdForm.confirm_pwd = ''
-      setTimeout(() => location.reload(), 1500)
-    } else {
-      ElMessage.error(res.data.msg)
-    }
-  } catch (_) {
-    ElMessage.error('密码修改失败，请核对旧密码')
-  }
-}
-
-const openSettingsTab = async () => {
-  activeTab.value = 'settings'
-  try {
-    const res = await axios.get(`/api/admin/settings?admin_user=${authForm.username}&admin_pwd=${authForm.password}`)
-    if (res.data.code === 200) {
-      const d = res.data.data
-      smtpForm.smtp_host = d.smtp_host
-      smtpForm.smtp_port = d.smtp_port
-      smtpForm.smtp_user = d.smtp_user
-      smtpForm.smtp_pass = d.smtp_pass
-      smtpForm.smtp_sender = d.smtp_sender
-      smtpForm.smtp_ssl = d.smtp_ssl === 'true'
-    }
-  } catch (_) {}
-}
-
-const saveSmtpSettings = async () => {
-  try {
-    const res = await axios.post('/api/admin/settings', {
-      admin_user: authForm.username,
-      admin_pwd: authForm.password,
-      ...smtpForm,
-      smtp_ssl: smtpForm.smtp_ssl ? 'true' : 'false'
-    })
-    if (res.data.code === 200) {
-      ElMessage.success(res.data.msg)
-    } else {
-      ElMessage.error(res.data.msg)
-    }
-  } catch (_) {
-    ElMessage.error('保存设置失败')
-  }
-}
-
-const sendTestEmail = async () => {
-  if (!testEmailTo.value) return ElMessage.warning('请输入测试收件邮箱')
-  testingEmail.value = true
-  try {
-    const res = await axios.post('/api/admin/test_email', {
-      admin_user: authForm.username,
-      admin_pwd: authForm.password,
-      test_to: testEmailTo.value
-    })
-    if (res.data.code === 200) {
-      ElMessage.success(res.data.msg)
-    } else {
-      ElMessage.error(res.data.msg)
-    }
-  } catch (_) {
-    ElMessage.error('发信异常，请核对端口与授权码')
-  } finally {
-    testingEmail.value = false
-  }
-}
-
-const copyText = async (text) => {
-  if (!text) return ElMessage.warning('内容为空')
-  if (navigator.clipboard && window.isSecureContext) {
-    try {
-      await navigator.clipboard.writeText(text)
-      ElMessage.success('已复制到剪贴板！')
-      return
-    } catch (_) {}
-  }
-  const ta = document.createElement('textarea')
-  ta.value = text
-  ta.style.position = 'fixed'
-  ta.style.opacity = '0'
-  document.body.appendChild(ta)
-  ta.select()
-  try {
-    document.execCommand('copy')
-    ElMessage.success('已复制到剪贴板！')
-  } catch (_) {
-    ElMessage.error('快捷复制失败，请手动长按复制')
-  }
-  document.body.removeChild(ta)
-}
-
-const handleAuth = async () => {
-  if (!authForm.username || !authForm.password) return ElMessage.warning('请填写账号与密码')
-  loading.value = true
-  const api = authMode.value === 'register' ? '/api/register' : '/api/login'
-  try {
-    const res = await axios.post(api, authForm)
-    if (res.data.code === 200) {
-      if (authMode.value === 'register') {
-        ElMessage.success(res.data.msg)
-        authMode.value = 'login'
-      } else {
-        ElMessage.success('登录成功')
-        Object.assign(currentUser, res.data.data)
-        notifyForm.notify_type = res.data.data.notify_type || 'email'
-        notifyForm.serverchan_key = res.data.data.serverchan_key || ''
-        if (currentUser.role === 'admin') loadAdminData()
-      }
-    } else {
-      ElMessage.error(res.data.msg)
-    }
-  } finally {
-    loading.value = false
-  }
-}
-
-const handleRecharge = async () => {
-  if (!rechargeCode.value) return ElMessage.warning('请输入卡密')
-  loading.value = true
-  try {
-    const res = await axios.post('/api/recharge', { username: currentUser.username, card_code: rechargeCode.value })
-    if (res.data.code === 200) {
-      ElMessage.success(res.data.msg)
-      rechargeCode.value = ''
-      handleAuth()
-    } else {
-      ElMessage.error(res.data.msg)
-    }
-  } finally {
-    loading.value = false
-  }
-}
-
-const loadAdminData = async () => {
-  const res = await axios.post('/api/admin/data', { admin_user: authForm.username, admin_pwd: authForm.password })
-  if (res.data.code === 200) {
-    adminCards.value = res.data.cards
-    adminUsers.value = res.data.users
-  }
-}
-
-const generateCards = async () => {
-  loading.value = true
-  try {
-    const res = await axios.post('/api/admin/cards/generate', { admin_user: authForm.username, admin_pwd: authForm.password, ...cardGenForm })
-    if (res.data.code === 200) {
-      ElMessage.success('卡密批量生成成功')
-      loadAdminData()
-    } else {
-      ElMessage.error(res.data.msg)
-    }
-  } finally {
-    loading.value = false
-  }
-}
-
-const logout = () => location.reload()
-</script>
-
-<style scoped>
-.dark-theme {
-  min-height: 100vh;
-  background-color: #080c14;
-  color: #e2e8f0;
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, monospace;
-}
-.cyber-header {
-  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
-  background: rgba(13, 19, 33, 0.85);
-  backdrop-filter: blur(10px);
-  padding: 14px 24px;
-}
-.header-content {
-  max-width: 1100px;
-  margin: 0 auto;
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-}
-.brand-title { font-size: 18px; font-weight: 800; letter-spacing: 1.5px; }
-.highlight { color: #38bdf8; text-shadow: 0 0 10px rgba(56, 189, 248, 0.5); }
-.user-status { display: flex; align-items: center; gap: 12px; }
-
-.main-body { max-width: 1100px; margin: 30px auto; padding: 0 16px; }
-.dashboard-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
-.col-span-2 { grid-column: span 2; }
-
-/* 选项卡导航 */
-.admin-wrapper { width: 100%; }
-.card-tabs-nav {
-  display: flex;
-  gap: 16px;
-  margin-bottom: 20px;
-}
-.tab-card-btn {
-  flex: 1;
-  display: flex;
-  align-items: center;
-  gap: 14px;
-  background: #0f172a;
-  border: 1px solid #1e293b;
-  border-radius: 12px;
-  padding: 18px 20px;
-  cursor: pointer;
-  text-align: left;
-  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
-  color: #94a3b8;
-  position: relative;
-}
-.tab-card-btn:hover {
-  background: #131d36;
-  border-color: #38bdf8;
-  transform: translateY(-2px);
-}
-.tab-card-btn.active {
-  background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%);
-  border-color: #38bdf8;
-  box-shadow: 0 0 20px rgba(56, 189, 248, 0.2);
-  color: #f8fafc;
-}
-.tab-icon { font-size: 24px; }
-.tab-title { font-size: 14px; font-weight: 700; color: #f8fafc; margin-bottom: 2px; }
-.tab-sub { font-size: 11px; color: #64748b; }
-.count-tag {
-  margin-left: auto;
-  font-size: 11px;
-  background: rgba(56, 189, 248, 0.1);
-  color: #38bdf8;
-  padding: 3px 8px;
-  border-radius: 20px;
-  border: 1px solid rgba(56, 189, 248, 0.3);
-}
-
-.cyber-card {
-  background: #0f172a;
-  border: 1px solid rgba(56, 189, 248, 0.2);
-  border-radius: 12px;
-  padding: 24px;
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
-}
-.tab-content-card { animation: fadeIn 0.3s ease-in-out; }
-@keyframes fadeIn {
-  from { opacity: 0; transform: translateY(6px); }
-  to { opacity: 1; transform: translateY(0); }
-}
-
-.card-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; }
-.card-header h3 { margin: 0; font-size: 16px; color: #f1f5f9; }
-
-.traffic-meter { margin: 15px 0; }
-.meter-info { display: flex; justify-content: space-between; margin-bottom: 8px; }
-.data-val { font-size: 22px; font-weight: 700; color: #38bdf8; }
-.data-unit { font-size: 12px; color: #64748b; margin-left: 4px; }
-.progress-track { background: #1e293b; height: 10px; border-radius: 5px; overflow: hidden; margin: 10px 0; }
-.progress-glow { background: linear-gradient(90deg, #38bdf8, #818cf8); height: 100%; box-shadow: 0 0 12px #38bdf8; }
-.expiry-notice { font-size: 13px; color: #94a3b8; }
-.highlight-date { color: #f59e0b; }
-
-.cyber-input {
-  width: 100%;
-  background: #1e293b;
-  border: 1px solid #334155;
-  color: #f8fafc;
-  padding: 10px 14px;
-  border-radius: 6px;
-  outline: none;
-  box-sizing: border-box;
-}
-.cyber-input:focus { border-color: #38bdf8; box-shadow: 0 0 8px rgba(56, 189, 248, 0.3); }
-
-.code-send-group { display: flex; gap: 8px; }
-.btn-cyber-code {
-  background: #1e293b; border: 1px solid #38bdf8; color: #38bdf8; border-radius: 6px; padding: 0 14px;
-  white-space: nowrap; cursor: pointer; font-size: 12px;
-}
-.btn-cyber-code:disabled { opacity: 0.5; cursor: not-allowed; border-color: #475569; color: #94a3b8; }
-
-.btn-cyber-primary {
-  background: linear-gradient(135deg, #0284c7, #2563eb);
-  color: white; border: none; padding: 10px 20px; border-radius: 6px; font-weight: 700; cursor: pointer; width: 100%;
-}
-.redeem-box { display: flex; gap: 10px; align-items: center; }
-.redeem-box .cyber-input { flex: 1; min-width: 0; }
-.btn-cyber-success {
-  background: #059669; color: white; border: none; padding: 10px 18px; border-radius: 6px; cursor: pointer;
-  white-space: nowrap; flex-shrink: 0; font-weight: 600;
-}
-.btn-cyber-action { background: #334155; color: white; border: none; padding: 10px 20px; border-radius: 6px; cursor: pointer; white-space: nowrap; }
-.btn-cyber-refresh { background: transparent; border: 1px solid #38bdf8; color: #38bdf8; padding: 5px 12px; border-radius: 6px; cursor: pointer; font-size: 12px; }
-
-.node-field { margin-bottom: 14px; }
-.node-field label { display: block; font-size: 12px; color: #94a3b8; margin-bottom: 6px; }
-.code-display {
-  background: #020617; border: 1px dashed rgba(255, 255, 255, 0.15); padding: 12px; border-radius: 6px;
-  font-size: 13px; word-break: break-all; font-family: monospace;
-}
-.text-green { color: #34d399; font-weight: bold; }
-.text-cyan { color: #38bdf8; }
-.btn-group { display: flex; gap: 12px; margin-top: 16px; }
-
-.settings-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; margin-top: 10px; }
-.settings-section { background: #0a0f1d; border: 1px solid #1e293b; padding: 20px; border-radius: 8px; }
-.settings-section h4 { margin-top: 0; margin-bottom: 16px; color: #f1f5f9; font-size: 14px; border-bottom: 1px solid #1e293b; padding-bottom: 8px; }
-.radio-group { display: flex; flex-direction: column; gap: 10px; margin-top: 6px; }
-.radio-label { font-size: 13px; color: #cbd5e1; cursor: pointer; display: flex; align-items: center; gap: 8px; }
-.input-hint { font-size: 11px; color: #94a3b8; margin-top: 6px; line-height: 1.5; }
-.cyber-link { color: #38bdf8; text-decoration: underline; }
-
-.modal-backdrop { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.8); display: flex; justify-content: center; align-items: center; z-index: 1000; }
-.cyber-modal { background: #0f172a; border: 1px solid #38bdf8; border-radius: 12px; padding: 24px; max-width: 360px; box-shadow: 0 0 30px rgba(56, 189, 248, 0.25); }
-.qr-box { background: white; padding: 12px; border-radius: 8px; display: inline-block; margin: 10px 0; }
-.modal-tip { font-size: 12px; color: #94a3b8; margin: 4px 0 10px 0; }
-
-.table-container { overflow-x: auto; margin-top: 10px; }
-.cyber-table { width: 100%; border-collapse: collapse; font-size: 13px; text-align: left; }
-.cyber-table th, .cyber-table td { padding: 12px 10px; border-bottom: 1px solid #1e293b; }
-.cyber-table th { color: #64748b; font-weight: 600; }
-.table-progress { background: #1e293b; height: 4px; border-radius: 2px; overflow: hidden; margin-top: 4px; width: 100px; }
-.table-glow { background: #38bdf8; height: 100%; }
-
-.badge { padding: 2px 8px; border-radius: 4px; font-size: 11px; }
-.badge-ready { background: rgba(16, 185, 129, 0.2); color: #34d399; }
-.badge-used { background: rgba(239, 68, 68, 0.2); color: #f87171; }
-.role-badge { padding: 3px 8px; border-radius: 4px; font-size: 11px; font-weight: 700; }
-.role-badge.admin { background: #dc2626; color: white; }
-.role-badge.user { background: #2563eb; color: white; }
-.btn-logout { background: transparent; border: 1px solid #475569; color: #94a3b8; padding: 4px 10px; border-radius: 4px; cursor: pointer; }
-
-.action-btn-row { display: flex; gap: 6px; align-items: center; }
-.btn-sm { padding: 4px 8px; font-size: 11px; border-radius: 4px; border: none; cursor: pointer; white-space: nowrap; }
-.btn-action { background: #0284c7; color: white; }
-.btn-reset { background: #d97706; color: white; font-weight: 600; }
-.btn-edit { background: #4f46e5; color: white; }
-.btn-promote { background: #f59e0b; color: #000; font-weight: 700; }
-.btn-demote { background: #475569; color: #fff; }
-.btn-del { background: #b91c1c; color: white; }
-.btn-del:disabled, .btn-demote:disabled { opacity: 0.3; cursor: not-allowed; }
-
-.auth-box { max-width: 420px; margin: 40px auto; }
-.form-item { margin-bottom: 16px; }
-.form-item label { display: block; font-size: 12px; color: #94a3b8; margin-bottom: 6px; }
-.auth-nav-links { display: flex; justify-content: space-between; margin-top: 16px; font-size: 13px; }
-.auth-nav-links a { color: #38bdf8; text-decoration: none; }
-.auth-nav-links a.text-warning { color: #f59e0b; }
-.auth-nav-links a:hover { text-decoration: underline; }
-.gen-form { display: grid; grid-template-columns: 1fr 1fr 1fr auto; gap: 10px; align-items: flex-end; }
-</style>
+    } else

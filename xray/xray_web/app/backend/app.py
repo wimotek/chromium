@@ -3,6 +3,8 @@ import io
 import uuid
 import random
 import datetime
+import threading
+import time
 import qrcode
 import qrcode.image.svg
 from flask import Flask, request, jsonify, send_from_directory, abort, send_file
@@ -13,6 +15,96 @@ from notify import send_smtp_email, send_serverchan_msg, notify_user
 
 app = Flask(__name__, static_folder='../frontend/dist', static_url_path='/')
 init_db()
+
+# ==================== 核心新增：定时自动检测与推送引擎 ====================
+
+def run_scheduled_check(force=False) -> tuple[int, int, str]:
+    """
+    执行全盘用户配额与到期检测 (支持 force 立即执行)
+    返回: (流量提醒发送数, 到期提醒发送数, 状态描述)
+    """
+    enable = get_setting("task_notify_enable", "true").lower() == "true"
+    if not enable and not force:
+        return 0, 0, "定时任务未开启"
+
+    traffic_threshold = int(get_setting("task_traffic_threshold", "80") or 80)
+    expire_threshold_days = int(get_setting("task_expire_days", "3") or 3)
+    today_str = datetime.date.today().strftime("%Y-%m-%d")
+
+    traffic_sent = 0
+    expire_sent = 0
+
+    conn = get_db()
+    c = conn.cursor()
+    # 仅检测正常活跃且已验证的普通用户
+    c.execute("SELECT * FROM users WHERE status=1 AND is_verified=1 AND role='user'")
+    users = [dict(u) for u in c.fetchall()]
+
+    for u in users:
+        uname = u["username"]
+        used_mb = query_user_traffic(uname)
+        limit_mb = u.get("traffic_limit_mb", 1024)
+
+        # 1. 流量不足告警检测
+        if limit_mb > 0:
+            used_percent = round((used_mb / limit_mb) * 100, 1)
+            if used_percent >= traffic_threshold:
+                # 检查今天是否已经发过流量预警
+                c.execute("SELECT id FROM notify_logs WHERE username=? AND warn_type='traffic' AND sent_date=?", (uname, today_str))
+                if not c.fetchone() or force:
+                    title = "【流量预警】您的节点可用流量已不足"
+                    content = (f"您好 {uname}，系统检测到您当前已用流量达到 {used_mb}MB / {limit_mb}MB "
+                               f"(使用率已达 {used_percent}%)。为避免停机，请及时登录面板充值续费。")
+                    ok, _ = notify_user(u, title, f"<h3>{title}</h3><p>{content}</p>", content)
+                    if ok:
+                        traffic_sent += 1
+                        c.execute("INSERT INTO notify_logs (username, warn_type, sent_date) VALUES (?, 'traffic', ?)", (uname, today_str))
+                        conn.commit()
+
+        # 2. 到期前时限预警检测
+        exp_str = u.get("expire_date", "").strip()
+        if exp_str:
+            try:
+                exp_date = datetime.datetime.strptime(exp_str[:10], "%Y-%m-%d").date()
+                days_left = (exp_date - datetime.date.today()).days
+                if 0 <= days_left <= expire_threshold_days:
+                    # 检查今天是否已经发过到期预警
+                    c.execute("SELECT id FROM notify_logs WHERE username=? AND warn_type='expire' AND sent_date=?", (uname, today_str))
+                    if not c.fetchone() or force:
+                        title = "【到期提醒】您的节点套餐即将到期"
+                        content = (f"您好 {uname}，您的节点服务套餐将于 {exp_str} 到期 "
+                                   f"(仅剩 {days_left} 天)。到期后服务将自动暂停，请尽快登录充值卡密。")
+                        ok, _ = notify_user(u, title, f"<h3>{title}</h3><p>{content}</p>", content)
+                        if ok:
+                            expire_sent += 1
+                            c.execute("INSERT INTO notify_logs (username, warn_type, sent_date) VALUES (?, 'expire', ?)", (uname, today_str))
+                            conn.commit()
+            except Exception:
+                pass
+
+    conn.close()
+    now_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    set_setting("task_last_run", now_time)
+    return traffic_sent, expire_sent, f"检测完毕，已成功推送 {traffic_sent} 条流量预警，{expire_sent} 条到期预警"
+
+def scheduled_worker_loop():
+    """后台独立守护线程：按设定的小时间隔自动触发"""
+    time.sleep(15)  # 启动等待网络就绪
+    while True:
+        try:
+            interval_hours = int(get_setting("task_interval_hours", "12") or 12)
+            run_scheduled_check(force=False)
+        except Exception as e:
+            print(f"[Task Error] {e}", flush=True)
+        # 轮询休眠 (默认每 12 小时执行一次，最少 1 小时)
+        sleep_sec = max(3600, interval_hours * 3600)
+        time.sleep(sleep_sec)
+
+# 启动后台守护任务线程 (零额外依赖，轻量安全)
+task_thread = threading.Thread(target=scheduled_worker_loop, daemon=True)
+task_thread.start()
+
+# ==================== 前台基础路由 ====================
 
 @app.route('/')
 def index():
@@ -39,9 +131,8 @@ def get_qrcode_svg():
     buf.seek(0)
     return send_file(buf, mimetype='image/svg+xml')
 
-# ==================== 用户认证体系 (注册 / 登录 / 找回 / 修改) ====================
+# ==================== 用户认证与安全 ====================
 
-# 1. 注册验证码发送
 @app.route('/api/auth/send_register_code', methods=['POST'])
 def send_register_code():
     data = request.json or {}
@@ -75,7 +166,6 @@ def send_register_code():
 
     return jsonify({"code": 200, "msg": "激活验证码已发送至您的邮箱，请查收"})
 
-# 2. 注册账号 (验证码核验)
 @app.route('/api/register', methods=['POST'])
 def register():
     if Config.APP_MODE == 'admin':
@@ -115,7 +205,6 @@ def register():
         conn.close()
         return jsonify({"code": 500, "msg": f"数据库写入失败: {str(e)}"})
 
-# 3. 忘记密码 - 发送重置验证码
 @app.route('/api/auth/send_reset_code', methods=['POST'])
 def send_reset_code():
     data = request.json or {}
@@ -141,7 +230,7 @@ def send_reset_code():
         <h2 style="color: #38bdf8;">🔐 Xray Reality 密码重置验证</h2>
         <p>您好 <b>{user['username']}</b>！您正在申请找回并重置登录密码。</p>
         <p>您的重置验证码为：<b style="font-size: 24px; color: #f59e0b; letter-spacing: 2px;">{code}</b></p>
-        <p style="color: #94a3b8; font-size: 12px;">验证码 10 分钟内有效。如非本人操作，请立刻检查您的邮箱安全！</p>
+        <p style="color: #94a3b8; font-size: 12px;">验证码 10 分钟内有效。如非本人操作请立即核查账号安全。</p>
     </div>
     """
     success, msg = send_smtp_email(email, "【Xray】找回登录密码验证码", content)
@@ -150,7 +239,6 @@ def send_reset_code():
 
     return jsonify({"code": 200, "msg": "密码重置验证码已发送至您的邮箱，请查收"})
 
-# 4. 忘记密码 - 校验验证码并直接重置新密码
 @app.route('/api/auth/reset_password', methods=['POST'])
 def reset_password():
     data = request.json or {}
@@ -182,14 +270,12 @@ def reset_password():
     conn.commit()
     conn.close()
 
-    # 密码重置安全通知
     title = "【Xray 安全通知】您的账户密码已成功重置"
-    text = f"您好 {user['username']}，您的登录密码于 {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 已通过邮箱验证码重置成功。如非本人操作请立即联系管理人员。"
+    text = f"您好 {user['username']}，您的登录密码已通过邮箱验证码重置成功。如非本人操作请立即联系管理人员。"
     notify_user(dict(user), title, f"<p>{text}</p>", text)
 
     return jsonify({"code": 200, "msg": "密码已成功重置，请使用新密码登录"})
 
-# 5. 登录 (支持用户名 或 邮箱)
 @app.route('/api/login', methods=['POST'])
 def login():
     data = request.json or {}
@@ -234,7 +320,6 @@ def login():
         }
     })
 
-# 6. 已登录用户修改密码
 @app.route('/api/user/change_password', methods=['POST'])
 def change_password():
     data = request.json or {}
@@ -258,12 +343,11 @@ def change_password():
     conn.close()
 
     title = "【Xray 安全通知】您的账户密码已成功修改"
-    content = f"您好 {username}，您的登录密码于 {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 已成功变更。如非本人操作请立即联系管理人员。"
+    content = f"您好 {username}，您的登录密码于 {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 已成功变更。"
     notify_user(dict(user), title, f"<p>{content}</p>", content)
 
     return jsonify({"code": 200, "msg": "密码修改成功，请使用新密码重新登录"})
 
-# 7. 用户通知设置
 @app.route('/api/user/notify_settings', methods=['POST'])
 def update_notify_settings():
     data = request.json or {}
@@ -329,7 +413,7 @@ def recharge():
 
     return jsonify({"code": 200, "msg": f"充值成功！增加 {card['traffic_gb']}GB 流量，延长 {card['days']} 天"})
 
-# ==================== 管理员全量治理路由 ====================
+# ==================== 管理员控制台与定时任务调度 ====================
 
 @app.route('/api/admin/cards/generate', methods=['POST'])
 def admin_generate():
@@ -454,26 +538,7 @@ def delete_user():
     conn.close()
     return jsonify({"code": 200, "msg": f"用户 [{target_user}] 已被彻底删除"})
 
-@app.route('/api/admin/users/role', methods=['POST'])
-def update_user_role():
-    if Config.APP_MODE == 'user': abort(404)
-    data = request.json or {}
-    admin_user = data.get('admin_user')
-    if not check_admin(admin_user, data.get('admin_pwd')): return jsonify({"code": 403, "msg": "无权限"})
-
-    target_user = data.get('target_user')
-    new_role = data.get('role', 'admin')
-    if target_user == admin_user and new_role == 'user':
-        return jsonify({"code": 400, "msg": "安全保护：不能降权当前登录的管理员自己！"})
-
-    conn = get_db()
-    c = conn.cursor()
-    c.execute("UPDATE users SET role=? WHERE username=?", (new_role, target_user))
-    conn.commit()
-    conn.close()
-    return jsonify({"code": 200, "msg": f"用户 [{target_user}] 角色已更新为 {new_role}"})
-
-# ==================== 管理员 SMTP 设置 ====================
+# ==================== 管理员 SMTP 与定时任务设置 ====================
 
 @app.route('/api/admin/settings', methods=['GET', 'POST'])
 def handle_settings():
@@ -490,16 +555,24 @@ def handle_settings():
                 "smtp_user": get_setting("smtp_user", ""),
                 "smtp_pass": get_setting("smtp_pass", ""),
                 "smtp_sender": get_setting("smtp_sender", "Xray 节点运营中心"),
-                "smtp_ssl": get_setting("smtp_ssl", "true")
+                "smtp_ssl": get_setting("smtp_ssl", "true"),
+                # 定时任务设置项
+                "task_notify_enable": get_setting("task_notify_enable", "true"),
+                "task_interval_hours": get_setting("task_interval_hours", "12"),
+                "task_traffic_threshold": get_setting("task_traffic_threshold", "80"),
+                "task_expire_days": get_setting("task_expire_days", "3"),
+                "task_last_run": get_setting("task_last_run", "尚未执行")
             }
         })
     else:
         data = request.json or {}
         if not check_admin(data.get('admin_user'), data.get('admin_pwd')): return jsonify({"code": 403, "msg": "无权限"})
-        for k in ["smtp_host", "smtp_port", "smtp_user", "smtp_pass", "smtp_sender", "smtp_ssl"]:
+        keys = ["smtp_host", "smtp_port", "smtp_user", "smtp_pass", "smtp_sender", "smtp_ssl",
+                "task_notify_enable", "task_interval_hours", "task_traffic_threshold", "task_expire_days"]
+        for k in keys:
             if k in data:
                 set_setting(k, str(data[k]).strip())
-        return jsonify({"code": 200, "msg": "发信服务器参数已保存"})
+        return jsonify({"code": 200, "msg": "发信与定时任务参数已成功保存"})
 
 @app.route('/api/admin/test_email', methods=['POST'])
 def test_email():
@@ -513,6 +586,20 @@ def test_email():
     if ok:
         return jsonify({"code": 200, "msg": "测试邮件已成功投递！"})
     return jsonify({"code": 500, "msg": msg})
+
+# 核心新增：管理员一键立即手动触发定时任务检测
+@app.route('/api/admin/tasks/trigger', methods=['POST'])
+def trigger_task_now():
+    if Config.APP_MODE == 'user': abort(404)
+    data = request.json or {}
+    if not check_admin(data.get('admin_user'), data.get('admin_pwd')): return jsonify({"code": 403, "msg": "无权限"})
+
+    t_sent, e_sent, desc = run_scheduled_check(force=True)
+    return jsonify({
+        "code": 200,
+        "msg": desc,
+        "data": {"traffic_sent": t_sent, "expire_sent": e_sent}
+    })
 
 def check_admin(u, p):
     conn = get_db()

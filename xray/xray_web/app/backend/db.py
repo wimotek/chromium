@@ -53,13 +53,21 @@ def init_db():
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )''')
 
-    # 4. 全局系统配置表 (SMTP 服务器参数等)
+    # 4. 全局系统配置表
     c.execute('''CREATE TABLE IF NOT EXISTS system_settings (
         key TEXT PRIMARY KEY,
         value TEXT
     )''')
 
-    # 平滑热补丁已有数据表字段（防止旧数据库报错）
+    # 5. 核心新增：定时通知去重记录表 (防同一天内重复骚扰用户)
+    c.execute('''CREATE TABLE IF NOT EXISTS notify_logs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        username TEXT NOT NULL,
+        warn_type TEXT NOT NULL,
+        sent_date TEXT NOT NULL
+    )''')
+
+    # 平滑补齐已有数据表字段
     def try_add_column(sql):
         try:
             c.execute(sql)
@@ -87,7 +95,6 @@ def init_db():
     conn.commit()
     conn.close()
 
-# 系统设置存取辅助函数
 def get_setting(key: str, default: str = "") -> str:
     conn = get_db()
     c = conn.cursor()
