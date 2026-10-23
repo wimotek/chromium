@@ -226,7 +226,7 @@
             <span class="tab-icon">🎟️</span>
             <div class="tab-text">
               <div class="tab-title">卡密生成与发卡中心</div>
-              <div class="tab-sub">批量制卡、库存监管、卡密一键导出核销</div>
+              <div class="tab-sub">批量制卡、库存导出、对接发卡系统 API</div>
             </div>
             <span class="count-tag">{{ adminCards.length }} 张卡密</span>
           </button>
@@ -235,13 +235,13 @@
             <span class="tab-icon">⚙️</span>
             <div class="tab-text">
               <div class="tab-title">系统发信与定时任务设置</div>
-              <div class="tab-sub">SMTP 配置、定时流量到期提醒与手动推送</div>
+              <div class="tab-sub">SMTP 配置、定时流量到期提醒与发卡令牌</div>
             </div>
             <span class="count-tag">配置</span>
           </button>
         </div>
 
-        <!-- 选项卡 1: 用户管理 (已彻底移除提权功能) -->
+        <!-- 选项卡 1: 用户管理 -->
         <div v-if="activeTab === 'users'" class="cyber-card tab-content-card">
           <div class="card-header">
             <h3>👥 接入用户治理列表</h3>
@@ -295,7 +295,7 @@
           </div>
         </div>
 
-        <!-- 选项卡 2: 卡密管理 -->
+        <!-- 选项卡 2: 卡密管理 (方案 B + 方案 C 融合) -->
         <div v-else-if="activeTab === 'cards'" class="cyber-card tab-content-card">
           <div class="card-header">
             <h3>🛠️ 商业发卡制卡面板</h3>
@@ -316,10 +316,17 @@
             <button class="btn-cyber-success" @click="generateCards">立即批量制卡</button>
           </div>
 
+          <!-- 方案 B 核心入口：一键导出所有未核销卡密 -->
           <div class="card-header" style="margin-top: 30px;">
             <h3>📦 历史卡密库存与核销流水 (最新100条)</h3>
-            <button class="btn-cyber-refresh" @click="loadAdminData">🔄 刷新卡密</button>
+            <div style="display: flex; gap: 8px;">
+              <button class="btn-cyber-success" style="font-size: 12px; padding: 5px 12px;" @click="exportAllUnusedCards">
+                📋 批量复制全部未售卡密 (独角数卡导入格式)
+              </button>
+              <button class="btn-cyber-refresh" @click="loadAdminData">🔄 刷新卡密</button>
+            </div>
           </div>
+
           <div class="table-container">
             <table class="cyber-table">
               <thead>
@@ -340,12 +347,28 @@
               </tbody>
             </table>
           </div>
+
+          <!-- 方案 C 说明卡片：第三方发卡系统即时对接 API 指南 -->
+          <div class="settings-section" style="margin-top: 25px;">
+            <h4>🔌 方案 C：第三方自动发卡系统 API 实时出卡对接指南</h4>
+            <p class="card-desc">买家在独角数卡等平台付款后，发卡系统可自动请求此 API 现场生成一张卡密交付，实现 0 库存全自动发卡：</p>
+            <div class="node-field">
+              <label>API 请求地址 (GET / POST)：</label>
+              <div class="code-display text-cyan">{{ fakaApiUrlSample }}</div>
+            </div>
+            <div class="btn-group">
+              <button class="btn-cyber-action" @click="copyText(fakaApiUrlSample)">复制 API 调用样例</button>
+              <span style="font-size: 12px; color: #94a3b8; align-self: center;">
+                * 接口参数可在 URL 中自定义，例如：<code>?gb=100&days=30&token=YOUR_TOKEN</code>
+              </span>
+            </div>
+          </div>
         </div>
 
         <!-- 选项卡 3: 系统发信与定时任务设置 -->
         <div v-else-if="activeTab === 'settings'" class="cyber-card tab-content-card">
           <div class="card-header">
-            <h3>⚙️ 系统发信与定时自动预警任务设置</h3>
+            <h3>⚙️ 系统发信、定时预警与发卡安全设置</h3>
           </div>
           <div class="settings-grid">
             <!-- 模块 A: 定时任务设置 -->
@@ -381,6 +404,13 @@
                 <button class="btn-cyber-primary" :disabled="triggeringTask" @click="triggerManualTask">
                   {{ triggeringTask ? '正在扫描并推送...' : '⚡ 立即执行一次检测推送' }}
                 </button>
+              </div>
+
+              <h4 style="margin-top: 25px;">🔑 方案 C：发卡网 API 对接安全令牌 (Token)</h4>
+              <div class="form-item">
+                <label>FAKA API TOKEN：</label>
+                <input v-model="settingsForm.faka_api_token" type="text" class="cyber-input" placeholder="自定义发卡接口通信密钥" />
+                <span class="input-hint">第三方发卡系统调用出卡接口时必须携带此 Token 进行身份验证</span>
               </div>
             </div>
 
@@ -537,7 +567,8 @@ const settingsForm = reactive({
   task_interval_hours: 12,
   task_traffic_threshold: 80,
   task_expire_days: 3,
-  task_last_run: '尚未执行'
+  task_last_run: '尚未执行',
+  faka_api_token: 'faka_secret_token_8899'
 })
 
 const testEmailTo = ref('')
@@ -580,6 +611,13 @@ const calcProgress = (used, total) => {
 const qrCodeImgUrl = computed(() => {
   if (!targetModalLink.value) return ''
   return '/api/qrcode?text=' + encodeURIComponent(targetModalLink.value)
+})
+
+// 方案 C API 样例调用链接计算属性
+const fakaApiUrlSample = computed(() => {
+  const host = window.location.origin
+  const token = settingsForm.faka_api_token || 'faka_secret_token_8899'
+  return `${host}/api/open/faka_generate?gb=100&days=30&token=${token}`
 })
 
 const startCountdown = () => {
@@ -778,4 +816,428 @@ const testUserNotify = async () => {
     const res = await axios.post('/api/user/test_notify', { username: currentUser.username })
     if (res.data.code === 200) {
       ElMessage.success(res.data.msg)
-    } else
+    } else {
+      ElMessage.error(res.data.msg)
+    }
+  } catch (_) {
+    ElMessage.error('测试发送失败')
+  }
+}
+
+const submitChangePassword = async () => {
+  if (!pwdForm.old_pwd || !pwdForm.new_pwd) {
+    return ElMessage.warning('请输入当前旧密码和新密码')
+  }
+  if (pwdForm.new_pwd.length < 6) {
+    return ElMessage.warning('新密码长度不能少于 6 位')
+  }
+  if (pwdForm.new_pwd !== pwdForm.confirm_pwd) {
+    return ElMessage.warning('两次输入的新密码不一致')
+  }
+  try {
+    const res = await axios.post('/api/user/change_password', {
+      username: currentUser.username,
+      old_password: pwdForm.old_pwd,
+      new_password: pwdForm.new_pwd
+    })
+    if (res.data.code === 200) {
+      ElMessage.success(res.data.msg)
+      pwdForm.old_pwd = ''
+      pwdForm.new_pwd = ''
+      pwdForm.confirm_pwd = ''
+      setTimeout(() => location.reload(), 1500)
+    } else {
+      ElMessage.error(res.data.msg)
+    }
+  } catch (_) {
+    ElMessage.error('密码修改失败，请核对旧密码')
+  }
+}
+
+const openSettingsTab = async () => {
+  activeTab.value = 'settings'
+  try {
+    const res = await axios.get(`/api/admin/settings?admin_user=${authForm.username}&admin_pwd=${authForm.password}`)
+    if (res.data.code === 200) {
+      const d = res.data.data
+      settingsForm.smtp_host = d.smtp_host
+      settingsForm.smtp_port = d.smtp_port
+      settingsForm.smtp_user = d.smtp_user
+      settingsForm.smtp_pass = d.smtp_pass
+      settingsForm.smtp_sender = d.smtp_sender
+      settingsForm.smtp_ssl = d.smtp_ssl === 'true'
+      settingsForm.task_notify_enable = d.task_notify_enable === 'true'
+      settingsForm.task_interval_hours = Number(d.task_interval_hours) || 12
+      settingsForm.task_traffic_threshold = Number(d.task_traffic_threshold) || 80
+      settingsForm.task_expire_days = Number(d.task_expire_days) || 3
+      settingsForm.task_last_run = d.task_last_run || '尚未执行'
+      settingsForm.faka_api_token = d.faka_api_token || 'faka_secret_token_8899'
+    }
+  } catch (_) {}
+}
+
+const saveAllSettings = async () => {
+  try {
+    const res = await axios.post('/api/admin/settings', {
+      admin_user: authForm.username,
+      admin_pwd: authForm.password,
+      ...settingsForm,
+      smtp_ssl: settingsForm.smtp_ssl ? 'true' : 'false',
+      task_notify_enable: settingsForm.task_notify_enable ? 'true' : 'false'
+    })
+    if (res.data.code === 200) {
+      ElMessage.success(res.data.msg)
+    } else {
+      ElMessage.error(res.data.msg)
+    }
+  } catch (_) {
+    ElMessage.error('保存设置失败')
+  }
+}
+
+const sendTestEmail = async () => {
+  if (!testEmailTo.value) return ElMessage.warning('请输入测试收件邮箱')
+  testingEmail.value = true
+  try {
+    const res = await axios.post('/api/admin/test_email', {
+      admin_user: authForm.username,
+      admin_pwd: authForm.password,
+      test_to: testEmailTo.value
+    })
+    if (res.data.code === 200) {
+      ElMessage.success(res.data.msg)
+    } else {
+      ElMessage.error(res.data.msg)
+    }
+  } catch (_) {
+    ElMessage.error('发信异常，请核对端口与授权码')
+  } finally {
+    testingEmail.value = false
+  }
+}
+
+const triggerManualTask = async () => {
+  triggeringTask.value = true
+  try {
+    const res = await axios.post('/api/admin/tasks/trigger', {
+      admin_user: authForm.username,
+      admin_pwd: authForm.password
+    })
+    if (res.data.code === 200) {
+      ElMessage.success(res.data.msg)
+      openSettingsTab()
+    } else {
+      ElMessage.error(res.data.msg)
+    }
+  } catch (_) {
+    ElMessage.error('触发扫描任务失败')
+  } finally {
+    triggeringTask.value = false
+  }
+}
+
+const copyText = async (text) => {
+  if (!text) return ElMessage.warning('内容为空')
+  if (navigator.clipboard && window.isSecureContext) {
+    try {
+      await navigator.clipboard.writeText(text)
+      ElMessage.success('已复制到剪贴板！')
+      return
+    } catch (_) {}
+  }
+  const ta = document.createElement('textarea')
+  ta.value = text
+  ta.style.position = 'fixed'
+  ta.style.opacity = '0'
+  document.body.appendChild(ta)
+  ta.select()
+  try {
+    document.execCommand('copy')
+    ElMessage.success('已复制到剪贴板！')
+  } catch (_) {
+    ElMessage.error('快捷复制失败，请手动长按复制')
+  }
+  document.body.removeChild(ta)
+}
+
+// 方案 B 核心函数：批量导出未核销卡密
+const exportAllUnusedCards = async () => {
+  try {
+    const res = await axios.post('/api/admin/cards/export_unused', {
+      admin_user: authForm.username,
+      admin_pwd: authForm.password
+    })
+    if (res.data.code === 200) {
+      if (res.data.count === 0) {
+        return ElMessage.warning('暂无可导出的未核销卡密')
+      }
+      copyText(res.data.text)
+      ElMessage.success(`成功复制 ${res.data.count} 张未售卡密，已符合独角数卡导入格式！`)
+    } else {
+      ElMessage.error(res.data.msg)
+    }
+  } catch (_) {
+    ElMessage.error('导出卡密失败')
+  }
+}
+
+const handleAuth = async () => {
+  if (!authForm.username || !authForm.password) return ElMessage.warning('请填写账号与密码')
+  loading.value = true
+  const api = authMode.value === 'register' ? '/api/register' : '/api/login'
+  try {
+    const res = await axios.post(api, authForm)
+    if (res.data.code === 200) {
+      if (authMode.value === 'register') {
+        ElMessage.success(res.data.msg)
+        authMode.value = 'login'
+      } else {
+        ElMessage.success('登录成功')
+        Object.assign(currentUser, res.data.data)
+        notifyForm.notify_type = res.data.data.notify_type || 'email'
+        notifyForm.serverchan_key = res.data.data.serverchan_key || ''
+        if (currentUser.role === 'admin') loadAdminData()
+      }
+    } else {
+      ElMessage.error(res.data.msg)
+    }
+  } finally {
+    loading.value = false
+  }
+}
+
+const handleRecharge = async () => {
+  if (!rechargeCode.value) return ElMessage.warning('请输入卡密')
+  loading.value = true
+  try {
+    const res = await axios.post('/api/recharge', { username: currentUser.username, card_code: rechargeCode.value })
+    if (res.data.code === 200) {
+      ElMessage.success(res.data.msg)
+      rechargeCode.value = ''
+      handleAuth()
+    } else {
+      ElMessage.error(res.data.msg)
+    }
+  } finally {
+    loading.value = false
+  }
+}
+
+const loadAdminData = async () => {
+  const res = await axios.post('/api/admin/data', { admin_user: authForm.username, admin_pwd: authForm.password })
+  if (res.data.code === 200) {
+    adminCards.value = res.data.cards
+    adminUsers.value = res.data.users
+  }
+}
+
+const generateCards = async () => {
+  loading.value = true
+  try {
+    const res = await axios.post('/api/admin/cards/generate', { admin_user: authForm.username, admin_pwd: authForm.password, ...cardGenForm })
+    if (res.data.code === 200) {
+      ElMessage.success('卡密批量生成成功')
+      loadAdminData()
+    } else {
+      ElMessage.error(res.data.msg)
+    }
+  } finally {
+    loading.value = false
+  }
+}
+
+const logout = () => location.reload()
+</script>
+
+<style scoped>
+.dark-theme {
+  min-height: 100vh;
+  background-color: #080c14;
+  color: #e2e8f0;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, monospace;
+}
+.cyber-header {
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(13, 19, 33, 0.85);
+  backdrop-filter: blur(10px);
+  padding: 14px 24px;
+}
+.header-content {
+  max-width: 1100px;
+  margin: 0 auto;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+.brand-title { font-size: 18px; font-weight: 800; letter-spacing: 1.5px; }
+.highlight { color: #38bdf8; text-shadow: 0 0 10px rgba(56, 189, 248, 0.5); }
+.user-status { display: flex; align-items: center; gap: 12px; }
+
+.main-body { max-width: 1100px; margin: 30px auto; padding: 0 16px; }
+.dashboard-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+.col-span-2 { grid-column: span 2; }
+
+/* 选项卡导航 */
+.admin-wrapper { width: 100%; }
+.card-tabs-nav {
+  display: flex;
+  gap: 16px;
+  margin-bottom: 20px;
+}
+.tab-card-btn {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  background: #0f172a;
+  border: 1px solid #1e293b;
+  border-radius: 12px;
+  padding: 18px 20px;
+  cursor: pointer;
+  text-align: left;
+  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  color: #94a3b8;
+  position: relative;
+}
+.tab-card-btn:hover {
+  background: #131d36;
+  border-color: #38bdf8;
+  transform: translateY(-2px);
+}
+.tab-card-btn.active {
+  background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%);
+  border-color: #38bdf8;
+  box-shadow: 0 0 20px rgba(56, 189, 248, 0.2);
+  color: #f8fafc;
+}
+.tab-icon { font-size: 24px; }
+.tab-title { font-size: 14px; font-weight: 700; color: #f8fafc; margin-bottom: 2px; }
+.tab-sub { font-size: 11px; color: #64748b; }
+.count-tag {
+  margin-left: auto;
+  font-size: 11px;
+  background: rgba(56, 189, 248, 0.1);
+  color: #38bdf8;
+  padding: 3px 8px;
+  border-radius: 20px;
+  border: 1px solid rgba(56, 189, 248, 0.3);
+}
+
+.cyber-card {
+  background: #0f172a;
+  border: 1px solid rgba(56, 189, 248, 0.2);
+  border-radius: 12px;
+  padding: 24px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+}
+.tab-content-card { animation: fadeIn 0.3s ease-in-out; }
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.card-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; }
+.card-header h3 { margin: 0; font-size: 16px; color: #f1f5f9; }
+
+.traffic-meter { margin: 15px 0; }
+.meter-info { display: flex; justify-content: space-between; margin-bottom: 8px; }
+.data-val { font-size: 22px; font-weight: 700; color: #38bdf8; }
+.data-unit { font-size: 12px; color: #64748b; margin-left: 4px; }
+.progress-track { background: #1e293b; height: 10px; border-radius: 5px; overflow: hidden; margin: 10px 0; }
+.progress-glow { background: linear-gradient(90deg, #38bdf8, #818cf8); height: 100%; box-shadow: 0 0 12px #38bdf8; }
+.expiry-notice { font-size: 13px; color: #94a3b8; }
+.highlight-date { color: #f59e0b; }
+
+.cyber-input {
+  width: 100%;
+  background: #1e293b;
+  border: 1px solid #334155;
+  color: #f8fafc;
+  padding: 10px 14px;
+  border-radius: 6px;
+  outline: none;
+  box-sizing: border-box;
+}
+.cyber-input:focus { border-color: #38bdf8; box-shadow: 0 0 8px rgba(56, 189, 248, 0.3); }
+
+.code-send-group { display: flex; gap: 8px; }
+.btn-cyber-code {
+  background: #1e293b; border: 1px solid #38bdf8; color: #38bdf8; border-radius: 6px; padding: 0 14px;
+  white-space: nowrap; cursor: pointer; font-size: 12px;
+}
+.btn-cyber-code:disabled { opacity: 0.5; cursor: not-allowed; border-color: #475569; color: #94a3b8; }
+
+.btn-cyber-primary {
+  background: linear-gradient(135deg, #0284c7, #2563eb);
+  color: white; border: none; padding: 10px 20px; border-radius: 6px; font-weight: 700; cursor: pointer; width: 100%;
+}
+.redeem-box { display: flex; gap: 10px; align-items: center; }
+.redeem-box .cyber-input { flex: 1; min-width: 0; }
+.btn-cyber-success {
+  background: #059669; color: white; border: none; padding: 10px 18px; border-radius: 6px; cursor: pointer;
+  white-space: nowrap; flex-shrink: 0; font-weight: 600;
+}
+.btn-cyber-action { background: #334155; color: white; border: none; padding: 10px 20px; border-radius: 6px; cursor: pointer; white-space: nowrap; }
+.btn-cyber-refresh { background: transparent; border: 1px solid #38bdf8; color: #38bdf8; padding: 5px 12px; border-radius: 6px; cursor: pointer; font-size: 12px; }
+
+.node-field { margin-bottom: 14px; }
+.node-field label { display: block; font-size: 12px; color: #94a3b8; margin-bottom: 6px; }
+.code-display {
+  background: #020617; border: 1px dashed rgba(255, 255, 255, 0.15); padding: 12px; border-radius: 6px;
+  font-size: 13px; word-break: break-all; font-family: monospace;
+}
+.text-green { color: #34d399; font-weight: bold; }
+.text-cyan { color: #38bdf8; }
+.btn-group { display: flex; gap: 12px; margin-top: 16px; }
+
+/* 设置区域 */
+.settings-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; margin-top: 10px; }
+.settings-section { background: #0a0f1d; border: 1px solid #1e293b; padding: 20px; border-radius: 8px; }
+.settings-section h4 { margin-top: 0; margin-bottom: 16px; color: #f1f5f9; font-size: 14px; border-bottom: 1px solid #1e293b; padding-bottom: 8px; }
+.radio-group { display: flex; flex-direction: column; gap: 10px; margin-top: 6px; }
+.radio-label { font-size: 13px; color: #cbd5e1; cursor: pointer; display: flex; align-items: center; gap: 8px; }
+.input-hint { font-size: 11px; color: #94a3b8; margin-top: 6px; line-height: 1.5; }
+.cyber-link { color: #38bdf8; text-decoration: underline; }
+
+/* 弹窗 */
+.modal-backdrop { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.8); display: flex; justify-content: center; align-items: center; z-index: 1000; }
+.cyber-modal { background: #0f172a; border: 1px solid #38bdf8; border-radius: 12px; padding: 24px; max-width: 360px; box-shadow: 0 0 30px rgba(56, 189, 248, 0.25); }
+.qr-box { background: white; padding: 12px; border-radius: 8px; display: inline-block; margin: 10px 0; }
+.modal-tip { font-size: 12px; color: #94a3b8; margin: 4px 0 10px 0; }
+
+/* 表格与操作 */
+.table-container { overflow-x: auto; margin-top: 10px; }
+.cyber-table { width: 100%; border-collapse: collapse; font-size: 13px; text-align: left; }
+.cyber-table th, .cyber-table td { padding: 12px 10px; border-bottom: 1px solid #1e293b; }
+.cyber-table th { color: #64748b; font-weight: 600; }
+.table-progress { background: #1e293b; height: 4px; border-radius: 2px; overflow: hidden; margin-top: 4px; width: 100px; }
+.table-glow { background: #38bdf8; height: 100%; }
+
+.badge { padding: 2px 8px; border-radius: 4px; font-size: 11px; }
+.badge-ready { background: rgba(16, 185, 129, 0.2); color: #34d399; }
+.badge-used { background: rgba(239, 68, 68, 0.2); color: #f87171; }
+.role-badge { padding: 3px 8px; border-radius: 4px; font-size: 11px; font-weight: 700; }
+.role-badge.admin { background: #dc2626; color: white; }
+.role-badge.user { background: #2563eb; color: white; }
+.btn-logout { background: transparent; border: 1px solid #475569; color: #94a3b8; padding: 4px 10px; border-radius: 4px; cursor: pointer; }
+
+/* 操作按钮组 (已去除提权) */
+.action-btn-row { display: flex; gap: 6px; align-items: center; }
+.btn-sm { padding: 4px 8px; font-size: 11px; border-radius: 4px; border: none; cursor: pointer; white-space: nowrap; }
+.btn-action { background: #0284c7; color: white; }
+.btn-reset { background: #d97706; color: white; font-weight: 600; }
+.btn-edit { background: #4f46e5; color: white; }
+.btn-unban { background: #059669; color: white; font-weight: 600; }
+.btn-demote { background: #475569; color: #fff; }
+.btn-del { background: #b91c1c; color: white; }
+.btn-del:disabled, .btn-demote:disabled { opacity: 0.3; cursor: not-allowed; }
+
+.auth-box { max-width: 420px; margin: 40px auto; }
+.form-item { margin-bottom: 16px; }
+.form-item label { display: block; font-size: 12px; color: #94a3b8; margin-bottom: 6px; }
+.auth-nav-links { display: flex; justify-content: space-between; margin-top: 16px; font-size: 13px; }
+.auth-nav-links a { color: #38bdf8; text-decoration: none; }
+.auth-nav-links a.text-warning { color: #f59e0b; }
+.auth-nav-links a:hover { text-decoration: underline; }
+.gen-form { display: grid; grid-template-columns: 1fr 1fr 1fr auto; gap: 10px; align-items: flex-end; }
+</style>

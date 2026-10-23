@@ -16,13 +16,9 @@ from notify import send_smtp_email, send_serverchan_msg, notify_user
 app = Flask(__name__, static_folder='../frontend/dist', static_url_path='/')
 init_db()
 
-# ==================== 核心新增：定时自动检测与推送引擎 ====================
+# ==================== 定时自动检测与推送引擎 ====================
 
 def run_scheduled_check(force=False) -> tuple[int, int, str]:
-    """
-    执行全盘用户配额与到期检测 (支持 force 立即执行)
-    返回: (流量提醒发送数, 到期提醒发送数, 状态描述)
-    """
     enable = get_setting("task_notify_enable", "true").lower() == "true"
     if not enable and not force:
         return 0, 0, "定时任务未开启"
@@ -36,7 +32,6 @@ def run_scheduled_check(force=False) -> tuple[int, int, str]:
 
     conn = get_db()
     c = conn.cursor()
-    # 仅检测正常活跃且已验证的普通用户
     c.execute("SELECT * FROM users WHERE status=1 AND is_verified=1 AND role='user'")
     users = [dict(u) for u in c.fetchall()]
 
@@ -45,11 +40,9 @@ def run_scheduled_check(force=False) -> tuple[int, int, str]:
         used_mb = query_user_traffic(uname)
         limit_mb = u.get("traffic_limit_mb", 1024)
 
-        # 1. 流量不足告警检测
         if limit_mb > 0:
             used_percent = round((used_mb / limit_mb) * 100, 1)
             if used_percent >= traffic_threshold:
-                # 检查今天是否已经发过流量预警
                 c.execute("SELECT id FROM notify_logs WHERE username=? AND warn_type='traffic' AND sent_date=?", (uname, today_str))
                 if not c.fetchone() or force:
                     title = "【流量预警】您的节点可用流量已不足"
@@ -61,14 +54,12 @@ def run_scheduled_check(force=False) -> tuple[int, int, str]:
                         c.execute("INSERT INTO notify_logs (username, warn_type, sent_date) VALUES (?, 'traffic', ?)", (uname, today_str))
                         conn.commit()
 
-        # 2. 到期前时限预警检测
         exp_str = u.get("expire_date", "").strip()
         if exp_str:
             try:
                 exp_date = datetime.datetime.strptime(exp_str[:10], "%Y-%m-%d").date()
                 days_left = (exp_date - datetime.date.today()).days
                 if 0 <= days_left <= expire_threshold_days:
-                    # 检查今天是否已经发过到期预警
                     c.execute("SELECT id FROM notify_logs WHERE username=? AND warn_type='expire' AND sent_date=?", (uname, today_str))
                     if not c.fetchone() or force:
                         title = "【到期提醒】您的节点套餐即将到期"
@@ -88,19 +79,16 @@ def run_scheduled_check(force=False) -> tuple[int, int, str]:
     return traffic_sent, expire_sent, f"检测完毕，已成功推送 {traffic_sent} 条流量预警，{expire_sent} 条到期预警"
 
 def scheduled_worker_loop():
-    """后台独立守护线程：按设定的小时间隔自动触发"""
-    time.sleep(15)  # 启动等待网络就绪
+    time.sleep(15)
     while True:
         try:
             interval_hours = int(get_setting("task_interval_hours", "12") or 12)
             run_scheduled_check(force=False)
         except Exception as e:
             print(f"[Task Error] {e}", flush=True)
-        # 轮询休眠 (默认每 12 小时执行一次，最少 1 小时)
         sleep_sec = max(3600, interval_hours * 3600)
         time.sleep(sleep_sec)
 
-# 启动后台守护任务线程 (零额外依赖，轻量安全)
 task_thread = threading.Thread(target=scheduled_worker_loop, daemon=True)
 task_thread.start()
 
@@ -130,6 +118,57 @@ def get_qrcode_svg():
     img.save(buf)
     buf.seek(0)
     return send_file(buf, mimetype='image/svg+xml')
+
+# ==================== 方案 C：第三方发卡系统开放 API ====================
+
+@app.route('/api/open/faka_generate', methods=['GET', 'POST'])
+def open_faka_generate():
+    """
+    供第三方发卡系统（如独角数卡）调用的即时出卡接口
+    支持 GET 或 POST 请求，默认直接输出纯文本卡密，完美适配发卡系统自定义 API 插件
+    """
+    # 鉴权 Token (支持请求头 Authorization 或 Query/Body 传参)
+    req_token = request.headers.get("Authorization") or request.args.get("token")
+    if not req_token and request.is_json:
+        req_token = (request.json or {}).get("token")
+    
+    if req_token and req_token.startswith("Bearer "):
+        req_token = req_token[7:].strip()
+
+    valid_token = get_setting("faka_api_token", Config.FAKA_API_TOKEN).strip()
+    if not req_token or req_token.strip() != valid_token:
+        return jsonify({"code": 403, "msg": "Invalid API Token"}), 403
+
+    # 获取制卡规格 (默认 100GB / 30天)
+    gb_param = request.args.get("gb") or (request.json or {}).get("gb") if request.is_json else None
+    days_param = request.args.get("days") or (request.json or {}).get("days") if request.is_json else None
+
+    try:
+        traffic_gb = int(gb_param or 100)
+        days = int(days_param or 30)
+    except ValueError:
+        traffic_gb, days = 100, 30
+
+    # 生成 16 位大写卡密
+    code = "KM-" + str(uuid.uuid4()).replace("-", "")[:12].upper()
+    now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("INSERT INTO cards VALUES (?, ?, ?, 0, NULL, ?)", (code, traffic_gb, days, now))
+    conn.commit()
+    conn.close()
+
+    # 如果请求指定 format=json，返回 JSON；否则默认返回纯文本（独角数卡等发卡系统通常抓取 response body 作为卡密）
+    if request.args.get("format") == "json":
+        return jsonify({
+            "code": 200,
+            "card": code,
+            "traffic_gb": traffic_gb,
+            "days": days
+        })
+
+    return code, 200, {"Content-Type": "text/plain; charset=utf-8"}
 
 # ==================== 用户认证与安全 ====================
 
@@ -413,7 +452,7 @@ def recharge():
 
     return jsonify({"code": 200, "msg": f"充值成功！增加 {card['traffic_gb']}GB 流量，延长 {card['days']} 天"})
 
-# ==================== 管理员控制台与定时任务调度 ====================
+# ==================== 管理员全量治理路由 ====================
 
 @app.route('/api/admin/cards/generate', methods=['POST'])
 def admin_generate():
@@ -433,6 +472,26 @@ def admin_generate():
     conn.commit()
     conn.close()
     return jsonify({"code": 200, "msg": "制卡成功", "cards": created})
+
+# 方案 B 核心接口：一键导出所有未核销卡密（纯文本换行格式，直接适配独角数卡）
+@app.route('/api/admin/cards/export_unused', methods=['POST'])
+def export_unused_cards():
+    if Config.APP_MODE == 'user': abort(404)
+    data = request.json or {}
+    if not check_admin(data.get('admin_user'), data.get('admin_pwd')):
+        return jsonify({"code": 403, "msg": "无权限"})
+
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("SELECT code FROM cards WHERE is_used=0 ORDER BY rowid DESC")
+    cards = [r["code"] for r in c.fetchall()]
+    conn.close()
+
+    return jsonify({
+        "code": 200,
+        "count": len(cards),
+        "text": "\n".join(cards)
+    })
 
 @app.route('/api/admin/data', methods=['POST'])
 def admin_data():
@@ -538,7 +597,7 @@ def delete_user():
     conn.close()
     return jsonify({"code": 200, "msg": f"用户 [{target_user}] 已被彻底删除"})
 
-# ==================== 管理员 SMTP 与定时任务设置 ====================
+# ==================== 管理员 SMTP 与系统参数设置 ====================
 
 @app.route('/api/admin/settings', methods=['GET', 'POST'])
 def handle_settings():
@@ -556,23 +615,24 @@ def handle_settings():
                 "smtp_pass": get_setting("smtp_pass", ""),
                 "smtp_sender": get_setting("smtp_sender", "Xray 节点运营中心"),
                 "smtp_ssl": get_setting("smtp_ssl", "true"),
-                # 定时任务设置项
                 "task_notify_enable": get_setting("task_notify_enable", "true"),
                 "task_interval_hours": get_setting("task_interval_hours", "12"),
                 "task_traffic_threshold": get_setting("task_traffic_threshold", "80"),
                 "task_expire_days": get_setting("task_expire_days", "3"),
-                "task_last_run": get_setting("task_last_run", "尚未执行")
+                "task_last_run": get_setting("task_last_run", "尚未执行"),
+                "faka_api_token": get_setting("faka_api_token", Config.FAKA_API_TOKEN)
             }
         })
     else:
         data = request.json or {}
         if not check_admin(data.get('admin_user'), data.get('admin_pwd')): return jsonify({"code": 403, "msg": "无权限"})
         keys = ["smtp_host", "smtp_port", "smtp_user", "smtp_pass", "smtp_sender", "smtp_ssl",
-                "task_notify_enable", "task_interval_hours", "task_traffic_threshold", "task_expire_days"]
+                "task_notify_enable", "task_interval_hours", "task_traffic_threshold", "task_expire_days",
+                "faka_api_token"]
         for k in keys:
             if k in data:
                 set_setting(k, str(data[k]).strip())
-        return jsonify({"code": 200, "msg": "发信与定时任务参数已成功保存"})
+        return jsonify({"code": 200, "msg": "配置已成功保存"})
 
 @app.route('/api/admin/test_email', methods=['POST'])
 def test_email():
@@ -587,7 +647,6 @@ def test_email():
         return jsonify({"code": 200, "msg": "测试邮件已成功投递！"})
     return jsonify({"code": 500, "msg": msg})
 
-# 核心新增：管理员一键立即手动触发定时任务检测
 @app.route('/api/admin/tasks/trigger', methods=['POST'])
 def trigger_task_now():
     if Config.APP_MODE == 'user': abort(404)
