@@ -139,7 +139,7 @@
           </div>
         </div>
 
-        <!-- 节点配置与密钥 -->
+        <!-- 节点配置、密钥与开箱即用客户端下载 -->
         <div class="cyber-card col-span-2">
           <div class="card-header">
             <h3>🔗 REALITY 节点订阅凭据</h3>
@@ -155,6 +155,9 @@
           <div class="btn-group">
             <button class="btn-cyber-primary" @click="copyText(currentUser.sub_link)">📋 一键复制节点</button>
             <button class="btn-cyber-action" @click="openQrModal(currentUser.sub_link, currentUser.username)">📱 弹出二维码扫码</button>
+            <button class="btn-cyber-download" :disabled="downloadingClient" @click="downloadWindowsClient">
+              {{ downloadingClient ? '正在打包客户端...' : '🖥️ 下载 Windows 开箱即用客户端' }}
+            </button>
           </div>
         </div>
 
@@ -416,13 +419,13 @@
           </div>
         </div>
 
-        <!-- 选项卡 3: 系统发信与定时任务设置 (核心新增：节点连接域名/IP 配置) -->
+        <!-- 选项卡 3: 系统发信与定时任务设置 (包含节点连接域名/IP 配置) -->
         <div v-else-if="activeTab === 'settings'" class="cyber-card tab-content-card">
           <div class="card-header">
             <h3>⚙️ 节点连接地址、系统发信与定时预警设置</h3>
           </div>
           <div class="settings-grid">
-            <!-- 模块 A: 节点客户端连接地址配置 (核心新增需求) -->
+            <!-- 模块 A: 节点客户端连接地址配置 -->
             <div class="settings-section">
               <h4>🌐 节点客户端连接地址配置 (域名或 IP)</h4>
               <div class="form-item">
@@ -586,6 +589,7 @@ const activeTab = ref('users')
 const authMode = ref('login')
 const countdown = ref(0)
 const sendingCode = ref(false)
+const downloadingClient = ref(false)
 
 const showQrModal = ref(false)
 const targetModalUser = ref('')
@@ -697,6 +701,7 @@ const generateRandomToken = () => {
   ElMessage.success('已随机生成新出卡 Token，请记得点击保存')
 }
 
+// 统一导出底层
 const executeExport = async (payload, successTip) => {
   try {
     const res = await axios.post('/api/admin/cards/export_unused', {
@@ -971,6 +976,25 @@ const submitChangePassword = async () => {
   }
 }
 
+// 下载开箱即用 Windows 客户端
+const downloadWindowsClient = () => {
+  if (!currentUser.username) return ElMessage.warning('用户未就绪')
+  downloadingClient.value = true
+  ElMessage.info('系统正在为您实时调取核心并组装专属配置，请稍候...')
+
+  const downloadUrl = `/api/user/download_client?username=${encodeURIComponent(currentUser.username)}`
+  const a = document.createElement('a')
+  a.href = downloadUrl
+  a.download = `Xray_Windows_${currentUser.username}.zip`
+  document.body.appendChild(a)
+  a.click()
+  document.body.removeChild(a)
+
+  setTimeout(() => {
+    downloadingClient.value = false
+  }, 3000)
+}
+
 const openSettingsTab = async () => {
   activeTab.value = 'settings'
   try {
@@ -1177,7 +1201,6 @@ const logout = () => location.reload()
 .dashboard-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
 .col-span-2 { grid-column: span 2; }
 
-/* 选项卡导航 */
 .admin-wrapper { width: 100%; }
 .card-tabs-nav {
   display: flex;
@@ -1239,7 +1262,6 @@ const logout = () => location.reload()
 .card-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; }
 .card-header h3 { margin: 0; font-size: 16px; color: #f1f5f9; }
 
-/* 导出工具栏增强样式 */
 .export-toolbar {
   background: #0a0f1d;
   border: 1px solid #1e293b;
@@ -1313,6 +1335,27 @@ const logout = () => location.reload()
 .btn-cyber-action { background: #334155; color: white; border: none; padding: 10px 20px; border-radius: 6px; cursor: pointer; white-space: nowrap; }
 .btn-cyber-refresh { background: transparent; border: 1px solid #38bdf8; color: #38bdf8; padding: 5px 12px; border-radius: 6px; cursor: pointer; font-size: 12px; }
 
+/* Windows 专属下载按钮 */
+.btn-cyber-download {
+  background: linear-gradient(135deg, #10b981, #059669);
+  color: white;
+  border: none;
+  padding: 10px 18px;
+  border-radius: 6px;
+  font-weight: 700;
+  cursor: pointer;
+  white-space: nowrap;
+  box-shadow: 0 0 10px rgba(16, 185, 129, 0.3);
+}
+.btn-cyber-download:hover {
+  background: linear-gradient(135deg, #059669, #047857);
+  box-shadow: 0 0 15px rgba(16, 185, 129, 0.5);
+}
+.btn-cyber-download:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 .node-field { margin-bottom: 14px; }
 .node-field label { display: block; font-size: 12px; color: #94a3b8; margin-bottom: 6px; }
 .code-display {
@@ -1321,7 +1364,7 @@ const logout = () => location.reload()
 }
 .text-green { color: #34d399; font-weight: bold; }
 .text-cyan { color: #38bdf8; }
-.btn-group { display: flex; gap: 12px; margin-top: 16px; }
+.btn-group { display: flex; gap: 12px; margin-top: 16px; flex-wrap: wrap; }
 
 .settings-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; margin-top: 10px; }
 .settings-section { background: #0a0f1d; border: 1px solid #1e293b; padding: 20px; border-radius: 8px; }
@@ -1351,7 +1394,6 @@ const logout = () => location.reload()
 .role-badge.user { background: #2563eb; color: white; }
 .btn-logout { background: transparent; border: 1px solid #475569; color: #94a3b8; padding: 4px 10px; border-radius: 4px; cursor: pointer; }
 
-/* 按钮组 */
 .action-btn-row { display: flex; gap: 6px; align-items: center; }
 .btn-sm { padding: 4px 8px; font-size: 11px; border-radius: 4px; border: none; cursor: pointer; white-space: nowrap; }
 .btn-action { background: #0284c7; color: white; }

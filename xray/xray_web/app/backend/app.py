@@ -19,10 +19,11 @@ from xray import (
     get_connection_host
 )
 from notify import send_smtp_email, send_serverchan_msg, notify_user
+from client_pack import generate_windows_package
 
 app = Flask(__name__, static_folder='../frontend/dist', static_url_path='/')
 
-# 1. 初始化数据库表结构
+# 1. 数据库初始化 (自动完成字段热迁移)
 init_db()
 
 # 2. 开机全量同步：服务启动瞬间把数据库中所有有效用户写入 Xray 的 config.json 并补全 stats/api
@@ -52,6 +53,7 @@ def run_scheduled_check(force=False) -> tuple[int, int, str]:
         used_mb = query_user_traffic(uname)
         limit_mb = u.get("traffic_limit_mb", 1024)
 
+        # 1. 流量预警
         if limit_mb > 0:
             used_percent = round((used_mb / limit_mb) * 100, 1)
             if used_percent >= traffic_threshold:
@@ -66,6 +68,7 @@ def run_scheduled_check(force=False) -> tuple[int, int, str]:
                         c.execute("INSERT INTO notify_logs (username, warn_type, sent_date) VALUES (?, 'traffic', ?)", (uname, today_str))
                         conn.commit()
 
+        # 2. 到期预警
         exp_str = u.get("expire_date", "").strip()
         if exp_str:
             try:
@@ -178,7 +181,7 @@ def open_faka_generate():
 
     return code, 200, {"Content-Type": "text/plain; charset=utf-8"}
 
-# ==================== 用户认证与安全 ====================
+# ==================== 用户认证与安全 (注册 / 登录 / 找回 / 改密) ====================
 
 @app.route('/api/auth/send_register_code', methods=['POST'])
 def send_register_code():
@@ -248,7 +251,7 @@ def register():
         conn.commit()
         conn.close()
 
-        # 核心联动：新用户注册成功，立刻同步至 Xray 核心生效
+        # 新用户注册成功，全量同步写入 Xray 核心 clients
         sync_users_to_xray()
 
         return jsonify({"code": 200, "msg": "账号已成功激活注册，已获赠 1GB 体验套餐"})
@@ -352,7 +355,6 @@ def login():
         return jsonify({"code": 403, "msg": "当前节点为纯用户端模式，已屏蔽管理员登录"})
 
     used_mb = query_user_traffic(user['username'])
-    # 动态抓取当前 Xray 正在运行的真实参数（自动识别后台自定义域名或外网 IP）
     params = get_xray_reality_params()
     link = build_vless_link(user['uuid'], params['pbk'], f"{user['username']}-Reality")
 
@@ -432,6 +434,36 @@ def user_test_notify():
     if ok:
         return jsonify({"code": 200, "msg": "测试消息发送成功，请前往查收"})
     return jsonify({"code": 500, "msg": msg})
+
+# 用户专属 Windows 客户端开箱即用打包下载
+@app.route('/api/user/download_client', methods=['GET'])
+def download_windows_client():
+    account = request.args.get('username', '').strip()
+    if not account:
+        abort(400)
+
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("SELECT * FROM users WHERE username=? OR email=?", (account, account))
+    user = c.fetchone()
+    conn.close()
+
+    if not user:
+        return jsonify({"code": 404, "msg": "未找到指定用户"}), 404
+    if user['status'] == 0:
+        return jsonify({"code": 403, "msg": "账号已被停用，禁止下载凭据"}), 403
+
+    try:
+        mem_file = generate_windows_package(dict(user))
+        filename = f"Xray_Windows_{user['username']}.zip"
+        return send_file(
+            mem_file,
+            as_attachment=True,
+            download_name=filename,
+            mimetype='application/zip'
+        )
+    except Exception as e:
+        return jsonify({"code": 500, "msg": f"客户端构建失败: {str(e)}"}), 500
 
 # ==================== 卡密充值 ====================
 
@@ -545,7 +577,6 @@ def admin_data():
         d = dict(r)
         d['used_mb'] = query_user_traffic(d['username'])
         d['status'] = 1 if d.get('status') is None else d['status']
-        # 为每一个用户自动拼装当前节点最新的真实 Reality 连接 (包含自定义域名与真实公钥)
         d['sub_link'] = build_vless_link(d['uuid'], params['pbk'], f"{d['username']}-Reality")
         users.append(d)
     conn.close()
@@ -597,7 +628,6 @@ def update_user_status():
     conn.commit()
     conn.close()
 
-    # 核心联动：封禁或解封后，立即同步 Xray 允许名单
     sync_users_to_xray()
 
     return jsonify({"code": 200, "msg": f"用户 [{target_user}] 状态已更新"})
@@ -635,12 +665,11 @@ def delete_user():
     conn.commit()
     conn.close()
 
-    # 核心联动：删除用户后，立刻从 Xray clients 中剔除
     sync_users_to_xray()
 
     return jsonify({"code": 200, "msg": f"用户 [{target_user}] 已被彻底删除"})
 
-# ==================== 管理员 SMTP 与系统参数设置 (含自定义域名/IP) ====================
+# ==================== 管理员 SMTP 与系统参数设置 ====================
 
 @app.route('/api/admin/settings', methods=['GET', 'POST'])
 def handle_settings():
@@ -665,7 +694,6 @@ def handle_settings():
                 "task_last_run": get_setting("task_last_run", "尚未执行"),
                 "faka_api_enable": get_setting("faka_api_enable", "true"),
                 "faka_api_token": get_setting("faka_api_token", Config.FAKA_API_TOKEN),
-                # 核心新增：客户端自定义连接地址 (域名或 IP)
                 "custom_host": get_setting("custom_host", "")
             }
         })
