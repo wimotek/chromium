@@ -10,15 +10,22 @@ import qrcode.image.svg
 from flask import Flask, request, jsonify, send_from_directory, abort, send_file
 from config import Config
 from db import init_db, get_db, hash_pwd, get_setting, set_setting
-from xray import get_reality_public_key, query_user_traffic, build_vless_link, sync_users_to_xray, get_xray_reality_params
+from xray import (
+    get_reality_public_key,
+    query_user_traffic,
+    build_vless_link,
+    sync_users_to_xray,
+    get_xray_reality_params,
+    get_connection_host
+)
 from notify import send_smtp_email, send_serverchan_msg, notify_user
 
 app = Flask(__name__, static_folder='../frontend/dist', static_url_path='/')
 
-# 1. 初始化数据库表结构（自动完成字段热迁移）
+# 1. 初始化数据库表结构
 init_db()
 
-# 2. 开机全量同步：服务启动瞬间把数据库中所有有效用户写入 Xray 的 config.json
+# 2. 开机全量同步：服务启动瞬间把数据库中所有有效用户写入 Xray 的 config.json 并补全 stats/api
 sync_users_to_xray()
 
 # ==================== 定时自动检测与推送引擎 ====================
@@ -124,7 +131,7 @@ def get_qrcode_svg():
     buf.seek(0)
     return send_file(buf, mimetype='image/svg+xml')
 
-# ==================== 第三方发卡系统开放 API ====================
+# ==================== 方案 C：第三方发卡系统开放 API ====================
 
 @app.route('/api/open/faka_generate', methods=['GET', 'POST'])
 def open_faka_generate():
@@ -241,7 +248,7 @@ def register():
         conn.commit()
         conn.close()
 
-        # 核心联动：新用户注册成功，立即将其全量同步进 Xray 的 config.json 鉴权名单
+        # 核心联动：新用户注册成功，立刻同步至 Xray 核心生效
         sync_users_to_xray()
 
         return jsonify({"code": 200, "msg": "账号已成功激活注册，已获赠 1GB 体验套餐"})
@@ -345,7 +352,7 @@ def login():
         return jsonify({"code": 403, "msg": "当前节点为纯用户端模式，已屏蔽管理员登录"})
 
     used_mb = query_user_traffic(user['username'])
-    # 动态抓取当前 Xray 正在运行的真实参数（解决公钥空与 sid 不一致问题）
+    # 动态抓取当前 Xray 正在运行的真实参数（自动识别后台自定义域名或外网 IP）
     params = get_xray_reality_params()
     link = build_vless_link(user['uuid'], params['pbk'], f"{user['username']}-Reality")
 
@@ -538,7 +545,7 @@ def admin_data():
         d = dict(r)
         d['used_mb'] = query_user_traffic(d['username'])
         d['status'] = 1 if d.get('status') is None else d['status']
-        # 为每一个用户自动拼装当前节点最新的真实 Reality 连接
+        # 为每一个用户自动拼装当前节点最新的真实 Reality 连接 (包含自定义域名与真实公钥)
         d['sub_link'] = build_vless_link(d['uuid'], params['pbk'], f"{d['username']}-Reality")
         users.append(d)
     conn.close()
@@ -590,7 +597,7 @@ def update_user_status():
     conn.commit()
     conn.close()
 
-    # 核心联动：用户状态改变，立即全量同步 Xray 配置（封禁用户立刻从 clients 移除）
+    # 核心联动：封禁或解封后，立即同步 Xray 允许名单
     sync_users_to_xray()
 
     return jsonify({"code": 200, "msg": f"用户 [{target_user}] 状态已更新"})
@@ -628,12 +635,12 @@ def delete_user():
     conn.commit()
     conn.close()
 
-    # 核心联动：用户被删除，立即同步移除 Xray clients
+    # 核心联动：删除用户后，立刻从 Xray clients 中剔除
     sync_users_to_xray()
 
     return jsonify({"code": 200, "msg": f"用户 [{target_user}] 已被彻底删除"})
 
-# ==================== 管理员 SMTP 与系统参数设置 ====================
+# ==================== 管理员 SMTP 与系统参数设置 (含自定义域名/IP) ====================
 
 @app.route('/api/admin/settings', methods=['GET', 'POST'])
 def handle_settings():
@@ -657,7 +664,9 @@ def handle_settings():
                 "task_expire_days": get_setting("task_expire_days", "3"),
                 "task_last_run": get_setting("task_last_run", "尚未执行"),
                 "faka_api_enable": get_setting("faka_api_enable", "true"),
-                "faka_api_token": get_setting("faka_api_token", Config.FAKA_API_TOKEN)
+                "faka_api_token": get_setting("faka_api_token", Config.FAKA_API_TOKEN),
+                # 核心新增：客户端自定义连接地址 (域名或 IP)
+                "custom_host": get_setting("custom_host", "")
             }
         })
     else:
@@ -665,7 +674,7 @@ def handle_settings():
         if not check_admin(data.get('admin_user'), data.get('admin_pwd')): return jsonify({"code": 403, "msg": "无权限"})
         keys = ["smtp_host", "smtp_port", "smtp_user", "smtp_pass", "smtp_sender", "smtp_ssl",
                 "task_notify_enable", "task_interval_hours", "task_traffic_threshold", "task_expire_days",
-                "faka_api_enable", "faka_api_token"]
+                "faka_api_enable", "faka_api_token", "custom_host"]
         for k in keys:
             if k in data:
                 set_setting(k, str(data[k]).strip())

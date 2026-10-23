@@ -139,6 +139,7 @@
           </div>
         </div>
 
+        <!-- 节点配置与密钥 -->
         <div class="cyber-card col-span-2">
           <div class="card-header">
             <h3>🔗 REALITY 节点订阅凭据</h3>
@@ -157,6 +158,7 @@
           </div>
         </div>
 
+        <!-- 用户通知偏好与安全设置 -->
         <div class="cyber-card col-span-2">
           <div class="card-header">
             <h3>🔔 告警通知偏好与安全中心</h3>
@@ -235,7 +237,7 @@
             <span class="tab-icon">⚙️</span>
             <div class="tab-text">
               <div class="tab-title">系统发信与定时任务设置</div>
-              <div class="tab-sub">SMTP 配置、定时流量到期提醒与发卡令牌</div>
+              <div class="tab-sub">节点域名设置、SMTP 配置、定时提醒</div>
             </div>
             <span class="count-tag">配置</span>
           </button>
@@ -414,14 +416,26 @@
           </div>
         </div>
 
-        <!-- 选项卡 3: 系统发信与定时任务设置 -->
+        <!-- 选项卡 3: 系统发信与定时任务设置 (核心新增：节点连接域名/IP 配置) -->
         <div v-else-if="activeTab === 'settings'" class="cyber-card tab-content-card">
           <div class="card-header">
-            <h3>⚙️ 系统发信、定时预警与系统参数设置</h3>
+            <h3>⚙️ 节点连接地址、系统发信与定时预警设置</h3>
           </div>
           <div class="settings-grid">
+            <!-- 模块 A: 节点客户端连接地址配置 (核心新增需求) -->
             <div class="settings-section">
-              <h4>⏰ 定时自动检测与通知推送任务</h4>
+              <h4>🌐 节点客户端连接地址配置 (域名或 IP)</h4>
+              <div class="form-item">
+                <label>自定义节点连接地址 (域名或 IP)</label>
+                <input v-model="settingsForm.custom_host" type="text" class="cyber-input" placeholder="留空则自动获取公网 IP" />
+                <span class="input-hint">
+                  💡 默认为空。可输入您解析到本机的专属域名（如 <code>hk.node.com</code>）或中转 IP。<br>
+                  <b>清空该输入框并保存时，系统将全自动恢复为自动检测的公网 IP。</b>
+                </span>
+              </div>
+              <button class="btn-cyber-success" style="margin-top: 10px;" @click="saveAllSettings">保存连接地址</button>
+
+              <h4 style="margin-top: 30px;">⏰ 定时自动检测与通知推送任务</h4>
               <div class="form-item">
                 <label class="radio-label">
                   <input type="checkbox" v-model="settingsForm.task_notify_enable" /> 启用后台定时自动轮询与智能预警
@@ -455,6 +469,7 @@
               </div>
             </div>
 
+            <!-- 模块 B: SMTP 邮件配置 -->
             <div class="settings-section">
               <h4>📧 SMTP 邮件服务器参数配置</h4>
               <div class="form-item">
@@ -606,7 +621,8 @@ const settingsForm = reactive({
   task_expire_days: 3,
   task_last_run: '尚未执行',
   faka_api_enable: true,
-  faka_api_token: 'faka_secret_token_8899'
+  faka_api_token: 'faka_secret_token_8899',
+  custom_host: ''
 })
 
 const testEmailTo = ref('')
@@ -681,7 +697,6 @@ const generateRandomToken = () => {
   ElMessage.success('已随机生成新出卡 Token，请记得点击保存')
 }
 
-// 统一导出底层
 const executeExport = async (payload, successTip) => {
   try {
     const res = await axios.post('/api/admin/cards/export_unused', {
@@ -718,7 +733,6 @@ const exportByDateRange = () => {
   }, '已导出指定日期范围内的未售卡密')
 }
 
-// 唯一保留的全部未售卡密导出函数 (彻底消除重复定义)
 const exportAllUnusedCards = () => {
   executeExport({}, '已复制全部未售卡密')
 }
@@ -976,6 +990,7 @@ const openSettingsTab = async () => {
       settingsForm.task_last_run = d.task_last_run || '尚未执行'
       settingsForm.faka_api_enable = d.faka_api_enable === 'true'
       settingsForm.faka_api_token = d.faka_api_token || 'faka_secret_token_8899'
+      settingsForm.custom_host = d.custom_host || ''
     }
   } catch (_) {}
 }
