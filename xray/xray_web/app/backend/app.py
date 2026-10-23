@@ -10,11 +10,16 @@ import qrcode.image.svg
 from flask import Flask, request, jsonify, send_from_directory, abort, send_file
 from config import Config
 from db import init_db, get_db, hash_pwd, get_setting, set_setting
-from xray import get_reality_public_key, query_user_traffic, build_vless_link
+from xray import get_reality_public_key, query_user_traffic, build_vless_link, sync_users_to_xray, get_xray_reality_params
 from notify import send_smtp_email, send_serverchan_msg, notify_user
 
 app = Flask(__name__, static_folder='../frontend/dist', static_url_path='/')
+
+# 1. 初始化数据库表结构（自动完成字段热迁移）
 init_db()
+
+# 2. 开机全量同步：服务启动瞬间把数据库中所有有效用户写入 Xray 的 config.json
+sync_users_to_xray()
 
 # ==================== 定时自动检测与推送引擎 ====================
 
@@ -119,20 +124,14 @@ def get_qrcode_svg():
     buf.seek(0)
     return send_file(buf, mimetype='image/svg+xml')
 
-# ==================== 方案 C：第三方发卡系统开放 API ====================
+# ==================== 第三方发卡系统开放 API ====================
 
 @app.route('/api/open/faka_generate', methods=['GET', 'POST'])
 def open_faka_generate():
-    """
-    供第三方发卡系统调用的即时出卡接口
-    可由后台开关控制是否启用；携带有效 Token 校验通过后现场生成一张卡密
-    """
-    # 1. 检查是否开启发卡 API
     is_enabled = get_setting("faka_api_enable", "true").lower() == "true"
     if not is_enabled:
         return jsonify({"code": 403, "msg": "第三方发卡 API 接口已被管理员禁用"}), 403
 
-    # 2. 校验 Token
     req_token = request.headers.get("Authorization") or request.args.get("token")
     if not req_token and request.is_json:
         req_token = (request.json or {}).get("token")
@@ -144,7 +143,6 @@ def open_faka_generate():
     if not req_token or req_token.strip() != valid_token:
         return jsonify({"code": 403, "msg": "Invalid API Token"}), 403
 
-    # 3. 提取制卡规格
     gb_param = request.args.get("gb") or (request.json or {}).get("gb") if request.is_json else None
     days_param = request.args.get("days") or (request.json or {}).get("days") if request.is_json else None
 
@@ -242,6 +240,10 @@ def register():
         c.execute("DELETE FROM verify_codes WHERE email=?", (email,))
         conn.commit()
         conn.close()
+
+        # 核心联动：新用户注册成功，立即将其全量同步进 Xray 的 config.json 鉴权名单
+        sync_users_to_xray()
+
         return jsonify({"code": 200, "msg": "账号已成功激活注册，已获赠 1GB 体验套餐"})
     except Exception as e:
         conn.close()
@@ -343,8 +345,9 @@ def login():
         return jsonify({"code": 403, "msg": "当前节点为纯用户端模式，已屏蔽管理员登录"})
 
     used_mb = query_user_traffic(user['username'])
-    pbk = get_reality_public_key()
-    link = build_vless_link(user['uuid'], pbk, f"{user['username']}-Reality")
+    # 动态抓取当前 Xray 正在运行的真实参数（解决公钥空与 sid 不一致问题）
+    params = get_xray_reality_params()
+    link = build_vless_link(user['uuid'], params['pbk'], f"{user['username']}-Reality")
 
     return jsonify({
         "code": 200,
@@ -355,7 +358,7 @@ def login():
             "used_mb": used_mb,
             "limit_mb": user['traffic_limit_mb'],
             "expire_date": user['expire_date'],
-            "public_key": pbk,
+            "public_key": params['pbk'],
             "sub_link": link,
             "notify_type": user['notify_type'] or 'email',
             "serverchan_key": user['serverchan_key'] or ''
@@ -476,7 +479,6 @@ def admin_generate():
     conn.close()
     return jsonify({"code": 200, "msg": "制卡成功", "cards": created})
 
-# 核心升级：支持日期范围筛选与多选导出的高级卡密导出接口
 @app.route('/api/admin/cards/export_unused', methods=['POST'])
 def export_unused_cards():
     if Config.APP_MODE == 'user': abort(404)
@@ -491,12 +493,10 @@ def export_unused_cards():
     conn = get_db()
     c = conn.cursor()
 
-    # 1. 如果用户手动勾选了卡密，直接导出选中的
     if selected_codes and len(selected_codes) > 0:
         placeholders = ','.join(['?'] * len(selected_codes))
         sql = f"SELECT code FROM cards WHERE code IN ({placeholders}) ORDER BY rowid DESC"
         c.execute(sql, selected_codes)
-    # 2. 如果指定了日期范围 (按 YYYY-MM-DD 筛选)
     elif start_date or end_date:
         query_parts = ["is_used=0"]
         params = []
@@ -508,7 +508,6 @@ def export_unused_cards():
             params.append(end_date)
         sql = f"SELECT code FROM cards WHERE {' AND '.join(query_parts)} ORDER BY rowid DESC"
         c.execute(sql, params)
-    # 3. 默认导出全部未核销卡密
     else:
         c.execute("SELECT code FROM cards WHERE is_used=0 ORDER BY rowid DESC")
 
@@ -527,10 +526,9 @@ def admin_data():
     data = request.json or {}
     if not check_admin(data.get('admin_user'), data.get('admin_pwd')): return jsonify({"code": 403, "msg": "无权限"})
 
-    pbk = get_reality_public_key()
+    params = get_xray_reality_params()
     conn = get_db()
     c = conn.cursor()
-    # 返回完整卡密字段 (含生成时间 created_at)
     c.execute("SELECT code, traffic_gb, days, is_used, used_by, created_at FROM cards ORDER BY rowid DESC LIMIT 200")
     cards = [dict(r) for r in c.fetchall()]
 
@@ -540,7 +538,8 @@ def admin_data():
         d = dict(r)
         d['used_mb'] = query_user_traffic(d['username'])
         d['status'] = 1 if d.get('status') is None else d['status']
-        d['sub_link'] = build_vless_link(d['uuid'], pbk, f"{d['username']}-Reality")
+        # 为每一个用户自动拼装当前节点最新的真实 Reality 连接
+        d['sub_link'] = build_vless_link(d['uuid'], params['pbk'], f"{d['username']}-Reality")
         users.append(d)
     conn.close()
     return jsonify({"code": 200, "cards": cards, "users": users})
@@ -590,6 +589,10 @@ def update_user_status():
     c.execute("UPDATE users SET status=? WHERE username=?", (status, target_user))
     conn.commit()
     conn.close()
+
+    # 核心联动：用户状态改变，立即全量同步 Xray 配置（封禁用户立刻从 clients 移除）
+    sync_users_to_xray()
+
     return jsonify({"code": 200, "msg": f"用户 [{target_user}] 状态已更新"})
 
 @app.route('/api/admin/users/edit', methods=['POST'])
@@ -624,6 +627,10 @@ def delete_user():
     c.execute("DELETE FROM users WHERE username=?", (target_user,))
     conn.commit()
     conn.close()
+
+    # 核心联动：用户被删除，立即同步移除 Xray clients
+    sync_users_to_xray()
+
     return jsonify({"code": 200, "msg": f"用户 [{target_user}] 已被彻底删除"})
 
 # ==================== 管理员 SMTP 与系统参数设置 ====================
