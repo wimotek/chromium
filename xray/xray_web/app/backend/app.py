@@ -124,14 +124,19 @@ def get_qrcode_svg():
 @app.route('/api/open/faka_generate', methods=['GET', 'POST'])
 def open_faka_generate():
     """
-    供第三方发卡系统（如独角数卡）调用的即时出卡接口
-    支持 GET 或 POST 请求，默认直接输出纯文本卡密，完美适配发卡系统自定义 API 插件
+    供第三方发卡系统调用的即时出卡接口
+    可由后台开关控制是否启用；携带有效 Token 校验通过后现场生成一张卡密
     """
-    # 鉴权 Token (支持请求头 Authorization 或 Query/Body 传参)
+    # 1. 检查是否开启发卡 API
+    is_enabled = get_setting("faka_api_enable", "true").lower() == "true"
+    if not is_enabled:
+        return jsonify({"code": 403, "msg": "第三方发卡 API 接口已被管理员禁用"}), 403
+
+    # 2. 校验 Token
     req_token = request.headers.get("Authorization") or request.args.get("token")
     if not req_token and request.is_json:
         req_token = (request.json or {}).get("token")
-    
+
     if req_token and req_token.startswith("Bearer "):
         req_token = req_token[7:].strip()
 
@@ -139,7 +144,7 @@ def open_faka_generate():
     if not req_token or req_token.strip() != valid_token:
         return jsonify({"code": 403, "msg": "Invalid API Token"}), 403
 
-    # 获取制卡规格 (默认 100GB / 30天)
+    # 3. 提取制卡规格
     gb_param = request.args.get("gb") or (request.json or {}).get("gb") if request.is_json else None
     days_param = request.args.get("days") or (request.json or {}).get("days") if request.is_json else None
 
@@ -149,9 +154,8 @@ def open_faka_generate():
     except ValueError:
         traffic_gb, days = 100, 30
 
-    # 生成 16 位大写卡密
     code = "KM-" + str(uuid.uuid4()).replace("-", "")[:12].upper()
-    now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+    now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     conn = get_db()
     c = conn.cursor()
@@ -159,7 +163,6 @@ def open_faka_generate():
     conn.commit()
     conn.close()
 
-    # 如果请求指定 format=json，返回 JSON；否则默认返回纯文本（独角数卡等发卡系统通常抓取 response body 作为卡密）
     if request.args.get("format") == "json":
         return jsonify({
             "code": 200,
@@ -462,7 +465,7 @@ def admin_generate():
 
     conn = get_db()
     c = conn.cursor()
-    now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+    now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     created = []
     for _ in range(int(data.get('count', 5))):
         code = "KM-" + str(uuid.uuid4()).replace("-", "")[:12].upper()
@@ -473,7 +476,7 @@ def admin_generate():
     conn.close()
     return jsonify({"code": 200, "msg": "制卡成功", "cards": created})
 
-# 方案 B 核心接口：一键导出所有未核销卡密（纯文本换行格式，直接适配独角数卡）
+# 核心升级：支持日期范围筛选与多选导出的高级卡密导出接口
 @app.route('/api/admin/cards/export_unused', methods=['POST'])
 def export_unused_cards():
     if Config.APP_MODE == 'user': abort(404)
@@ -481,9 +484,34 @@ def export_unused_cards():
     if not check_admin(data.get('admin_user'), data.get('admin_pwd')):
         return jsonify({"code": 403, "msg": "无权限"})
 
+    selected_codes = data.get("selected_codes", [])
+    start_date = data.get("start_date", "").strip()
+    end_date = data.get("end_date", "").strip()
+
     conn = get_db()
     c = conn.cursor()
-    c.execute("SELECT code FROM cards WHERE is_used=0 ORDER BY rowid DESC")
+
+    # 1. 如果用户手动勾选了卡密，直接导出选中的
+    if selected_codes and len(selected_codes) > 0:
+        placeholders = ','.join(['?'] * len(selected_codes))
+        sql = f"SELECT code FROM cards WHERE code IN ({placeholders}) ORDER BY rowid DESC"
+        c.execute(sql, selected_codes)
+    # 2. 如果指定了日期范围 (按 YYYY-MM-DD 筛选)
+    elif start_date or end_date:
+        query_parts = ["is_used=0"]
+        params = []
+        if start_date:
+            query_parts.append("substr(created_at, 1, 10) >= ?")
+            params.append(start_date)
+        if end_date:
+            query_parts.append("substr(created_at, 1, 10) <= ?")
+            params.append(end_date)
+        sql = f"SELECT code FROM cards WHERE {' AND '.join(query_parts)} ORDER BY rowid DESC"
+        c.execute(sql, params)
+    # 3. 默认导出全部未核销卡密
+    else:
+        c.execute("SELECT code FROM cards WHERE is_used=0 ORDER BY rowid DESC")
+
     cards = [r["code"] for r in c.fetchall()]
     conn.close()
 
@@ -502,7 +530,8 @@ def admin_data():
     pbk = get_reality_public_key()
     conn = get_db()
     c = conn.cursor()
-    c.execute("SELECT * FROM cards ORDER BY rowid DESC LIMIT 100")
+    # 返回完整卡密字段 (含生成时间 created_at)
+    c.execute("SELECT code, traffic_gb, days, is_used, used_by, created_at FROM cards ORDER BY rowid DESC LIMIT 200")
     cards = [dict(r) for r in c.fetchall()]
 
     c.execute("SELECT username, email, traffic_limit_mb, expire_date, role, uuid, status, notify_type FROM users")
@@ -620,6 +649,7 @@ def handle_settings():
                 "task_traffic_threshold": get_setting("task_traffic_threshold", "80"),
                 "task_expire_days": get_setting("task_expire_days", "3"),
                 "task_last_run": get_setting("task_last_run", "尚未执行"),
+                "faka_api_enable": get_setting("faka_api_enable", "true"),
                 "faka_api_token": get_setting("faka_api_token", Config.FAKA_API_TOKEN)
             }
         })
@@ -628,7 +658,7 @@ def handle_settings():
         if not check_admin(data.get('admin_user'), data.get('admin_pwd')): return jsonify({"code": 403, "msg": "无权限"})
         keys = ["smtp_host", "smtp_port", "smtp_user", "smtp_pass", "smtp_sender", "smtp_ssl",
                 "task_notify_enable", "task_interval_hours", "task_traffic_threshold", "task_expire_days",
-                "faka_api_token"]
+                "faka_api_enable", "faka_api_token"]
         for k in keys:
             if k in data:
                 set_setting(k, str(data[k]).strip())
