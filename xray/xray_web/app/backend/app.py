@@ -39,15 +39,15 @@ def get_qrcode_svg():
     buf.seek(0)
     return send_file(buf, mimetype='image/svg+xml')
 
-# ==================== 用户认证与安全 ====================
+# ==================== 用户认证体系 (注册 / 登录 / 找回 / 修改) ====================
 
-# 1. 注册获取邮箱验证码
+# 1. 注册验证码发送
 @app.route('/api/auth/send_register_code', methods=['POST'])
 def send_register_code():
     data = request.json or {}
     email = data.get('email', '').strip().lower()
     if not email or '@' not in email:
-        return jsonify({"code": 400, "msg": "请输入合法的邮箱地址"})
+        return jsonify({"code": 400, "msg": "请输入合法的电子邮箱"})
 
     conn = get_db()
     c = conn.cursor()
@@ -56,13 +56,11 @@ def send_register_code():
         conn.close()
         return jsonify({"code": 400, "msg": "该邮箱已被注册"})
 
-    # 生成 6 位随机数字验证码
     code = f"{random.randint(100000, 999999)}"
     c.execute("INSERT INTO verify_codes (email, code) VALUES (?, ?)", (email, code))
     conn.commit()
     conn.close()
 
-    # 发送验证邮件
     content = f"""
     <div style="font-family: sans-serif; background: #0f172a; color: #f8fafc; padding: 25px; border-radius: 8px;">
         <h2 style="color: #38bdf8;">⚡ Xray Reality 账号激活验证</h2>
@@ -75,9 +73,9 @@ def send_register_code():
     if not success:
         return jsonify({"code": 500, "msg": msg})
 
-    return jsonify({"code": 200, "msg": "验证码已成功发送至您的邮箱，请查收"})
+    return jsonify({"code": 200, "msg": "激活验证码已发送至您的邮箱，请查收"})
 
-# 2. 注册账号 (校验验证码)
+# 2. 注册账号 (验证码核验)
 @app.route('/api/register', methods=['POST'])
 def register():
     if Config.APP_MODE == 'admin':
@@ -94,14 +92,12 @@ def register():
 
     conn = get_db()
     c = conn.cursor()
-    # 校验验证码 (匹配最新一条且 10 分钟内有效)
-    c.execute("SELECT code, created_at FROM verify_codes WHERE email=? ORDER BY id DESC LIMIT 1", (email,))
+    c.execute("SELECT code FROM verify_codes WHERE email=? ORDER BY id DESC LIMIT 1", (email,))
     row = c.fetchone()
     if not row or row["code"] != code:
         conn.close()
         return jsonify({"code": 400, "msg": "验证码错误或已失效"})
 
-    # 查重
     c.execute("SELECT id FROM users WHERE username=? OR email=?", (u, email))
     if c.fetchone():
         conn.close()
@@ -111,7 +107,6 @@ def register():
     try:
         c.execute("INSERT INTO users (username, password_hash, uuid, email, traffic_limit_mb, expire_date, role, status, is_verified) VALUES (?, ?, ?, ?, 1024, ?, 'user', 1, 1)",
                   (u, hash_pwd(p), str(uuid.uuid4()), email, exp))
-        # 激活后清空该邮箱的历史验证码
         c.execute("DELETE FROM verify_codes WHERE email=?", (email,))
         conn.commit()
         conn.close()
@@ -120,7 +115,81 @@ def register():
         conn.close()
         return jsonify({"code": 500, "msg": f"数据库写入失败: {str(e)}"})
 
-# 3. 登录 (支持用户名 或 邮箱)
+# 3. 忘记密码 - 发送重置验证码
+@app.route('/api/auth/send_reset_code', methods=['POST'])
+def send_reset_code():
+    data = request.json or {}
+    email = data.get('email', '').strip().lower()
+    if not email or '@' not in email:
+        return jsonify({"code": 400, "msg": "请输入合法的电子邮箱"})
+
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("SELECT id, username FROM users WHERE email=?", (email,))
+    user = c.fetchone()
+    if not user:
+        conn.close()
+        return jsonify({"code": 404, "msg": "该邮箱尚未绑定任何已注册的账号"})
+
+    code = f"{random.randint(100000, 999999)}"
+    c.execute("INSERT INTO verify_codes (email, code) VALUES (?, ?)", (email, code))
+    conn.commit()
+    conn.close()
+
+    content = f"""
+    <div style="font-family: sans-serif; background: #0f172a; color: #f8fafc; padding: 25px; border-radius: 8px;">
+        <h2 style="color: #38bdf8;">🔐 Xray Reality 密码重置验证</h2>
+        <p>您好 <b>{user['username']}</b>！您正在申请找回并重置登录密码。</p>
+        <p>您的重置验证码为：<b style="font-size: 24px; color: #f59e0b; letter-spacing: 2px;">{code}</b></p>
+        <p style="color: #94a3b8; font-size: 12px;">验证码 10 分钟内有效。如非本人操作，请立刻检查您的邮箱安全！</p>
+    </div>
+    """
+    success, msg = send_smtp_email(email, "【Xray】找回登录密码验证码", content)
+    if not success:
+        return jsonify({"code": 500, "msg": msg})
+
+    return jsonify({"code": 200, "msg": "密码重置验证码已发送至您的邮箱，请查收"})
+
+# 4. 忘记密码 - 校验验证码并直接重置新密码
+@app.route('/api/auth/reset_password', methods=['POST'])
+def reset_password():
+    data = request.json or {}
+    email = data.get('email', '').strip().lower()
+    code = data.get('code', '').strip()
+    new_pwd = data.get('new_password', '').strip()
+
+    if not email or not code or not new_pwd:
+        return jsonify({"code": 400, "msg": "请填写完整重置信息"})
+    if len(new_pwd) < 6:
+        return jsonify({"code": 400, "msg": "新密码长度至少需要 6 位"})
+
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("SELECT code FROM verify_codes WHERE email=? ORDER BY id DESC LIMIT 1", (email,))
+    row = c.fetchone()
+    if not row or row["code"] != code:
+        conn.close()
+        return jsonify({"code": 400, "msg": "验证码错误或已失效"})
+
+    c.execute("SELECT * FROM users WHERE email=?", (email,))
+    user = c.fetchone()
+    if not user:
+        conn.close()
+        return jsonify({"code": 404, "msg": "未找到对应账号"})
+
+    c.execute("UPDATE users SET password_hash=? WHERE email=?", (hash_pwd(new_pwd), email))
+    c.execute("DELETE FROM verify_codes WHERE email=?", (email,))
+    conn.commit()
+    conn.close()
+
+    # 密码重置安全通知
+    title = "【Xray 安全通知】您的账户密码已成功重置"
+    text = f"您好 {user['username']}，您的登录密码于 {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 已通过邮箱验证码重置成功。如非本人操作请立即联系管理人员。"
+    notify_user(dict(user), title, f"<p>{text}</p>", text)
+
+    return jsonify({"code": 200, "msg": "密码已成功重置，请使用新密码登录"})
+
+# 5. 登录 (支持用户名 或 邮箱)
 @app.route('/api/login', methods=['POST'])
 def login():
     data = request.json or {}
@@ -129,7 +198,6 @@ def login():
 
     conn = get_db()
     c = conn.cursor()
-    # 核心：支持用户名 OR 邮箱登录
     c.execute("SELECT * FROM users WHERE (username=? OR email=?) AND password_hash=?", (account, account, hash_pwd(p)))
     user = c.fetchone()
     conn.close()
@@ -166,7 +234,7 @@ def login():
         }
     })
 
-# 4. 用户自主修改密码
+# 6. 已登录用户修改密码
 @app.route('/api/user/change_password', methods=['POST'])
 def change_password():
     data = request.json or {}
@@ -189,14 +257,13 @@ def change_password():
     conn.commit()
     conn.close()
 
-    # 触发安全通知
     title = "【Xray 安全通知】您的账户密码已成功修改"
     content = f"您好 {username}，您的登录密码于 {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 已成功变更。如非本人操作请立即联系管理人员。"
     notify_user(dict(user), title, f"<p>{content}</p>", content)
 
     return jsonify({"code": 200, "msg": "密码修改成功，请使用新密码重新登录"})
 
-# 5. 用户更新通知偏好 (Server酱 / 邮件)
+# 7. 用户通知设置
 @app.route('/api/user/notify_settings', methods=['POST'])
 def update_notify_settings():
     data = request.json or {}
@@ -211,7 +278,6 @@ def update_notify_settings():
     conn.close()
     return jsonify({"code": 200, "msg": "通知偏好设置已更新"})
 
-# 6. 用户端发送测试通知
 @app.route('/api/user/test_notify', methods=['POST'])
 def user_test_notify():
     data = request.json or {}
@@ -225,10 +291,10 @@ def user_test_notify():
         return jsonify({"code": 404, "msg": "用户不存在"})
 
     title = "【通知测试】Xray 节点服务消息连通性验证"
-    content = f"恭喜！您在 Xray 节点面板的通知通道验证成功。当前通知方式：{user['notify_type']}。"
+    content = f"恭喜！您在 Xray 节点面板的通知通道验证成功。当前通知通道：{user['notify_type']}。"
     ok, msg = notify_user(dict(user), title, f"<h3>{title}</h3><p>{content}</p>", content)
     if ok:
-        return jsonify({"code": 200, "msg": "测试消息发送成功，请前往检查"})
+        return jsonify({"code": 200, "msg": "测试消息发送成功，请前往查收"})
     return jsonify({"code": 500, "msg": msg})
 
 # ==================== 卡密充值 ====================
@@ -257,7 +323,6 @@ def recharge():
     conn.commit()
     conn.close()
 
-    # 充值成功发送通知
     title = "【充值成功】您的套餐配额已更新"
     text = f"您好 {u}，您已成功兑换卡密！增加流量：{card['traffic_gb']}GB，有效期顺延至：{n_exp}。"
     notify_user(dict(user), title, f"<p>{text}</p>", text)
@@ -308,7 +373,6 @@ def admin_data():
     conn.close()
     return jsonify({"code": 200, "cards": cards, "users": users})
 
-# 管理员重置指定用户密码
 @app.route('/api/admin/users/reset_password', methods=['POST'])
 def admin_reset_password():
     if Config.APP_MODE == 'user': abort(404)
@@ -332,7 +396,6 @@ def admin_reset_password():
     conn.commit()
     conn.close()
 
-    # 向用户推送重置提醒
     title = "【系统提醒】管理员已重置您的登录密码"
     text = f"您好 {target_user}，管理员已为您重置新密码。新密码为：{new_pwd} ，请登录后及时修改。"
     notify_user(dict(user), title, f"<p>{text}</p>", text)
@@ -410,7 +473,7 @@ def update_user_role():
     conn.close()
     return jsonify({"code": 200, "msg": f"用户 [{target_user}] 角色已更新为 {new_role}"})
 
-# ==================== 管理员系统与 SMTP 发信设置 ====================
+# ==================== 管理员 SMTP 设置 ====================
 
 @app.route('/api/admin/settings', methods=['GET', 'POST'])
 def handle_settings():

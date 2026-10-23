@@ -16,20 +16,41 @@
     </header>
 
     <main class="main-body">
-      <!-- 1. 登录 / 注册模块 -->
+      <!-- 1. 登录 / 注册 / 找回密码 模块 -->
       <div v-if="!currentUser.username" class="auth-center">
         <div class="cyber-card auth-box">
-          <h2 class="card-title">{{ isPureAdmin ? '管理员认证' : (isRegister ? '新用户激活注册' : '控制台账号接入') }}</h2>
-          
-          <div class="form-item">
-            <label>{{ isRegister ? 'USER IDENTIFIER / 用户名' : 'ACCOUNT / 用户名 或 注册邮箱' }}</label>
-            <input v-model="authForm.username" type="text" class="cyber-input" :placeholder="isRegister ? '设置您的用户名' : '输入用户名或邮箱地址'" />
-          </div>
+          <!-- 动态卡片标题 -->
+          <h2 class="card-title">
+            {{ isPureAdmin ? '管理员认证' : (authMode === 'login' ? '控制台账号接入' : (authMode === 'register' ? '新用户激活注册' : '🔐 找回 / 重置密码')) }}
+          </h2>
 
-          <!-- 注册特有字段：邮箱与验证码 -->
-          <template v-if="isRegister">
+          <!-- A. 登录表单 -->
+          <template v-if="authMode === 'login'">
             <div class="form-item">
-              <label>EMAIL / 电子邮箱 (必填接收激活码)</label>
+              <label>ACCOUNT / 用户名 或 注册邮箱</label>
+              <input v-model="authForm.username" type="text" class="cyber-input" placeholder="输入用户名或邮箱地址" />
+            </div>
+            <div class="form-item">
+              <label>ACCESS KEY / 登录密码</label>
+              <input v-model="authForm.password" type="password" class="cyber-input" placeholder="请输入密码" />
+            </div>
+            <button class="btn-cyber-primary" :disabled="loading" @click="handleAuth">
+              {{ loading ? 'AUTHENTICATING...' : '登录系统' }}
+            </button>
+            <div v-if="!isPureAdmin" class="auth-nav-links">
+              <a href="javascript:;" @click="authMode = 'register'">没有账号？邮箱注册</a>
+              <a href="javascript:;" class="text-warning" @click="authMode = 'forgot'">忘记密码？</a>
+            </div>
+          </template>
+
+          <!-- B. 注册表单 -->
+          <template v-else-if="authMode === 'register'">
+            <div class="form-item">
+              <label>USER IDENTIFIER / 设置用户名</label>
+              <input v-model="authForm.username" type="text" class="cyber-input" placeholder="字母/数字用户名" />
+            </div>
+            <div class="form-item">
+              <label>EMAIL / 接收激活码邮箱</label>
               <input v-model="authForm.email" type="email" class="cyber-input" placeholder="name@example.com" />
             </div>
             <div class="form-item">
@@ -41,22 +62,44 @@
                 </button>
               </div>
             </div>
+            <div class="form-item">
+              <label>ACCESS KEY / 设置新登录密码</label>
+              <input v-model="authForm.password" type="password" class="cyber-input" placeholder="至少 6 位密码" />
+            </div>
+            <button class="btn-cyber-primary" :disabled="loading" @click="handleAuth">
+              {{ loading ? 'AUTHENTICATING...' : '验证并激活账号' }}
+            </button>
+            <div class="auth-nav-links">
+              <a href="javascript:;" @click="authMode = 'login'">已有账号？返回登录</a>
+            </div>
           </template>
 
-          <div class="form-item">
-            <label>ACCESS KEY / 登录密码</label>
-            <input v-model="authForm.password" type="password" class="cyber-input" placeholder="请输入密码" />
-          </div>
-
-          <button class="btn-cyber-primary" :disabled="loading" @click="handleAuth">
-            {{ loading ? 'AUTHENTICATING...' : (isRegister ? '验证并激活账号' : '登录系统') }}
-          </button>
-          
-          <div v-if="!isPureAdmin" class="auth-toggle">
-            <a href="javascript:;" @click="isRegister = !isRegister">
-              {{ isRegister ? '已有凭据？返回登录' : '没有账号？邮箱注册领体验套餐' }}
-            </a>
-          </div>
+          <!-- C. 忘记密码表单 -->
+          <template v-else-if="authMode === 'forgot'">
+            <div class="form-item">
+              <label>REGISTERED EMAIL / 绑定的注册邮箱</label>
+              <input v-model="forgotForm.email" type="email" class="cyber-input" placeholder="输入绑定的邮箱" />
+            </div>
+            <div class="form-item">
+              <label>RESET CODE / 邮箱重置码</label>
+              <div class="code-send-group">
+                <input v-model="forgotForm.code" type="text" class="cyber-input" placeholder="6 位重置码" />
+                <button class="btn-cyber-code" :disabled="countdown > 0 || sendingCode" @click="sendForgotCode">
+                  {{ countdown > 0 ? `${countdown}s 后重试` : (sendingCode ? '发送中...' : '获取重置码') }}
+                </button>
+              </div>
+            </div>
+            <div class="form-item">
+              <label>NEW PASSWORD / 设置新密码</label>
+              <input v-model="forgotForm.new_password" type="password" class="cyber-input" placeholder="输入新密码 (至少6位)" />
+            </div>
+            <button class="btn-cyber-primary" :disabled="loading" @click="submitForgotPassword">
+              {{ loading ? 'PROCESSING...' : '确认重置密码' }}
+            </button>
+            <div class="auth-nav-links">
+              <a href="javascript:;" @click="authMode = 'login'">想起密码？返回登录</a>
+            </div>
+          </template>
         </div>
       </div>
 
@@ -152,15 +195,20 @@
               </div>
             </div>
 
+            <!-- 用户自主修改密码模块 -->
             <div class="settings-section">
               <h4>2. 修改账户登录密码</h4>
               <div class="form-item">
                 <label>当前原密码</label>
-                <input v-model="pwdForm.old_pwd" type="password" class="cyber-input" placeholder="输入当前密码" />
+                <input v-model="pwdForm.old_pwd" type="password" class="cyber-input" placeholder="输入当前原密码" />
               </div>
               <div class="form-item">
                 <label>新密码 (至少6位)</label>
                 <input v-model="pwdForm.new_pwd" type="password" class="cyber-input" placeholder="输入新密码" />
+              </div>
+              <div class="form-item">
+                <label>确认新密码</label>
+                <input v-model="pwdForm.confirm_pwd" type="password" class="cyber-input" placeholder="再次输入新密码" />
               </div>
               <button class="btn-cyber-primary" @click="submitChangePassword">确认变更密码</button>
             </div>
@@ -415,10 +463,12 @@ import axios from 'axios'
 import { ElMessage } from 'element-plus'
 
 const loading = ref(false)
-const isRegister = ref(false)
 const isPureAdmin = ref(false)
 const rechargeCode = ref('')
 const activeTab = ref('users')
+
+// 认证模式：'login' | 'register' | 'forgot'
+const authMode = ref('login')
 
 // 验证码倒计时
 const countdown = ref(0)
@@ -436,12 +486,13 @@ const showResetPwdModal = ref(false)
 const resetTargetUser = ref('')
 const resetNewPassword = ref('')
 
-// 表单
+// 表单定义
 const currentUser = reactive({ username: '', email: '', role: '', used_mb: 0, limit_mb: 0, expire_date: '', public_key: '', sub_link: '' })
 const authForm = reactive({ username: '', email: '', code: '', password: '' })
+const forgotForm = reactive({ email: '', code: '', new_password: '' })
 const cardGenForm = reactive({ traffic_gb: 50, days: 30, count: 5 })
 const notifyForm = reactive({ notify_type: 'email', serverchan_key: '' })
-const pwdForm = reactive({ old_pwd: '', new_pwd: '' })
+const pwdForm = reactive({ old_pwd: '', new_pwd: '', confirm_pwd: '' })
 
 // 管理员 SMTP 设置
 const smtpForm = reactive({ smtp_host: '', smtp_port: '465', smtp_user: '', smtp_pass: '', smtp_sender: '', smtp_ssl: true })
@@ -460,28 +511,80 @@ onMounted(async () => {
 
 const trafficPercent = computed(() => currentUser.limit_mb ? Math.min(100, Math.round((currentUser.used_mb / currentUser.limit_mb) * 100)) : 0)
 
+// 启动倒计时计时器
+const startCountdown = () => {
+  countdown.value = 60
+  const timer = setInterval(() => {
+    countdown.value--
+    if (countdown.value <= 0) clearInterval(timer)
+  }, 1000)
+}
+
 // 发送注册邮箱验证码
 const sendRegisterCode = async () => {
   if (!authForm.email || !authForm.email.includes('@')) {
-    return ElMessage.warning('请先输入正确的电子邮箱')
+    return ElMessage.warning('请先输入合法的电子邮箱')
   }
   sendingCode.value = true
   try {
     const res = await axios.post('/api/auth/send_register_code', { email: authForm.email })
     if (res.data.code === 200) {
       ElMessage.success(res.data.msg)
-      countdown.value = 60
-      const timer = setInterval(() => {
-        countdown.value--
-        if (countdown.value <= 0) clearInterval(timer)
-      }, 1000)
+      startCountdown()
     } else {
       ElMessage.error(res.data.msg)
     }
   } catch (_) {
-    ElMessage.error('验证码发送请求失败，请确保后台已配置好发信服务器')
+    ElMessage.error('验证码发送请求失败，请确保后台已配置发信参数')
   } finally {
     sendingCode.value = false
+  }
+}
+
+// 发送找回密码验证码
+const sendForgotCode = async () => {
+  if (!forgotForm.email || !forgotForm.email.includes('@')) {
+    return ElMessage.warning('请输入绑定的注册电子邮箱')
+  }
+  sendingCode.value = true
+  try {
+    const res = await axios.post('/api/auth/send_reset_code', { email: forgotForm.email })
+    if (res.data.code === 200) {
+      ElMessage.success(res.data.msg)
+      startCountdown()
+    } else {
+      ElMessage.error(res.data.msg)
+    }
+  } catch (_) {
+    ElMessage.error('验证码发送请求失败')
+  } finally {
+    sendingCode.value = false
+  }
+}
+
+// 提交找回密码重置
+const submitForgotPassword = async () => {
+  if (!forgotForm.email || !forgotForm.code || !forgotForm.new_password) {
+    return ElMessage.warning('请完整填写邮箱、重置码与新密码')
+  }
+  if (forgotForm.new_password.length < 6) {
+    return ElMessage.warning('新密码长度不能少于 6 位')
+  }
+  loading.value = true
+  try {
+    const res = await axios.post('/api/auth/reset_password', forgotForm)
+    if (res.data.code === 200) {
+      ElMessage.success(res.data.msg)
+      authMode.value = 'login'
+      authForm.username = forgotForm.email
+      authForm.password = ''
+    } else {
+      ElMessage.error(res.data.msg)
+    }
+  } catch (_) {
+    ElMessage.error('重置密码提交失败')
+  } finally {
+    loading.value = false
   }
 }
 
@@ -607,7 +710,6 @@ const handleRoleChange = async (targetUser, newRole) => {
   }
 }
 
-// 用户保存通知偏好
 const saveNotifySettings = async () => {
   try {
     const res = await axios.post('/api/user/notify_settings', {
@@ -638,9 +740,17 @@ const testUserNotify = async () => {
   }
 }
 
-// 用户自改密码
+// 用户自主修改密码
 const submitChangePassword = async () => {
-  if (!pwdForm.old_pwd || !pwdForm.new_pwd) return ElMessage.warning('请输入新旧密码')
+  if (!pwdForm.old_pwd || !pwdForm.new_pwd) {
+    return ElMessage.warning('请输入当前旧密码和新密码')
+  }
+  if (pwdForm.new_pwd.length < 6) {
+    return ElMessage.warning('新密码长度不能少于 6 位')
+  }
+  if (pwdForm.new_pwd !== pwdForm.confirm_pwd) {
+    return ElMessage.warning('两次输入的新密码不一致')
+  }
   try {
     const res = await axios.post('/api/user/change_password', {
       username: currentUser.username,
@@ -651,12 +761,13 @@ const submitChangePassword = async () => {
       ElMessage.success(res.data.msg)
       pwdForm.old_pwd = ''
       pwdForm.new_pwd = ''
+      pwdForm.confirm_pwd = ''
       setTimeout(() => location.reload(), 1500)
     } else {
       ElMessage.error(res.data.msg)
     }
   } catch (_) {
-    ElMessage.error('密码修改失败')
+    ElMessage.error('密码修改失败，请核对旧密码')
   }
 }
 
@@ -741,14 +852,15 @@ const copyText = async (text) => {
 }
 
 const handleAuth = async () => {
-  if (!authForm.username || !authForm.password) return ElMessage.warning('请填写必要账号密码')
+  if (!authForm.username || !authForm.password) return ElMessage.warning('请填写账号与密码')
   loading.value = true
+  const api = authMode.value === 'register' ? '/api/register' : '/api/login'
   try {
-    const res = await axios.post(isRegister.value ? '/api/register' : '/api/login', authForm)
+    const res = await axios.post(api, authForm)
     if (res.data.code === 200) {
-      if (isRegister.value) {
+      if (authMode.value === 'register') {
         ElMessage.success(res.data.msg)
-        isRegister.value = false
+        authMode.value = 'login'
       } else {
         ElMessage.success('登录成功')
         Object.assign(currentUser, res.data.data)
@@ -927,7 +1039,7 @@ const logout = () => location.reload()
 
 .btn-cyber-primary {
   background: linear-gradient(135deg, #0284c7, #2563eb);
-  color: white; border: none; padding: 10px 20px; border-radius: 6px; font-weight: 700; cursor: pointer;
+  color: white; border: none; padding: 10px 20px; border-radius: 6px; font-weight: 700; cursor: pointer; width: 100%;
 }
 .redeem-box { display: flex; gap: 10px; align-items: center; }
 .redeem-box .cyber-input { flex: 1; min-width: 0; }
@@ -958,41 +1070,4 @@ const logout = () => location.reload()
 .cyber-link { color: #38bdf8; text-decoration: underline; }
 
 /* 弹窗 */
-.modal-backdrop { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.8); display: flex; justify-content: center; align-items: center; z-index: 1000; }
-.cyber-modal { background: #0f172a; border: 1px solid #38bdf8; border-radius: 12px; padding: 24px; max-width: 360px; box-shadow: 0 0 30px rgba(56, 189, 248, 0.25); }
-.qr-box { background: white; padding: 12px; border-radius: 8px; display: inline-block; margin: 10px 0; }
-.modal-tip { font-size: 12px; color: #94a3b8; margin: 4px 0 10px 0; }
-
-/* 表格与操作 */
-.table-container { overflow-x: auto; margin-top: 10px; }
-.cyber-table { width: 100%; border-collapse: collapse; font-size: 13px; text-align: left; }
-.cyber-table th, .cyber-table td { padding: 12px 10px; border-bottom: 1px solid #1e293b; }
-.cyber-table th { color: #64748b; font-weight: 600; }
-.table-progress { background: #1e293b; height: 4px; border-radius: 2px; overflow: hidden; margin-top: 4px; width: 100px; }
-.table-glow { background: #38bdf8; height: 100%; }
-
-.badge { padding: 2px 8px; border-radius: 4px; font-size: 11px; }
-.badge-ready { background: rgba(16, 185, 129, 0.2); color: #34d399; }
-.badge-used { background: rgba(239, 68, 68, 0.2); color: #f87171; }
-.role-badge { padding: 3px 8px; border-radius: 4px; font-size: 11px; font-weight: 700; }
-.role-badge.admin { background: #dc2626; color: white; }
-.role-badge.user { background: #2563eb; color: white; }
-.btn-logout { background: transparent; border: 1px solid #475569; color: #94a3b8; padding: 4px 10px; border-radius: 4px; cursor: pointer; }
-
-.action-btn-row { display: flex; gap: 6px; align-items: center; }
-.btn-sm { padding: 4px 8px; font-size: 11px; border-radius: 4px; border: none; cursor: pointer; white-space: nowrap; }
-.btn-action { background: #0284c7; color: white; }
-.btn-reset { background: #d97706; color: white; font-weight: 600; }
-.btn-edit { background: #4f46e5; color: white; }
-.btn-promote { background: #f59e0b; color: #000; font-weight: 700; }
-.btn-demote { background: #475569; color: #fff; }
-.btn-del { background: #b91c1c; color: white; }
-.btn-del:disabled, .btn-demote:disabled { opacity: 0.3; cursor: not-allowed; }
-
-.auth-box { max-width: 420px; margin: 40px auto; }
-.form-item { margin-bottom: 16px; }
-.form-item label { display: block; font-size: 12px; color: #94a3b8; margin-bottom: 6px; }
-.auth-toggle { text-align: center; margin-top: 16px; font-size: 13px; }
-.auth-toggle a { color: #38bdf8; text-decoration: none; }
-.gen-form { display: grid; grid-template-columns: 1fr 1fr 1fr auto; gap: 10px; align-items: flex-end; }
-</style>
+.modal-backdrop { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.8); display
