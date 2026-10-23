@@ -1,11 +1,10 @@
-# ================= 阶段 1：编译 Vue 3 前端 (改用 Debian glibc 核心，单层拷贝，绝不崩溃) =================
-FROM node:20-slim AS frontend-builder
+# ================= 阶段 1：编译 Vue 3 前端 (原生极速构建，杜绝 QEMU 模拟器崩溃) =================
+FROM --platform=$BUILDPLATFORM node:20-slim AS frontend-builder
 WORKDIR /build
 
 COPY app/frontend/package*.json ./
 RUN npm install
 
-# 恢复单层拷贝，保持层数最精简
 COPY app/frontend/ ./
 RUN npm run build
 
