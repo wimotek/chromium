@@ -1,6 +1,5 @@
 <template>
   <div class="dark-theme">
-    <!-- 顶部科技导航 (动态全屏) -->
     <header class="cyber-header">
       <div class="header-content">
         <div class="brand">
@@ -21,7 +20,6 @@
         <div class="cyber-card auth-box">
           <h2 class="card-title">{{ authCardTitle }}</h2>
 
-          <!-- A. 登录表单 -->
           <template v-if="authMode === 'login'">
             <div class="form-item">
               <label>ACCOUNT / 用户名 或 注册邮箱</label>
@@ -40,7 +38,6 @@
             </div>
           </template>
 
-          <!-- B. 注册表单 -->
           <template v-else-if="authMode === 'register'">
             <div class="form-item">
               <label>USER IDENTIFIER / 设置用户名</label>
@@ -71,7 +68,6 @@
             </div>
           </template>
 
-          <!-- C. 忘记密码表单 -->
           <template v-else-if="authMode === 'forgot'">
             <div class="form-item">
               <label>REGISTERED EMAIL / 绑定的注册邮箱</label>
@@ -100,7 +96,7 @@
         </div>
       </div>
 
-      <!-- 2. 普通用户端仪表盘 (流式全屏响应式) -->
+      <!-- 2. 普通用户端仪表盘 (支持不限流量与永久有效) -->
       <div v-else-if="currentUser.role === 'user'" class="dashboard-grid">
         <div class="cyber-card">
           <div class="card-header">
@@ -114,16 +110,18 @@
                 <span class="data-unit">MB (已用)</span>
               </div>
               <div class="text-right">
-                <span class="data-val">{{ currentUser.limit_mb }}</span>
-                <span class="data-unit">MB (总额)</span>
+                <span class="data-val">{{ currentUser.limit_mb === 0 ? '♾️' : currentUser.limit_mb }}</span>
+                <span class="data-unit">{{ currentUser.limit_mb === 0 ? '不限流量' : 'MB (总额)' }}</span>
               </div>
             </div>
             <div class="progress-track">
               <div class="progress-glow" :style="{ width: trafficPercent + '%' }"></div>
             </div>
             <div class="expiry-notice">
-              <span>套餐有效期至：</span>
-              <strong class="highlight-date">{{ currentUser.expire_date }}</strong>
+              <span>套餐有效期：</span>
+              <strong class="highlight-date">
+                {{ currentUser.expire_date.startsWith('2099') ? '♾️ 永久有效' : currentUser.expire_date }}
+              </strong>
             </div>
           </div>
         </div>
@@ -215,9 +213,8 @@
         </div>
       </div>
 
-      <!-- 3. 管理员控制台：全屏动态自适应 -->
+      <!-- 3. 管理员控制台 (全屏流式缩放) -->
       <div v-else-if="currentUser.role === 'admin'" class="admin-wrapper">
-        <!-- 顶部主卡片切换导航 (防折行优化) -->
         <div class="card-tabs-nav">
           <button class="tab-card-btn" :class="{ active: activeTab === 'users' }" @click="activeTab = 'users'">
             <span class="tab-icon">👥</span>
@@ -259,7 +256,7 @@
                 <tr>
                   <th>用户 / 绑定邮箱</th>
                   <th>状态</th>
-                  <th>流量配额</th>
+                  <th>流量使用 / 总配额</th>
                   <th>到期时间</th>
                   <th>通知通道</th>
                   <th>专属凭证</th>
@@ -278,10 +275,10 @@
                     </span>
                   </td>
                   <td>
-                    <div>{{ u.used_mb }} / {{ u.traffic_limit_mb }} MB</div>
+                    <div>{{ u.used_mb }} / {{ u.traffic_limit_mb === 0 ? '♾️ 不限' : u.traffic_limit_mb + ' MB' }}</div>
                     <div class="table-progress"><div class="table-glow" :style="{ width: calcProgress(u.used_mb, u.traffic_limit_mb) + '%' }"></div></div>
                   </td>
-                  <td>{{ u.expire_date }}</td>
+                  <td>{{ u.expire_date.startsWith('2099') ? '♾️ 永久有效' : u.expire_date }}</td>
                   <td><span class="role-badge user">{{ u.notify_type }}</span></td>
                   <td>
                     <button class="btn-sm btn-action" @click="openQrModal(u.sub_link, u.username)">📱 凭证/二维码</button>
@@ -301,37 +298,30 @@
           </div>
         </div>
 
-        <!-- 主选项卡 2: 卡密管理 (核心优化：子卡片选项卡，彻底告别平铺) -->
+        <!-- 主选项卡 2: 卡密管理 -->
         <div v-else-if="activeTab === 'cards'" class="cyber-card tab-content-card">
-          <!-- 子卡片分类切换器 -->
           <div class="sub-tab-nav">
-            <button
-              class="sub-tab-btn"
-              :class="{ active: cardSubTab === 'inventory' }"
-              @click="cardSubTab = 'inventory'">
+            <button class="sub-tab-btn" :class="{ active: cardSubTab === 'inventory' }" @click="cardSubTab = 'inventory'">
               📦 卡密制卡与库存管理
             </button>
-            <button
-              class="sub-tab-btn"
-              :class="{ active: cardSubTab === 'api' }"
-              @click="cardSubTab = 'api'">
+            <button class="sub-tab-btn" :class="{ active: cardSubTab === 'api' }" @click="cardSubTab = 'api'">
               🔌 API自动发卡
             </button>
           </div>
 
-          <!-- 子卡片 A: 卡密生成与库存管理 -->
+          <!-- 子卡片 A: 批量制卡与库存 -->
           <div v-if="cardSubTab === 'inventory'" class="sub-tab-pane">
             <div class="card-header">
               <h3>🛠️ 批量生成卡密</h3>
             </div>
             <div class="gen-form">
               <div>
-                <label>流量配额 (GB)</label>
-                <input v-model.number="cardGenForm.traffic_gb" type="number" class="cyber-input" />
+                <label>流量配额 (GB, 填0为不限)</label>
+                <input v-model.number="cardGenForm.traffic_gb" type="number" class="cyber-input" placeholder="0=不限" />
               </div>
               <div>
-                <label>有效时限 (天)</label>
-                <input v-model.number="cardGenForm.days" type="number" class="cyber-input" />
+                <label>有效时限 (天, 填36500为永久)</label>
+                <input v-model.number="cardGenForm.days" type="number" class="cyber-input" placeholder="36500=永久" />
               </div>
               <div>
                 <label>批量制卡数 (张)</label>
@@ -340,7 +330,6 @@
               <button class="btn-cyber-success" @click="generateCards">立即批量制卡</button>
             </div>
 
-            <!-- 导出工具栏 -->
             <div class="card-header" style="margin-top: 30px;">
               <h3>📦 历史卡密库存与核销流水 (最新200条)</h3>
               <button class="btn-cyber-refresh" @click="loadAdminData">🔄 刷新列表</button>
@@ -386,7 +375,7 @@
                       <input type="checkbox" :value="c.code" v-model="selectedCards" />
                     </td>
                     <td class="font-mono text-cyan">{{ c.code }}</td>
-                    <td>{{ c.traffic_gb }} GB / {{ c.days }} 天</td>
+                    <td>{{ c.traffic_gb === 0 ? '♾️ 不限' : c.traffic_gb + ' GB' }} / {{ c.days >= 3650 ? '永久' : c.days + ' 天' }}</td>
                     <td>
                       <span class="badge" :class="c.is_used ? 'badge-used' : 'badge-ready'">
                         {{ c.is_used ? '已核销' : '待售出/有效' }}
@@ -401,7 +390,7 @@
             </div>
           </div>
 
-          <!-- 子卡片 B: 方案 C 独立的 API 自动发卡子卡片 -->
+          <!-- 子卡片 B: 方案 C API 自动发卡 -->
           <div v-else-if="cardSubTab === 'api'" class="sub-tab-pane">
             <div class="settings-section" style="margin-top: 5px;">
               <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; border-bottom: 1px solid #1e293b; padding-bottom: 10px;">
@@ -414,7 +403,7 @@
                 </label>
               </div>
 
-              <p class="card-desc">买家在独角数卡等第三方发卡网付款后，发卡系统可自动请求此 API 现场生成一张卡密交付，实现 0 库存全自动发卡：</p>
+              <p class="card-desc">买家在独角数卡等第三方发卡网付款后，发卡系统可自动请求此 API 现场生成一张卡密交付：</p>
 
               <div class="form-item">
                 <label>API 通信验证 TOKEN (密钥)：</label>
@@ -433,15 +422,12 @@
 
               <div class="btn-group">
                 <button class="btn-cyber-action" @click="copyText(fakaApiUrlSample)">复制 API 完整调用地址</button>
-                <span style="font-size: 12px; color: #94a3b8; align-self: center;">
-                  * 参数可在 URL 中自定义，例如：<code>?gb=100&days=30&token=YOUR_TOKEN</code>
-                </span>
               </div>
             </div>
           </div>
         </div>
 
-        <!-- 主选项卡 3: 系统发信与定时任务设置 -->
+        <!-- 主选项卡 3: 系统发信与定时任务设置 (核心友好度提升) -->
         <div v-else-if="activeTab === 'settings'" class="cyber-card tab-content-card">
           <div class="card-header">
             <h3>⚙️ 节点连接地址、系统发信与定时预警设置</h3>
@@ -475,13 +461,13 @@
               <div class="form-item">
                 <label>流量不足告警阈值 (%)</label>
                 <input v-model.number="settingsForm.task_traffic_threshold" type="number" class="cyber-input" placeholder="例如已用达 80% 触发" />
-                <span class="input-hint">用户已用流量达到该百分比时，自动推送微信/邮件提醒</span>
+                <span class="input-hint">用户已用流量达到该百分比时触发提醒（设为不限流量的用户不会提醒）</span>
               </div>
 
               <div class="form-item">
                 <label>套餐到期告警阈值 (天)</label>
                 <input v-model.number="settingsForm.task_expire_days" type="number" class="cyber-input" placeholder="例如到期前 3 天触发" />
-                <span class="input-hint">距离到期时间不足设定天数时，自动推送续费提醒</span>
+                <span class="input-hint">距离到期时间不足设定天数时触发提醒（永久有效用户不会提醒）</span>
               </div>
 
               <div class="form-item" style="margin-top: 15px; border-top: 1px dashed #1e293b; padding-top: 10px;">
@@ -494,9 +480,15 @@
               </div>
             </div>
 
-            <!-- 模块 B: SMTP 邮件配置 -->
+            <!-- 模块 B: SMTP 邮件配置 (增加状态展示与密码防清空保护) -->
             <div class="settings-section">
               <h4>📧 SMTP 邮件服务器参数配置</h4>
+              
+              <!-- 友好状态指示灯 -->
+              <div class="smtp-status-box" :class="settingsForm.is_smtp_configured ? 'smtp-ready' : 'smtp-empty'">
+                <span>{{ settingsForm.is_smtp_configured ? '🟢 SMTP 发信通道：已配置就绪（可正常发送邮件）' : '⚪ SMTP 发信通道：尚未完整配置（无法发送邮件与验证码）' }}</span>
+              </div>
+
               <div class="form-item">
                 <label>SMTP 服务器地址</label>
                 <input v-model="settingsForm.smtp_host" type="text" class="cyber-input" placeholder="例如: smtp.qq.com / smtp.163.com" />
@@ -511,7 +503,15 @@
               </div>
               <div class="form-item">
                 <label>邮箱授权码 / 密码 (Password)</label>
-                <input v-model="settingsForm.smtp_pass" type="password" class="cyber-input" placeholder="第三方客户端授权码" />
+                <input
+                  v-model="settingsForm.smtp_pass"
+                  type="password"
+                  class="cyber-input"
+                  :placeholder="settingsForm.has_smtp_pass ? '●●●●●●●● (已安全保存，留空则保持原密码)' : '请输入第三方客户端授权码'"
+                />
+                <span class="input-hint">
+                  {{ settingsForm.has_smtp_pass ? '✅ 系统已安全保存授权码。若无需更换，请直接留空保存即可。' : '⚠️ 尚未配置授权码，配置后方可发送邮件。' }}
+                </span>
               </div>
               <div class="form-item">
                 <label>发件人显示名称 (Sender Name)</label>
@@ -560,19 +560,29 @@
       </div>
     </div>
 
-    <!-- 弹窗 2：管理员修改用户配额 -->
+    <!-- 弹窗 2：管理员修改用户配额 (增加快捷设为不限流量/永久有效) -->
     <div v-if="showEditModal" class="modal-backdrop" @click="showEditModal = false">
-      <div class="cyber-modal" style="max-width: 420px; text-align: left;" @click.stop>
+      <div class="cyber-modal" style="max-width: 440px; text-align: left;" @click.stop>
         <h3>✏️ 调整用户 [{{ editForm.username }}] 属性</h3>
+        
         <div class="form-item" style="margin-top: 15px;">
-          <label>总流量限制配额 (MB)</label>
+          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
+            <label style="margin: 0;">总流量限制配额 (MB)</label>
+            <button class="btn-link-action" @click="editForm.limit_mb = 0">♾️ 设为不限流量</button>
+          </div>
           <input v-model.number="editForm.limit_mb" type="number" class="cyber-input" />
-          <span style="font-size: 11px; color: #64748b;">换算参考：1GB = 1024MB | 100GB = 102400MB</span>
+          <span style="font-size: 11px; color: #64748b;">提示：填 0 表示不限制流量 | 100GB = 102400MB</span>
         </div>
+
         <div class="form-item">
-          <label>套餐到期时限 (格式: YYYY-MM-DD HH:MM:SS)</label>
+          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
+            <label style="margin: 0;">套餐到期时限</label>
+            <button class="btn-link-action" @click="editForm.expire_date = '2099-12-31 23:59:59'">♾️ 设为永久有效</button>
+          </div>
           <input v-model="editForm.expire_date" type="text" class="cyber-input" />
+          <span style="font-size: 11px; color: #64748b;">提示：填 2099-12-31 表示永久有效</span>
         </div>
+
         <div class="btn-group" style="justify-content: flex-end; margin-top: 20px;">
           <button class="btn-cyber-action" @click="showEditModal = false">取消</button>
           <button class="btn-cyber-success" @click="submitUserEdit">保存修改</button>
@@ -607,8 +617,6 @@ const loading = ref(false)
 const isPureAdmin = ref(false)
 const rechargeCode = ref('')
 const activeTab = ref('users')
-
-// 卡密内部子卡片选项卡 ('inventory': 批量与库存 | 'api': API自动发卡)
 const cardSubTab = ref('inventory')
 
 const authMode = ref('login')
@@ -642,6 +650,8 @@ const settingsForm = reactive({
   smtp_port: '465',
   smtp_user: '',
   smtp_pass: '',
+  has_smtp_pass: false,
+  is_smtp_configured: false,
   smtp_sender: '',
   smtp_ssl: true,
   task_notify_enable: true,
@@ -682,12 +692,12 @@ const countdownText = computed(() => {
 })
 
 const trafficPercent = computed(() => {
-  if (!currentUser.limit_mb) return 0
+  if (!currentUser.limit_mb) return 100 // 不限流量时进度条满格高亮
   return Math.min(100, Math.round((currentUser.used_mb / currentUser.limit_mb) * 100))
 })
 
 const calcProgress = (used, total) => {
-  if (!total) return 0
+  if (!total) return 100
   return Math.min(100, Math.round((used / total) * 100))
 }
 
@@ -728,8 +738,9 @@ const generateRandomToken = () => {
 
 const executeExport = async (payload, successTip) => {
   try {
+    const adminUser = currentUser.username || authForm.username
     const res = await axios.post('/api/admin/cards/export_unused', {
-      admin_user: authForm.username,
+      admin_user: adminUser,
       admin_pwd: authForm.password,
       ...payload
     })
@@ -862,8 +873,9 @@ const openResetPwdModal = (uname) => {
 const submitResetPassword = async () => {
   if (!resetNewPassword.value) return ElMessage.warning('请输入新密码')
   try {
+    const adminUser = currentUser.username || authForm.username
     const res = await axios.post('/api/admin/users/reset_password', {
-      admin_user: authForm.username,
+      admin_user: adminUser,
       admin_pwd: authForm.password,
       target_user: resetTargetUser.value,
       new_password: resetNewPassword.value
@@ -881,8 +893,9 @@ const submitResetPassword = async () => {
 
 const submitUserEdit = async () => {
   try {
+    const adminUser = currentUser.username || authForm.username
     const res = await axios.post('/api/admin/users/edit', {
-      admin_user: authForm.username,
+      admin_user: adminUser,
       admin_pwd: authForm.password,
       target_user: editForm.username,
       limit_mb: editForm.limit_mb,
@@ -904,8 +917,9 @@ const handleStatusToggle = async (targetUser, newStatus) => {
   const tip = newStatus === 0 ? '封禁' : '解封'
   if (!confirm(`确定要${tip}用户 [${targetUser}] 吗？`)) return
   try {
+    const adminUser = currentUser.username || authForm.username
     const res = await axios.post('/api/admin/users/status', {
-      admin_user: authForm.username,
+      admin_user: adminUser,
       admin_pwd: authForm.password,
       target_user: targetUser,
       status: newStatus
@@ -924,8 +938,9 @@ const handleStatusToggle = async (targetUser, newStatus) => {
 const handleDeleteUser = async (targetUser) => {
   if (!confirm(`⚠️ 警告：确定要彻底删除用户 [${targetUser}] 吗？数据无法恢复！`)) return
   try {
+    const adminUser = currentUser.username || authForm.username
     const res = await axios.post('/api/admin/users/delete', {
-      admin_user: authForm.username,
+      admin_user: adminUser,
       admin_pwd: authForm.password,
       target_user: targetUser
     })
@@ -1021,14 +1036,18 @@ const downloadWindowsClient = () => {
 const openSettingsTab = async () => {
   activeTab.value = 'settings'
   try {
-    const res = await axios.get(`/api/admin/settings?admin_user=${authForm.username}&admin_pwd=${authForm.password}`)
+    // 修复：优先使用已确定的管理员用户名鉴权
+    const adminUser = currentUser.username || authForm.username
+    const res = await axios.get(`/api/admin/settings?admin_user=${encodeURIComponent(adminUser)}&admin_pwd=${encodeURIComponent(authForm.password)}`)
     if (res.data.code === 200) {
       const d = res.data.data
-      settingsForm.smtp_host = d.smtp_host
-      settingsForm.smtp_port = d.smtp_port
-      settingsForm.smtp_user = d.smtp_user
-      settingsForm.smtp_pass = d.smtp_pass
-      settingsForm.smtp_sender = d.smtp_sender
+      settingsForm.smtp_host = d.smtp_host || ''
+      settingsForm.smtp_port = d.smtp_port || '465'
+      settingsForm.smtp_user = d.smtp_user || ''
+      settingsForm.smtp_pass = '' // 出于安全不回传明文，留空
+      settingsForm.has_smtp_pass = d.has_smtp_pass || false
+      settingsForm.is_smtp_configured = d.is_smtp_configured || false
+      settingsForm.smtp_sender = d.smtp_sender || ''
       settingsForm.smtp_ssl = d.smtp_ssl === 'true'
       settingsForm.task_notify_enable = d.task_notify_enable === 'true'
       settingsForm.task_interval_hours = Number(d.task_interval_hours) || 12
@@ -1044,8 +1063,9 @@ const openSettingsTab = async () => {
 
 const saveAllSettings = async () => {
   try {
+    const adminUser = currentUser.username || authForm.username
     const res = await axios.post('/api/admin/settings', {
-      admin_user: authForm.username,
+      admin_user: adminUser,
       admin_pwd: authForm.password,
       ...settingsForm,
       smtp_ssl: settingsForm.smtp_ssl ? 'true' : 'false',
@@ -1054,6 +1074,7 @@ const saveAllSettings = async () => {
     })
     if (res.data.code === 200) {
       ElMessage.success(res.data.msg)
+      openSettingsTab() // 刷新最新状态
     } else {
       ElMessage.error(res.data.msg)
     }
@@ -1066,8 +1087,9 @@ const sendTestEmail = async () => {
   if (!testEmailTo.value) return ElMessage.warning('请输入测试收件邮箱')
   testingEmail.value = true
   try {
+    const adminUser = currentUser.username || authForm.username
     const res = await axios.post('/api/admin/test_email', {
-      admin_user: authForm.username,
+      admin_user: adminUser,
       admin_pwd: authForm.password,
       test_to: testEmailTo.value
     })
@@ -1086,8 +1108,9 @@ const sendTestEmail = async () => {
 const triggerManualTask = async () => {
   triggeringTask.value = true
   try {
+    const adminUser = currentUser.username || authForm.username
     const res = await axios.post('/api/admin/tasks/trigger', {
-      admin_user: authForm.username,
+      admin_user: adminUser,
       admin_pwd: authForm.password
     })
     if (res.data.code === 200) {
@@ -1125,6 +1148,25 @@ const copyText = async (text) => {
     ElMessage.error('快捷复制失败，请手动长按复制')
   }
   document.body.removeChild(ta)
+}
+
+const exportSelectedCards = () => {
+  if (selectedCards.value.length === 0) return ElMessage.warning('请先在表格左侧勾选要导出的卡密')
+  executeExport({ selected_codes: selectedCards.value }, '已复制选中的卡密')
+}
+
+const exportByDateRange = () => {
+  if (!exportFilter.startDate && !exportFilter.endDate) {
+    return ElMessage.warning('请先选择开始日期或结束日期')
+  }
+  executeExport({
+    start_date: exportFilter.startDate,
+    end_date: exportFilter.endDate
+  }, '已导出指定日期范围内的未售卡密')
+}
+
+const exportAllUnusedCards = () => {
+  executeExport({}, '已复制全部未售卡密')
 }
 
 const handleAuth = async () => {
@@ -1170,7 +1212,8 @@ const handleRecharge = async () => {
 }
 
 const loadAdminData = async () => {
-  const res = await axios.post('/api/admin/data', { admin_user: authForm.username, admin_pwd: authForm.password })
+  const adminUser = currentUser.username || authForm.username
+  const res = await axios.post('/api/admin/data', { admin_user: adminUser, admin_pwd: authForm.password })
   if (res.data.code === 200) {
     adminCards.value = res.data.cards
     adminUsers.value = res.data.users
@@ -1181,7 +1224,8 @@ const loadAdminData = async () => {
 const generateCards = async () => {
   loading.value = true
   try {
-    const res = await axios.post('/api/admin/cards/generate', { admin_user: authForm.username, admin_pwd: authForm.password, ...cardGenForm })
+    const adminUser = currentUser.username || authForm.username
+    const res = await axios.post('/api/admin/cards/generate', { admin_user: adminUser, admin_pwd: authForm.password, ...cardGenForm })
     if (res.data.code === 200) {
       ElMessage.success('卡密批量生成成功')
       loadAdminData()
@@ -1221,7 +1265,6 @@ const logout = () => location.reload()
 .highlight { color: #38bdf8; text-shadow: 0 0 10px rgba(56, 189, 248, 0.5); }
 .user-status { display: flex; align-items: center; gap: 12px; }
 
-/* 核心优化：动态流式全屏自适应布局 */
 .main-body {
   width: 100%;
   max-width: 98%;
@@ -1232,7 +1275,6 @@ const logout = () => location.reload()
 .dashboard-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
 .col-span-2 { grid-column: span 2; }
 
-/* 选项卡导航 */
 .admin-wrapper { width: 100%; }
 .card-tabs-nav {
   display: flex;
@@ -1271,7 +1313,6 @@ const logout = () => location.reload()
 .tab-title { font-size: 14px; font-weight: 700; color: #f8fafc; margin-bottom: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .tab-sub { font-size: 11px; color: #64748b; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
-/* 核心优化：数字徽章强制单行，禁止被挤压折行 */
 .count-tag {
   margin-left: auto;
   font-size: 11px;
@@ -1284,7 +1325,6 @@ const logout = () => location.reload()
   flex-shrink: 0;
 }
 
-/* 核心新增：卡密子卡片选项卡样式 */
 .sub-tab-nav {
   display: flex;
   gap: 12px;
@@ -1330,7 +1370,25 @@ const logout = () => location.reload()
 .card-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; }
 .card-header h3 { margin: 0; font-size: 16px; color: #f1f5f9; }
 
-/* 导出工具栏增强样式 */
+/* 状态指示条 */
+.smtp-status-box {
+  padding: 10px 14px;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  margin-bottom: 16px;
+}
+.smtp-ready {
+  background: rgba(16, 185, 129, 0.15);
+  border: 1px solid rgba(16, 185, 129, 0.4);
+  color: #34d399;
+}
+.smtp-empty {
+  background: rgba(148, 163, 184, 0.1);
+  border: 1px solid rgba(148, 163, 184, 0.3);
+  color: #94a3b8;
+}
+
 .export-toolbar {
   background: #0a0f1d;
   border: 1px solid #1e293b;
@@ -1404,7 +1462,6 @@ const logout = () => location.reload()
 .btn-cyber-action { background: #334155; color: white; border: none; padding: 10px 20px; border-radius: 6px; cursor: pointer; white-space: nowrap; }
 .btn-cyber-refresh { background: transparent; border: 1px solid #38bdf8; color: #38bdf8; padding: 5px 12px; border-radius: 6px; cursor: pointer; font-size: 12px; }
 
-/* Windows 专属下载按钮 */
 .btn-cyber-download {
   background: linear-gradient(135deg, #10b981, #059669);
   color: white;
@@ -1463,7 +1520,6 @@ const logout = () => location.reload()
 .role-badge.user { background: #2563eb; color: white; }
 .btn-logout { background: transparent; border: 1px solid #475569; color: #94a3b8; padding: 4px 10px; border-radius: 4px; cursor: pointer; }
 
-/* 按钮组 */
 .action-btn-row { display: flex; gap: 6px; align-items: center; }
 .btn-sm { padding: 4px 8px; font-size: 11px; border-radius: 4px; border: none; cursor: pointer; white-space: nowrap; }
 .btn-action { background: #0284c7; color: white; }
@@ -1473,6 +1529,19 @@ const logout = () => location.reload()
 .btn-demote { background: #475569; color: #fff; }
 .btn-del { background: #b91c1c; color: white; }
 .btn-del:disabled, .btn-demote:disabled { opacity: 0.3; cursor: not-allowed; }
+
+.btn-link-action {
+  background: transparent;
+  border: none;
+  color: #38bdf8;
+  font-size: 11px;
+  cursor: pointer;
+  text-decoration: underline;
+  padding: 0;
+}
+.btn-link-action:hover {
+  color: #7dd3fc;
+}
 
 .auth-box { max-width: 420px; margin: 40px auto; }
 .form-item { margin-bottom: 16px; }

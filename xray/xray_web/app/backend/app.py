@@ -23,13 +23,10 @@ from client_pack import generate_windows_package
 
 app = Flask(__name__, static_folder='../frontend/dist', static_url_path='/')
 
-# 1. 数据库初始化 (自动完成字段热迁移)
 init_db()
-
-# 2. 开机全量同步：服务启动瞬间把数据库中所有有效用户写入 Xray 的 config.json 并补全 stats/api
 sync_users_to_xray()
 
-# ==================== 定时自动检测与推送引擎 ====================
+# ==================== 定时任务：智能过滤“不限流量”与“永久有效” ====================
 
 def run_scheduled_check(force=False) -> tuple[int, int, str]:
     enable = get_setting("task_notify_enable", "true").lower() == "true"
@@ -53,7 +50,7 @@ def run_scheduled_check(force=False) -> tuple[int, int, str]:
         used_mb = query_user_traffic(uname)
         limit_mb = u.get("traffic_limit_mb", 1024)
 
-        # 1. 流量预警
+        # 核心逻辑：limit_mb 为 0 表示不限流量，永不告警
         if limit_mb > 0:
             used_percent = round((used_mb / limit_mb) * 100, 1)
             if used_percent >= traffic_threshold:
@@ -68,9 +65,9 @@ def run_scheduled_check(force=False) -> tuple[int, int, str]:
                         c.execute("INSERT INTO notify_logs (username, warn_type, sent_date) VALUES (?, 'traffic', ?)", (uname, today_str))
                         conn.commit()
 
-        # 2. 到期预警
         exp_str = u.get("expire_date", "").strip()
-        if exp_str:
+        # 核心逻辑：2099 表示永久有效，永不告警
+        if exp_str and not exp_str.startswith("2099"):
             try:
                 exp_date = datetime.datetime.strptime(exp_str[:10], "%Y-%m-%d").date()
                 days_left = (exp_date - datetime.date.today()).days
@@ -134,8 +131,6 @@ def get_qrcode_svg():
     buf.seek(0)
     return send_file(buf, mimetype='image/svg+xml')
 
-# ==================== 方案 C：第三方发卡系统开放 API ====================
-
 @app.route('/api/open/faka_generate', methods=['GET', 'POST'])
 def open_faka_generate():
     is_enabled = get_setting("faka_api_enable", "true").lower() == "true"
@@ -180,8 +175,6 @@ def open_faka_generate():
         })
 
     return code, 200, {"Content-Type": "text/plain; charset=utf-8"}
-
-# ==================== 用户认证与安全 (注册 / 登录 / 找回 / 改密) ====================
 
 @app.route('/api/auth/send_register_code', methods=['POST'])
 def send_register_code():
@@ -251,9 +244,7 @@ def register():
         conn.commit()
         conn.close()
 
-        # 新用户注册成功，全量同步写入 Xray 核心 clients
         sync_users_to_xray()
-
         return jsonify({"code": 200, "msg": "账号已成功激活注册，已获赠 1GB 体验套餐"})
     except Exception as e:
         conn.close()
@@ -435,7 +426,6 @@ def user_test_notify():
         return jsonify({"code": 200, "msg": "测试消息发送成功，请前往查收"})
     return jsonify({"code": 500, "msg": msg})
 
-# 用户专属 Windows 客户端开箱即用打包下载
 @app.route('/api/user/download_client', methods=['GET'])
 def download_windows_client():
     account = request.args.get('username', '').strip()
@@ -465,8 +455,6 @@ def download_windows_client():
     except Exception as e:
         return jsonify({"code": 500, "msg": f"客户端构建失败: {str(e)}"}), 500
 
-# ==================== 卡密充值 ====================
-
 @app.route('/api/recharge', methods=['POST'])
 def recharge():
     data = request.json or {}
@@ -484,18 +472,35 @@ def recharge():
     c.execute("UPDATE cards SET is_used=1, used_by=?, created_at=? WHERE code=?", (u, now, code))
     c.execute("SELECT * FROM users WHERE username=?", (u,))
     user = c.fetchone()
-    c_exp = datetime.datetime.strptime(user['expire_date'], "%Y-%m-%d %H:%M:%S")
-    n_exp = (max(datetime.datetime.now(), c_exp) + datetime.timedelta(days=card['days'])).strftime("%Y-%m-%d %H:%M:%S")
-    c.execute("UPDATE users SET traffic_limit_mb=?, expire_date=? WHERE username=?",
-              (user['traffic_limit_mb'] + card['traffic_gb'] * 1024, n_exp, u))
+
+    # 处理不限流量与充值
+    current_limit = user['traffic_limit_mb']
+    if card['traffic_gb'] == 0:
+        new_limit = 0  # 设为不限流量
+    elif current_limit == 0:
+        new_limit = 0  # 原本就不限流量，保持不限
+    else:
+        new_limit = current_limit + card['traffic_gb'] * 1024
+
+    # 处理不限有效期与续费
+    c_exp_str = user['expire_date']
+    if card['days'] >= 3650 or c_exp_str.startswith("2099"):
+        n_exp = "2099-12-31 23:59:59"
+    else:
+        c_exp = datetime.datetime.strptime(c_exp_str, "%Y-%m-%d %H:%M:%S")
+        n_exp = (max(datetime.datetime.now(), c_exp) + datetime.timedelta(days=card['days'])).strftime("%Y-%m-%d %H:%M:%S")
+
+    c.execute("UPDATE users SET traffic_limit_mb=?, expire_date=? WHERE username=?", (new_limit, n_exp, u))
     conn.commit()
     conn.close()
 
     title = "【充值成功】您的套餐配额已更新"
-    text = f"您好 {u}，您已成功兑换卡密！增加流量：{card['traffic_gb']}GB，有效期顺延至：{n_exp}。"
+    limit_desc = "不限流量" if new_limit == 0 else f"+{card['traffic_gb']}GB"
+    exp_desc = "永久有效" if n_exp.startswith("2099") else n_exp
+    text = f"您好 {u}，您已成功兑换卡密！增加流量：{limit_desc}，有效期至：{exp_desc}。"
     notify_user(dict(user), title, f"<p>{text}</p>", text)
 
-    return jsonify({"code": 200, "msg": f"充值成功！增加 {card['traffic_gb']}GB 流量，延长 {card['days']} 天"})
+    return jsonify({"code": 200, "msg": f"充值成功！当前配额: {limit_desc}，有效期至: {exp_desc}"})
 
 # ==================== 管理员全量治理路由 ====================
 
@@ -509,10 +514,11 @@ def admin_generate():
     c = conn.cursor()
     now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     created = []
+    t_gb = int(data.get('traffic_gb', 50))
+    days = int(data.get('days', 30))
     for _ in range(int(data.get('count', 5))):
         code = "KM-" + str(uuid.uuid4()).replace("-", "")[:12].upper()
-        c.execute("INSERT INTO cards VALUES (?, ?, ?, 0, NULL, ?)",
-                  (code, int(data.get('traffic_gb', 50)), int(data.get('days', 30)), now))
+        c.execute("INSERT INTO cards VALUES (?, ?, ?, 0, NULL, ?)", (code, t_gb, days, now))
         created.append(code)
     conn.commit()
     conn.close()
@@ -629,7 +635,6 @@ def update_user_status():
     conn.close()
 
     sync_users_to_xray()
-
     return jsonify({"code": 200, "msg": f"用户 [{target_user}] 状态已更新"})
 
 @app.route('/api/admin/users/edit', methods=['POST'])
@@ -639,7 +644,7 @@ def edit_user_quota():
     if not check_admin(data.get('admin_user'), data.get('admin_pwd')): return jsonify({"code": 403, "msg": "无权限"})
 
     target_user = data.get('target_user')
-    limit_mb = int(data.get('limit_mb', 1024))
+    limit_mb = int(data.get('limit_mb', 0))
     expire_date = data.get('expire_date', '').strip()
 
     conn = get_db()
@@ -666,10 +671,9 @@ def delete_user():
     conn.close()
 
     sync_users_to_xray()
-
     return jsonify({"code": 200, "msg": f"用户 [{target_user}] 已被彻底删除"})
 
-# ==================== 管理员 SMTP 与系统参数设置 ====================
+# ==================== 管理员系统设置 (核心修复：友好状态回显与密码防覆盖) ====================
 
 @app.route('/api/admin/settings', methods=['GET', 'POST'])
 def handle_settings():
@@ -678,13 +682,21 @@ def handle_settings():
         admin_user = request.args.get('admin_user')
         admin_pwd = request.args.get('admin_pwd')
         if not check_admin(admin_user, admin_pwd): return jsonify({"code": 403, "msg": "无权限"})
+        
+        smtp_host = get_setting("smtp_host", "")
+        smtp_user = get_setting("smtp_user", "")
+        smtp_pass = get_setting("smtp_pass", "")
+        has_smtp_pass = bool(smtp_pass.strip())
+        is_smtp_configured = bool(smtp_host.strip() and smtp_user.strip() and has_smtp_pass)
+
         return jsonify({
             "code": 200,
             "data": {
-                "smtp_host": get_setting("smtp_host", ""),
+                "smtp_host": smtp_host,
                 "smtp_port": get_setting("smtp_port", "465"),
-                "smtp_user": get_setting("smtp_user", ""),
-                "smtp_pass": get_setting("smtp_pass", ""),
+                "smtp_user": smtp_user,
+                "has_smtp_pass": has_smtp_pass,
+                "is_smtp_configured": is_smtp_configured,
                 "smtp_sender": get_setting("smtp_sender", "Xray 节点运营中心"),
                 "smtp_ssl": get_setting("smtp_ssl", "true"),
                 "task_notify_enable": get_setting("task_notify_enable", "true"),
@@ -700,13 +712,19 @@ def handle_settings():
     else:
         data = request.json or {}
         if not check_admin(data.get('admin_user'), data.get('admin_pwd')): return jsonify({"code": 403, "msg": "无权限"})
-        keys = ["smtp_host", "smtp_port", "smtp_user", "smtp_pass", "smtp_sender", "smtp_ssl",
+        
+        # 核心防清空保护：密码若留空则自动保持原密码，绝不覆盖为空！
+        new_pass = data.get("smtp_pass", "").strip()
+        if new_pass:
+            set_setting("smtp_pass", new_pass)
+
+        keys = ["smtp_host", "smtp_port", "smtp_user", "smtp_sender", "smtp_ssl",
                 "task_notify_enable", "task_interval_hours", "task_traffic_threshold", "task_expire_days",
                 "faka_api_enable", "faka_api_token", "custom_host"]
         for k in keys:
             if k in data:
                 set_setting(k, str(data[k]).strip())
-        return jsonify({"code": 200, "msg": "配置已成功保存"})
+        return jsonify({"code": 200, "msg": "系统配置已成功保存"})
 
 @app.route('/api/admin/test_email', methods=['POST'])
 def test_email():
@@ -734,10 +752,11 @@ def trigger_task_now():
         "data": {"traffic_sent": t_sent, "expire_sent": e_sent}
     })
 
+# 核心修复：支持用用户名或邮箱鉴权管理员
 def check_admin(u, p):
     conn = get_db()
     c = conn.cursor()
-    c.execute("SELECT role FROM users WHERE username=? AND password_hash=?", (u, hash_pwd(p or '')))
+    c.execute("SELECT role FROM users WHERE (username=? OR email=?) AND password_hash=?", (u, u, hash_pwd(p or '')))
     r = c.fetchone()
     conn.close()
     return r and r['role'] == 'admin'
