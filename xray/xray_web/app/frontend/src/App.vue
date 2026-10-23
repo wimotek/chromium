@@ -163,7 +163,7 @@
           </div>
         </div>
 
-        <!-- 用户通知偏好与安全设置 -->
+        <!-- 普通用户通知与改密卡片 -->
         <div class="cyber-card col-span-2">
           <div class="card-header">
             <h3>🔔 告警通知偏好与安全中心</h3>
@@ -175,7 +175,7 @@
                 <label>首选通知通道 (默认邮件)</label>
                 <div class="radio-group">
                   <label class="radio-label">
-                    <input type="radio" value="email" v-model="notifyForm.notify_type" /> 📧 电子邮箱通知 ({{ currentUser.email }})
+                    <input type="radio" value="email" v-model="notifyForm.notify_type" /> 📧 电子邮箱通知 ({{ currentUser.email || '尚未绑定' }})
                   </label>
                   <label class="radio-label">
                     <input type="radio" value="serverchan" v-model="notifyForm.notify_type" /> 📲 Server酱 (微信服务号即时推送)
@@ -243,7 +243,7 @@
             <span class="tab-icon">⚙️</span>
             <div class="tab-text">
               <div class="tab-title">系统发信与定时任务设置</div>
-              <div class="tab-sub">节点域名设置、SMTP 配置、定时提醒</div>
+              <div class="tab-sub">管理员通知、节点域名、SMTP 与定时预警</div>
             </div>
             <span class="count-tag">配置中心</span>
           </button>
@@ -303,20 +303,13 @@
           </div>
         </div>
 
-        <!-- 主选项卡 2: 卡密管理 -->
+        <!-- 主选项卡 2: 卡密管理 (子卡片体系) -->
         <div v-else-if="activeTab === 'cards'" class="cyber-card tab-content-card">
-          <!-- 子卡片分类切换器 -->
           <div class="sub-tab-nav">
-            <button
-              class="sub-tab-btn"
-              :class="{ active: cardSubTab === 'inventory' }"
-              @click="cardSubTab = 'inventory'">
+            <button class="sub-tab-btn" :class="{ active: cardSubTab === 'inventory' }" @click="cardSubTab = 'inventory'">
               📦 卡密制卡与库存管理
             </button>
-            <button
-              class="sub-tab-btn"
-              :class="{ active: cardSubTab === 'api' }"
-              @click="cardSubTab = 'api'">
+            <button class="sub-tab-btn" :class="{ active: cardSubTab === 'api' }" @click="cardSubTab = 'api'">
               🔌 API自动发卡
             </button>
           </div>
@@ -440,14 +433,92 @@
           </div>
         </div>
 
-        <!-- 主选项卡 3: 系统发信与定时任务设置 -->
+        <!-- 主选项卡 3: 系统发信与定时任务设置 (核心优化：引入子卡片，彻底消灭平铺) -->
         <div v-else-if="activeTab === 'settings'" class="cyber-card tab-content-card">
-          <div class="card-header">
-            <h3>⚙️ 节点连接地址、系统发信与定时预警设置</h3>
+          <!-- 设置板块子卡片切换器 -->
+          <div class="sub-tab-nav">
+            <button
+              class="sub-tab-btn"
+              :class="{ active: settingSubTab === 'admin_notify' }"
+              @click="settingSubTab = 'admin_notify'">
+              🔔 管理员通知与安全
+            </button>
+            <button
+              class="sub-tab-btn"
+              :class="{ active: settingSubTab === 'network_smtp' }"
+              @click="settingSubTab = 'network_smtp'">
+              🌐 节点连接与发信配置 (SMTP)
+            </button>
+            <button
+              class="sub-tab-btn"
+              :class="{ active: settingSubTab === 'cron' }"
+              @click="settingSubTab = 'cron'">
+              ⏰ 定时任务与预警
+            </button>
           </div>
-          <div class="settings-grid">
-            <!-- 模块 A: 节点客户端连接地址配置 -->
-            <div class="settings-section">
+
+          <!-- 子卡片 1: 管理员个人通知偏好与改密 (彻底解决管理员无法配置通知的问题) -->
+          <div v-if="settingSubTab === 'admin_notify'" class="sub-tab-pane">
+            <div class="card-header">
+              <h3>🔔 管理员专属通知通道与安全设置</h3>
+            </div>
+            <p class="card-desc">配置当前登录的管理员 ({{ currentUser.username }}) 的通知接收通道。当产生告警、充值或异常事件时优先向此通道推送：</p>
+
+            <div class="settings-section" style="margin-top: 10px;">
+              <h4>1. 管理员消息告警通道偏好 (Server酱 / 邮件)</h4>
+              <div class="form-item">
+                <label>选择接收通知通道</label>
+                <div class="radio-group">
+                  <label class="radio-label">
+                    <input type="radio" value="email" v-model="notifyForm.notify_type" />
+                    📧 电子邮箱接收 ({{ currentUser.email || '未绑定邮箱' }})
+                  </label>
+                  <label class="radio-label">
+                    <input type="radio" value="serverchan" v-model="notifyForm.notify_type" />
+                    📲 Server酱 (微信服务号即时推送)
+                  </label>
+                </div>
+              </div>
+
+              <div class="form-item" v-if="notifyForm.notify_type === 'serverchan'">
+                <label>Server酱 SendKey：</label>
+                <input v-model="notifyForm.serverchan_key" type="text" class="cyber-input font-mono" placeholder="SCTxxxxxxxxxx" />
+                <div class="input-hint">
+                  💡 未申请过？点击前往 <a href="https://sct.ftqq.com/" target="_blank" class="cyber-link">Server酱·Turbo版官网 (https://sct.ftqq.com/)</a> 微信扫码一键获取 SendKey。
+                </div>
+              </div>
+
+              <div class="btn-group" style="margin-top: 15px;">
+                <button class="btn-cyber-success" @click="saveNotifySettings">保存管理员通知设置</button>
+                <button class="btn-cyber-action" @click="testUserNotify">发送测试通知 (微信/邮件)</button>
+              </div>
+            </div>
+
+            <div class="settings-section" style="margin-top: 20px;">
+              <h4>2. 修改管理员自身登录密码</h4>
+              <div class="form-item">
+                <label>当前管理员旧密码</label>
+                <input v-model="pwdForm.old_pwd" type="password" class="cyber-input" placeholder="输入当前原密码" />
+              </div>
+              <div class="form-item">
+                <label>新密码 (至少6位)</label>
+                <input v-model="pwdForm.new_pwd" type="password" class="cyber-input" placeholder="输入新密码" />
+              </div>
+              <div class="form-item">
+                <label>确认新密码</label>
+                <input v-model="pwdForm.confirm_pwd" type="password" class="cyber-input" placeholder="再次输入新密码" />
+              </div>
+              <button class="btn-cyber-primary" style="width: auto; padding: 10px 24px;" @click="submitChangePassword">确认变更密码</button>
+            </div>
+          </div>
+
+          <!-- 子卡片 2: 节点连接地址与发信服务器配置 -->
+          <div v-else-if="settingSubTab === 'network_smtp'" class="sub-tab-pane">
+            <div class="card-header">
+              <h3>🌐 节点连接地址与 SMTP 发信服务器参数</h3>
+            </div>
+
+            <div class="settings-section" style="margin-top: 10px;">
               <h4>🌐 节点客户端连接地址配置 (域名或 IP)</h4>
               <div class="form-item">
                 <label>自定义节点连接地址 (域名或 IP)</label>
@@ -457,45 +528,11 @@
                   <b>清空该输入框并保存时，系统将全自动恢复为自动检测的公网 IP。</b>
                 </span>
               </div>
-              <button class="btn-cyber-success" style="margin-top: 10px;" @click="saveAllSettings">保存连接地址</button>
-
-              <h4 style="margin-top: 30px;">⏰ 定时自动检测与通知推送任务</h4>
-              <div class="form-item">
-                <label class="radio-label">
-                  <input type="checkbox" v-model="settingsForm.task_notify_enable" /> 启用后台定时自动轮询与智能预警
-                </label>
-              </div>
-
-              <div class="form-item">
-                <label>轮询检测执行周期 (小时)</label>
-                <input v-model.number="settingsForm.task_interval_hours" type="number" class="cyber-input" placeholder="默认 12 小时执行一次" />
-              </div>
-
-              <div class="form-item">
-                <label>流量不足告警阈值 (%)</label>
-                <input v-model.number="settingsForm.task_traffic_threshold" type="number" class="cyber-input" placeholder="例如已用达 80% 触发" />
-                <span class="input-hint">用户已用流量达到该百分比时触发提醒（设为不限流量的用户不会提醒）</span>
-              </div>
-
-              <div class="form-item">
-                <label>套餐到期告警阈值 (天)</label>
-                <input v-model.number="settingsForm.task_expire_days" type="number" class="cyber-input" placeholder="例如到期前 3 天触发" />
-                <span class="input-hint">距离到期时间不足设定天数时触发提醒（永久有效用户不会提醒）</span>
-              </div>
-
-              <div class="form-item" style="margin-top: 15px; border-top: 1px dashed #1e293b; padding-top: 10px;">
-                <div style="font-size: 12px; color: #94a3b8; margin-bottom: 8px;">
-                  最近自动扫描完成时间：<b class="text-cyan">{{ settingsForm.task_last_run }}</b>
-                </div>
-                <button class="btn-cyber-primary" :disabled="triggeringTask" @click="triggerManualTask">
-                  {{ triggeringTask ? '正在扫描并推送...' : '⚡ 立即执行一次检测推送' }}
-                </button>
-              </div>
+              <button class="btn-cyber-success" style="margin-top: 6px;" @click="saveAllSettings">保存连接地址</button>
             </div>
 
-            <!-- 模块 B: SMTP 邮件配置 -->
-            <div class="settings-section">
-              <h4>📧 SMTP 邮件服务器参数配置</h4>
+            <div class="settings-section" style="margin-top: 20px;">
+              <h4>📧 SMTP 发信服务器参数配置</h4>
               
               <div class="smtp-status-box" :class="settingsForm.is_smtp_configured ? 'smtp-ready' : 'smtp-empty'">
                 <span>{{ settingsForm.is_smtp_configured ? '🟢 SMTP 发信通道：已配置就绪（可正常发送邮件）' : '⚪ SMTP 发信通道：尚未完整配置（无法发送邮件与验证码）' }}</span>
@@ -536,7 +573,7 @@
               </div>
 
               <div class="btn-group" style="margin-top: 15px;">
-                <button class="btn-cyber-success" @click="saveAllSettings">保存全部参数设置</button>
+                <button class="btn-cyber-success" @click="saveAllSettings">保存发信服务器参数</button>
               </div>
 
               <div class="form-item" style="margin-top: 20px; border-top: 1px dashed #1e293b; padding-top: 12px;">
@@ -547,6 +584,51 @@
                     {{ testingEmail ? '发送中...' : '测试发信' }}
                   </button>
                 </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- 子卡片 3: 定时预警与推送任务 -->
+          <div v-else-if="settingSubTab === 'cron'" class="sub-tab-pane">
+            <div class="card-header">
+              <h3>⏰ 定时自动检测与智能推送任务设置</h3>
+            </div>
+
+            <div class="settings-section" style="margin-top: 10px;">
+              <div class="form-item">
+                <label class="radio-label">
+                  <input type="checkbox" v-model="settingsForm.task_notify_enable" /> 启用后台定时自动轮询与智能预警
+                </label>
+              </div>
+
+              <div class="form-item">
+                <label>轮询检测执行周期 (小时)</label>
+                <input v-model.number="settingsForm.task_interval_hours" type="number" class="cyber-input" placeholder="默认 12 小时执行一次" />
+              </div>
+
+              <div class="form-item">
+                <label>流量不足告警阈值 (%)</label>
+                <input v-model.number="settingsForm.task_traffic_threshold" type="number" class="cyber-input" placeholder="例如已用达 80% 触发" />
+                <span class="input-hint">用户已用流量达到该百分比时触发提醒（设为不限流量的用户不会提醒）</span>
+              </div>
+
+              <div class="form-item">
+                <label>套餐到期告警阈值 (天)</label>
+                <input v-model.number="settingsForm.task_expire_days" type="number" class="cyber-input" placeholder="例如到期前 3 天触发" />
+                <span class="input-hint">距离到期时间不足设定天数时触发提醒（永久有效用户不会提醒）</span>
+              </div>
+
+              <div class="btn-group" style="margin-top: 15px;">
+                <button class="btn-cyber-success" @click="saveAllSettings">保存定时任务设置</button>
+              </div>
+
+              <div class="form-item" style="margin-top: 20px; border-top: 1px dashed #1e293b; padding-top: 12px;">
+                <div style="font-size: 12px; color: #94a3b8; margin-bottom: 8px;">
+                  最近自动扫描完成时间：<b class="text-cyan">{{ settingsForm.task_last_run }}</b>
+                </div>
+                <button class="btn-cyber-primary" :disabled="triggeringTask" style="width: auto; padding: 10px 20px;" @click="triggerManualTask">
+                  {{ triggeringTask ? '正在扫描并推送...' : '⚡ 立即执行一次检测推送' }}
+                </button>
               </div>
             </div>
           </div>
@@ -629,7 +711,12 @@ const loading = ref(false)
 const isPureAdmin = ref(false)
 const rechargeCode = ref('')
 const activeTab = ref('users')
+
+// 卡密内部子卡片 ('inventory': 批量与库存 | 'api': API自动发卡)
 const cardSubTab = ref('inventory')
+
+// 核心新增：系统设置内部子卡片 ('admin_notify': 管理员通知 | 'network_smtp': 节点与发信 | 'cron': 定时任务)
+const settingSubTab = ref('admin_notify')
 
 const authMode = ref('login')
 const countdown = ref(0)
@@ -771,13 +858,11 @@ const executeExport = async (payload, successTip) => {
   }
 }
 
-// 唯一保留：导出勾选卡密
 const exportSelectedCards = () => {
   if (selectedCards.value.length === 0) return ElMessage.warning('请先在表格左侧勾选要导出的卡密')
   executeExport({ selected_codes: selectedCards.value }, '已复制选中的卡密')
 }
 
-// 唯一保留：按日期范围导出
 const exportByDateRange = () => {
   if (!exportFilter.startDate && !exportFilter.endDate) {
     return ElMessage.warning('请先选择开始日期或结束日期')
@@ -788,7 +873,6 @@ const exportByDateRange = () => {
   }, '已导出指定日期范围内的未售卡密')
 }
 
-// 唯一保留：导出全部未售卡密 (彻底消除了重复定义)
 const exportAllUnusedCards = () => {
   executeExport({}, '已复制全部未售卡密')
 }
@@ -1165,6 +1249,25 @@ const copyText = async (text) => {
   document.body.removeChild(ta)
 }
 
+const exportSelectedCards = () => {
+  if (selectedCards.value.length === 0) return ElMessage.warning('请先在表格左侧勾选要导出的卡密')
+  executeExport({ selected_codes: selectedCards.value }, '已复制选中的卡密')
+}
+
+const exportByDateRange = () => {
+  if (!exportFilter.startDate && !exportFilter.endDate) {
+    return ElMessage.warning('请先选择开始日期或结束日期')
+  }
+  executeExport({
+    start_date: exportFilter.startDate,
+    end_date: exportFilter.endDate
+  }, '已导出指定日期范围内的未售卡密')
+}
+
+const exportAllUnusedCards = () => {
+  executeExport({}, '已复制全部未售卡密')
+}
+
 const handleAuth = async () => {
   if (!authForm.username || !authForm.password) return ElMessage.warning('请填写账号与密码')
   loading.value = true
@@ -1321,12 +1424,14 @@ const logout = () => location.reload()
   flex-shrink: 0;
 }
 
+/* 子卡片选项卡样式 */
 .sub-tab-nav {
   display: flex;
   gap: 12px;
   margin-bottom: 20px;
   border-bottom: 1px solid #1e293b;
   padding-bottom: 12px;
+  flex-wrap: wrap;
 }
 .sub-tab-btn {
   background: #0b1120;
@@ -1534,9 +1639,7 @@ const logout = () => location.reload()
   text-decoration: underline;
   padding: 0;
 }
-.btn-link-action:hover {
-  color: #7dd3fc;
-}
+.btn-link-action:hover { color: #7dd3fc; }
 
 .auth-box { max-width: 420px; margin: 40px auto; }
 .form-item { margin-bottom: 16px; }
