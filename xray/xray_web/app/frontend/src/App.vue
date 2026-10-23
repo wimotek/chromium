@@ -434,13 +434,22 @@
         <!-- 主选项卡 3: 系统发信与定时任务设置 -->
         <div v-else-if="activeTab === 'settings'" class="cyber-card tab-content-card">
           <div class="sub-tab-nav">
-            <button class="sub-tab-btn" :class="{ active: settingSubTab === 'admin_notify' }" @click="settingSubTab = 'admin_notify'">
+            <button
+              class="sub-tab-btn"
+              :class="{ active: settingSubTab === 'admin_notify' }"
+              @click="settingSubTab = 'admin_notify'">
               🔔 管理员通知与安全
             </button>
-            <button class="sub-tab-btn" :class="{ active: settingSubTab === 'network_smtp' }" @click="settingSubTab = 'network_smtp'">
+            <button
+              class="sub-tab-btn"
+              :class="{ active: settingSubTab === 'network_smtp' }"
+              @click="settingSubTab = 'network_smtp'">
               🌐 节点连接与发信配置 (SMTP)
             </button>
-            <button class="sub-tab-btn" :class="{ active: settingSubTab === 'cron' }" @click="settingSubTab = 'cron'">
+            <button
+              class="sub-tab-btn"
+              :class="{ active: settingSubTab === 'cron' }"
+              @click="settingSubTab = 'cron'">
               ⏰ 定时任务与预警
             </button>
           </div>
@@ -755,7 +764,7 @@ const adminCards = ref([])
 const adminUsers = ref([])
 
 onMounted(async () => {
-  // 核心特性：自动从本地缓存恢复会话 (彻底解决 F5 刷新退出登录问题)
+  // 恢复本地会话，实现刷新页面永不退登
   const savedSession = localStorage.getItem('xray_auth_session')
   if (savedSession) {
     try {
@@ -839,6 +848,7 @@ const generateRandomToken = () => {
   ElMessage.success('已随机生成新出卡 Token，请记得点击保存')
 }
 
+// 导出卡密底层
 const executeExport = async (payload, successTip) => {
   try {
     const adminUser = currentUser.username || authForm.username
@@ -861,11 +871,13 @@ const executeExport = async (payload, successTip) => {
   }
 }
 
+// 唯一保留：按勾选导出 (绝无重名)
 const exportSelectedCards = () => {
   if (selectedCards.value.length === 0) return ElMessage.warning('请先在表格左侧勾选要导出的卡密')
   executeExport({ selected_codes: selectedCards.value }, '已复制选中的卡密')
 }
 
+// 唯一保留：按日期范围导出 (绝无重名)
 const exportByDateRange = () => {
   if (!exportFilter.startDate && !exportFilter.endDate) {
     return ElMessage.warning('请先选择开始日期或结束日期')
@@ -876,6 +888,7 @@ const exportByDateRange = () => {
   }, '已导出指定日期范围内的未售卡密')
 }
 
+// 唯一保留：导出全部未售卡密 (绝无重名)
 const exportAllUnusedCards = () => {
   executeExport({}, '已复制全部未售卡密')
 }
@@ -1067,7 +1080,6 @@ const saveNotifySettings = async () => {
     })
     if (res.data.code === 200) {
       ElMessage.success(res.data.msg)
-      // 更新本地会话
       const session = JSON.parse(localStorage.getItem('xray_auth_session') || '{}')
       if (session.user) {
         session.user.notify_type = notifyForm.notify_type
@@ -1116,7 +1128,6 @@ const submitChangePassword = async () => {
       pwdForm.old_pwd = ''
       pwdForm.new_pwd = ''
       pwdForm.confirm_pwd = ''
-      // 清空本地登录状态，强制使用新密码登录
       localStorage.removeItem('xray_auth_session')
       setTimeout(() => location.reload(), 1500)
     } else {
@@ -1165,4 +1176,490 @@ const openSettingsTab = async () => {
       settingsForm.task_traffic_threshold = Number(d.task_traffic_threshold) || 80
       settingsForm.task_expire_days = Number(d.task_expire_days) || 3
       settingsForm.task_last_run = d.task_last_run || '尚未执行'
-      settingsForm.faka_api_enabl
+      settingsForm.faka_api_enable = d.faka_api_enable === 'true'
+      settingsForm.faka_api_token = d.faka_api_token || 'faka_secret_token_8899'
+      settingsForm.custom_host = d.custom_host || ''
+    }
+  } catch (_) {}
+}
+
+const saveAllSettings = async () => {
+  try {
+    const adminUser = currentUser.username || authForm.username
+    const res = await axios.post('/api/admin/settings', {
+      admin_user: adminUser,
+      admin_pwd: authForm.password,
+      ...settingsForm,
+      smtp_ssl: settingsForm.smtp_ssl ? 'true' : 'false',
+      task_notify_enable: settingsForm.task_notify_enable ? 'true' : 'false',
+      faka_api_enable: settingsForm.faka_api_enable ? 'true' : 'false'
+    })
+    if (res.data.code === 200) {
+      ElMessage.success(res.data.msg)
+      openSettingsTab()
+    } else {
+      ElMessage.error(res.data.msg)
+    }
+  } catch (_) {
+    ElMessage.error('保存设置失败')
+  }
+}
+
+const sendTestEmail = async () => {
+  if (!testEmailTo.value) return ElMessage.warning('请输入测试收件邮箱')
+  testingEmail.value = true
+  try {
+    const adminUser = currentUser.username || authForm.username
+    const res = await axios.post('/api/admin/test_email', {
+      admin_user: adminUser,
+      admin_pwd: authForm.password,
+      test_to: testEmailTo.value
+    })
+    if (res.data.code === 200) {
+      ElMessage.success(res.data.msg)
+    } else {
+      ElMessage.error(res.data.msg)
+    }
+  } catch (_) {
+    ElMessage.error('发信异常，请核对端口与授权码')
+  } finally {
+    testingEmail.value = false
+  }
+}
+
+const triggerManualTask = async () => {
+  triggeringTask.value = true
+  try {
+    const adminUser = currentUser.username || authForm.username
+    const res = await axios.post('/api/admin/tasks/trigger', {
+      admin_user: adminUser,
+      admin_pwd: authForm.password
+    })
+    if (res.data.code === 200) {
+      ElMessage.success(res.data.msg)
+      openSettingsTab()
+    } else {
+      ElMessage.error(res.data.msg)
+    }
+  } catch (_) {
+    ElMessage.error('触发扫描任务失败')
+  } finally {
+    triggeringTask.value = false
+  }
+}
+
+const copyText = async (text) => {
+  if (!text) return ElMessage.warning('内容为空')
+  if (navigator.clipboard && window.isSecureContext) {
+    try {
+      await navigator.clipboard.writeText(text)
+      ElMessage.success('已复制到剪贴板！')
+      return
+    } catch (_) {}
+  }
+  const ta = document.createElement('textarea')
+  ta.value = text
+  ta.style.position = 'fixed'
+  ta.style.opacity = '0'
+  document.body.appendChild(ta)
+  ta.select()
+  try {
+    document.execCommand('copy')
+    ElMessage.success('已复制到剪贴板！')
+  } catch (_) {
+    ElMessage.error('快捷复制失败，请手动长按复制')
+  }
+  document.body.removeChild(ta)
+}
+
+const handleAuth = async () => {
+  if (!authForm.username || !authForm.password) return ElMessage.warning('请填写账号与密码')
+  loading.value = true
+  const api = authMode.value === 'register' ? '/api/register' : '/api/login'
+  try {
+    const res = await axios.post(api, authForm)
+    if (res.data.code === 200) {
+      if (authMode.value === 'register') {
+        ElMessage.success(res.data.msg)
+        authMode.value = 'login'
+      } else {
+        ElMessage.success('登录成功')
+        Object.assign(currentUser, res.data.data)
+        notifyForm.notify_type = res.data.data.notify_type || 'email'
+        notifyForm.serverchan_key = res.data.data.serverchan_key || ''
+
+        // 会话持久化至 localStorage，F5 刷新永不退登
+        localStorage.setItem('xray_auth_session', JSON.stringify({
+          user: res.data.data,
+          password: authForm.password
+        }))
+
+        if (currentUser.role === 'admin') loadAdminData()
+      }
+    } else {
+      ElMessage.error(res.data.msg)
+    }
+  } finally {
+    loading.value = false
+  }
+}
+
+const handleRecharge = async () => {
+  if (!rechargeCode.value) return ElMessage.warning('请输入卡密')
+  loading.value = true
+  try {
+    const res = await axios.post('/api/recharge', { username: currentUser.username, card_code: rechargeCode.value })
+    if (res.data.code === 200) {
+      ElMessage.success(res.data.msg)
+      rechargeCode.value = ''
+      handleAuth()
+    } else {
+      ElMessage.error(res.data.msg)
+    }
+  } finally {
+    loading.value = false
+  }
+}
+
+const loadAdminData = async () => {
+  const adminUser = currentUser.username || authForm.username
+  const res = await axios.post('/api/admin/data', { admin_user: adminUser, admin_pwd: authForm.password })
+  if (res.data.code === 200) {
+    adminCards.value = res.data.cards
+    adminUsers.value = res.data.users
+    selectedCards.value = []
+  }
+}
+
+const generateCards = async () => {
+  loading.value = true
+  try {
+    const adminUser = currentUser.username || authForm.username
+    const res = await axios.post('/api/admin/cards/generate', { admin_user: adminUser, admin_pwd: authForm.password, ...cardGenForm })
+    if (res.data.code === 200) {
+      ElMessage.success('卡密批量生成成功')
+      loadAdminData()
+    } else {
+      ElMessage.error(res.data.msg)
+    }
+  } finally {
+    loading.value = false
+  }
+}
+
+const logout = () => {
+  localStorage.removeItem('xray_auth_session')
+  location.reload()
+}
+</script>
+
+<style scoped>
+.dark-theme {
+  min-height: 100vh;
+  background-color: #080c14;
+  color: #e2e8f0;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, monospace;
+}
+.cyber-header {
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(13, 19, 33, 0.85);
+  backdrop-filter: blur(10px);
+  padding: 14px 24px;
+}
+.header-content {
+  width: 100%;
+  max-width: 98%;
+  margin: 0 auto;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+.brand-title { font-size: 18px; font-weight: 800; letter-spacing: 1.5px; }
+.highlight { color: #38bdf8; text-shadow: 0 0 10px rgba(56, 189, 248, 0.5); }
+.user-status { display: flex; align-items: center; gap: 12px; }
+
+.main-body {
+  width: 100%;
+  max-width: 98%;
+  margin: 20px auto;
+  padding: 0 12px;
+  box-sizing: border-box;
+}
+.dashboard-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+.col-span-2 { grid-column: span 2; }
+
+.admin-wrapper { width: 100%; }
+.card-tabs-nav {
+  display: flex;
+  gap: 16px;
+  margin-bottom: 20px;
+}
+.tab-card-btn {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  background: #0f172a;
+  border: 1px solid #1e293b;
+  border-radius: 12px;
+  padding: 16px 20px;
+  cursor: pointer;
+  text-align: left;
+  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  color: #94a3b8;
+  position: relative;
+  min-width: 0;
+}
+.tab-card-btn:hover {
+  background: #131d36;
+  border-color: #38bdf8;
+  transform: translateY(-2px);
+}
+.tab-card-btn.active {
+  background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%);
+  border-color: #38bdf8;
+  box-shadow: 0 0 20px rgba(56, 189, 248, 0.2);
+  color: #f8fafc;
+}
+.tab-icon { font-size: 24px; flex-shrink: 0; }
+.tab-text { flex: 1; min-width: 0; }
+.tab-title { font-size: 14px; font-weight: 700; color: #f8fafc; margin-bottom: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tab-sub { font-size: 11px; color: #64748b; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+.count-tag {
+  margin-left: auto;
+  font-size: 11px;
+  background: rgba(56, 189, 248, 0.1);
+  color: #38bdf8;
+  padding: 3px 10px;
+  border-radius: 20px;
+  border: 1px solid rgba(56, 189, 248, 0.3);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.sub-tab-nav {
+  display: flex;
+  gap: 12px;
+  margin-bottom: 20px;
+  border-bottom: 1px solid #1e293b;
+  padding-bottom: 12px;
+  flex-wrap: wrap;
+}
+.sub-tab-btn {
+  background: #0b1120;
+  border: 1px solid #1e293b;
+  color: #94a3b8;
+  padding: 8px 18px;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 600;
+  transition: all 0.2s;
+}
+.sub-tab-btn:hover {
+  color: #38bdf8;
+  border-color: #38bdf8;
+}
+.sub-tab-btn.active {
+  background: rgba(56, 189, 248, 0.15);
+  color: #38bdf8;
+  border-color: #38bdf8;
+  box-shadow: 0 0 12px rgba(56, 189, 248, 0.25);
+}
+
+.cyber-card {
+  background: #0f172a;
+  border: 1px solid rgba(56, 189, 248, 0.2);
+  border-radius: 12px;
+  padding: 24px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+}
+.tab-content-card { animation: fadeIn 0.3s ease-in-out; }
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.card-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; }
+.card-header h3 { margin: 0; font-size: 16px; color: #f1f5f9; }
+
+.smtp-status-box {
+  padding: 10px 14px;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  margin-bottom: 16px;
+}
+.smtp-ready {
+  background: rgba(16, 185, 129, 0.15);
+  border: 1px solid rgba(16, 185, 129, 0.4);
+  color: #34d399;
+}
+.smtp-empty {
+  background: rgba(148, 163, 184, 0.1);
+  border: 1px solid rgba(148, 163, 184, 0.3);
+  color: #94a3b8;
+}
+
+.export-toolbar {
+  background: #0a0f1d;
+  border: 1px solid #1e293b;
+  border-radius: 8px;
+  padding: 12px 16px;
+  margin-bottom: 14px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+.date-filter-group {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+}
+.filter-label { color: #94a3b8; font-weight: 600; white-space: nowrap; }
+.date-input { width: 130px; padding: 6px 10px; font-size: 12px; }
+.export-actions-group { display: flex; gap: 8px; align-items: center; }
+.btn-export-select {
+  background: #3b82f6;
+  color: white;
+  font-weight: 600;
+}
+.btn-export-select:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+  background: #475569;
+}
+
+.traffic-meter { margin: 15px 0; }
+.meter-info { display: flex; justify-content: space-between; margin-bottom: 8px; }
+.data-val { font-size: 22px; font-weight: 700; color: #38bdf8; }
+.data-unit { font-size: 12px; color: #64748b; margin-left: 4px; }
+.progress-track { background: #1e293b; height: 10px; border-radius: 5px; overflow: hidden; margin: 10px 0; }
+.progress-glow { background: linear-gradient(90deg, #38bdf8, #818cf8); height: 100%; box-shadow: 0 0 12px #38bdf8; }
+.expiry-notice { font-size: 13px; color: #94a3b8; }
+.highlight-date { color: #f59e0b; }
+
+.cyber-input {
+  width: 100%;
+  background: #1e293b;
+  border: 1px solid #334155;
+  color: #f8fafc;
+  padding: 10px 14px;
+  border-radius: 6px;
+  outline: none;
+  box-sizing: border-box;
+}
+.cyber-input:focus { border-color: #38bdf8; box-shadow: 0 0 8px rgba(56, 189, 248, 0.3); }
+
+.code-send-group { display: flex; gap: 8px; }
+.btn-cyber-code {
+  background: #1e293b; border: 1px solid #38bdf8; color: #38bdf8; border-radius: 6px; padding: 0 14px;
+  white-space: nowrap; cursor: pointer; font-size: 12px;
+}
+.btn-cyber-code:disabled { opacity: 0.5; cursor: not-allowed; border-color: #475569; color: #94a3b8; }
+
+.btn-cyber-primary {
+  background: linear-gradient(135deg, #0284c7, #2563eb);
+  color: white; border: none; padding: 10px 20px; border-radius: 6px; font-weight: 700; cursor: pointer; width: 100%;
+}
+.redeem-box { display: flex; gap: 10px; align-items: center; }
+.redeem-box .cyber-input { flex: 1; min-width: 0; }
+.btn-cyber-success {
+  background: #059669; color: white; border: none; padding: 10px 18px; border-radius: 6px; cursor: pointer;
+  white-space: nowrap; flex-shrink: 0; font-weight: 600;
+}
+.btn-cyber-action { background: #334155; color: white; border: none; padding: 10px 20px; border-radius: 6px; cursor: pointer; white-space: nowrap; }
+.btn-cyber-refresh { background: transparent; border: 1px solid #38bdf8; color: #38bdf8; padding: 5px 12px; border-radius: 6px; cursor: pointer; font-size: 12px; }
+
+.btn-cyber-download {
+  background: linear-gradient(135deg, #10b981, #059669);
+  color: white;
+  border: none;
+  padding: 10px 18px;
+  border-radius: 6px;
+  font-weight: 700;
+  cursor: pointer;
+  white-space: nowrap;
+  box-shadow: 0 0 10px rgba(16, 185, 129, 0.3);
+}
+.btn-cyber-download:hover {
+  background: linear-gradient(135deg, #059669, #047857);
+  box-shadow: 0 0 15px rgba(16, 185, 129, 0.5);
+}
+.btn-cyber-download:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.node-field { margin-bottom: 14px; }
+.node-field label { display: block; font-size: 12px; color: #94a3b8; margin-bottom: 6px; }
+.code-display {
+  background: #020617; border: 1px dashed rgba(255, 255, 255, 0.15); padding: 12px; border-radius: 6px;
+  font-size: 13px; word-break: break-all; font-family: monospace;
+}
+.text-green { color: #34d399; font-weight: bold; }
+.text-cyan { color: #38bdf8; }
+.btn-group { display: flex; gap: 12px; margin-top: 16px; flex-wrap: wrap; }
+
+.settings-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; margin-top: 10px; }
+.settings-section { background: #0a0f1d; border: 1px solid #1e293b; padding: 20px; border-radius: 8px; }
+.settings-section h4 { margin-top: 0; margin-bottom: 16px; color: #f1f5f9; font-size: 14px; border-bottom: 1px solid #1e293b; padding-bottom: 8px; }
+.radio-group { display: flex; flex-direction: column; gap: 10px; margin-top: 6px; }
+.radio-label { font-size: 13px; color: #cbd5e1; cursor: pointer; display: flex; align-items: center; gap: 8px; }
+.input-hint { font-size: 11px; color: #94a3b8; margin-top: 6px; line-height: 1.5; }
+.cyber-link { color: #38bdf8; text-decoration: underline; }
+
+.modal-backdrop { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.8); display: flex; justify-content: center; align-items: center; z-index: 1000; }
+.cyber-modal { background: #0f172a; border: 1px solid #38bdf8; border-radius: 12px; padding: 24px; max-width: 360px; box-shadow: 0 0 30px rgba(56, 189, 248, 0.25); }
+.qr-box { background: white; padding: 12px; border-radius: 8px; display: inline-block; margin: 10px 0; }
+.modal-tip { font-size: 12px; color: #94a3b8; margin: 4px 0 10px 0; }
+
+.table-container { overflow-x: auto; margin-top: 10px; }
+.cyber-table { width: 100%; border-collapse: collapse; font-size: 13px; text-align: left; }
+.cyber-table th, .cyber-table td { padding: 12px 10px; border-bottom: 1px solid #1e293b; }
+.cyber-table th { color: #64748b; font-weight: 600; }
+.table-progress { background: #1e293b; height: 4px; border-radius: 2px; overflow: hidden; margin-top: 4px; width: 100px; }
+.table-glow { background: #38bdf8; height: 100%; }
+
+.badge { padding: 2px 8px; border-radius: 4px; font-size: 11px; }
+.badge-ready { background: rgba(16, 185, 129, 0.2); color: #34d399; }
+.badge-used { background: rgba(239, 68, 68, 0.2); color: #f87171; }
+.role-badge { padding: 3px 8px; border-radius: 4px; font-size: 11px; font-weight: 700; }
+.role-badge.admin { background: #dc2626; color: white; }
+.role-badge.user { background: #2563eb; color: white; }
+.btn-logout { background: transparent; border: 1px solid #475569; color: #94a3b8; padding: 4px 10px; border-radius: 4px; cursor: pointer; }
+
+.action-btn-row { display: flex; gap: 6px; align-items: center; }
+.btn-sm { padding: 4px 8px; font-size: 11px; border-radius: 4px; border: none; cursor: pointer; white-space: nowrap; }
+.btn-action { background: #0284c7; color: white; }
+.btn-reset { background: #d97706; color: white; font-weight: 600; }
+.btn-edit { background: #4f46e5; color: white; }
+.btn-unban { background: #059669; color: white; font-weight: 600; }
+.btn-demote { background: #475569; color: #fff; }
+.btn-del { background: #b91c1c; color: white; }
+.btn-del:disabled, .btn-demote:disabled { opacity: 0.3; cursor: not-allowed; }
+
+.btn-link-action {
+  background: transparent;
+  border: none;
+  color: #38bdf8;
+  font-size: 11px;
+  cursor: pointer;
+  text-decoration: underline;
+  padding: 0;
+}
+.btn-link-action:hover { color: #7dd3fc; }
+
+.auth-box { max-width: 420px; margin: 40px auto; }
+.form-item { margin-bottom: 16px; }
+.form-item label { display: block; font-size: 12px; color: #94a3b8; margin-bottom: 6px; }
+.auth-nav-links { display: flex; justify-content: space-between; margin-top: 16px; font-size: 13px; }
+.auth-nav-links a { color: #38bdf8; text-decoration: none; }
+.auth-nav-links a.text-warning { color: #f59e0b; }
+.auth-nav-links a:hover { text-decoration: underline; }
+.gen-form { display: grid; grid-template-columns: 1fr 1fr 1fr auto; gap: 10px; align-items: flex-end; }
+</style>
