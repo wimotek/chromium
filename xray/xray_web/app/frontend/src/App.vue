@@ -1,6 +1,6 @@
 <template>
   <div class="dark-theme">
-    <!-- 顶部科技导航 -->
+    <!-- 顶部科技导航 (动态全屏) -->
     <header class="cyber-header">
       <div class="header-content">
         <div class="brand">
@@ -100,7 +100,7 @@
         </div>
       </div>
 
-      <!-- 2. 普通用户端仪表盘 -->
+      <!-- 2. 普通用户端仪表盘 (流式全屏响应式) -->
       <div v-else-if="currentUser.role === 'user'" class="dashboard-grid">
         <div class="cyber-card">
           <div class="card-header">
@@ -139,7 +139,7 @@
           </div>
         </div>
 
-        <!-- 节点配置、密钥与开箱即用客户端下载 -->
+        <!-- 节点配置与专属客户端下载 -->
         <div class="cyber-card col-span-2">
           <div class="card-header">
             <h3>🔗 REALITY 节点订阅凭据</h3>
@@ -215,8 +215,9 @@
         </div>
       </div>
 
-      <!-- 3. 管理员控制台：卡片切换布局 -->
+      <!-- 3. 管理员控制台：全屏动态自适应 -->
       <div v-else-if="currentUser.role === 'admin'" class="admin-wrapper">
+        <!-- 顶部主卡片切换导航 (防折行优化) -->
         <div class="card-tabs-nav">
           <button class="tab-card-btn" :class="{ active: activeTab === 'users' }" @click="activeTab = 'users'">
             <span class="tab-icon">👥</span>
@@ -242,11 +243,11 @@
               <div class="tab-title">系统发信与定时任务设置</div>
               <div class="tab-sub">节点域名设置、SMTP 配置、定时提醒</div>
             </div>
-            <span class="count-tag">配置</span>
+            <span class="count-tag">配置中心</span>
           </button>
         </div>
 
-        <!-- 选项卡 1: 用户管理 -->
+        <!-- 主选项卡 1: 用户管理 -->
         <div v-if="activeTab === 'users'" class="cyber-card tab-content-card">
           <div class="card-header">
             <h3>👥 接入用户治理列表</h3>
@@ -300,126 +301,147 @@
           </div>
         </div>
 
-        <!-- 选项卡 2: 卡密管理 -->
+        <!-- 主选项卡 2: 卡密管理 (核心优化：子卡片选项卡，彻底告别平铺) -->
         <div v-else-if="activeTab === 'cards'" class="cyber-card tab-content-card">
-          <div class="card-header">
-            <h3>🛠️ 商业发卡制卡面板</h3>
-          </div>
-          <div class="gen-form">
-            <div>
-              <label>流量配额 (GB)</label>
-              <input v-model.number="cardGenForm.traffic_gb" type="number" class="cyber-input" />
-            </div>
-            <div>
-              <label>有效时限 (天)</label>
-              <input v-model.number="cardGenForm.days" type="number" class="cyber-input" />
-            </div>
-            <div>
-              <label>批量制卡数 (张)</label>
-              <input v-model.number="cardGenForm.count" type="number" class="cyber-input" />
-            </div>
-            <button class="btn-cyber-success" @click="generateCards">立即批量制卡</button>
+          <!-- 子卡片分类切换器 -->
+          <div class="sub-tab-nav">
+            <button
+              class="sub-tab-btn"
+              :class="{ active: cardSubTab === 'inventory' }"
+              @click="cardSubTab = 'inventory'">
+              📦 卡密制卡与库存管理
+            </button>
+            <button
+              class="sub-tab-btn"
+              :class="{ active: cardSubTab === 'api' }"
+              @click="cardSubTab = 'api'">
+              🔌 API自动发卡
+            </button>
           </div>
 
-          <div class="card-header" style="margin-top: 30px;">
-            <h3>📦 历史卡密库存与核销流水 (最新200条)</h3>
-            <button class="btn-cyber-refresh" @click="loadAdminData">🔄 刷新列表</button>
-          </div>
-
-          <!-- 导出工具栏 -->
-          <div class="export-toolbar">
-            <div class="date-filter-group">
-              <span class="filter-label">📅 日期范围筛选:</span>
-              <input v-model="exportFilter.startDate" type="date" class="cyber-input date-input" />
-              <span style="color: #64748b;">至</span>
-              <input v-model="exportFilter.endDate" type="date" class="cyber-input date-input" />
-              <button class="btn-sm btn-action" @click="exportByDateRange">按日期范围导出</button>
+          <!-- 子卡片 A: 卡密生成与库存管理 -->
+          <div v-if="cardSubTab === 'inventory'" class="sub-tab-pane">
+            <div class="card-header">
+              <h3>🛠️ 批量生成卡密</h3>
             </div>
-
-            <div class="export-actions-group">
-              <button class="btn-sm btn-export-select" :disabled="selectedCards.length === 0" @click="exportSelectedCards">
-                ☑️ 导出勾选卡密 (已选 {{ selectedCards.length }} 张)
-              </button>
-              <button class="btn-sm btn-cyber-success" @click="exportAllUnusedCards">
-                📋 导出全部未售卡密
-              </button>
-            </div>
-          </div>
-
-          <!-- 卡密数据表格 -->
-          <div class="table-container">
-            <table class="cyber-table">
-              <thead>
-                <tr>
-                  <th style="width: 40px; text-align: center;">
-                    <input type="checkbox" :checked="isAllSelected" @change="toggleSelectAll" title="全选当前页未售卡密" />
-                  </th>
-                  <th>兑换卡密编号</th>
-                  <th>套餐配额</th>
-                  <th>核销状态</th>
-                  <th>生成日期</th>
-                  <th>兑换用户</th>
-                  <th>单张操作</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr v-for="c in adminCards" :key="c.code">
-                  <td style="text-align: center;">
-                    <input type="checkbox" :value="c.code" v-model="selectedCards" />
-                  </td>
-                  <td class="font-mono text-cyan">{{ c.code }}</td>
-                  <td>{{ c.traffic_gb }} GB / {{ c.days }} 天</td>
-                  <td>
-                    <span class="badge" :class="c.is_used ? 'badge-used' : 'badge-ready'">
-                      {{ c.is_used ? '已核销' : '待售出/有效' }}
-                    </span>
-                  </td>
-                  <td class="text-muted">{{ c.created_at || '早期生成' }}</td>
-                  <td>{{ c.used_by || '-' }}</td>
-                  <td><button class="btn-sm btn-action" @click="copyText(c.code)">一键复制</button></td>
-                </tr>
-              </tbody>
-            </table>
-          </div>
-
-          <!-- 方案 C 发卡 API 对接说明 -->
-          <div class="settings-section" style="margin-top: 25px;">
-            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; border-bottom: 1px solid #1e293b; padding-bottom: 8px;">
-              <h4 style="margin: 0; border: none; padding: 0;">🔌 方案 C：第三方自动发卡系统 API 实时出卡对接管理</h4>
-              <label class="radio-label" style="font-weight: 600;">
-                <input type="checkbox" v-model="settingsForm.faka_api_enable" @change="saveAllSettings" />
-                <span :style="{ color: settingsForm.faka_api_enable ? '#10b981' : '#ef4444' }">
-                  {{ settingsForm.faka_api_enable ? '🟢 API 接口已启用' : '🔴 API 接口已禁用' }}
-                </span>
-              </label>
-            </div>
-
-            <p class="card-desc">买家在独角数卡等平台付款后，发卡系统可自动请求此 API 现场生成一张卡密交付，实现 0 库存全自动发卡：</p>
-
-            <div class="form-item">
-              <label>API 通信验证 TOKEN (密钥)：</label>
-              <div style="display: flex; gap: 8px;">
-                <input v-model="settingsForm.faka_api_token" type="text" class="cyber-input font-mono" placeholder="自定义出卡令牌" />
-                <button class="btn-sm btn-action" style="padding: 0 14px; white-space: nowrap;" @click="generateRandomToken">🎲 随机生成</button>
-                <button class="btn-sm btn-cyber-success" style="padding: 0 14px; white-space: nowrap;" @click="saveAllSettings">保存密钥</button>
+            <div class="gen-form">
+              <div>
+                <label>流量配额 (GB)</label>
+                <input v-model.number="cardGenForm.traffic_gb" type="number" class="cyber-input" />
               </div>
-              <span class="input-hint">第三方发卡系统调用出卡接口时必须携带此 Token 进行身份鉴权</span>
+              <div>
+                <label>有效时限 (天)</label>
+                <input v-model.number="cardGenForm.days" type="number" class="cyber-input" />
+              </div>
+              <div>
+                <label>批量制卡数 (张)</label>
+                <input v-model.number="cardGenForm.count" type="number" class="cyber-input" />
+              </div>
+              <button class="btn-cyber-success" @click="generateCards">立即批量制卡</button>
             </div>
 
-            <div class="node-field" style="margin-top: 14px;">
-              <label>独角数卡自定义发卡调用 URL (GET / POST)：</label>
-              <div class="code-display text-cyan">{{ fakaApiUrlSample }}</div>
+            <!-- 导出工具栏 -->
+            <div class="card-header" style="margin-top: 30px;">
+              <h3>📦 历史卡密库存与核销流水 (最新200条)</h3>
+              <button class="btn-cyber-refresh" @click="loadAdminData">🔄 刷新列表</button>
             </div>
-            <div class="btn-group">
-              <button class="btn-cyber-action" @click="copyText(fakaApiUrlSample)">复制 API 完整调用地址</button>
-              <span style="font-size: 12px; color: #94a3b8; align-self: center;">
-                * 参数支持在 URL 自定义调整，例如：<code>?gb=100&days=30&token=YOUR_TOKEN</code>
-              </span>
+
+            <div class="export-toolbar">
+              <div class="date-filter-group">
+                <span class="filter-label">📅 日期范围:</span>
+                <input v-model="exportFilter.startDate" type="date" class="cyber-input date-input" />
+                <span style="color: #64748b;">至</span>
+                <input v-model="exportFilter.endDate" type="date" class="cyber-input date-input" />
+                <button class="btn-sm btn-action" @click="exportByDateRange">按日期范围导出</button>
+              </div>
+
+              <div class="export-actions-group">
+                <button class="btn-sm btn-export-select" :disabled="selectedCards.length === 0" @click="exportSelectedCards">
+                  ☑️ 导出勾选卡密 (已选 {{ selectedCards.length }} 张)
+                </button>
+                <button class="btn-sm btn-cyber-success" @click="exportAllUnusedCards">
+                  📋 导出全部未售卡密
+                </button>
+              </div>
+            </div>
+
+            <div class="table-container">
+              <table class="cyber-table">
+                <thead>
+                  <tr>
+                    <th style="width: 40px; text-align: center;">
+                      <input type="checkbox" :checked="isAllSelected" @change="toggleSelectAll" title="全选未售卡密" />
+                    </th>
+                    <th>兑换卡密编号</th>
+                    <th>套餐配额</th>
+                    <th>核销状态</th>
+                    <th>生成日期</th>
+                    <th>兑换用户</th>
+                    <th>单张操作</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="c in adminCards" :key="c.code">
+                    <td style="text-align: center;">
+                      <input type="checkbox" :value="c.code" v-model="selectedCards" />
+                    </td>
+                    <td class="font-mono text-cyan">{{ c.code }}</td>
+                    <td>{{ c.traffic_gb }} GB / {{ c.days }} 天</td>
+                    <td>
+                      <span class="badge" :class="c.is_used ? 'badge-used' : 'badge-ready'">
+                        {{ c.is_used ? '已核销' : '待售出/有效' }}
+                      </span>
+                    </td>
+                    <td class="text-muted">{{ c.created_at || '早期生成' }}</td>
+                    <td>{{ c.used_by || '-' }}</td>
+                    <td><button class="btn-sm btn-action" @click="copyText(c.code)">一键复制</button></td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <!-- 子卡片 B: 方案 C 独立的 API 自动发卡子卡片 -->
+          <div v-else-if="cardSubTab === 'api'" class="sub-tab-pane">
+            <div class="settings-section" style="margin-top: 5px;">
+              <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; border-bottom: 1px solid #1e293b; padding-bottom: 10px;">
+                <h4 style="margin: 0; border: none; padding: 0; font-size: 16px; color: #38bdf8;">🔌 API自动发卡</h4>
+                <label class="radio-label" style="font-weight: 600;">
+                  <input type="checkbox" v-model="settingsForm.faka_api_enable" @change="saveAllSettings" />
+                  <span :style="{ color: settingsForm.faka_api_enable ? '#10b981' : '#ef4444' }">
+                    {{ settingsForm.faka_api_enable ? '🟢 接口运行中' : '🔴 接口已停用' }}
+                  </span>
+                </label>
+              </div>
+
+              <p class="card-desc">买家在独角数卡等第三方发卡网付款后，发卡系统可自动请求此 API 现场生成一张卡密交付，实现 0 库存全自动发卡：</p>
+
+              <div class="form-item">
+                <label>API 通信验证 TOKEN (密钥)：</label>
+                <div style="display: flex; gap: 8px;">
+                  <input v-model="settingsForm.faka_api_token" type="text" class="cyber-input font-mono" placeholder="自定义出卡令牌" />
+                  <button class="btn-sm btn-action" style="padding: 0 14px; white-space: nowrap;" @click="generateRandomToken">🎲 随机生成</button>
+                  <button class="btn-sm btn-cyber-success" style="padding: 0 14px; white-space: nowrap;" @click="saveAllSettings">保存密钥</button>
+                </div>
+                <span class="input-hint">第三方发卡系统调用出卡接口时必须携带此 Token 进行身份鉴权</span>
+              </div>
+
+              <div class="node-field" style="margin-top: 18px;">
+                <label>独角数卡自定义发卡调用 URL (GET / POST)：</label>
+                <div class="code-display text-cyan">{{ fakaApiUrlSample }}</div>
+              </div>
+
+              <div class="btn-group">
+                <button class="btn-cyber-action" @click="copyText(fakaApiUrlSample)">复制 API 完整调用地址</button>
+                <span style="font-size: 12px; color: #94a3b8; align-self: center;">
+                  * 参数可在 URL 中自定义，例如：<code>?gb=100&days=30&token=YOUR_TOKEN</code>
+                </span>
+              </div>
             </div>
           </div>
         </div>
 
-        <!-- 选项卡 3: 系统发信与定时任务设置 (包含节点连接域名/IP 配置) -->
+        <!-- 主选项卡 3: 系统发信与定时任务设置 -->
         <div v-else-if="activeTab === 'settings'" class="cyber-card tab-content-card">
           <div class="card-header">
             <h3>⚙️ 节点连接地址、系统发信与定时预警设置</h3>
@@ -432,7 +454,7 @@
                 <label>自定义节点连接地址 (域名或 IP)</label>
                 <input v-model="settingsForm.custom_host" type="text" class="cyber-input" placeholder="留空则自动获取公网 IP" />
                 <span class="input-hint">
-                  💡 默认为空。可输入您解析到本机的专属域名（如 <code>hk.node.com</code>）或中转 IP。<br>
+                  💡 默认为空。可输入解析到本机的专属域名（如 <code>hk.node.com</code>）或中转 IP。<br>
                   <b>清空该输入框并保存时，系统将全自动恢复为自动检测的公网 IP。</b>
                 </span>
               </div>
@@ -586,6 +608,9 @@ const isPureAdmin = ref(false)
 const rechargeCode = ref('')
 const activeTab = ref('users')
 
+// 卡密内部子卡片选项卡 ('inventory': 批量与库存 | 'api': API自动发卡)
+const cardSubTab = ref('inventory')
+
 const authMode = ref('login')
 const countdown = ref(0)
 const sendingCode = ref(false)
@@ -701,7 +726,6 @@ const generateRandomToken = () => {
   ElMessage.success('已随机生成新出卡 Token，请记得点击保存')
 }
 
-// 统一导出底层
 const executeExport = async (payload, successTip) => {
   try {
     const res = await axios.post('/api/admin/cards/export_unused', {
@@ -976,7 +1000,6 @@ const submitChangePassword = async () => {
   }
 }
 
-// 下载开箱即用 Windows 客户端
 const downloadWindowsClient = () => {
   if (!currentUser.username) return ElMessage.warning('用户未就绪')
   downloadingClient.value = true
@@ -1187,7 +1210,8 @@ const logout = () => location.reload()
   padding: 14px 24px;
 }
 .header-content {
-  max-width: 1100px;
+  width: 100%;
+  max-width: 98%;
   margin: 0 auto;
   display: flex;
   justify-content: space-between;
@@ -1197,10 +1221,18 @@ const logout = () => location.reload()
 .highlight { color: #38bdf8; text-shadow: 0 0 10px rgba(56, 189, 248, 0.5); }
 .user-status { display: flex; align-items: center; gap: 12px; }
 
-.main-body { max-width: 1100px; margin: 30px auto; padding: 0 16px; }
+/* 核心优化：动态流式全屏自适应布局 */
+.main-body {
+  width: 100%;
+  max-width: 98%;
+  margin: 20px auto;
+  padding: 0 12px;
+  box-sizing: border-box;
+}
 .dashboard-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
 .col-span-2 { grid-column: span 2; }
 
+/* 选项卡导航 */
 .admin-wrapper { width: 100%; }
 .card-tabs-nav {
   display: flex;
@@ -1215,12 +1247,13 @@ const logout = () => location.reload()
   background: #0f172a;
   border: 1px solid #1e293b;
   border-radius: 12px;
-  padding: 18px 20px;
+  padding: 16px 20px;
   cursor: pointer;
   text-align: left;
   transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
   color: #94a3b8;
   position: relative;
+  min-width: 0;
 }
 .tab-card-btn:hover {
   background: #131d36;
@@ -1233,17 +1266,52 @@ const logout = () => location.reload()
   box-shadow: 0 0 20px rgba(56, 189, 248, 0.2);
   color: #f8fafc;
 }
-.tab-icon { font-size: 24px; }
-.tab-title { font-size: 14px; font-weight: 700; color: #f8fafc; margin-bottom: 2px; }
-.tab-sub { font-size: 11px; color: #64748b; }
+.tab-icon { font-size: 24px; flex-shrink: 0; }
+.tab-text { flex: 1; min-width: 0; }
+.tab-title { font-size: 14px; font-weight: 700; color: #f8fafc; margin-bottom: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tab-sub { font-size: 11px; color: #64748b; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* 核心优化：数字徽章强制单行，禁止被挤压折行 */
 .count-tag {
   margin-left: auto;
   font-size: 11px;
   background: rgba(56, 189, 248, 0.1);
   color: #38bdf8;
-  padding: 3px 8px;
+  padding: 3px 10px;
   border-radius: 20px;
   border: 1px solid rgba(56, 189, 248, 0.3);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+/* 核心新增：卡密子卡片选项卡样式 */
+.sub-tab-nav {
+  display: flex;
+  gap: 12px;
+  margin-bottom: 20px;
+  border-bottom: 1px solid #1e293b;
+  padding-bottom: 12px;
+}
+.sub-tab-btn {
+  background: #0b1120;
+  border: 1px solid #1e293b;
+  color: #94a3b8;
+  padding: 8px 18px;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 600;
+  transition: all 0.2s;
+}
+.sub-tab-btn:hover {
+  color: #38bdf8;
+  border-color: #38bdf8;
+}
+.sub-tab-btn.active {
+  background: rgba(56, 189, 248, 0.15);
+  color: #38bdf8;
+  border-color: #38bdf8;
+  box-shadow: 0 0 12px rgba(56, 189, 248, 0.25);
 }
 
 .cyber-card {
@@ -1262,6 +1330,7 @@ const logout = () => location.reload()
 .card-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; }
 .card-header h3 { margin: 0; font-size: 16px; color: #f1f5f9; }
 
+/* 导出工具栏增强样式 */
 .export-toolbar {
   background: #0a0f1d;
   border: 1px solid #1e293b;
@@ -1394,6 +1463,7 @@ const logout = () => location.reload()
 .role-badge.user { background: #2563eb; color: white; }
 .btn-logout { background: transparent; border: 1px solid #475569; color: #94a3b8; padding: 4px 10px; border-radius: 4px; cursor: pointer; }
 
+/* 按钮组 */
 .action-btn-row { display: flex; gap: 6px; align-items: center; }
 .btn-sm { padding: 4px 8px; font-size: 11px; border-radius: 4px; border: none; cursor: pointer; white-space: nowrap; }
 .btn-action { background: #0284c7; color: white; }
