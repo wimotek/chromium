@@ -19,21 +19,42 @@
       <!-- 1. 登录 / 注册模块 -->
       <div v-if="!currentUser.username" class="auth-center">
         <div class="cyber-card auth-box">
-          <h2 class="card-title">{{ isPureAdmin ? '管理员认证' : (isRegister ? '新用户接入' : '节点控制台登录') }}</h2>
+          <h2 class="card-title">{{ isPureAdmin ? '管理员认证' : (isRegister ? '新用户激活注册' : '控制台账号接入') }}</h2>
+          
           <div class="form-item">
-            <label>IDENTIFIER / 账号</label>
-            <input v-model="authForm.username" type="text" class="cyber-input" placeholder="请输入用户名" />
+            <label>{{ isRegister ? 'USER IDENTIFIER / 用户名' : 'ACCOUNT / 用户名 或 注册邮箱' }}</label>
+            <input v-model="authForm.username" type="text" class="cyber-input" :placeholder="isRegister ? '设置您的用户名' : '输入用户名或邮箱地址'" />
           </div>
+
+          <!-- 注册特有字段：邮箱与验证码 -->
+          <template v-if="isRegister">
+            <div class="form-item">
+              <label>EMAIL / 电子邮箱 (必填接收激活码)</label>
+              <input v-model="authForm.email" type="email" class="cyber-input" placeholder="name@example.com" />
+            </div>
+            <div class="form-item">
+              <label>VERIFY CODE / 邮箱激活码</label>
+              <div class="code-send-group">
+                <input v-model="authForm.code" type="text" class="cyber-input" placeholder="6 位验证码" />
+                <button class="btn-cyber-code" :disabled="countdown > 0 || sendingCode" @click="sendRegisterCode">
+                  {{ countdown > 0 ? `${countdown}s 后重试` : (sendingCode ? '发送中...' : '获取验证码') }}
+                </button>
+              </div>
+            </div>
+          </template>
+
           <div class="form-item">
-            <label>ACCESS KEY / 密码</label>
+            <label>ACCESS KEY / 登录密码</label>
             <input v-model="authForm.password" type="password" class="cyber-input" placeholder="请输入密码" />
           </div>
+
           <button class="btn-cyber-primary" :disabled="loading" @click="handleAuth">
-            {{ loading ? 'AUTHENTICATING...' : (isRegister ? '立即开通体验' : '进入控制台') }}
+            {{ loading ? 'AUTHENTICATING...' : (isRegister ? '验证并激活账号' : '登录系统') }}
           </button>
+          
           <div v-if="!isPureAdmin" class="auth-toggle">
             <a href="javascript:;" @click="isRegister = !isRegister">
-              {{ isRegister ? '已有凭据？返回登录' : '没有凭证？注册领体验套餐' }}
+              {{ isRegister ? '已有凭据？返回登录' : '没有账号？邮箱注册领体验套餐' }}
             </a>
           </div>
         </div>
@@ -71,13 +92,14 @@
           <div class="card-header">
             <h3>🎟️ 卡密充值续费</h3>
           </div>
-          <p class="card-desc">输入发卡平台获取的兑换码，即时自动扩展流量与天数：</p>
+          <p class="card-desc">输入发卡平台兑换码，即时扩展流量与天数：</p>
           <div class="redeem-box">
             <input v-model="rechargeCode" type="text" class="cyber-input" placeholder="KM-XXXX-XXXX" />
             <button class="btn-cyber-success" :disabled="loading" @click="handleRecharge">立即激活</button>
           </div>
         </div>
 
+        <!-- 节点配置与密钥 -->
         <div class="cyber-card col-span-2">
           <div class="card-header">
             <h3>🔗 REALITY 节点订阅凭据</h3>
@@ -95,33 +117,85 @@
             <button class="btn-cyber-action" @click="openQrModal(currentUser.sub_link, currentUser.username)">📱 弹出二维码扫码</button>
           </div>
         </div>
+
+        <!-- 用户通知偏好与安全设置 -->
+        <div class="cyber-card col-span-2">
+          <div class="card-header">
+            <h3>🔔 告警通知偏好与安全中心</h3>
+          </div>
+          <div class="settings-grid">
+            <div class="settings-section">
+              <h4>1. 到期与流量微信/邮件通知设置</h4>
+              <div class="form-item">
+                <label>首选通知通道 (默认邮件)</label>
+                <div class="radio-group">
+                  <label class="radio-label">
+                    <input type="radio" value="email" v-model="notifyForm.notify_type" /> 📧 电子邮箱通知 ({{ currentUser.email }})
+                  </label>
+                  <label class="radio-label">
+                    <input type="radio" value="serverchan" v-model="notifyForm.notify_type" /> 📲 Server酱 (微信服务号即时推送)
+                  </label>
+                </div>
+              </div>
+
+              <div class="form-item" v-if="notifyForm.notify_type === 'serverchan'">
+                <label>Server酱 SendKey：</label>
+                <input v-model="notifyForm.serverchan_key" type="text" class="cyber-input" placeholder="SCTxxxxxxxxxx" />
+                <div class="input-hint">
+                  💡 未申请过？点击前往 <a href="https://sct.ftqq.com/" target="_blank" class="cyber-link">Server酱·Turbo版官网 (https://sct.ftqq.com/)</a> 微信扫码一键获取 SendKey。
+                </div>
+              </div>
+
+              <div class="btn-group">
+                <button class="btn-cyber-success" @click="saveNotifySettings">保存通知设置</button>
+                <button class="btn-cyber-action" @click="testUserNotify">发送测试通知</button>
+              </div>
+            </div>
+
+            <div class="settings-section">
+              <h4>2. 修改账户登录密码</h4>
+              <div class="form-item">
+                <label>当前原密码</label>
+                <input v-model="pwdForm.old_pwd" type="password" class="cyber-input" placeholder="输入当前密码" />
+              </div>
+              <div class="form-item">
+                <label>新密码 (至少6位)</label>
+                <input v-model="pwdForm.new_pwd" type="password" class="cyber-input" placeholder="输入新密码" />
+              </div>
+              <button class="btn-cyber-primary" @click="submitChangePassword">确认变更密码</button>
+            </div>
+          </div>
+        </div>
       </div>
 
-      <!-- 3. 管理员控制台 (卡片切换) -->
+      <!-- 3. 管理员控制台：重叠式卡片切换布局 -->
       <div v-else-if="currentUser.role === 'admin'" class="admin-wrapper">
         <div class="card-tabs-nav">
-          <button
-            class="tab-card-btn"
-            :class="{ active: activeTab === 'users' }"
-            @click="activeTab = 'users'">
+          <button class="tab-card-btn" :class="{ active: activeTab === 'users' }" @click="activeTab = 'users'">
             <span class="tab-icon">👥</span>
             <div class="tab-text">
               <div class="tab-title">全站用户生命周期管理</div>
-              <div class="tab-sub">配额/时效治理、凭证封禁、二维码与节点下发</div>
+              <div class="tab-sub">配额/时效治理、凭证封禁、二维码与密码重置</div>
             </div>
             <span class="count-tag">{{ adminUsers.length }} 位用户</span>
           </button>
 
-          <button
-            class="tab-card-btn"
-            :class="{ active: activeTab === 'cards' }"
-            @click="activeTab = 'cards'">
+          <button class="tab-card-btn" :class="{ active: activeTab === 'cards' }" @click="activeTab = 'cards'">
             <span class="tab-icon">🎟️</span>
             <div class="tab-text">
               <div class="tab-title">卡密生成与发卡中心</div>
               <div class="tab-sub">批量制卡、库存监管、卡密一键导出核销</div>
             </div>
             <span class="count-tag">{{ adminCards.length }} 张卡密</span>
+          </button>
+
+          <button class="tab-card-btn" :class="{ active: activeTab === 'settings' }" @click="openSettingsTab">
+            <span class="tab-icon">⚙️</span>
+            <div class="tab-text">
+              <div class="tab-title">系统与发信参数设置</div>
+              <div class="tab-sub">SMTP 邮件服务器配置、发信连接测试</div>
+            </div>
+            <span class="count-tag">配置</span>
           </button>
         </div>
 
@@ -135,21 +209,24 @@
             <table class="cyber-table">
               <thead>
                 <tr>
-                  <th>用户账号</th>
-                  <th>账号状态</th>
-                  <th>流量使用 / 总配额</th>
+                  <th>用户 / 绑定邮箱</th>
+                  <th>状态</th>
+                  <th>流量配额</th>
                   <th>到期时间</th>
-                  <th>系统角色</th>
+                  <th>通知</th>
                   <th>专属凭证</th>
-                  <th style="width: 280px;">治理操作</th>
+                  <th style="width: 320px;">治理操作</th>
                 </tr>
               </thead>
               <tbody>
                 <tr v-for="u in adminUsers" :key="u.username">
-                  <td><b>{{ u.username }}</b></td>
+                  <td>
+                    <b>{{ u.username }}</b>
+                    <div style="font-size: 11px; color: #64748b;">{{ u.email }}</div>
+                  </td>
                   <td>
                     <span class="badge" :class="u.status === 1 ? 'badge-ready' : 'badge-used'">
-                      {{ u.status === 1 ? '🟢 正常活跃' : '🔴 已被封禁' }}
+                      {{ u.status === 1 ? '🟢 活跃' : '🔴 封禁' }}
                     </span>
                   </td>
                   <td>
@@ -157,44 +234,19 @@
                     <div class="table-progress"><div class="table-glow" :style="{ width: Math.min(100, (u.used_mb / u.traffic_limit_mb) * 100) + '%' }"></div></div>
                   </td>
                   <td>{{ u.expire_date }}</td>
-                  <td><span class="role-badge" :class="u.role">{{ u.role }}</span></td>
+                  <td><span class="role-badge user">{{ u.notify_type }}</span></td>
                   <td>
-                    <button class="btn-sm btn-action" @click="openQrModal(u.sub_link, u.username)">📱 链接/二维码</button>
+                    <button class="btn-sm btn-action" @click="openQrModal(u.sub_link, u.username)">📱 凭证/二维码</button>
                   </td>
                   <td>
                     <div class="action-btn-row">
+                      <button class="btn-sm btn-reset" @click="openResetPwdModal(u.username)">🔑 重置密码</button>
                       <button class="btn-sm btn-edit" @click="openEditModal(u)">✏️ 改配额</button>
-                      <button
-                        v-if="u.status === 1"
-                        class="btn-sm btn-demote"
-                        :disabled="u.username === currentUser.username"
-                        @click="handleStatusToggle(u.username, 0)">
-                        🛑 封禁
-                      </button>
-                      <button
-                        v-else
-                        class="btn-sm btn-promote"
-                        @click="handleStatusToggle(u.username, 1)">
-                        🟢 解封
-                      </button>
-                      <button
-                        v-if="u.role === 'user'"
-                        class="btn-sm btn-promote"
-                        @click="handleRoleChange(u.username, 'admin')">
-                        ⚡ 提权
-                      </button>
-                      <button
-                        v-else-if="u.username !== currentUser.username"
-                        class="btn-sm btn-demote"
-                        @click="handleRoleChange(u.username, 'user')">
-                        降权
-                      </button>
-                      <button
-                        class="btn-sm btn-del"
-                        :disabled="u.username === currentUser.username"
-                        @click="handleDeleteUser(u.username)">
-                        🗑️
-                      </button>
+                      <button v-if="u.status === 1" class="btn-sm btn-demote" :disabled="u.username === currentUser.username" @click="handleStatusToggle(u.username, 0)">🛑 封禁</button>
+                      <button v-else class="btn-sm btn-promote" @click="handleStatusToggle(u.username, 1)">🟢 解封</button>
+                      <button v-if="u.role === 'user'" class="btn-sm btn-promote" @click="handleRoleChange(u.username, 'admin')">⚡ 提权</button>
+                      <button v-else-if="u.username !== currentUser.username" class="btn-sm btn-demote" @click="handleRoleChange(u.username, 'user')">降权</button>
+                      <button class="btn-sm btn-del" :disabled="u.username === currentUser.username" @click="handleDeleteUser(u.username)">🗑️</button>
                     </div>
                   </td>
                 </tr>
@@ -249,6 +301,55 @@
             </table>
           </div>
         </div>
+
+        <!-- 选项卡 3: 系统与 SMTP 邮件设置 -->
+        <div v-else-if="activeTab === 'settings'" class="cyber-card tab-content-card">
+          <div class="card-header">
+            <h3>⚙️ SMTP 发信服务器参数配置 (用于用户激活与到期提醒)</h3>
+          </div>
+          <div class="settings-grid">
+            <div class="settings-section">
+              <div class="form-item">
+                <label>SMTP 服务器地址</label>
+                <input v-model="smtpForm.smtp_host" type="text" class="cyber-input" placeholder="例如: smtp.qq.com / smtp.163.com" />
+              </div>
+              <div class="form-item">
+                <label>端口 (SSL 常用 465, STARTTLS 常用 587)</label>
+                <input v-model="smtpForm.smtp_port" type="text" class="cyber-input" placeholder="465" />
+              </div>
+              <div class="form-item">
+                <label>发信邮箱账号 (User)</label>
+                <input v-model="smtpForm.smtp_user" type="text" class="cyber-input" placeholder="service@example.com" />
+              </div>
+              <div class="form-item">
+                <label>邮箱授权码 / 密码 (Password)</label>
+                <input v-model="smtpForm.smtp_pass" type="password" class="cyber-input" placeholder="第三方客户端独立授权码" />
+              </div>
+              <div class="form-item">
+                <label>发件人显示名称 (Sender Name)</label>
+                <input v-model="smtpForm.smtp_sender" type="text" class="cyber-input" placeholder="Xray 节点中心" />
+              </div>
+              <div class="form-item">
+                <label class="radio-label">
+                  <input type="checkbox" v-model="smtpForm.smtp_ssl" /> 启用 SSL 安全加密连接 (推荐 465 端口开启)
+                </label>
+              </div>
+              <button class="btn-cyber-success" @click="saveSmtpSettings">保存邮件服务器参数</button>
+            </div>
+
+            <div class="settings-section">
+              <h4>📧 发信连通性一键测试</h4>
+              <p class="card-desc">输入接收测试邮件的邮箱，验证服务器是否能正常发送：</p>
+              <div class="form-item">
+                <label>收件人测试邮箱</label>
+                <input v-model="testEmailTo" type="email" class="cyber-input" placeholder="test@your-domain.com" />
+              </div>
+              <button class="btn-cyber-primary" :disabled="testingEmail" @click="sendTestEmail">
+                {{ testingEmail ? '正在发信...' : '发送测试邮件' }}
+              </button>
+            </div>
+          </div>
+        </div>
       </div>
     </main>
 
@@ -270,7 +371,7 @@
       </div>
     </div>
 
-    <!-- 弹窗 2：配额与到期时限修改 -->
+    <!-- 弹窗 2：管理员修改用户配额 -->
     <div v-if="showEditModal" class="modal-backdrop" @click="showEditModal = false">
       <div class="cyber-modal" style="max-width: 420px; text-align: left;" @click.stop>
         <h3>✏️ 调整用户 [{{ editForm.username }}] 属性</h3>
@@ -289,6 +390,22 @@
         </div>
       </div>
     </div>
+
+    <!-- 弹窗 3：管理员重置用户密码 -->
+    <div v-if="showResetPwdModal" class="modal-backdrop" @click="showResetPwdModal = false">
+      <div class="cyber-modal" style="max-width: 380px; text-align: left;" @click.stop>
+        <h3>🔑 重置用户 [{{ resetTargetUser }}] 密码</h3>
+        <div class="form-item" style="margin-top: 15px;">
+          <label>为该用户设置的新密码</label>
+          <input v-model="resetNewPassword" type="text" class="cyber-input" placeholder="输入新密码" />
+          <span style="font-size: 11px; color: #64748b;">重置后系统会自动向其邮箱/微信推送新密码通知</span>
+        </div>
+        <div class="btn-group" style="justify-content: flex-end; margin-top: 20px;">
+          <button class="btn-cyber-action" @click="showResetPwdModal = false">取消</button>
+          <button class="btn-cyber-primary" @click="submitResetPassword">确认重置</button>
+        </div>
+      </div>
+    </div>
   </div>
 </template>
 
@@ -303,6 +420,10 @@ const isPureAdmin = ref(false)
 const rechargeCode = ref('')
 const activeTab = ref('users')
 
+// 验证码倒计时
+const countdown = ref(0)
+const sendingCode = ref(false)
+
 // 弹窗状态
 const showQrModal = ref(false)
 const targetModalUser = ref('')
@@ -311,9 +432,22 @@ const targetModalLink = ref('')
 const showEditModal = ref(false)
 const editForm = reactive({ username: '', limit_mb: 1024, expire_date: '' })
 
-const currentUser = reactive({ username: '', role: '', used_mb: 0, limit_mb: 0, expire_date: '', public_key: '', sub_link: '' })
-const authForm = reactive({ username: '', password: '' })
+const showResetPwdModal = ref(false)
+const resetTargetUser = ref('')
+const resetNewPassword = ref('')
+
+// 表单
+const currentUser = reactive({ username: '', email: '', role: '', used_mb: 0, limit_mb: 0, expire_date: '', public_key: '', sub_link: '' })
+const authForm = reactive({ username: '', email: '', code: '', password: '' })
 const cardGenForm = reactive({ traffic_gb: 50, days: 30, count: 5 })
+const notifyForm = reactive({ notify_type: 'email', serverchan_key: '' })
+const pwdForm = reactive({ old_pwd: '', new_pwd: '' })
+
+// 管理员 SMTP 设置
+const smtpForm = reactive({ smtp_host: '', smtp_port: '465', smtp_user: '', smtp_pass: '', smtp_sender: '', smtp_ssl: true })
+const testEmailTo = ref('')
+const testingEmail = ref(false)
+
 const adminCards = ref([])
 const adminUsers = ref([])
 
@@ -326,7 +460,31 @@ onMounted(async () => {
 
 const trafficPercent = computed(() => currentUser.limit_mb ? Math.min(100, Math.round((currentUser.used_mb / currentUser.limit_mb) * 100)) : 0)
 
-// 弹出对应用户的专属二维码弹窗
+// 发送注册邮箱验证码
+const sendRegisterCode = async () => {
+  if (!authForm.email || !authForm.email.includes('@')) {
+    return ElMessage.warning('请先输入正确的电子邮箱')
+  }
+  sendingCode.value = true
+  try {
+    const res = await axios.post('/api/auth/send_register_code', { email: authForm.email })
+    if (res.data.code === 200) {
+      ElMessage.success(res.data.msg)
+      countdown.value = 60
+      const timer = setInterval(() => {
+        countdown.value--
+        if (countdown.value <= 0) clearInterval(timer)
+      }, 1000)
+    } else {
+      ElMessage.error(res.data.msg)
+    }
+  } catch (_) {
+    ElMessage.error('验证码发送请求失败，请确保后台已配置好发信服务器')
+  } finally {
+    sendingCode.value = false
+  }
+}
+
 const openQrModal = (link, uname) => {
   if (!link) return ElMessage.warning('链接无效或公钥未初始化')
   targetModalUser.value = uname
@@ -339,6 +497,32 @@ const openEditModal = (u) => {
   editForm.limit_mb = u.traffic_limit_mb
   editForm.expire_date = u.expire_date
   showEditModal.value = true
+}
+
+const openResetPwdModal = (uname) => {
+  resetTargetUser.value = uname
+  resetNewPassword.value = ''
+  showResetPwdModal.value = true
+}
+
+const submitResetPassword = async () => {
+  if (!resetNewPassword.value) return ElMessage.warning('请输入新密码')
+  try {
+    const res = await axios.post('/api/admin/users/reset_password', {
+      admin_user: authForm.username,
+      admin_pwd: authForm.password,
+      target_user: resetTargetUser.value,
+      new_password: resetNewPassword.value
+    })
+    if (res.data.code === 200) {
+      ElMessage.success(res.data.msg)
+      showResetPwdModal.value = false
+    } else {
+      ElMessage.error(res.data.msg)
+    }
+  } catch (_) {
+    ElMessage.error('重置密码操作失败')
+  }
 }
 
 const submitUserEdit = async () => {
@@ -423,6 +607,115 @@ const handleRoleChange = async (targetUser, newRole) => {
   }
 }
 
+// 用户保存通知偏好
+const saveNotifySettings = async () => {
+  try {
+    const res = await axios.post('/api/user/notify_settings', {
+      username: currentUser.username,
+      notify_type: notifyForm.notify_type,
+      serverchan_key: notifyForm.serverchan_key
+    })
+    if (res.data.code === 200) {
+      ElMessage.success(res.data.msg)
+    } else {
+      ElMessage.error(res.data.msg)
+    }
+  } catch (_) {
+    ElMessage.error('保存设置失败')
+  }
+}
+
+const testUserNotify = async () => {
+  try {
+    const res = await axios.post('/api/user/test_notify', { username: currentUser.username })
+    if (res.data.code === 200) {
+      ElMessage.success(res.data.msg)
+    } else {
+      ElMessage.error(res.data.msg)
+    }
+  } catch (_) {
+    ElMessage.error('测试发送失败')
+  }
+}
+
+// 用户自改密码
+const submitChangePassword = async () => {
+  if (!pwdForm.old_pwd || !pwdForm.new_pwd) return ElMessage.warning('请输入新旧密码')
+  try {
+    const res = await axios.post('/api/user/change_password', {
+      username: currentUser.username,
+      old_password: pwdForm.old_pwd,
+      new_password: pwdForm.new_pwd
+    })
+    if (res.data.code === 200) {
+      ElMessage.success(res.data.msg)
+      pwdForm.old_pwd = ''
+      pwdForm.new_pwd = ''
+      setTimeout(() => location.reload(), 1500)
+    } else {
+      ElMessage.error(res.data.msg)
+    }
+  } catch (_) {
+    ElMessage.error('密码修改失败')
+  }
+}
+
+// 管理员配置 SMTP
+const openSettingsTab = async () => {
+  activeTab.value = 'settings'
+  try {
+    const res = await axios.get(`/api/admin/settings?admin_user=${authForm.username}&admin_pwd=${authForm.password}`)
+    if (res.data.code === 200) {
+      const d = res.data.data
+      smtpForm.smtp_host = d.smtp_host
+      smtpForm.smtp_port = d.smtp_port
+      smtpForm.smtp_user = d.smtp_user
+      smtpForm.smtp_pass = d.smtp_pass
+      smtpForm.smtp_sender = d.smtp_sender
+      smtpForm.smtp_ssl = d.smtp_ssl === 'true'
+    }
+  } catch (_) {}
+}
+
+const saveSmtpSettings = async () => {
+  try {
+    const res = await axios.post('/api/admin/settings', {
+      admin_user: authForm.username,
+      admin_pwd: authForm.password,
+      ...smtpForm,
+      smtp_ssl: smtpForm.smtp_ssl ? 'true' : 'false'
+    })
+    if (res.data.code === 200) {
+      ElMessage.success(res.data.msg)
+    } else {
+      ElMessage.error(res.data.msg)
+    }
+  } catch (_) {
+    ElMessage.error('保存设置失败')
+  }
+}
+
+const sendTestEmail = async () => {
+  if (!testEmailTo.value) return ElMessage.warning('请输入测试收件邮箱')
+  testingEmail.value = true
+  try {
+    const res = await axios.post('/api/admin/test_email', {
+      admin_user: authForm.username,
+      admin_pwd: authForm.password,
+      test_to: testEmailTo.value
+    })
+    if (res.data.code === 200) {
+      ElMessage.success(res.data.msg)
+    } else {
+      ElMessage.error(res.data.msg)
+    }
+  } catch (_) {
+    ElMessage.error('发信异常，请核对端口与授权码')
+  } finally {
+    testingEmail.value = false
+  }
+}
+
 const copyText = async (text) => {
   if (!text) return ElMessage.warning('内容为空')
   if (navigator.clipboard && window.isSecureContext) {
@@ -448,17 +741,19 @@ const copyText = async (text) => {
 }
 
 const handleAuth = async () => {
-  if (!authForm.username || !authForm.password) return ElMessage.warning('请输入用户名与密码')
+  if (!authForm.username || !authForm.password) return ElMessage.warning('请填写必要账号密码')
   loading.value = true
   try {
     const res = await axios.post(isRegister.value ? '/api/register' : '/api/login', authForm)
     if (res.data.code === 200) {
       if (isRegister.value) {
-        ElMessage.success('注册成功，请登录！')
+        ElMessage.success(res.data.msg)
         isRegister.value = false
       } else {
         ElMessage.success('登录成功')
         Object.assign(currentUser, res.data.data)
+        notifyForm.notify_type = res.data.data.notify_type || 'email'
+        notifyForm.serverchan_key = res.data.data.serverchan_key || ''
         if (currentUser.role === 'admin') loadAdminData()
       }
     } else {
@@ -540,7 +835,7 @@ const logout = () => location.reload()
 .dashboard-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
 .col-span-2 { grid-column: span 2; }
 
-/* 卡片选项卡导航 */
+/* 选项卡导航 */
 .admin-wrapper { width: 100%; }
 .card-tabs-nav {
   display: flex;
@@ -555,7 +850,7 @@ const logout = () => location.reload()
   background: #0f172a;
   border: 1px solid #1e293b;
   border-radius: 12px;
-  padding: 18px 24px;
+  padding: 18px 20px;
   cursor: pointer;
   text-align: left;
   transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
@@ -573,15 +868,15 @@ const logout = () => location.reload()
   box-shadow: 0 0 20px rgba(56, 189, 248, 0.2);
   color: #f8fafc;
 }
-.tab-icon { font-size: 26px; }
-.tab-title { font-size: 15px; font-weight: 700; color: #f8fafc; margin-bottom: 2px; }
-.tab-sub { font-size: 12px; color: #64748b; }
+.tab-icon { font-size: 24px; }
+.tab-title { font-size: 14px; font-weight: 700; color: #f8fafc; margin-bottom: 2px; }
+.tab-sub { font-size: 11px; color: #64748b; }
 .count-tag {
   margin-left: auto;
-  font-size: 12px;
+  font-size: 11px;
   background: rgba(56, 189, 248, 0.1);
   color: #38bdf8;
-  padding: 4px 10px;
+  padding: 3px 8px;
   border-radius: 20px;
   border: 1px solid rgba(56, 189, 248, 0.3);
 }
@@ -593,9 +888,7 @@ const logout = () => location.reload()
   padding: 24px;
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
 }
-.tab-content-card {
-  animation: fadeIn 0.3s ease-in-out;
-}
+.tab-content-card { animation: fadeIn 0.3s ease-in-out; }
 @keyframes fadeIn {
   from { opacity: 0; transform: translateY(6px); }
   to { opacity: 1; transform: translateY(0); }
@@ -625,32 +918,24 @@ const logout = () => location.reload()
 }
 .cyber-input:focus { border-color: #38bdf8; box-shadow: 0 0 8px rgba(56, 189, 248, 0.3); }
 
+.code-send-group { display: flex; gap: 8px; }
+.btn-cyber-code {
+  background: #1e293b; border: 1px solid #38bdf8; color: #38bdf8; border-radius: 6px; padding: 0 14px;
+  white-space: nowrap; cursor: pointer; font-size: 12px;
+}
+.btn-cyber-code:disabled { opacity: 0.5; cursor: not-allowed; border-color: #475569; color: #94a3b8; }
+
 .btn-cyber-primary {
   background: linear-gradient(135deg, #0284c7, #2563eb);
   color: white; border: none; padding: 10px 20px; border-radius: 6px; font-weight: 700; cursor: pointer;
 }
-.redeem-box {
-  display: flex;
-  gap: 10px;
-  align-items: center;
-}
-.redeem-box .cyber-input {
-  flex: 1;
-  min-width: 0;
-}
+.redeem-box { display: flex; gap: 10px; align-items: center; }
+.redeem-box .cyber-input { flex: 1; min-width: 0; }
 .btn-cyber-success {
-  background: #059669;
-  color: white;
-  border: none;
-  padding: 10px 18px;
-  border-radius: 6px;
-  cursor: pointer;
-  white-space: nowrap;
-  flex-shrink: 0;
-  font-weight: 600;
+  background: #059669; color: white; border: none; padding: 10px 18px; border-radius: 6px; cursor: pointer;
+  white-space: nowrap; flex-shrink: 0; font-weight: 600;
 }
-
-.btn-cyber-action { background: #334155; color: white; border: none; padding: 10px 20px; border-radius: 6px; cursor: pointer; }
+.btn-cyber-action { background: #334155; color: white; border: none; padding: 10px 20px; border-radius: 6px; cursor: pointer; white-space: nowrap; }
 .btn-cyber-refresh { background: transparent; border: 1px solid #38bdf8; color: #38bdf8; padding: 5px 12px; border-radius: 6px; cursor: pointer; font-size: 12px; }
 
 .node-field { margin-bottom: 14px; }
@@ -663,11 +948,22 @@ const logout = () => location.reload()
 .text-cyan { color: #38bdf8; }
 .btn-group { display: flex; gap: 12px; margin-top: 16px; }
 
+/* 设置区域 */
+.settings-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; margin-top: 10px; }
+.settings-section { background: #0a0f1d; border: 1px solid #1e293b; padding: 20px; border-radius: 8px; }
+.settings-section h4 { margin-top: 0; margin-bottom: 16px; color: #f1f5f9; font-size: 14px; border-bottom: 1px solid #1e293b; padding-bottom: 8px; }
+.radio-group { display: flex; flex-direction: column; gap: 10px; margin-top: 6px; }
+.radio-label { font-size: 13px; color: #cbd5e1; cursor: pointer; display: flex; align-items: center; gap: 8px; }
+.input-hint { font-size: 11px; color: #94a3b8; margin-top: 6px; line-height: 1.5; }
+.cyber-link { color: #38bdf8; text-decoration: underline; }
+
+/* 弹窗 */
 .modal-backdrop { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.8); display: flex; justify-content: center; align-items: center; z-index: 1000; }
 .cyber-modal { background: #0f172a; border: 1px solid #38bdf8; border-radius: 12px; padding: 24px; max-width: 360px; box-shadow: 0 0 30px rgba(56, 189, 248, 0.25); }
 .qr-box { background: white; padding: 12px; border-radius: 8px; display: inline-block; margin: 10px 0; }
 .modal-tip { font-size: 12px; color: #94a3b8; margin: 4px 0 10px 0; }
 
+/* 表格与操作 */
 .table-container { overflow-x: auto; margin-top: 10px; }
 .cyber-table { width: 100%; border-collapse: collapse; font-size: 13px; text-align: left; }
 .cyber-table th, .cyber-table td { padding: 12px 10px; border-bottom: 1px solid #1e293b; }
@@ -686,13 +982,14 @@ const logout = () => location.reload()
 .action-btn-row { display: flex; gap: 6px; align-items: center; }
 .btn-sm { padding: 4px 8px; font-size: 11px; border-radius: 4px; border: none; cursor: pointer; white-space: nowrap; }
 .btn-action { background: #0284c7; color: white; }
+.btn-reset { background: #d97706; color: white; font-weight: 600; }
 .btn-edit { background: #4f46e5; color: white; }
 .btn-promote { background: #f59e0b; color: #000; font-weight: 700; }
 .btn-demote { background: #475569; color: #fff; }
 .btn-del { background: #b91c1c; color: white; }
 .btn-del:disabled, .btn-demote:disabled { opacity: 0.3; cursor: not-allowed; }
 
-.auth-box { max-width: 400px; margin: 50px auto; }
+.auth-box { max-width: 420px; margin: 40px auto; }
 .form-item { margin-bottom: 16px; }
 .form-item label { display: block; font-size: 12px; color: #94a3b8; margin-bottom: 6px; }
 .auth-toggle { text-align: center; margin-top: 16px; font-size: 13px; }
