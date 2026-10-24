@@ -131,5 +131,5 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
           repository: ${{ steps.prep.outputs.dh_user }}/xray
-          readme-filepath: ./xray/README.md
+          readme-filepath: ./xray/xray_core/README.md
           short-description: "Xray REALITY Suite: High Performance Core & Vue 3 Web Panel"
