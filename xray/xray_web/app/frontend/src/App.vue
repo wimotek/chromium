@@ -1,6 +1,5 @@
 <template>
   <div class="dark-theme">
-    <!-- 顶部科技导航 -->
     <header class="cyber-header">
       <div class="header-content">
         <div class="brand">
@@ -18,10 +17,19 @@
     <main class="main-body">
       <!-- 1. 登录 / 注册 / 找回密码 模块 -->
       <div v-if="!currentUser.username" class="auth-center">
+        <!-- 登录页系统公告展示栏 -->
+        <div v-if="systemNotice" class="cyber-notice-card">
+          <div class="notice-header">
+            <span class="notice-icon">📢</span>
+            <strong>系统公告 NOTICE</strong>
+          </div>
+          <div class="notice-body">{{ systemNotice }}</div>
+        </div>
+
         <div class="cyber-card auth-box">
           <h2 class="card-title">{{ authCardTitle }}</h2>
 
-          <!-- A. 登录表单 -->
+          <!-- A. 登录 -->
           <template v-if="authMode === 'login'">
             <div class="form-item">
               <label>ACCOUNT / 用户名 或 注册邮箱</label>
@@ -40,7 +48,7 @@
             </div>
           </template>
 
-          <!-- B. 注册表单 -->
+          <!-- B. 注册 -->
           <template v-else-if="authMode === 'register'">
             <div class="form-item">
               <label>USER IDENTIFIER / 设置用户名</label>
@@ -71,7 +79,7 @@
             </div>
           </template>
 
-          <!-- C. 忘记密码表单 -->
+          <!-- C. 找回密码 -->
           <template v-else-if="authMode === 'forgot'">
             <div class="form-item">
               <label>REGISTERED EMAIL / 绑定的注册邮箱</label>
@@ -100,7 +108,7 @@
         </div>
       </div>
 
-      <!-- 2. 普通用户端仪表盘 (流式全屏) -->
+      <!-- 2. 用户仪表盘 -->
       <div v-else-if="currentUser.role === 'user'" class="dashboard-grid">
         <div class="cyber-card">
           <div class="card-header">
@@ -126,6 +134,7 @@
               <strong class="highlight-date">
                 {{ (currentUser.expire_date && currentUser.expire_date.startsWith('2099')) ? '♾️ 永久有效' : currentUser.expire_date }}
               </strong>
+              <span v-if="currentUser.is_monthly === 1" class="monthly-tag">🔄 每月 {{ currentUser.reset_day }} 号重置</span>
             </div>
           </div>
         </div>
@@ -217,9 +226,8 @@
         </div>
       </div>
 
-      <!-- 3. 管理员控制台：全屏动态自适应 -->
+      <!-- 3. 管理员控制台 -->
       <div v-else-if="currentUser.role === 'admin'" class="admin-wrapper">
-        <!-- 顶部主卡片切换导航 -->
         <div class="card-tabs-nav">
           <button class="tab-card-btn" :class="{ active: activeTab === 'users' }" @click="activeTab = 'users'">
             <span class="tab-icon">👥</span>
@@ -243,7 +251,7 @@
             <span class="tab-icon">⚙️</span>
             <div class="tab-text">
               <div class="tab-title">系统发信与全局运维配置</div>
-              <div class="tab-sub">节点域名、发信配置、巡检预警与个人通知</div>
+              <div class="tab-sub">节点域名、公告配置、SMTP、巡检与注册配额</div>
             </div>
             <span class="count-tag">配置中心</span>
           </button>
@@ -263,6 +271,7 @@
                   <th>状态</th>
                   <th>流量使用 / 总配额</th>
                   <th>到期时间</th>
+                  <th>套餐特性</th>
                   <th>通知通道</th>
                   <th>专属凭证</th>
                   <th style="width: 250px;">治理操作</th>
@@ -284,6 +293,10 @@
                     <div class="table-progress"><div class="table-glow" :style="{ width: calcProgress(u.used_mb, u.traffic_limit_mb) + '%' }"></div></div>
                   </td>
                   <td style="white-space: nowrap;">{{ (u.expire_date && u.expire_date.startsWith('2099')) ? '♾️ 永久有效' : u.expire_date }}</td>
+                  <td>
+                    <span v-if="u.is_monthly === 1" class="badge badge-monthly">每月{{ u.reset_day }}号重置</span>
+                    <span v-else class="text-muted" style="font-size: 11px;">普通固定</span>
+                  </td>
                   <td><span class="role-badge user">{{ u.notify_type }}</span></td>
                   <td>
                     <button class="btn-sm btn-action" @click="openQrModal(u.sub_link, u.username)">📱 凭证/二维码</button>
@@ -332,7 +345,12 @@
                 <label>批量制卡数 (张)</label>
                 <input v-model.number="cardGenForm.count" type="number" class="cyber-input" />
               </div>
-              <button class="btn-cyber-success" @click="generateCards">立即批量制卡</button>
+              <div style="display: flex; flex-direction: column; justify-content: flex-end;">
+                <label class="radio-label" style="margin-bottom: 8px;">
+                  <input type="checkbox" v-model="cardGenForm.is_monthly" /> 设为每月固定重置套餐卡
+                </label>
+                <button class="btn-cyber-success" @click="generateCards">立即批量制卡</button>
+              </div>
             </div>
 
             <div class="card-header" style="margin-top: 30px;">
@@ -369,6 +387,7 @@
                     </th>
                     <th>兑换卡密编号</th>
                     <th>套餐配额</th>
+                    <th>套餐属性</th>
                     <th>核销状态</th>
                     <th>生成日期</th>
                     <th>兑换用户</th>
@@ -382,6 +401,10 @@
                     </td>
                     <td class="font-mono text-cyan">{{ c.code }}</td>
                     <td style="white-space: nowrap;">{{ c.traffic_gb === 0 ? '♾️ 不限' : c.traffic_gb + ' GB' }} / {{ c.days >= 3650 ? '永久' : c.days + ' 天' }}</td>
+                    <td>
+                      <span v-if="c.is_monthly === 1" class="badge badge-monthly">每月重置</span>
+                      <span v-else class="text-muted" style="font-size: 11px;">普通固定</span>
+                    </td>
                     <td>
                       <span class="badge" :class="c.is_used ? 'badge-used' : 'badge-ready'">
                         {{ c.is_used ? '已核销' : '待售出/有效' }}
@@ -409,7 +432,7 @@
                 </label>
               </div>
 
-              <p class="card-desc">买家在独角数卡等第三方发卡网付款后，发卡系统可自动请求此 API 现场生成一张卡密交付：</p>
+              <p class="card-desc">买家在独角数卡等发卡平台付款后，发卡系统可自动请求此 API 现场生成卡密交付，支持设定 <code>&amp;is_monthly=1</code> 出每月重置卡：</p>
 
               <div class="form-item">
                 <label>API 通信验证 TOKEN (密钥)：</label>
@@ -433,18 +456,49 @@
           </div>
         </div>
 
-        <!-- 主选项卡 3: 系统与发信设置 (现代平铺双列全屏响应式布局) -->
+        <!-- 主选项卡 3: 系统与发信设置 -->
         <div v-else-if="activeTab === 'settings'" class="cyber-card tab-content-card">
           <div class="card-header" style="margin-bottom: 22px;">
             <h3>⚙️ 系统发信、节点连接与全局运维中枢</h3>
             <button class="btn-cyber-success" @click="saveAllSettings">💾 保存全部系统设置</button>
           </div>
 
-          <!-- 双列并排平铺网格：桌面端并列2栏，手机端自适应1栏 -->
           <div class="settings-2col-layout">
-            <!-- 栏目 1 (左列): 管理员个人偏好与定时巡检任务 -->
+            <!-- 栏目 1 (左列): 公告、新用户配额与管理员安全 -->
             <div class="column-stack">
-              <!-- 左卡片 A: 管理员通知与安全中心 -->
+              <!-- 左卡片 A: 登录页公告与新注册配额设置 -->
+              <div class="panel-card">
+                <div class="panel-card-header">
+                  <div class="panel-title-wrap">
+                    <span class="panel-icon">📢</span>
+                    <div>
+                      <strong class="panel-title">系统公告与新注册用户默认配额</strong>
+                      <div class="panel-sub">登录页横幅公告展示与新用户免费体验配额</div>
+                    </div>
+                  </div>
+                </div>
+
+                <div class="form-item">
+                  <label>登录页系统公告内容 (留空则不显示公告)：</label>
+                  <textarea v-model="settingsForm.system_notice" rows="3" class="cyber-input cyber-textarea" placeholder="例如：欢迎加入！新节点已上线，高速晚高峰不卡顿..."></textarea>
+                  <span class="input-hint">保存后，前台用户打开登录卡片顶部将即时看到此公告</span>
+                </div>
+
+                <div class="form-row-2" style="margin-top: 15px;">
+                  <div class="form-item">
+                    <label>新注册默认赠送流量 (MB)</label>
+                    <input v-model.number="settingsForm.reg_traffic_mb" type="number" class="cyber-input" placeholder="例如 1024" />
+                    <span class="input-hint">填 0 为不赠送流量</span>
+                  </div>
+                  <div class="form-item">
+                    <label>新注册默认有效天数 (天)</label>
+                    <input v-model.number="settingsForm.reg_expire_days" type="number" class="cyber-input" placeholder="例如 1 或 3" />
+                    <span class="input-hint">填 36500 为永久有效</span>
+                  </div>
+                </div>
+              </div>
+
+              <!-- 左卡片 B: 管理员通知通道与改密 -->
               <div class="panel-card">
                 <div class="panel-card-header">
                   <div class="panel-title-wrap">
@@ -483,7 +537,6 @@
                   <button class="btn-cyber-action" style="padding: 6px 14px; font-size: 12px;" @click="testUserNotify">发送测试通知</button>
                 </div>
 
-                <!-- 管理员改密 -->
                 <div class="inner-divider">
                   <div class="inner-divider-title">🔑 修改管理员自身登录密码</div>
                   <div class="form-item" style="margin-bottom: 8px;">
@@ -498,15 +551,39 @@
                   <button class="btn-cyber-primary" style="width: auto; padding: 7px 20px; font-size: 12px;" @click="submitChangePassword">确认变更密码</button>
                 </div>
               </div>
+            </div>
 
-              <!-- 左卡片 B: 定时自动巡检任务 -->
+            <!-- 栏目 2 (右列): 节点连接地址、定时任务与发信中枢 -->
+            <div class="column-stack">
+              <!-- 右卡片 A: 节点客户端连接地址配置 -->
+              <div class="panel-card">
+                <div class="panel-card-header">
+                  <div class="panel-title-wrap">
+                    <span class="panel-icon">🌐</span>
+                    <div>
+                      <strong class="panel-title">节点客户端连接地址 (域名或 IP)</strong>
+                      <div class="panel-sub">客户端配置与订阅链接中使用的主机地址</div>
+                    </div>
+                  </div>
+                </div>
+
+                <div class="form-item">
+                  <input v-model="settingsForm.custom_host" type="text" class="cyber-input" placeholder="留空则自动获取服务器真实外网 IP" />
+                  <span class="input-hint">
+                    💡 可输入解析到本机的专属域名（如 <code>hk.node.com</code>）或中转 IP。<br>
+                    <b>清空该输入框并保存时，系统将全自动恢复为自动检测的外网公网 IP。</b>
+                  </span>
+                </div>
+              </div>
+
+              <!-- 右卡片 B: 定时自动巡检任务 -->
               <div class="panel-card">
                 <div class="panel-card-header">
                   <div class="panel-title-wrap">
                     <span class="panel-icon">⏰</span>
                     <div>
-                      <strong class="panel-title">定时巡检与智能预警</strong>
-                      <div class="panel-sub">后台自动定时轮询全站用户配额与到期时限</div>
+                      <strong class="panel-title">定时巡检、预警与每月固定流量刷新</strong>
+                      <div class="panel-sub">后台自动定时轮询配额、执行每月重置与到期推送</div>
                     </div>
                   </div>
                   <label class="radio-label" style="font-weight: 600; font-size: 13px; margin: 0; white-space: nowrap;">
@@ -547,39 +624,15 @@
                 <div class="inner-divider">
                   <div style="font-size: 12px; color: #94a3b8; margin-bottom: 10px;">
                     最近自动扫描完成时间：<b class="text-cyan">{{ settingsForm.task_last_run }}</b>
-                    <div style="font-size: 11px; color: #64748b; margin-top: 2px;">单日防骚扰机制：同类型预警当天只提醒一次</div>
+                    <div style="font-size: 11px; color: #64748b; margin-top: 2px;">若用户为每月固定套餐，到达重置日时系统将自动清零 Xray 流量并推送通知</div>
                   </div>
                   <button class="btn-cyber-primary" :disabled="triggeringTask" style="width: auto; padding: 7px 18px; font-size: 12px;" @click="triggerManualTask">
-                    {{ triggeringTask ? '正在扫描并推送...' : '⚡ 立即执行一次巡检' }}
+                    {{ triggeringTask ? '正在扫描并推送...' : '⚡ 立即执行一次巡检与重置' }}
                   </button>
                 </div>
               </div>
-            </div>
 
-            <!-- 栏目 2 (右列): 节点连接地址与 SMTP 发信中枢 -->
-            <div class="column-stack">
-              <!-- 右卡片 A: 节点客户端连接地址配置 -->
-              <div class="panel-card">
-                <div class="panel-card-header">
-                  <div class="panel-title-wrap">
-                    <span class="panel-icon">🌐</span>
-                    <div>
-                      <strong class="panel-title">节点客户端连接地址 (域名或 IP)</strong>
-                      <div class="panel-sub">客户端配置与订阅链接中使用的主机地址</div>
-                    </div>
-                  </div>
-                </div>
-
-                <div class="form-item">
-                  <input v-model="settingsForm.custom_host" type="text" class="cyber-input" placeholder="留空则自动获取服务器真实外网 IP" />
-                  <span class="input-hint">
-                    💡 可输入解析到本机的专属域名（如 <code>hk.node.com</code>）或中转 IP。<br>
-                    <b>清空该输入框并保存时，系统将全自动恢复为自动检测的外网公网 IP。</b>
-                  </span>
-                </div>
-              </div>
-
-              <!-- 右卡片 B: SMTP 邮件服务器配置与测试 -->
+              <!-- 右卡片 C: SMTP 邮件服务器配置与测试 -->
               <div class="panel-card">
                 <div class="panel-card-header">
                   <div class="panel-title-wrap">
@@ -591,7 +644,6 @@
                   </div>
                 </div>
 
-                <!-- 状态指示条 -->
                 <div class="smtp-status-box" :class="settingsForm.is_smtp_configured ? 'smtp-ready' : 'smtp-empty'">
                   <span>{{ settingsForm.is_smtp_configured ? '🟢 SMTP 状态：已配置就绪 (可正常发信)' : '⚪ SMTP 状态：尚未完整配置 (无法发信)' }}</span>
                 </div>
@@ -670,7 +722,7 @@
       </div>
     </div>
 
-    <!-- 弹窗 2：管理员修改用户配额 -->
+    <!-- 弹窗 2：管理员修改用户配额 (支持每月重置与永久有效) -->
     <div v-if="showEditModal" class="modal-backdrop" @click="showEditModal = false">
       <div class="cyber-modal" style="max-width: 440px; text-align: left;" @click.stop>
         <h3>✏️ 调整用户 [{{ editForm.username }}] 属性</h3>
@@ -680,7 +732,7 @@
             <label style="margin: 0;">总流量限制配额 (MB)</label>
             <button class="btn-link-action" @click="editForm.limit_mb = 0">♾️ 设为不限流量</button>
           </div>
-          <input v-model.number="editForm.limit_mb" type="number" class="cyber-input" />
+          <input v-model.number="editForm.limit_mb" type="number" class="cyber-input modal-input" />
           <span style="font-size: 11px; color: #64748b;">提示：填 0 表示不限制流量 | 100GB = 102400MB</span>
         </div>
 
@@ -689,8 +741,19 @@
             <label style="margin: 0;">套餐到期时限</label>
             <button class="btn-link-action" @click="editForm.expire_date = '2099-12-31 23:59:59'">♾️ 设为永久有效</button>
           </div>
-          <input v-model="editForm.expire_date" type="text" class="cyber-input" />
+          <input v-model="editForm.expire_date" type="text" class="cyber-input modal-input" />
           <span style="font-size: 11px; color: #64748b;">提示：填 2099-12-31 表示永久有效</span>
+        </div>
+
+        <div class="form-item">
+          <label class="radio-label">
+            <input type="checkbox" v-model="editForm.is_monthly" /> 开启每月固定重置流量套餐
+          </label>
+        </div>
+
+        <div class="form-item" v-if="editForm.is_monthly">
+          <label>每月流量重置日期 (1~28 号)</label>
+          <input v-model.number="editForm.reset_day" type="number" min="1" max="28" class="cyber-input modal-input" placeholder="例如每月 1 号" />
         </div>
 
         <div class="btn-group" style="justify-content: flex-end; margin-top: 20px;">
@@ -706,7 +769,7 @@
         <h3>🔑 重置用户 [{{ resetTargetUser }}] 密码</h3>
         <div class="form-item" style="margin-top: 15px;">
           <label>为该用户设置的新密码</label>
-          <input v-model="resetNewPassword" type="text" class="cyber-input" placeholder="输入新密码" />
+          <input v-model="resetNewPassword" type="text" class="cyber-input modal-input" placeholder="输入新密码" />
           <span style="font-size: 11px; color: #64748b;">重置后系统会自动向其邮箱/微信推送新密码通知</span>
         </div>
         <div class="btn-group" style="justify-content: flex-end; margin-top: 20px;">
@@ -734,21 +797,23 @@ const countdown = ref(0)
 const sendingCode = ref(false)
 const downloadingClient = ref(false)
 
+const systemNotice = ref('')
+
 const showQrModal = ref(false)
 const targetModalUser = ref('')
 const targetModalLink = ref('')
 
 const showEditModal = ref(false)
-const editForm = reactive({ username: '', limit_mb: 1024, expire_date: '' })
+const editForm = reactive({ username: '', limit_mb: 1024, expire_date: '', is_monthly: false, reset_day: 1 })
 
 const showResetPwdModal = ref(false)
 const resetTargetUser = ref('')
 const resetNewPassword = ref('')
 
-const currentUser = reactive({ username: '', email: '', role: '', used_mb: 0, limit_mb: 0, expire_date: '', public_key: '', sub_link: '' })
+const currentUser = reactive({ username: '', email: '', role: '', used_mb: 0, limit_mb: 0, expire_date: '', is_monthly: 0, reset_day: 1, public_key: '', sub_link: '' })
 const authForm = reactive({ username: '', email: '', code: '', password: '' })
 const forgotForm = reactive({ email: '', code: '', new_password: '' })
-const cardGenForm = reactive({ traffic_gb: 50, days: 30, count: 5 })
+const cardGenForm = reactive({ traffic_gb: 50, days: 30, count: 5, is_monthly: false })
 const notifyForm = reactive({ notify_type: 'email', serverchan_key: '' })
 const pwdForm = reactive({ old_pwd: '', new_pwd: '', confirm_pwd: '' })
 
@@ -771,7 +836,10 @@ const settingsForm = reactive({
   task_last_run: '尚未执行',
   faka_api_enable: true,
   faka_api_token: 'faka_secret_token_8899',
-  custom_host: ''
+  custom_host: '',
+  system_notice: '',
+  reg_traffic_mb: 1024,
+  reg_expire_days: 1
 })
 
 const testEmailTo = ref('')
@@ -782,7 +850,6 @@ const adminCards = ref([])
 const adminUsers = ref([])
 
 onMounted(async () => {
-  // 恢复本地会话，实现 F5 刷新页面永不退登
   const savedSession = localStorage.getItem('xray_auth_session')
   if (savedSession) {
     try {
@@ -805,6 +872,7 @@ onMounted(async () => {
   try {
     const res = await axios.get('/api/system/info')
     if (res.data.data.mode === 'admin') isPureAdmin.value = true
+    if (res.data.data.system_notice) systemNotice.value = res.data.data.system_notice
   } catch (_) {}
 })
 
@@ -839,7 +907,7 @@ const qrCodeImgUrl = computed(() => {
 const fakaApiUrlSample = computed(() => {
   const host = window.location.origin
   const token = settingsForm.faka_api_token || 'faka_secret_token_8899'
-  return `${host}/api/open/faka_generate?gb=100&days=30&token=${token}`
+  return `${host}/api/open/faka_generate?gb=100&days=30&is_monthly=1&token=${token}`
 })
 
 const isAllSelected = computed(() => {
@@ -866,7 +934,6 @@ const generateRandomToken = () => {
   ElMessage.success('已随机生成新出卡 Token，请记得点击保存')
 }
 
-// 统一导出底层
 const executeExport = async (payload, successTip) => {
   try {
     const adminUser = currentUser.username || authForm.username
@@ -889,13 +956,11 @@ const executeExport = async (payload, successTip) => {
   }
 }
 
-// 唯一保留：按勾选导出
 const exportSelectedCards = () => {
   if (selectedCards.value.length === 0) return ElMessage.warning('请先在表格左侧勾选要导出的卡密')
   executeExport({ selected_codes: selectedCards.value }, '已复制选中的卡密')
 }
 
-// 唯一保留：按日期范围导出
 const exportByDateRange = () => {
   if (!exportFilter.startDate && !exportFilter.endDate) {
     return ElMessage.warning('请先选择开始日期或结束日期')
@@ -906,7 +971,6 @@ const exportByDateRange = () => {
   }, '已导出指定日期范围内的未售卡密')
 }
 
-// 唯一保留：导出全部未售卡密
 const exportAllUnusedCards = () => {
   executeExport({}, '已复制全部未售卡密')
 }
@@ -995,6 +1059,8 @@ const openEditModal = (u) => {
   editForm.username = u.username
   editForm.limit_mb = u.traffic_limit_mb
   editForm.expire_date = u.expire_date
+  editForm.is_monthly = u.is_monthly === 1
+  editForm.reset_day = u.reset_day || 1
   showEditModal.value = true
 }
 
@@ -1033,7 +1099,9 @@ const submitUserEdit = async () => {
       admin_pwd: authForm.password,
       target_user: editForm.username,
       limit_mb: editForm.limit_mb,
-      expire_date: editForm.expire_date
+      expire_date: editForm.expire_date,
+      is_monthly: editForm.is_monthly,
+      reset_day: editForm.reset_day
     })
     if (res.data.code === 200) {
       ElMessage.success(res.data.msg)
@@ -1197,6 +1265,9 @@ const openSettingsTab = async () => {
       settingsForm.faka_api_enable = d.faka_api_enable === 'true'
       settingsForm.faka_api_token = d.faka_api_token || 'faka_secret_token_8899'
       settingsForm.custom_host = d.custom_host || ''
+      settingsForm.system_notice = d.system_notice || ''
+      settingsForm.reg_traffic_mb = Number(d.reg_traffic_mb) || 1024
+      settingsForm.reg_expire_days = Number(d.reg_expire_days) || 1
     }
   } catch (_) {}
 }
@@ -1215,6 +1286,7 @@ const saveAllSettings = async () => {
     if (res.data.code === 200) {
       ElMessage.success(res.data.msg)
       openSettingsTab()
+      systemNotice.value = settingsForm.system_notice
     } else {
       ElMessage.error(res.data.msg)
     }
@@ -1288,6 +1360,25 @@ const copyText = async (text) => {
     ElMessage.error('快捷复制失败，请手动长按复制')
   }
   document.body.removeChild(ta)
+}
+
+const exportSelectedCards = () => {
+  if (selectedCards.value.length === 0) return ElMessage.warning('请先在表格左侧勾选要导出的卡密')
+  executeExport({ selected_codes: selectedCards.value }, '已复制选中的卡密')
+}
+
+const exportByDateRange = () => {
+  if (!exportFilter.startDate && !exportFilter.endDate) {
+    return ElMessage.warning('请先选择开始日期或结束日期')
+  }
+  executeExport({
+    start_date: exportFilter.startDate,
+    end_date: exportFilter.endDate
+  }, '已导出指定日期范围内的未售卡密')
+}
+
+const exportAllUnusedCards = () => {
+  executeExport({}, '已复制全部未售卡密')
 }
 
 const handleAuth = async () => {
@@ -1395,7 +1486,6 @@ const logout = () => {
 .highlight { color: #38bdf8; text-shadow: 0 0 10px rgba(56, 189, 248, 0.5); }
 .user-status { display: flex; align-items: center; gap: 12px; }
 
-/* 动态流式全屏 */
 .main-body {
   width: 100%;
   max-width: 98%;
@@ -1405,6 +1495,31 @@ const logout = () => {
 }
 .dashboard-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
 .col-span-2 { grid-column: span 2; }
+
+/* 登录页科技公告卡片 */
+.cyber-notice-card {
+  max-width: 420px;
+  margin: 0 auto 16px auto;
+  background: rgba(56, 189, 248, 0.08);
+  border: 1px solid rgba(56, 189, 248, 0.3);
+  border-radius: 8px;
+  padding: 12px 16px;
+  box-shadow: 0 0 15px rgba(56, 189, 248, 0.15);
+}
+.notice-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: #38bdf8;
+  margin-bottom: 6px;
+}
+.notice-body {
+  font-size: 12px;
+  color: #cbd5e1;
+  line-height: 1.6;
+  white-space: pre-wrap;
+}
 
 .admin-wrapper { width: 100%; }
 .card-tabs-nav {
@@ -1444,7 +1559,6 @@ const logout = () => {
 .tab-title { font-size: 14px; font-weight: 700; color: #f8fafc; margin-bottom: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .tab-sub { font-size: 11px; color: #64748b; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
-/* 徽章强制不换行 */
 .count-tag {
   margin-left: auto;
   font-size: 11px;
@@ -1457,7 +1571,6 @@ const logout = () => {
   flex-shrink: 0;
 }
 
-/* 子卡片导航 */
 .sub-tab-nav {
   display: flex;
   gap: 12px;
@@ -1504,7 +1617,6 @@ const logout = () => {
 .card-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; }
 .card-header h3 { margin: 0; font-size: 16px; color: #f1f5f9; }
 
-/* 现代流行双列平铺布局 */
 .settings-2col-layout {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -1571,6 +1683,7 @@ const logout = () => {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 12px;
+  max-width: 520px;
 }
 
 .smtp-status-box {
@@ -1629,11 +1742,22 @@ const logout = () => {
 .data-unit { font-size: 12px; color: #64748b; margin-left: 4px; }
 .progress-track { background: #1e293b; height: 10px; border-radius: 5px; overflow: hidden; margin: 10px 0; }
 .progress-glow { background: linear-gradient(90deg, #38bdf8, #818cf8); height: 100%; box-shadow: 0 0 12px #38bdf8; }
-.expiry-notice { font-size: 13px; color: #94a3b8; }
+.expiry-notice { font-size: 13px; color: #94a3b8; display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
 .highlight-date { color: #f59e0b; }
 
+.monthly-tag {
+  background: rgba(56, 189, 248, 0.15);
+  color: #38bdf8;
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 4px;
+  border: 1px solid rgba(56, 189, 248, 0.3);
+}
+
 .cyber-input {
-  width: 100%;
+  width: 70%;
+  min-width: 260px;
+  max-width: 500px;
   background: #1e293b;
   border: 1px solid #334155;
   color: #f8fafc;
@@ -1641,10 +1765,33 @@ const logout = () => {
   border-radius: 6px;
   outline: none;
   box-sizing: border-box;
+  transition: border-color 0.2s, box-shadow 0.2s;
 }
 .cyber-input:focus { border-color: #38bdf8; box-shadow: 0 0 8px rgba(56, 189, 248, 0.3); }
 
-.code-send-group { display: flex; gap: 8px; }
+.cyber-textarea {
+  resize: vertical;
+  min-height: 70px;
+  font-family: inherit;
+}
+
+.auth-box .cyber-input,
+.modal-input {
+  width: 100% !important;
+  min-width: 0 !important;
+  max-width: 100% !important;
+}
+
+.code-send-group {
+  display: flex;
+  gap: 8px;
+  max-width: 500px;
+}
+.code-send-group .cyber-input {
+  flex: 1;
+  width: auto;
+  min-width: 140px;
+}
 .btn-cyber-code {
   background: #1e293b; border: 1px solid #38bdf8; color: #38bdf8; border-radius: 6px; padding: 0 14px;
   white-space: nowrap; cursor: pointer; font-size: 12px;
@@ -1655,8 +1802,17 @@ const logout = () => {
   background: linear-gradient(135deg, #0284c7, #2563eb);
   color: white; border: none; padding: 10px 20px; border-radius: 6px; font-weight: 700; cursor: pointer; width: 100%;
 }
-.redeem-box { display: flex; gap: 10px; align-items: center; }
-.redeem-box .cyber-input { flex: 1; min-width: 0; }
+.redeem-box {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  max-width: 500px;
+}
+.redeem-box .cyber-input {
+  flex: 1;
+  width: auto;
+  min-width: 180px;
+}
 .btn-cyber-success {
   background: #059669; color: white; border: none; padding: 10px 18px; border-radius: 6px; cursor: pointer;
   white-space: nowrap; flex-shrink: 0; font-weight: 600;
@@ -1693,7 +1849,7 @@ const logout = () => {
 
 .radio-group { display: flex; flex-direction: column; gap: 10px; margin-top: 6px; }
 .radio-label { font-size: 13px; color: #cbd5e1; cursor: pointer; display: flex; align-items: center; gap: 8px; }
-.input-hint { font-size: 11px; color: #94a3b8; margin-top: 6px; line-height: 1.5; }
+.input-hint { font-size: 11px; color: #94a3b8; margin-top: 6px; line-height: 1.5; display: block; }
 .cyber-link { color: #38bdf8; text-decoration: underline; }
 
 .modal-backdrop { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.8); display: flex; justify-content: center; align-items: center; z-index: 1000; }
@@ -1711,6 +1867,7 @@ const logout = () => {
 .badge { padding: 2px 8px; border-radius: 4px; font-size: 11px; }
 .badge-ready { background: rgba(16, 185, 129, 0.2); color: #34d399; }
 .badge-used { background: rgba(239, 68, 68, 0.2); color: #f87171; }
+.badge-monthly { background: rgba(56, 189, 248, 0.2); color: #38bdf8; border: 1px solid rgba(56, 189, 248, 0.4); }
 .role-badge { padding: 3px 8px; border-radius: 4px; font-size: 11px; font-weight: 700; }
 .role-badge.admin { background: #dc2626; color: white; }
 .role-badge.user { background: #2563eb; color: white; }
@@ -1737,12 +1894,26 @@ const logout = () => {
 }
 .btn-link-action:hover { color: #7dd3fc; }
 
-.auth-box { max-width: 420px; margin: 40px auto; }
+.auth-box { max-width: 420px; margin: 0 auto 40px auto; }
 .form-item { margin-bottom: 16px; }
 .form-item label { display: block; font-size: 12px; color: #94a3b8; margin-bottom: 6px; }
 .auth-nav-links { display: flex; justify-content: space-between; margin-top: 16px; font-size: 13px; }
 .auth-nav-links a { color: #38bdf8; text-decoration: none; }
 .auth-nav-links a.text-warning { color: #f59e0b; }
 .auth-nav-links a:hover { text-decoration: underline; }
-.gen-form { display: grid; grid-template-columns: 1fr 1fr 1fr auto; gap: 10px; align-items: flex-end; }
+.gen-form { display: grid; grid-template-columns: 1fr 1fr 1fr 1.2fr; gap: 10px; align-items: flex-end; }
+
+@media (max-width: 640px) {
+  .cyber-input {
+    width: 100% !important;
+    min-width: 0 !important;
+    max-width: 100% !important;
+  }
+  .form-row-2 {
+    grid-template-columns: 1fr;
+  }
+  .gen-form {
+    grid-template-columns: 1fr;
+  }
+}
 </style>

@@ -13,6 +13,7 @@ from db import init_db, get_db, hash_pwd, get_setting, set_setting
 from xray import (
     get_reality_public_key,
     query_user_traffic,
+    reset_user_traffic,
     build_vless_link,
     sync_users_to_xray,
     get_xray_reality_params,
@@ -23,10 +24,13 @@ from client_pack import generate_windows_package
 
 app = Flask(__name__, static_folder='../frontend/dist', static_url_path='/')
 
+# 1. 初始化数据库表结构
 init_db()
+
+# 2. 开机全量同步：服务启动瞬间把数据库中所有有效用户写入 Xray 的 config.json
 sync_users_to_xray()
 
-# ==================== 定时任务：智能过滤“不限流量”与“永久有效” ====================
+# ==================== 定时任务：智能检测、预警与每月固定流量刷新 ====================
 
 def run_scheduled_check(force=False) -> tuple[int, int, str]:
     enable = get_setting("task_notify_enable", "true").lower() == "true"
@@ -35,7 +39,9 @@ def run_scheduled_check(force=False) -> tuple[int, int, str]:
 
     traffic_threshold = int(get_setting("task_traffic_threshold", "80") or 80)
     expire_threshold_days = int(get_setting("task_expire_days", "3") or 3)
-    today_str = datetime.date.today().strftime("%Y-%m-%d")
+    today = datetime.date.today()
+    today_str = today.strftime("%Y-%m-%d")
+    current_day = today.day
 
     traffic_sent = 0
     expire_sent = 0
@@ -47,10 +53,25 @@ def run_scheduled_check(force=False) -> tuple[int, int, str]:
 
     for u in users:
         uname = u["username"]
+
+        # 1. 核心特性：每月固定流量套餐重置
+        if u.get("is_monthly") == 1:
+            reset_day = u.get("reset_day", 1) or 1
+            if current_day == reset_day or force:
+                c.execute("SELECT id FROM notify_logs WHERE username=? AND warn_type='monthly_reset' AND sent_date=?", (uname, today_str))
+                if not c.fetchone() or force:
+                    # 调用 Xray 命令清零已用流量
+                    reset_user_traffic(uname)
+                    c.execute("INSERT INTO notify_logs (username, warn_type, sent_date) VALUES (?, 'monthly_reset', ?)", (uname, today_str))
+                    conn.commit()
+                    title = "【流量已重置】您的每月固定流量套餐已刷新"
+                    content = f"您好 {uname}，今天是您的每月固定套餐重置日（每月 {reset_day} 号），您的可用流量已全部恢复满格，祝您使用愉快！"
+                    notify_user(u, title, f"<h3>{title}</h3><p>{content}</p>", content)
+
         used_mb = query_user_traffic(uname)
         limit_mb = u.get("traffic_limit_mb", 1024)
 
-        # 核心逻辑：limit_mb 为 0 表示不限流量，永不告警
+        # 2. 流量不足告警检测 (limit_mb 为 0 表示不限流量，跳过告警)
         if limit_mb > 0:
             used_percent = round((used_mb / limit_mb) * 100, 1)
             if used_percent >= traffic_threshold:
@@ -65,12 +86,12 @@ def run_scheduled_check(force=False) -> tuple[int, int, str]:
                         c.execute("INSERT INTO notify_logs (username, warn_type, sent_date) VALUES (?, 'traffic', ?)", (uname, today_str))
                         conn.commit()
 
+        # 3. 套餐到期预警检测 (2099 表示永久有效，跳过告警)
         exp_str = u.get("expire_date", "").strip()
-        # 核心逻辑：2099 表示永久有效，永不告警
         if exp_str and not exp_str.startswith("2099"):
             try:
                 exp_date = datetime.datetime.strptime(exp_str[:10], "%Y-%m-%d").date()
-                days_left = (exp_date - datetime.date.today()).days
+                days_left = (exp_date - today).days
                 if 0 <= days_left <= expire_threshold_days:
                     c.execute("SELECT id FROM notify_logs WHERE username=? AND warn_type='expire' AND sent_date=?", (uname, today_str))
                     if not c.fetchone() or force:
@@ -116,7 +137,8 @@ def system_info():
         "code": 200,
         "data": {
             "mode": Config.APP_MODE,
-            "public_key": get_reality_public_key()
+            "public_key": get_reality_public_key(),
+            "system_notice": get_setting("system_notice", "")
         }
     })
 
@@ -130,6 +152,8 @@ def get_qrcode_svg():
     img.save(buf)
     buf.seek(0)
     return send_file(buf, mimetype='image/svg+xml')
+
+# ==================== 方案 C：第三方发卡系统开放 API ====================
 
 @app.route('/api/open/faka_generate', methods=['GET', 'POST'])
 def open_faka_generate():
@@ -150,19 +174,21 @@ def open_faka_generate():
 
     gb_param = request.args.get("gb") or (request.json or {}).get("gb") if request.is_json else None
     days_param = request.args.get("days") or (request.json or {}).get("days") if request.is_json else None
+    is_monthly_param = request.args.get("is_monthly") or (request.json or {}).get("is_monthly") if request.is_json else 0
 
     try:
         traffic_gb = int(gb_param or 100)
         days = int(days_param or 30)
+        is_monthly = 1 if str(is_monthly_param) in ["1", "true"] else 0
     except ValueError:
-        traffic_gb, days = 100, 30
+        traffic_gb, days, is_monthly = 100, 30, 0
 
     code = "KM-" + str(uuid.uuid4()).replace("-", "")[:12].upper()
     now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     conn = get_db()
     c = conn.cursor()
-    c.execute("INSERT INTO cards VALUES (?, ?, ?, 0, NULL, ?)", (code, traffic_gb, days, now))
+    c.execute("INSERT INTO cards VALUES (?, ?, ?, 0, NULL, ?, ?)", (code, traffic_gb, days, now, is_monthly))
     conn.commit()
     conn.close()
 
@@ -171,10 +197,13 @@ def open_faka_generate():
             "code": 200,
             "card": code,
             "traffic_gb": traffic_gb,
-            "days": days
+            "days": days,
+            "is_monthly": is_monthly
         })
 
     return code, 200, {"Content-Type": "text/plain; charset=utf-8"}
+
+# ==================== 用户认证与安全 ====================
 
 @app.route('/api/auth/send_register_code', methods=['POST'])
 def send_register_code():
@@ -236,16 +265,26 @@ def register():
         conn.close()
         return jsonify({"code": 400, "msg": "用户名或邮箱已被占用"})
 
-    exp = (datetime.datetime.now() + datetime.timedelta(days=1)).strftime("%Y-%m-%d %H:%M:%S")
+    # 读取后台设置的新用户默认配额与有效天数
+    reg_traffic_mb = int(get_setting("reg_traffic_mb", "1024") or 1024)
+    reg_expire_days = int(get_setting("reg_expire_days", "1") or 1)
+
+    if reg_expire_days >= 3650:
+        exp = "2099-12-31 23:59:59"
+    else:
+        exp = (datetime.datetime.now() + datetime.timedelta(days=reg_expire_days)).strftime("%Y-%m-%d %H:%M:%S")
+
     try:
-        c.execute("INSERT INTO users (username, password_hash, uuid, email, traffic_limit_mb, expire_date, role, status, is_verified) VALUES (?, ?, ?, ?, 1024, ?, 'user', 1, 1)",
-                  (u, hash_pwd(p), str(uuid.uuid4()), email, exp))
+        c.execute("INSERT INTO users (username, password_hash, uuid, email, traffic_limit_mb, expire_date, role, status, is_verified, is_monthly, reset_day) VALUES (?, ?, ?, ?, ?, ?, 'user', 1, 1, 0, 1)",
+                  (u, hash_pwd(p), str(uuid.uuid4()), email, reg_traffic_mb, exp))
         c.execute("DELETE FROM verify_codes WHERE email=?", (email,))
         conn.commit()
         conn.close()
 
+        # 核心联动：新用户注册成功，全量实时同步写入 Xray 核心 clients
         sync_users_to_xray()
-        return jsonify({"code": 200, "msg": "账号已成功激活注册，已获赠 1GB 体验套餐"})
+
+        return jsonify({"code": 200, "msg": f"账号已成功激活注册，已获赠 {reg_traffic_mb}MB 体验套餐"})
     except Exception as e:
         conn.close()
         return jsonify({"code": 500, "msg": f"数据库写入失败: {str(e)}"})
@@ -358,6 +397,8 @@ def login():
             "used_mb": used_mb,
             "limit_mb": user['traffic_limit_mb'],
             "expire_date": user['expire_date'],
+            "is_monthly": user['is_monthly'] or 0,
+            "reset_day": user['reset_day'] or 1,
             "public_key": params['pbk'],
             "sub_link": link,
             "notify_type": user['notify_type'] or 'email',
@@ -455,6 +496,8 @@ def download_windows_client():
     except Exception as e:
         return jsonify({"code": 500, "msg": f"客户端构建失败: {str(e)}"}), 500
 
+# ==================== 卡密充值 ====================
+
 @app.route('/api/recharge', methods=['POST'])
 def recharge():
     data = request.json or {}
@@ -473,16 +516,14 @@ def recharge():
     c.execute("SELECT * FROM users WHERE username=?", (u,))
     user = c.fetchone()
 
-    # 处理不限流量与充值
     current_limit = user['traffic_limit_mb']
     if card['traffic_gb'] == 0:
-        new_limit = 0  # 设为不限流量
+        new_limit = 0
     elif current_limit == 0:
-        new_limit = 0  # 原本就不限流量，保持不限
+        new_limit = 0
     else:
         new_limit = current_limit + card['traffic_gb'] * 1024
 
-    # 处理不限有效期与续费
     c_exp_str = user['expire_date']
     if card['days'] >= 3650 or c_exp_str.startswith("2099"):
         n_exp = "2099-12-31 23:59:59"
@@ -490,7 +531,14 @@ def recharge():
         c_exp = datetime.datetime.strptime(c_exp_str, "%Y-%m-%d %H:%M:%S")
         n_exp = (max(datetime.datetime.now(), c_exp) + datetime.timedelta(days=card['days'])).strftime("%Y-%m-%d %H:%M:%S")
 
-    c.execute("UPDATE users SET traffic_limit_mb=?, expire_date=? WHERE username=?", (new_limit, n_exp, u))
+    # 如果充值的卡密是每月固定重置卡，自动继承该属性
+    card_is_monthly = card['is_monthly'] if 'is_monthly' in card.keys() else 0
+    if card_is_monthly == 1:
+        reset_day = datetime.date.today().day
+        c.execute("UPDATE users SET traffic_limit_mb=?, expire_date=?, is_monthly=1, reset_day=? WHERE username=?", (new_limit, n_exp, reset_day, u))
+    else:
+        c.execute("UPDATE users SET traffic_limit_mb=?, expire_date=? WHERE username=?", (new_limit, n_exp, u))
+
     conn.commit()
     conn.close()
 
@@ -516,9 +564,11 @@ def admin_generate():
     created = []
     t_gb = int(data.get('traffic_gb', 50))
     days = int(data.get('days', 30))
+    is_monthly = 1 if data.get('is_monthly') else 0
+
     for _ in range(int(data.get('count', 5))):
         code = "KM-" + str(uuid.uuid4()).replace("-", "")[:12].upper()
-        c.execute("INSERT INTO cards VALUES (?, ?, ?, 0, NULL, ?)", (code, t_gb, days, now))
+        c.execute("INSERT INTO cards VALUES (?, ?, ?, 0, NULL, ?, ?)", (code, t_gb, days, now, is_monthly))
         created.append(code)
     conn.commit()
     conn.close()
@@ -574,10 +624,10 @@ def admin_data():
     params = get_xray_reality_params()
     conn = get_db()
     c = conn.cursor()
-    c.execute("SELECT code, traffic_gb, days, is_used, used_by, created_at FROM cards ORDER BY rowid DESC LIMIT 200")
+    c.execute("SELECT code, traffic_gb, days, is_used, used_by, created_at, is_monthly FROM cards ORDER BY rowid DESC LIMIT 200")
     cards = [dict(r) for r in c.fetchall()]
 
-    c.execute("SELECT username, email, traffic_limit_mb, expire_date, role, uuid, status, notify_type FROM users")
+    c.execute("SELECT username, email, traffic_limit_mb, expire_date, role, uuid, status, notify_type, is_monthly, reset_day FROM users")
     users = []
     for r in c.fetchall():
         d = dict(r)
@@ -646,10 +696,13 @@ def edit_user_quota():
     target_user = data.get('target_user')
     limit_mb = int(data.get('limit_mb', 0))
     expire_date = data.get('expire_date', '').strip()
+    is_monthly = 1 if data.get('is_monthly') else 0
+    reset_day = int(data.get('reset_day', 1) or 1)
 
     conn = get_db()
     c = conn.cursor()
-    c.execute("UPDATE users SET traffic_limit_mb=?, expire_date=? WHERE username=?", (limit_mb, expire_date, target_user))
+    c.execute("UPDATE users SET traffic_limit_mb=?, expire_date=?, is_monthly=?, reset_day=? WHERE username=?",
+              (limit_mb, expire_date, is_monthly, reset_day, target_user))
     conn.commit()
     conn.close()
     return jsonify({"code": 200, "msg": f"用户 [{target_user}] 属性已更新"})
@@ -673,7 +726,7 @@ def delete_user():
     sync_users_to_xray()
     return jsonify({"code": 200, "msg": f"用户 [{target_user}] 已被彻底删除"})
 
-# ==================== 管理员系统设置 (核心修复：友好状态回显与密码防覆盖) ====================
+# ==================== 管理员系统设置 (含公告、注册配额、SMTP、自定义域名) ====================
 
 @app.route('/api/admin/settings', methods=['GET', 'POST'])
 def handle_settings():
@@ -682,7 +735,7 @@ def handle_settings():
         admin_user = request.args.get('admin_user')
         admin_pwd = request.args.get('admin_pwd')
         if not check_admin(admin_user, admin_pwd): return jsonify({"code": 403, "msg": "无权限"})
-        
+
         smtp_host = get_setting("smtp_host", "")
         smtp_user = get_setting("smtp_user", "")
         smtp_pass = get_setting("smtp_pass", "")
@@ -706,21 +759,24 @@ def handle_settings():
                 "task_last_run": get_setting("task_last_run", "尚未执行"),
                 "faka_api_enable": get_setting("faka_api_enable", "true"),
                 "faka_api_token": get_setting("faka_api_token", Config.FAKA_API_TOKEN),
-                "custom_host": get_setting("custom_host", "")
+                "custom_host": get_setting("custom_host", ""),
+                "system_notice": get_setting("system_notice", ""),
+                "reg_traffic_mb": get_setting("reg_traffic_mb", "1024"),
+                "reg_expire_days": get_setting("reg_expire_days", "1")
             }
         })
     else:
         data = request.json or {}
         if not check_admin(data.get('admin_user'), data.get('admin_pwd')): return jsonify({"code": 403, "msg": "无权限"})
-        
-        # 核心防清空保护：密码若留空则自动保持原密码，绝不覆盖为空！
+
         new_pass = data.get("smtp_pass", "").strip()
         if new_pass:
             set_setting("smtp_pass", new_pass)
 
         keys = ["smtp_host", "smtp_port", "smtp_user", "smtp_sender", "smtp_ssl",
                 "task_notify_enable", "task_interval_hours", "task_traffic_threshold", "task_expire_days",
-                "faka_api_enable", "faka_api_token", "custom_host"]
+                "faka_api_enable", "faka_api_token", "custom_host", "system_notice",
+                "reg_traffic_mb", "reg_expire_days"]
         for k in keys:
             if k in data:
                 set_setting(k, str(data[k]).strip())
@@ -752,7 +808,6 @@ def trigger_task_now():
         "data": {"traffic_sent": t_sent, "expire_sent": e_sent}
     })
 
-# 核心修复：支持用用户名或邮箱鉴权管理员
 def check_admin(u, p):
     conn = get_db()
     c = conn.cursor()

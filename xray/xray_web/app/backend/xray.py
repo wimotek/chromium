@@ -121,6 +121,7 @@ def get_reality_public_key() -> str:
     return get_xray_reality_params().get("pbk", "")
 
 def query_user_traffic(username: str) -> float:
+    """从 Xray 内部 API (10085) 统计用户的实时上行+下行总流量（MB）"""
     try:
         cmd = [
             "/usr/bin/xray", "api", "statsquery",
@@ -136,6 +137,20 @@ def query_user_traffic(username: str) -> float:
 
 get_user_traffic = query_user_traffic
 
+def reset_user_traffic(username: str) -> bool:
+    """调用 Xray 核心命令将指定用户的流量计数重置清零 (用于每月固定套餐刷新)"""
+    try:
+        cmd = [
+            "/usr/bin/xray", "api", "statsquery",
+            f"--server={Config.XRAY_API_SERVER}",
+            "-pattern", f"user>>>{username}>>>",
+            "-reset=true"
+        ]
+        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+        return True
+    except Exception:
+        return False
+
 def build_vless_link(uuid_str: str, pbk: str, name: str) -> str:
     params = get_xray_reality_params()
     real_pbk = pbk if (pbk and len(pbk) > 20) else params["pbk"]
@@ -147,15 +162,15 @@ def build_vless_link(uuid_str: str, pbk: str, name: str) -> str:
 
 def sync_users_to_xray():
     """
-    【核心打通】读取 SQLite 中所有有效用户全量同步写入 /data/config.json，
-    并自动补全 stats、policy 与 10085 统计端口！
+    【核心枢纽】将 SQLite 中所有正常状态的用户同步写入 /data/config.json，
+    并自动补齐 stats、policy 与 10085 统计端口，让 Xray 即刻识别新用户！
     """
     if not os.path.exists(CONFIG_PATH):
         return False, "config.json 尚未生成"
 
     conn = get_db()
     c = conn.cursor()
-    # 状态正常（未被封禁）的用户
+    # 状态正常（未被封禁）的用户全量同步
     c.execute("SELECT username, uuid FROM users WHERE status=1")
     active_users = c.fetchall()
     conn.close()
@@ -244,7 +259,7 @@ def sync_users_to_xray():
         except Exception:
             pass
 
-        print(f"[Xray Sync] 成功将 {len(active_users)} 位用户 ({[u['username'] for u in active_users]}) 真实写入 Xray 核心并重载生效！", flush=True)
+        print(f"[Xray Sync] 成功将 {len(active_users)} 位用户同步写入 Xray 核心并重载生效！", flush=True)
         return True, "同步成功"
 
     except Exception as e:

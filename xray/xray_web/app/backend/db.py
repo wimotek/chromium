@@ -19,7 +19,7 @@ def init_db():
     conn = get_db()
     c = conn.cursor()
 
-    # 1. 用户表
+    # 1. 用户表 (包含每月重置字段 is_monthly, reset_day)
     c.execute('''CREATE TABLE IF NOT EXISTS users (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         username TEXT UNIQUE NOT NULL,
@@ -32,17 +32,20 @@ def init_db():
         status INTEGER DEFAULT 1,
         is_verified INTEGER DEFAULT 0,
         serverchan_key TEXT DEFAULT '',
-        notify_type TEXT DEFAULT 'email'
+        notify_type TEXT DEFAULT 'email',
+        is_monthly INTEGER DEFAULT 0,
+        reset_day INTEGER DEFAULT 1
     )''')
 
-    # 2. 卡密表
+    # 2. 卡密表 (包含是否为每月重置卡字段 is_monthly)
     c.execute('''CREATE TABLE IF NOT EXISTS cards (
         code TEXT PRIMARY KEY,
         traffic_gb INTEGER NOT NULL,
         days INTEGER NOT NULL,
         is_used INTEGER DEFAULT 0,
         used_by TEXT,
-        created_at TEXT NOT NULL
+        created_at TEXT NOT NULL,
+        is_monthly INTEGER DEFAULT 0
     )''')
 
     # 3. 邮箱验证码缓存表
@@ -53,13 +56,13 @@ def init_db():
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )''')
 
-    # 4. 全局系统配置表
+    # 4. 全局系统配置表 (公告、新用户配额、SMTP、API Token 等)
     c.execute('''CREATE TABLE IF NOT EXISTS system_settings (
         key TEXT PRIMARY KEY,
         value TEXT
     )''')
 
-    # 5. 核心新增：定时通知去重记录表 (防同一天内重复骚扰用户)
+    # 5. 定时通知去重记录表 (防同一天内重复向用户发送同一类型的预警)
     c.execute('''CREATE TABLE IF NOT EXISTS notify_logs (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         username TEXT NOT NULL,
@@ -67,7 +70,7 @@ def init_db():
         sent_date TEXT NOT NULL
     )''')
 
-    # 平滑补齐已有数据表字段
+    # 安全平滑热补丁已有数据表字段（防止老数据库报错）
     def try_add_column(sql):
         try:
             c.execute(sql)
@@ -79,8 +82,11 @@ def init_db():
     try_add_column("ALTER TABLE users ADD COLUMN is_verified INTEGER DEFAULT 1")
     try_add_column("ALTER TABLE users ADD COLUMN serverchan_key TEXT DEFAULT ''")
     try_add_column("ALTER TABLE users ADD COLUMN notify_type TEXT DEFAULT 'email'")
+    try_add_column("ALTER TABLE users ADD COLUMN is_monthly INTEGER DEFAULT 0")
+    try_add_column("ALTER TABLE users ADD COLUMN reset_day INTEGER DEFAULT 1")
+    try_add_column("ALTER TABLE cards ADD COLUMN is_monthly INTEGER DEFAULT 0")
 
-    # 默认管理员种子逻辑
+    # 默认管理员种子逻辑（库内没有任何管理员时才初始化）
     c.execute("SELECT id FROM users WHERE role='admin'")
     existing_admin = c.fetchone()
     if not existing_admin:
