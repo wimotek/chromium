@@ -185,7 +185,7 @@
 
               <div class="form-item" v-if="notifyForm.notify_type === 'serverchan'">
                 <label>Server酱 SendKey：</label>
-                <input v-model="notifyForm.serverchan_key" type="text" class="cyber-input" placeholder="SCTxxxxxxxxxx" />
+                <input v-model="notifyForm.serverchan_key" type="text" class="cyber-input font-mono" placeholder="SCTxxxxxxxxxx" />
                 <div class="input-hint">
                   💡 未申请过？点击前往 <a href="https://sct.ftqq.com/" target="_blank" class="cyber-link">Server酱·Turbo版官网 (https://sct.ftqq.com/)</a> 微信扫码一键获取 SendKey。
                 </div>
@@ -217,8 +217,9 @@
         </div>
       </div>
 
-      <!-- 3. 管理员控制台：全屏动态自适应 -->
+      <!-- 3. 管理员控制台 -->
       <div v-else-if="currentUser.role === 'admin'" class="admin-wrapper">
+        <!-- 顶部主卡片切换导航 -->
         <div class="card-tabs-nav">
           <button class="tab-card-btn" :class="{ active: activeTab === 'users' }" @click="activeTab = 'users'">
             <span class="tab-icon">👥</span>
@@ -302,7 +303,7 @@
           </div>
         </div>
 
-        <!-- 主选项卡 2: 卡密管理 -->
+        <!-- 主选项卡 2: 卡密管理 (子卡片切换) -->
         <div v-else-if="activeTab === 'cards'" class="cyber-card tab-content-card">
           <div class="sub-tab-nav">
             <button class="sub-tab-btn" :class="{ active: cardSubTab === 'inventory' }" @click="cardSubTab = 'inventory'">
@@ -313,7 +314,7 @@
             </button>
           </div>
 
-          <!-- 子卡片 A: 批量制卡与库存 -->
+          <!-- 子卡 A: 批量制卡与库存表格 -->
           <div v-if="cardSubTab === 'inventory'" class="sub-tab-pane">
             <div class="card-header">
               <h3>🛠️ 批量生成卡密</h3>
@@ -395,11 +396,11 @@
             </div>
           </div>
 
-          <!-- 子卡片 B: 方案 C API 自动发卡 -->
+          <!-- 子卡 B: API 自动发卡 -->
           <div v-else-if="cardSubTab === 'api'" class="sub-tab-pane">
-            <div class="settings-section" style="margin-top: 5px;">
-              <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; border-bottom: 1px solid #1e293b; padding-bottom: 10px;">
-                <h4 style="margin: 0; border: none; padding: 0; font-size: 16px; color: #38bdf8;">🔌 API自动发卡</h4>
+            <div class="settings-section">
+              <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; border-bottom: 1px solid #1e293b; padding-bottom: 12px;">
+                <h4 style="margin: 0; font-size: 16px; color: #38bdf8;">🔌 API自动发卡</h4>
                 <label class="radio-label" style="font-weight: 600;">
                   <input type="checkbox" v-model="settingsForm.faka_api_enable" @change="saveAllSettings" />
                   <span :style="{ color: settingsForm.faka_api_enable ? '#10b981' : '#ef4444' }">
@@ -412,15 +413,15 @@
 
               <div class="form-item">
                 <label>API 通信验证 TOKEN (密钥)：</label>
-                <div style="display: flex; gap: 8px;">
+                <div style="display: flex; gap: 10px; max-width: 650px;">
                   <input v-model="settingsForm.faka_api_token" type="text" class="cyber-input font-mono" placeholder="自定义出卡令牌" />
-                  <button class="btn-sm btn-action" style="padding: 0 14px; white-space: nowrap;" @click="generateRandomToken">🎲 随机生成</button>
-                  <button class="btn-sm btn-cyber-success" style="padding: 0 14px; white-space: nowrap;" @click="saveAllSettings">保存密钥</button>
+                  <button class="btn-sm btn-action" style="padding: 0 16px; white-space: nowrap;" @click="generateRandomToken">🎲 随机生成</button>
+                  <button class="btn-sm btn-cyber-success" style="padding: 0 16px; white-space: nowrap;" @click="saveAllSettings">保存密钥</button>
                 </div>
                 <span class="input-hint">第三方发卡系统调用出卡接口时必须携带此 Token 进行身份鉴权</span>
               </div>
 
-              <div class="node-field" style="margin-top: 18px;">
+              <div class="node-field" style="margin-top: 20px;">
                 <label>独角数卡自定义发卡调用 URL (GET / POST)：</label>
                 <div class="code-display text-cyan">{{ fakaApiUrlSample }}</div>
               </div>
@@ -432,27 +433,31 @@
           </div>
         </div>
 
-        <!-- 主选项卡 3: 系统发信、节点连接与全局运维设置 (现代紧凑仪表盘重构) -->
+        <!-- 主选项卡 3: 系统发信与定时任务设置 (舒展大气的子卡片平铺体系) -->
         <div v-else-if="activeTab === 'settings'" class="cyber-card tab-content-card">
-          <div class="card-header">
-            <h3>⚙️ 系统发信、节点连接与全局运维中枢</h3>
-            <button class="btn-cyber-success" @click="saveAllSettings">💾 保存全部系统设置</button>
+          <!-- 设置子卡片导航 -->
+          <div class="sub-tab-nav">
+            <button class="sub-tab-btn" :class="{ active: settingSubTab === 'admin_notify' }" @click="settingSubTab = 'admin_notify'">
+              👤 管理员通知与安全
+            </button>
+            <button class="sub-tab-btn" :class="{ active: settingSubTab === 'network_smtp' }" @click="settingSubTab = 'network_smtp'">
+              🌐 节点连接与发信配置 (SMTP)
+            </button>
+            <button class="sub-tab-btn" :class="{ active: settingSubTab === 'cron' }" @click="settingSubTab = 'cron'">
+              ⏰ 定时巡检与智能预警
+            </button>
           </div>
 
-          <!-- 区域 1：前两项【并排紧凑卡片】(左右对称，紧凑精致) -->
-          <div class="settings-two-col">
-            <!-- 左卡片：管理员通知通道与安全设置 -->
-            <div class="sub-panel">
-              <div class="sub-panel-title">
-                <span class="sub-panel-icon">👤</span>
-                <div>
-                  <strong>管理员通知与个人偏好</strong>
-                  <div class="sub-panel-hint">当前登录管理员: {{ currentUser.username }}</div>
-                </div>
+          <!-- 子卡 1: 管理员个人通知偏好与改密 (舒展平铺，不拥挤) -->
+          <div v-if="settingSubTab === 'admin_notify'" class="sub-tab-pane">
+            <div class="settings-section">
+              <div class="card-header" style="margin-bottom: 20px; border-bottom: 1px solid #1e293b; padding-bottom: 12px;">
+                <h3 style="color: #38bdf8;">🔔 管理员专属告警通道偏好 (Server酱 / 邮件)</h3>
+                <span style="font-size: 13px; color: #94a3b8;">当前登录管理员: <b>{{ currentUser.username }}</b></span>
               </div>
 
               <div class="form-item">
-                <label>告警通知通道选择</label>
+                <label>选择接收系统通知通道</label>
                 <div class="radio-group">
                   <label class="radio-label">
                     <input type="radio" value="email" v-model="notifyForm.notify_type" />
@@ -467,147 +472,173 @@
 
               <div class="form-item" v-if="notifyForm.notify_type === 'serverchan'">
                 <label>Server酱 SendKey：</label>
-                <input v-model="notifyForm.serverchan_key" type="text" class="cyber-input font-mono" placeholder="SCTxxxxxxxxxx" />
+                <input v-model="notifyForm.serverchan_key" type="text" class="cyber-input font-mono form-standard-width" placeholder="SCTxxxxxxxxxx" />
                 <div class="input-hint">
-                  💡 前往 <a href="https://sct.ftqq.com/" target="_blank" class="cyber-link">Server酱官网</a> 微信扫码获取 SendKey。
+                  💡 未申请过？点击前往 <a href="https://sct.ftqq.com/" target="_blank" class="cyber-link">Server酱·Turbo版官网 (https://sct.ftqq.com/)</a> 微信扫码一键获取 SendKey。
                 </div>
               </div>
 
-              <div class="btn-group" style="margin-top: 12px;">
-                <button class="btn-cyber-success" style="padding: 6px 14px; font-size: 12px;" @click="saveNotifySettings">保存通知设置</button>
-                <button class="btn-cyber-action" style="padding: 6px 14px; font-size: 12px;" @click="testUserNotify">测试发信</button>
-              </div>
-
-              <!-- 管理员改密区域 -->
-              <div style="border-top: 1px dashed #1e293b; margin-top: 18px; padding-top: 12px;">
-                <div style="font-size: 13px; font-weight: 700; color: #f1f5f9; margin-bottom: 10px;">🔑 修改管理员登录密码</div>
-                <div class="compact-form-row">
-                  <input v-model="pwdForm.old_pwd" type="password" class="cyber-input" placeholder="当前原密码" />
-                  <input v-model="pwdForm.new_pwd" type="password" class="cyber-input" placeholder="新密码(至少6位)" />
-                  <input v-model="pwdForm.confirm_pwd" type="password" class="cyber-input" placeholder="确认新密码" />
-                  <button class="btn-cyber-primary" style="white-space: nowrap; width: auto; padding: 0 16px;" @click="submitChangePassword">改密</button>
-                </div>
+              <div class="btn-group" style="margin-top: 20px;">
+                <button class="btn-cyber-success" @click="saveNotifySettings">保存通知设置</button>
+                <button class="btn-cyber-action" @click="testUserNotify">发送测试通知 (微信/邮件)</button>
               </div>
             </div>
 
-            <!-- 右卡片：节点网络与发信服务器配置 -->
-            <div class="sub-panel">
-              <div class="sub-panel-title">
-                <span class="sub-panel-icon">🌐</span>
-                <div>
-                  <strong>节点连接与 SMTP 发信中枢</strong>
-                  <div class="sub-panel-hint">节点对外域名解析与验证码发信服务</div>
-                </div>
+            <div class="settings-section" style="margin-top: 24px;">
+              <div class="card-header" style="margin-bottom: 20px; border-bottom: 1px solid #1e293b; padding-bottom: 12px;">
+                <h3 style="color: #f1f5f9;">🔑 修改管理员自身登录密码</h3>
+              </div>
+              <div class="form-item">
+                <label>当前原密码</label>
+                <input v-model="pwdForm.old_pwd" type="password" class="cyber-input form-standard-width" placeholder="输入当前原密码" />
+              </div>
+              <div class="form-item">
+                <label>新密码 (至少6位)</label>
+                <input v-model="pwdForm.new_pwd" type="password" class="cyber-input form-standard-width" placeholder="输入新密码" />
+              </div>
+              <div class="form-item">
+                <label>确认新密码</label>
+                <input v-model="pwdForm.confirm_pwd" type="password" class="cyber-input form-standard-width" placeholder="再次输入新密码" />
+              </div>
+              <div class="btn-group" style="margin-top: 15px;">
+                <button class="btn-cyber-primary" style="width: auto; padding: 10px 28px;" @click="submitChangePassword">确认变更密码</button>
+              </div>
+            </div>
+          </div>
+
+          <!-- 子卡 2: 节点连接地址与发信服务器配置 (舒展平铺) -->
+          <div v-else-if="settingSubTab === 'network_smtp'" class="sub-tab-pane">
+            <div class="settings-section">
+              <div class="card-header" style="margin-bottom: 18px; border-bottom: 1px solid #1e293b; padding-bottom: 12px;">
+                <h3 style="color: #38bdf8;">🌐 节点客户端连接地址配置 (域名或 IP)</h3>
+              </div>
+              <div class="form-item">
+                <label>自定义节点连接地址 (域名或 IP)</label>
+                <input v-model="settingsForm.custom_host" type="text" class="cyber-input form-standard-width" placeholder="留空则自动获取服务器真实外网 IP" />
+                <span class="input-hint">
+                  💡 默认为空。可输入解析到本机的专属域名（如 <code>hk.node.com</code>）或中转 IP。<br>
+                  <b>清空该输入框并保存时，系统将全自动恢复为自动检测的公网 IP。</b>
+                </span>
+              </div>
+              <div class="btn-group" style="margin-top: 15px;">
+                <button class="btn-cyber-success" @click="saveAllSettings">保存连接地址</button>
+              </div>
+            </div>
+
+            <div class="settings-section" style="margin-top: 24px;">
+              <div class="card-header" style="margin-bottom: 18px; border-bottom: 1px solid #1e293b; padding-bottom: 12px;">
+                <h3 style="color: #f1f5f9;">📧 SMTP 发信服务器参数配置</h3>
+              </div>
+
+              <!-- 状态指示条 -->
+              <div class="smtp-status-box" :class="settingsForm.is_smtp_configured ? 'smtp-ready' : 'smtp-empty'">
+                <span>{{ settingsForm.is_smtp_configured ? '🟢 SMTP 发信通道：已配置就绪（可正常发送邮件与验证码）' : '⚪ SMTP 发信通道：尚未完整配置（无法发送邮件与验证码）' }}</span>
               </div>
 
               <div class="form-item">
-                <label>节点客户端连接地址 (域名或 IP)</label>
-                <input v-model="settingsForm.custom_host" type="text" class="cyber-input" placeholder="留空则自动获取服务器真实外网 IP" />
-                <span class="input-hint">填入您解析到本机的域名（如 <code>hk.node.com</code>），清空保存则自动回退为外网 IP。</span>
+                <label>SMTP 服务器地址</label>
+                <input v-model="settingsForm.smtp_host" type="text" class="cyber-input form-standard-width" placeholder="例如: smtp.qq.com / smtp.163.com" />
               </div>
-
-              <div class="smtp-status-box" :class="settingsForm.is_smtp_configured ? 'smtp-ready' : 'smtp-empty'" style="margin: 12px 0;">
-                <span>{{ settingsForm.is_smtp_configured ? '🟢 SMTP 状态：已配置就绪' : '⚪ SMTP 状态：未配置 (无法发送邮件)' }}</span>
+              <div class="form-item">
+                <label>端口 (SSL 常用 465, STARTTLS 常用 587)</label>
+                <input v-model="settingsForm.smtp_port" type="text" class="cyber-input form-standard-width" placeholder="465" />
               </div>
-
-              <div class="compact-grid-2">
-                <div class="form-item" style="margin-bottom: 10px;">
-                  <label>SMTP 服务器</label>
-                  <input v-model="settingsForm.smtp_host" type="text" class="cyber-input" placeholder="smtp.qq.com" />
-                </div>
-                <div class="form-item" style="margin-bottom: 10px;">
-                  <label>端口 (默认465)</label>
-                  <input v-model="settingsForm.smtp_port" type="text" class="cyber-input" placeholder="465" />
-                </div>
+              <div class="form-item">
+                <label>发信邮箱账号 (User)</label>
+                <input v-model="settingsForm.smtp_user" type="text" class="cyber-input form-standard-width" placeholder="service@example.com" />
               </div>
-
-              <div class="compact-grid-2">
-                <div class="form-item" style="margin-bottom: 10px;">
-                  <label>发信邮箱账号</label>
-                  <input v-model="settingsForm.smtp_user" type="text" class="cyber-input" placeholder="service@example.com" />
-                </div>
-                <div class="form-item" style="margin-bottom: 10px;">
-                  <label>授权码 / 密码</label>
-                  <input
-                    v-model="settingsForm.smtp_pass"
-                    type="password"
-                    class="cyber-input"
-                    :placeholder="settingsForm.has_smtp_pass ? '●●●●●● (留空保持原密码)' : '输入授权码'"
-                  />
-                </div>
+              <div class="form-item">
+                <label>邮箱授权码 / 密码 (Password)</label>
+                <input
+                  v-model="settingsForm.smtp_pass"
+                  type="password"
+                  class="cyber-input form-standard-width"
+                  :placeholder="settingsForm.has_smtp_pass ? '●●●●●●●● (已安全保存，留空则保持原密码)' : '请输入第三方客户端授权码'"
+                />
+                <span class="input-hint">
+                  {{ settingsForm.has_smtp_pass ? '✅ 系统已安全保存授权码。若无需更换，请直接留空保存即可。' : '⚠️ 尚未配置授权码，配置后方可发送邮件。' }}
+                </span>
               </div>
-
-              <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 10px; border-top: 1px dashed #1e293b; padding-top: 10px;">
-                <label class="radio-label" style="font-size: 12px;">
-                  <input type="checkbox" v-model="settingsForm.smtp_ssl" /> SSL 加密
+              <div class="form-item">
+                <label>发件人显示名称 (Sender Name)</label>
+                <input v-model="settingsForm.smtp_sender" type="text" class="cyber-input form-standard-width" placeholder="Xray 节点中心" />
+              </div>
+              <div class="form-item">
+                <label class="radio-label">
+                  <input type="checkbox" v-model="settingsForm.smtp_ssl" /> 启用 SSL 安全加密连接 (推荐开启)
                 </label>
-                <div style="display: flex; gap: 8px;">
-                  <input v-model="testEmailTo" type="email" class="cyber-input" style="width: 160px; padding: 4px 8px; font-size: 11px;" placeholder="测试接收邮箱" />
-                  <button class="btn-cyber-action" :disabled="testingEmail" style="padding: 4px 10px; font-size: 11px;" @click="sendTestEmail">
-                    {{ testingEmail ? '...' : '发信测试' }}
+              </div>
+
+              <div class="btn-group" style="margin-top: 20px;">
+                <button class="btn-cyber-success" @click="saveAllSettings">保存发信服务器参数</button>
+              </div>
+
+              <div class="form-item" style="margin-top: 25px; border-top: 1px dashed #1e293b; padding-top: 18px;">
+                <label>发信连通性验证 (收件邮箱)</label>
+                <div style="display: flex; gap: 10px; max-width: 550px;">
+                  <input v-model="testEmailTo" type="email" class="cyber-input" placeholder="test@example.com" />
+                  <button class="btn-cyber-action" :disabled="testingEmail" @click="sendTestEmail">
+                    {{ testingEmail ? '发送中...' : '测试发信' }}
                   </button>
                 </div>
               </div>
             </div>
           </div>
 
-          <!-- 区域 2：第三项【定时预警任务】(紧凑控制台仪表板，彻底告别拉长输入框) -->
-          <div class="cron-console-panel">
-            <div class="cron-console-header">
-              <div class="cron-header-left">
-                <span class="cron-icon">⏰</span>
-                <div>
-                  <strong style="color: #f1f5f9; font-size: 14px;">定时自动巡检与智能预警任务控制台</strong>
-                  <div style="font-size: 11px; color: #94a3b8;">后台自动轮询用户流量与到期时间，通过微信/邮件向超额或即将到期用户精准推送告警</div>
-                </div>
-              </div>
-
-              <div class="cron-header-right">
-                <label class="radio-label" style="margin: 0; font-weight: 600;">
+          <!-- 子卡 3: 定时巡检与智能预警 (舒展平铺，带舒适输入间距) -->
+          <div v-else-if="settingSubTab === 'cron'" class="sub-tab-pane">
+            <div class="settings-section">
+              <div class="card-header" style="margin-bottom: 20px; border-bottom: 1px solid #1e293b; padding-bottom: 12px;">
+                <h3 style="color: #38bdf8;">⏰ 定时自动检测与智能推送任务设置</h3>
+                <label class="radio-label" style="font-weight: 600; font-size: 14px;">
                   <input type="checkbox" v-model="settingsForm.task_notify_enable" />
                   <span :style="{ color: settingsForm.task_notify_enable ? '#10b981' : '#ef4444' }">
-                    {{ settingsForm.task_notify_enable ? '🟢 巡检运行中' : '🔴 巡检已暂停' }}
+                    {{ settingsForm.task_notify_enable ? '🟢 巡检任务运行中' : '🔴 巡检任务已暂停' }}
                   </span>
                 </label>
-                <button class="btn-cyber-primary" :disabled="triggeringTask" style="width: auto; padding: 6px 14px; font-size: 12px;" @click="triggerManualTask">
-                  {{ triggeringTask ? '扫描推送中...' : '⚡ 立即执行一次巡检' }}
+              </div>
+
+              <p class="card-desc">后台自动定时轮询全站用户。当用户流量达到阈值或套餐即将到期时，通过邮件/微信向用户推送提醒：</p>
+
+              <div class="form-item" style="margin-top: 20px;">
+                <label>轮询检测执行周期 (小时)</label>
+                <div style="display: flex; align-items: center; gap: 10px; max-width: 300px;">
+                  <input v-model.number="settingsForm.task_interval_hours" type="number" class="cyber-input" placeholder="12" />
+                  <span style="color: #94a3b8; font-size: 13px; white-space: nowrap;">小时 / 次</span>
+                </div>
+                <span class="input-hint">建议设为 12 或 24 小时</span>
+              </div>
+
+              <div class="form-item">
+                <label>流量不足告警阈值 (%)</label>
+                <div style="display: flex; align-items: center; gap: 10px; max-width: 300px;">
+                  <input v-model.number="settingsForm.task_traffic_threshold" type="number" class="cyber-input" placeholder="80" />
+                  <span style="color: #94a3b8; font-size: 13px; white-space: nowrap;">%</span>
+                </div>
+                <span class="input-hint">用户已用流量达到该百分比时触发提醒（设为不限流量的用户自动跳过）</span>
+              </div>
+
+              <div class="form-item">
+                <label>套餐到期告警阈值 (天)</label>
+                <div style="display: flex; align-items: center; gap: 10px; max-width: 300px;">
+                  <input v-model.number="settingsForm.task_expire_days" type="number" class="cyber-input" placeholder="3" />
+                  <span style="color: #94a3b8; font-size: 13px; white-space: nowrap;">天</span>
+                </div>
+                <span class="input-hint">距离到期时间不足设定天数时触发提醒（永久有效用户自动跳过）</span>
+              </div>
+
+              <div class="btn-group" style="margin-top: 25px;">
+                <button class="btn-cyber-success" @click="saveAllSettings">保存定时任务设置</button>
+              </div>
+
+              <div class="form-item" style="margin-top: 30px; border-top: 1px dashed #1e293b; padding-top: 20px;">
+                <div style="font-size: 13px; color: #94a3b8; margin-bottom: 12px;">
+                  最近自动扫描完成时间：<b class="text-cyan">{{ settingsForm.task_last_run }}</b>
+                  <span style="margin-left: 10px; font-size: 12px; color: #64748b;">(单日防骚扰机制：同类型预警当天只提醒一次)</span>
+                </div>
+                <button class="btn-cyber-primary" :disabled="triggeringTask" style="width: auto; padding: 10px 24px;" @click="triggerManualTask">
+                  {{ triggeringTask ? '正在扫描并推送...' : '⚡ 立即执行一次检测推送' }}
                 </button>
-              </div>
-            </div>
-
-            <!-- 4 个精致小巧的横向指标控制微卡 -->
-            <div class="cron-metrics-grid">
-              <div class="metric-card">
-                <div class="metric-label">🕒 轮询执行周期</div>
-                <div class="metric-input-wrap">
-                  <input v-model.number="settingsForm.task_interval_hours" type="number" class="cyber-input mini-input" />
-                  <span class="metric-unit">小时 / 次</span>
-                </div>
-                <div class="metric-hint">建议设为 12 或 24 小时</div>
-              </div>
-
-              <div class="metric-card">
-                <div class="metric-label">⚠️ 流量告警阈值</div>
-                <div class="metric-input-wrap">
-                  <input v-model.number="settingsForm.task_traffic_threshold" type="number" class="cyber-input mini-input" />
-                  <span class="metric-unit">%</span>
-                </div>
-                <div class="metric-hint">使用达此比例提醒 (0不限跳过)</div>
-              </div>
-
-              <div class="metric-card">
-                <div class="metric-label">⏳ 到期告警阈值</div>
-                <div class="metric-input-wrap">
-                  <input v-model.number="settingsForm.task_expire_days" type="number" class="cyber-input mini-input" />
-                  <span class="metric-unit">天</span>
-                </div>
-                <div class="metric-hint">到期前不足该天数提醒</div>
-              </div>
-
-              <div class="metric-card status-metric">
-                <div class="metric-label">📡 最近自动扫描完成时间</div>
-                <div class="metric-value text-cyan">{{ settingsForm.task_last_run }}</div>
-                <div class="metric-hint">单日防骚扰机制：同类型当天只提醒一次</div>
               </div>
             </div>
           </div>
@@ -691,6 +722,7 @@ const isPureAdmin = ref(false)
 const rechargeCode = ref('')
 const activeTab = ref('users')
 const cardSubTab = ref('inventory')
+const settingSubTab = ref('admin_notify')
 
 const authMode = ref('login')
 const countdown = ref(0)
@@ -745,7 +777,7 @@ const adminCards = ref([])
 const adminUsers = ref([])
 
 onMounted(async () => {
-  // 从 localStorage 恢复会话，F5 刷新绝不退出
+  // 会话持久化，实现 F5 刷新页面永不退出登录
   const savedSession = localStorage.getItem('xray_auth_session')
   if (savedSession) {
     try {
@@ -829,7 +861,7 @@ const generateRandomToken = () => {
   ElMessage.success('已随机生成新出卡 Token，请记得点击保存')
 }
 
-// 统一导出底层 (全局唯一声明)
+// 统一导出底层
 const executeExport = async (payload, successTip) => {
   try {
     const adminUser = currentUser.username || authForm.username
@@ -1415,6 +1447,7 @@ const logout = () => {
   flex-shrink: 0;
 }
 
+/* 子卡片导航 */
 .sub-tab-nav {
   display: flex;
   gap: 12px;
@@ -1461,126 +1494,34 @@ const logout = () => {
 .card-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; }
 .card-header h3 { margin: 0; font-size: 16px; color: #f1f5f9; }
 
-/* 核心优化：前两项双列紧凑并排布局 */
-.settings-two-col {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 20px;
-  margin-bottom: 24px;
-}
-.sub-panel {
-  background: #0a0f1d;
+/* 舒展平铺区域：设置板块样式 */
+.settings-section {
+  background: #0b1120;
   border: 1px solid #1e293b;
   border-radius: 10px;
-  padding: 20px;
+  padding: 24px;
+  margin-bottom: 20px;
 }
-.sub-panel-title {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  margin-bottom: 16px;
+.settings-section h4 {
+  margin-top: 0;
+  margin-bottom: 18px;
+  color: #f1f5f9;
+  font-size: 15px;
   border-bottom: 1px solid #1e293b;
   padding-bottom: 10px;
 }
-.sub-panel-icon { font-size: 22px; }
-.sub-panel-title strong { color: #f1f5f9; font-size: 15px; }
-.sub-panel-hint { font-size: 11px; color: #64748b; font-weight: normal; margin-top: 2px; }
 
-.compact-form-row {
-  display: flex;
-  gap: 8px;
-}
-.compact-grid-2 {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 12px;
-}
-
-/* 核心优化：第三项定时任务控制台（指标微卡，彻底解决长条拉伸） */
-.cron-console-panel {
-  background: #0a0f1d;
-  border: 1px solid rgba(56, 189, 248, 0.25);
-  border-radius: 10px;
-  padding: 20px;
-  box-shadow: 0 4px 16px rgba(0,0,0,0.3);
-}
-.cron-console-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 16px;
-  border-bottom: 1px solid #1e293b;
-  padding-bottom: 12px;
-  flex-wrap: wrap;
-  gap: 12px;
-}
-.cron-header-left {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-}
-.cron-icon { font-size: 24px; }
-.cron-header-right {
-  display: flex;
-  align-items: center;
-  gap: 16px;
-}
-
-.cron-metrics-grid {
-  display: grid;
-  grid-template-columns: repeat(4, 1fr);
-  gap: 16px;
-}
-.metric-card {
-  background: #0f172a;
-  border: 1px solid #1e293b;
-  border-radius: 8px;
-  padding: 14px 16px;
-}
-.metric-label {
-  font-size: 12px;
-  color: #94a3b8;
-  font-weight: 600;
-  margin-bottom: 8px;
-}
-.metric-input-wrap {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-.mini-input {
-  width: 80px !important;
-  padding: 6px 10px;
-  font-size: 14px;
-  font-weight: 700;
-  color: #38bdf8;
-  text-align: center;
-}
-.metric-unit {
-  font-size: 12px;
-  color: #64748b;
-  font-weight: 600;
-}
-.metric-hint {
-  font-size: 10px;
-  color: #64748b;
-  margin-top: 6px;
-}
-.metric-value {
-  font-size: 13px;
-  font-weight: 700;
-  padding: 4px 0;
-}
-.status-metric {
-  background: rgba(56, 189, 248, 0.05);
-  border-color: rgba(56, 189, 248, 0.2);
+/* 人体工程学输入框黄金宽度：舒适舒展，绝不拉满成一条线 */
+.form-standard-width {
+  max-width: 550px !important;
 }
 
 .smtp-status-box {
-  padding: 8px 12px;
+  padding: 10px 14px;
   border-radius: 6px;
   font-size: 12px;
   font-weight: 600;
+  margin-bottom: 18px;
 }
 .smtp-ready {
   background: rgba(16, 185, 129, 0.15);
@@ -1612,7 +1553,7 @@ const logout = () => {
   font-size: 13px;
 }
 .filter-label { color: #94a3b8; font-weight: 600; white-space: nowrap; }
-.date-input { width: 130px; padding: 6px 10px; font-size: 12px; }
+.date-input { width: 140px; padding: 6px 10px; font-size: 12px; }
 .export-actions-group { display: flex; gap: 8px; align-items: center; }
 .btn-export-select {
   background: #3b82f6;
@@ -1639,7 +1580,7 @@ const logout = () => {
   background: #1e293b;
   border: 1px solid #334155;
   color: #f8fafc;
-  padding: 9px 12px;
+  padding: 10px 14px;
   border-radius: 6px;
   outline: none;
   box-sizing: border-box;
@@ -1660,10 +1601,10 @@ const logout = () => {
 .redeem-box { display: flex; gap: 10px; align-items: center; }
 .redeem-box .cyber-input { flex: 1; min-width: 0; }
 .btn-cyber-success {
-  background: #059669; color: white; border: none; padding: 9px 16px; border-radius: 6px; cursor: pointer;
+  background: #059669; color: white; border: none; padding: 10px 18px; border-radius: 6px; cursor: pointer;
   white-space: nowrap; flex-shrink: 0; font-weight: 600;
 }
-.btn-cyber-action { background: #334155; color: white; border: none; padding: 9px 16px; border-radius: 6px; cursor: pointer; white-space: nowrap; }
+.btn-cyber-action { background: #334155; color: white; border: none; padding: 10px 20px; border-radius: 6px; cursor: pointer; white-space: nowrap; }
 .btn-cyber-refresh { background: transparent; border: 1px solid #38bdf8; color: #38bdf8; padding: 5px 12px; border-radius: 6px; cursor: pointer; font-size: 12px; }
 
 .btn-cyber-download {
@@ -1693,6 +1634,7 @@ const logout = () => {
 .text-cyan { color: #38bdf8; }
 .btn-group { display: flex; gap: 12px; margin-top: 16px; flex-wrap: wrap; }
 
+.settings-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; margin-top: 10px; }
 .radio-group { display: flex; flex-direction: column; gap: 10px; margin-top: 6px; }
 .radio-label { font-size: 13px; color: #cbd5e1; cursor: pointer; display: flex; align-items: center; gap: 8px; }
 .input-hint { font-size: 11px; color: #94a3b8; margin-top: 6px; line-height: 1.5; }
@@ -1740,21 +1682,11 @@ const logout = () => {
 .btn-link-action:hover { color: #7dd3fc; }
 
 .auth-box { max-width: 420px; margin: 40px auto; }
-.form-item { margin-bottom: 14px; }
+.form-item { margin-bottom: 16px; }
 .form-item label { display: block; font-size: 12px; color: #94a3b8; margin-bottom: 6px; }
 .auth-nav-links { display: flex; justify-content: space-between; margin-top: 16px; font-size: 13px; }
 .auth-nav-links a { color: #38bdf8; text-decoration: none; }
 .auth-nav-links a.text-warning { color: #f59e0b; }
 .auth-nav-links a:hover { text-decoration: underline; }
 .gen-form { display: grid; grid-template-columns: 1fr 1fr 1fr auto; gap: 10px; align-items: flex-end; }
-
-/* 响应式收敛 */
-@media (max-width: 1024px) {
-  .settings-two-col { grid-template-columns: 1fr; }
-  .cron-metrics-grid { grid-template-columns: 1fr 1fr; }
-}
-@media (max-width: 640px) {
-  .cron-metrics-grid { grid-template-columns: 1fr; }
-  .compact-form-row { flex-direction: column; }
-}
 </style>
