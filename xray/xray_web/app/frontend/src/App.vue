@@ -433,7 +433,7 @@
           </div>
         </div>
 
-        <!-- 主选项卡 3: 系统与发信设置 (现代平铺双列全屏响应式布局) -->
+        <!-- 主选项卡 3: 系统与发信设置 (双列平铺 + 黄金比例宽度输入框) -->
         <div v-else-if="activeTab === 'settings'" class="cyber-card tab-content-card">
           <div class="card-header" style="margin-bottom: 22px;">
             <h3>⚙️ 系统发信、节点连接与全局运维中枢</h3>
@@ -680,7 +680,7 @@
             <label style="margin: 0;">总流量限制配额 (MB)</label>
             <button class="btn-link-action" @click="editForm.limit_mb = 0">♾️ 设为不限流量</button>
           </div>
-          <input v-model.number="editForm.limit_mb" type="number" class="cyber-input" />
+          <input v-model.number="editForm.limit_mb" type="number" class="cyber-input modal-input" />
           <span style="font-size: 11px; color: #64748b;">提示：填 0 表示不限制流量 | 100GB = 102400MB</span>
         </div>
 
@@ -689,7 +689,7 @@
             <label style="margin: 0;">套餐到期时限</label>
             <button class="btn-link-action" @click="editForm.expire_date = '2099-12-31 23:59:59'">♾️ 设为永久有效</button>
           </div>
-          <input v-model="editForm.expire_date" type="text" class="cyber-input" />
+          <input v-model="editForm.expire_date" type="text" class="cyber-input modal-input" />
           <span style="font-size: 11px; color: #64748b;">提示：填 2099-12-31 表示永久有效</span>
         </div>
 
@@ -706,7 +706,7 @@
         <h3>🔑 重置用户 [{{ resetTargetUser }}] 密码</h3>
         <div class="form-item" style="margin-top: 15px;">
           <label>为该用户设置的新密码</label>
-          <input v-model="resetNewPassword" type="text" class="cyber-input" placeholder="输入新密码" />
+          <input v-model="resetNewPassword" type="text" class="cyber-input modal-input" placeholder="输入新密码" />
           <span style="font-size: 11px; color: #64748b;">重置后系统会自动向其邮箱/微信推送新密码通知</span>
         </div>
         <div class="btn-group" style="justify-content: flex-end; margin-top: 20px;">
@@ -782,7 +782,6 @@ const adminCards = ref([])
 const adminUsers = ref([])
 
 onMounted(async () => {
-  // 恢复本地会话，实现 F5 刷新页面永不退登
   const savedSession = localStorage.getItem('xray_auth_session')
   if (savedSession) {
     try {
@@ -866,7 +865,6 @@ const generateRandomToken = () => {
   ElMessage.success('已随机生成新出卡 Token，请记得点击保存')
 }
 
-// 统一导出底层
 const executeExport = async (payload, successTip) => {
   try {
     const adminUser = currentUser.username || authForm.username
@@ -889,13 +887,11 @@ const executeExport = async (payload, successTip) => {
   }
 }
 
-// 唯一保留：按勾选导出
 const exportSelectedCards = () => {
   if (selectedCards.value.length === 0) return ElMessage.warning('请先在表格左侧勾选要导出的卡密')
   executeExport({ selected_codes: selectedCards.value }, '已复制选中的卡密')
 }
 
-// 唯一保留：按日期范围导出
 const exportByDateRange = () => {
   if (!exportFilter.startDate && !exportFilter.endDate) {
     return ElMessage.warning('请先选择开始日期或结束日期')
@@ -906,7 +902,6 @@ const exportByDateRange = () => {
   }, '已导出指定日期范围内的未售卡密')
 }
 
-// 唯一保留：导出全部未售卡密
 const exportAllUnusedCards = () => {
   executeExport({}, '已复制全部未售卡密')
 }
@@ -1290,6 +1285,25 @@ const copyText = async (text) => {
   document.body.removeChild(ta)
 }
 
+const exportSelectedCards = () => {
+  if (selectedCards.value.length === 0) return ElMessage.warning('请先在表格左侧勾选要导出的卡密')
+  executeExport({ selected_codes: selectedCards.value }, '已复制选中的卡密')
+}
+
+const exportByDateRange = () => {
+  if (!exportFilter.startDate && !exportFilter.endDate) {
+    return ElMessage.warning('请先选择开始日期或结束日期')
+  }
+  executeExport({
+    start_date: exportFilter.startDate,
+    end_date: exportFilter.endDate
+  }, '已导出指定日期范围内的未售卡密')
+}
+
+const exportAllUnusedCards = () => {
+  executeExport({}, '已复制全部未售卡密')
+}
+
 const handleAuth = async () => {
   if (!authForm.username || !authForm.password) return ElMessage.warning('请填写账号与密码')
   loading.value = true
@@ -1571,6 +1585,7 @@ const logout = () => {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 12px;
+  max-width: 520px;
 }
 
 .smtp-status-box {
@@ -1632,8 +1647,11 @@ const logout = () => {
 .expiry-notice { font-size: 13px; color: #94a3b8; }
 .highlight-date { color: #f59e0b; }
 
+/* 核心优化：输入框黄金百分比宽度 + 最小/最大宽度保底，杜绝占满整行难看 */
 .cyber-input {
-  width: 100%;
+  width: 70%;
+  min-width: 260px;
+  max-width: 500px;
   background: #1e293b;
   border: 1px solid #334155;
   color: #f8fafc;
@@ -1641,10 +1659,28 @@ const logout = () => {
   border-radius: 6px;
   outline: none;
   box-sizing: border-box;
+  transition: border-color 0.2s, box-shadow 0.2s;
 }
 .cyber-input:focus { border-color: #38bdf8; box-shadow: 0 0 8px rgba(56, 189, 248, 0.3); }
 
-.code-send-group { display: flex; gap: 8px; }
+/* 针对登录卡片和弹窗内的小容器做 100% 贴合处理 */
+.auth-box .cyber-input,
+.modal-input {
+  width: 100% !important;
+  min-width: 0 !important;
+  max-width: 100% !important;
+}
+
+.code-send-group {
+  display: flex;
+  gap: 8px;
+  max-width: 500px;
+}
+.code-send-group .cyber-input {
+  flex: 1;
+  width: auto;
+  min-width: 140px;
+}
 .btn-cyber-code {
   background: #1e293b; border: 1px solid #38bdf8; color: #38bdf8; border-radius: 6px; padding: 0 14px;
   white-space: nowrap; cursor: pointer; font-size: 12px;
@@ -1655,8 +1691,17 @@ const logout = () => {
   background: linear-gradient(135deg, #0284c7, #2563eb);
   color: white; border: none; padding: 10px 20px; border-radius: 6px; font-weight: 700; cursor: pointer; width: 100%;
 }
-.redeem-box { display: flex; gap: 10px; align-items: center; }
-.redeem-box .cyber-input { flex: 1; min-width: 0; }
+.redeem-box {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  max-width: 500px;
+}
+.redeem-box .cyber-input {
+  flex: 1;
+  width: auto;
+  min-width: 180px;
+}
 .btn-cyber-success {
   background: #059669; color: white; border: none; padding: 10px 18px; border-radius: 6px; cursor: pointer;
   white-space: nowrap; flex-shrink: 0; font-weight: 600;
@@ -1693,7 +1738,7 @@ const logout = () => {
 
 .radio-group { display: flex; flex-direction: column; gap: 10px; margin-top: 6px; }
 .radio-label { font-size: 13px; color: #cbd5e1; cursor: pointer; display: flex; align-items: center; gap: 8px; }
-.input-hint { font-size: 11px; color: #94a3b8; margin-top: 6px; line-height: 1.5; }
+.input-hint { font-size: 11px; color: #94a3b8; margin-top: 6px; line-height: 1.5; display: block; }
 .cyber-link { color: #38bdf8; text-decoration: underline; }
 
 .modal-backdrop { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.8); display: flex; justify-content: center; align-items: center; z-index: 1000; }
@@ -1745,4 +1790,16 @@ const logout = () => {
 .auth-nav-links a.text-warning { color: #f59e0b; }
 .auth-nav-links a:hover { text-decoration: underline; }
 .gen-form { display: grid; grid-template-columns: 1fr 1fr 1fr auto; gap: 10px; align-items: flex-end; }
+
+/* 手机端极小屏幕自适应铺满 */
+@media (max-width: 640px) {
+  .cyber-input {
+    width: 100% !important;
+    min-width: 0 !important;
+    max-width: 100% !important;
+  }
+  .form-row-2 {
+    grid-template-columns: 1fr;
+  }
+}
 </style>
