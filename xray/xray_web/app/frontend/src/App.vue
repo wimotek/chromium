@@ -30,7 +30,7 @@
         <div class="cyber-card auth-box">
           <h2 class="card-title">{{ authCardTitle }}</h2>
 
-          <!-- A. 登录表单 -->
+          <!-- A. 登录 -->
           <template v-if="authMode === 'login'">
             <div class="form-item">
               <label>ACCOUNT / 用户名 或 注册邮箱</label>
@@ -49,7 +49,7 @@
             </div>
           </template>
 
-          <!-- B. 注册表单 -->
+          <!-- B. 注册 -->
           <template v-else-if="authMode === 'register'">
             <div class="form-item">
               <label>USER IDENTIFIER / 设置用户名</label>
@@ -80,7 +80,7 @@
             </div>
           </template>
 
-          <!-- C. 忘记密码表单 -->
+          <!-- C. 找回密码 -->
           <template v-else-if="authMode === 'forgot'">
             <div class="form-item">
               <label>REGISTERED EMAIL / 绑定的注册邮箱</label>
@@ -109,7 +109,7 @@
         </div>
       </div>
 
-      <!-- 2. 普通用户端仪表盘 (流式全屏) -->
+      <!-- 2. 普通用户端仪表盘 -->
       <div v-else-if="currentUser.role === 'user'" class="dashboard-grid">
         <div class="cyber-card">
           <div class="card-header">
@@ -936,7 +936,7 @@ const generateRandomToken = () => {
   ElMessage.success('已随机生成新出卡 Token，请记得点击保存')
 }
 
-// 统一导出底层
+// 统一导出底层 (全局仅此一处定义)
 const executeExport = async (payload, successTip) => {
   try {
     const adminUser = currentUser.username || authForm.username
@@ -959,11 +959,13 @@ const executeExport = async (payload, successTip) => {
   }
 }
 
+// 唯一声明：勾选导出
 const exportSelectedCards = () => {
   if (selectedCards.value.length === 0) return ElMessage.warning('请先在表格左侧勾选要导出的卡密')
   executeExport({ selected_codes: selectedCards.value }, '已复制选中的卡密')
 }
 
+// 唯一声明：日期范围导出
 const exportByDateRange = () => {
   if (!exportFilter.startDate && !exportFilter.endDate) {
     return ElMessage.warning('请先选择开始日期或结束日期')
@@ -974,6 +976,7 @@ const exportByDateRange = () => {
   }, '已导出指定日期范围内的未售卡密')
 }
 
+// 唯一声明：全部未售导出
 const exportAllUnusedCards = () => {
   executeExport({}, '已复制全部未售卡密')
 }
@@ -1365,25 +1368,7 @@ const copyText = async (text) => {
   document.body.removeChild(ta)
 }
 
-const exportSelectedCards = () => {
-  if (selectedCards.value.length === 0) return ElMessage.warning('请先在表格左侧勾选要导出的卡密')
-  executeExport({ selected_codes: selectedCards.value }, '已复制选中的卡密')
-}
-
-const exportByDateRange = () => {
-  if (!exportFilter.startDate && !exportFilter.endDate) {
-    return ElMessage.warning('请先选择开始日期或结束日期')
-  }
-  executeExport({
-    start_date: exportFilter.startDate,
-    end_date: exportFilter.endDate
-  }, '已导出指定日期范围内的未售卡密')
-}
-
-const exportAllUnusedCards = () => {
-  executeExport({}, '已复制全部未售卡密')
-}
-
+// 核心自检确认：copyText 下方直接衔接 handleAuth，绝无重复 export 函数
 const handleAuth = async () => {
   if (!authForm.username || !authForm.password) return ElMessage.warning('请填写账号与密码')
   loading.value = true
