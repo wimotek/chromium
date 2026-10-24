@@ -32,10 +32,10 @@ services:
     environment:
       - TZ=Asia/Shanghai
       - AUTO_UPDATE=true                        # 每次重启容器时自动检查并热更新到官方最新版
-      - PORT=443                                          # 监听端口
-      - DEST=www.apple.com:443             # REALITY 伪装目标地址与端口
+      - PORT=443                                # 监听端口,确定此端口未被占用!!!
+      - DEST=www.apple.com:443                  # REALITY 伪装目标地址与端口
       - SERVER_NAMES=www.microsoft.com
-      - PANEL_URL="http://xx.xx.xxxx:3000"   # 设置panel_url和node_key在web中激活此节点
+      - PANEL_URL="http://xx.xx.xxxx:3000"      # 设置panel_url和node_key在web中激活此节点, 单机用户请不要设置这两个变量.
       - NODE_KEY="xray_cluster_secret_key_2026"    
     volumes:
       - ./data:/data
@@ -69,7 +69,7 @@ docker run -d \
   -e AUTO_UPDATE=true \
   -e PORT=443 \
   -e DEST=www.apple.com:443 \
-  -e SERVER_NAMES=www.apple.com,apple.com \
+  -e SERVER_NAMES=www.microsoft.com \
   ghcr.io/wimotek/xray:latest
 ```
 * 选项 2：端口映射模式（跨平台 / 非 Host 环境）
