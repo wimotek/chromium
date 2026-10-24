@@ -26,6 +26,7 @@
 services:
   xray:
     image: ghcr.io/wimotek/xray:latest
+    # 若使用 Docker Hub 镜像可切换为: wimotek/xray:latest
     container_name: xray-service
     restart: unless-stopped
     network_mode: "host"
