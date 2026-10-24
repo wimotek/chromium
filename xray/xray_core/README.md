@@ -26,16 +26,17 @@
 services:
   xray:
     image: ghcr.io/wimotek/xray:latest
-    # 若使用 Docker Hub 镜像可切换为: wimotek/xray:latest
     container_name: xray-service
     restart: unless-stopped
     network_mode: "host"
     environment:
       - TZ=Asia/Shanghai
-      - AUTO_UPDATE=true        # 每次重启容器时自动检查并热更新到官方最新版
-      - PORT=443               # 监听端口
-      - DEST=www.apple.com:443 # REALITY 伪装目标地址与端口
-      - SERVER_NAMES=www.apple.com,apple.com
+      - AUTO_UPDATE=true                        # 每次重启容器时自动检查并热更新到官方最新版
+      - PORT=443                                          # 监听端口
+      - DEST=www.apple.com:443             # REALITY 伪装目标地址与端口
+      - SERVER_NAMES=www.microsoft.com
+      - PANEL_URL="http://xx.xx.xxxx:3000"   # 设置panel_url和node_key在web中激活此节点
+      - NODE_KEY="xray_cluster_secret_key_2026"    
     volumes:
       - ./data:/data
     logging:
@@ -149,43 +150,6 @@ docker compose restart xray
 docker compose build --no-cache
 docker compose up -d
 ```
-
----
-
-## 🛠️ 环境变量说明
-
-可通过修改 `docker-compose.yml` 中的 `environment` 自定义各项参数：
-
-为您整理了 **`xray_core`（纯核心版）** 与 **`xray_web`（可视化商业版）** 的环境变量详细对比表格，可直接复制粘贴到 `README.md` 中：
-
----
-
-### 📊 环境变量对比矩阵 (`xray_core` vs `xray_web`)
-
-| 环境变量 | `xray_core` (纯核心版) | `xray_web` (可视化商业版) | 默认推荐值 | 功能说明与行为差异 |
-| :--- | :---: | :---: | :--- | :--- |
-| **`PORT`** | ✅ 支持 | ✅ 支持 | `8443` 或 `443` | **Xray 节点入站监听端口**。<br>两个版本均支持动态更改，重启自动应用。 |
-| **`DEST`** | ✅ 支持 | ✅ 支持 | `www.microsoft.com:443` | **REALITY 伪装握手与 TLS 回落目标目标**。 |
-| **`SERVER_NAMES`** | ✅ 支持 | ✅ 支持 | `www.microsoft.com,microsoft.com` | **REALITY 可信伪装 SNI 列表**（逗号分隔）。 |
-| **`SERVER_IP`** | ✅ 支持 | ✅ 支持 | `自动获取公网 IP` | 节点对外连接公网 IP（多网卡机器可手动指定）。 |
-| **`REALITY_PRIVATE_KEY`** | ❌ 仅写入文件 | ✅ 环境变量+持久化 | `留空自动生成` | 服务端 X25519 私钥。<br>`xray_web` 支持自动反推公钥并固化到 `/data/public_key.txt`。 |
-| **`REALITY_SHORT_ID`** | ❌ 静态固定 | ✅ 环境变量注入 | `123456` | REALITY 客户端握手识别 ID。 |
-| **`AUTO_UPDATE`** | ✅ 支持 | ✅ 支持 | `true` | 重启容器时是否自动拉取并热更新官方最新 Xray-core。 |
-| **`TZ`** | ✅ 支持 | ✅ 支持 | `Asia/Shanghai` | 容器运行时区配置。 |
-| **`USER_COUNT`** | ❌ 仅单用户/静态 | ✅ 支持 | `2` | **初始用户数**。<br>`xray_web` 会自动存入 SQLite 并初始化对应体验配额。 |
-| **`WEB_ENABLE`** | ❌ **不支持** | ✅ **核心参数** | `true` | **Web 服务总开关**。<br>设为 `false` 时，`xray_web` 可一键降级为纯核心代理模式，零多余内存开销。 |
-| **`APP_MODE`** | ❌ **不支持** | ✅ **核心参数** | `user` | **权限与防扫模式控制**：<br>• `user`：**默认安全模式**，仅开放用户端（查流量/卡密充值），管理接口物理 404 隐藏防扫描；<br>• `admin`：纯管理后台（不启动 Xray，适合内网独立机）；<br>• `all`：单机全功能（前台+管理后台一体）。 |
-| **`WEB_PORT`** | ❌ **不支持** | ✅ **核心参数** | `3000` (或 `8080`) | 前端 Vue 3 及 API 后端对外网页访问端口。 |
-| **`ADMIN_USERNAME`** | ❌ **不支持** | ✅ **核心参数** | `随机生成` | 管理员控制台用户名（在 `APP_MODE` 为 `admin` 或 `all` 时生效）。 |
-| **`ADMIN_PASSWORD`** | ❌ **不支持** | ✅ **核心参数** | `随机生成` | 管理员控制台密码（在 `APP_MODE` 为 `admin` 或 `all` 时生效）。 |
-| **`DB_PATH`** | ❌ **不支持** | ✅ **核心参数** | `/data/xray_web.db` | SQLite3 商业数据库持久化路径，记录账号、配额、到期日与卡密库存。 |
-
----
-
-### 💡 版本选型建议
-
-* **`xray_core` 适用场景**：个人轻量单一节点、配置固定、追求极致精简（仅依靠静态配置文件或无 Web 界面需求）。
-* **`xray_web` 适用场景**：多用户分发、商业运营/发卡变现（卡密充值）、防止公网恶意扫描管理后台、需要实时监控用户上传/下载流量及自动到期拦截。
 
 ---
 
