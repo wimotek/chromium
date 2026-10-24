@@ -1,6 +1,5 @@
 <template>
   <div class="dark-theme">
-    <!-- 顶部科技导航 -->
     <header class="cyber-header">
       <div class="header-content">
         <div class="brand">
@@ -18,19 +17,14 @@
     <main class="main-body">
       <!-- 1. 登录 / 注册 / 找回密码 模块 -->
       <div v-if="!currentUser.username" class="auth-center">
-        <!-- 登录页系统公告展示栏 -->
         <div v-if="systemNotice" class="cyber-notice-card">
-          <div class="notice-header">
-            <span class="notice-icon">📢</span>
-            <strong>系统公告 NOTICE</strong>
-          </div>
+          <div class="notice-header"><span class="notice-icon">📢</span><strong>系统公告 NOTICE</strong></div>
           <div class="notice-body">{{ systemNotice }}</div>
         </div>
 
         <div class="cyber-card auth-box">
           <h2 class="card-title">{{ authCardTitle }}</h2>
 
-          <!-- A. 登录 -->
           <template v-if="authMode === 'login'">
             <div class="form-item">
               <label>ACCOUNT / 用户名 或 注册邮箱</label>
@@ -49,7 +43,6 @@
             </div>
           </template>
 
-          <!-- B. 注册 -->
           <template v-else-if="authMode === 'register'">
             <div class="form-item">
               <label>USER IDENTIFIER / 设置用户名</label>
@@ -80,7 +73,6 @@
             </div>
           </template>
 
-          <!-- C. 找回密码 -->
           <template v-else-if="authMode === 'forgot'">
             <div class="form-item">
               <label>REGISTERED EMAIL / 绑定的注册邮箱</label>
@@ -109,7 +101,7 @@
         </div>
       </div>
 
-      <!-- 2. 普通用户端仪表盘 -->
+      <!-- 2. 普通用户端：多节点集群中心 -->
       <div v-else-if="currentUser.role === 'user'" class="dashboard-grid">
         <div class="cyber-card">
           <div class="card-header">
@@ -151,25 +143,41 @@
           </div>
         </div>
 
-        <!-- 节点配置与专属客户端下载 -->
+        <!-- 核心重构：多节点列表与通用订阅入口 -->
         <div class="cyber-card col-span-2">
           <div class="card-header">
-            <h3>🔗 REALITY 节点订阅凭据</h3>
+            <h3>🌐 全球加速节点列表与通用订阅 (共 {{ currentUser.nodes ? currentUser.nodes.length : 0 }} 个节点)</h3>
+            <div style="display: flex; gap: 8px;">
+              <button class="btn-cyber-primary" style="font-size: 12px; padding: 6px 14px;" @click="copyText(currentUser.sub_url)">
+                🔗 一键复制全节点订阅链接
+              </button>
+            </div>
           </div>
-          <div class="node-field">
-            <label>REALITY PUBLIC KEY (公钥):</label>
-            <div class="code-display text-green">{{ currentUser.public_key || '正在提取公钥...' }}</div>
-          </div>
-          <div class="node-field">
-            <label>VLESS REALITY 订阅配置链接:</label>
-            <div class="code-display text-cyan">{{ currentUser.sub_link }}</div>
-          </div>
-          <div class="btn-group">
-            <button class="btn-cyber-primary" @click="copyText(currentUser.sub_link)">📋 一键复制节点</button>
-            <button class="btn-cyber-action" @click="openQrModal(currentUser.sub_link, currentUser.username)">📱 弹出二维码扫码</button>
-            <button class="btn-cyber-download" :disabled="downloadingClient" @click="downloadWindowsClient">
-              {{ downloadingClient ? '正在打包客户端...' : '🖥️ 下载 Windows 开箱即用客户端' }}
-            </button>
+
+          <p class="card-desc">
+            支持直接将订阅链接导入 <b>v2rayN / Clash-Meta / Sing-box / Shadowrocket</b>，客户端内可批量更新并自动延迟测速：
+          </p>
+
+          <!-- 节点卡片流式网格 -->
+          <div class="node-grid">
+            <div v-for="node in currentUser.nodes" :key="node.id" class="node-card">
+              <div class="node-header">
+                <span class="node-title">{{ node.name }}</span>
+                <span class="badge badge-ready">🟢 在线加速</span>
+              </div>
+              <div class="node-detail">
+                <span>地址: {{ node.ip }}:{{ node.port }}</span>
+              </div>
+              <div class="btn-group" style="margin-top: 12px; gap: 6px;">
+                <button class="btn-sm btn-action" @click="copyText(node.link)">📋 复制</button>
+                <button class="btn-sm btn-edit" @click="openQrModal(node.link, node.name)">📱 扫码</button>
+                <button class="btn-sm btn-cyber-download" @click="downloadWindowsClient(node.id, node.name)">🖥️ 下载客户端</button>
+              </div>
+            </div>
+
+            <div v-if="!currentUser.nodes || currentUser.nodes.length === 0" class="empty-node-tip">
+              暂无在线节点，请等待管理员启动并接入 xray_core 远程节点。
+            </div>
           </div>
         </div>
 
@@ -185,10 +193,10 @@
                 <label>首选通知通道 (默认邮件)</label>
                 <div class="radio-group">
                   <label class="radio-label">
-                    <input type="radio" value="email" v-model="notifyForm.notify_type" /> 📧 电子邮箱通知 ({{ currentUser.email || '未绑定邮箱' }})
+                    <input type="radio" value="email" v-model="notifyForm.notify_type" /> 📧 电子邮箱通知 ({{ currentUser.email || '未绑定' }})
                   </label>
                   <label class="radio-label">
-                    <input type="radio" value="serverchan" v-model="notifyForm.notify_type" /> 📲 Server酱 (微信服务号即时推送)
+                    <input type="radio" value="serverchan" v-model="notifyForm.notify_type" /> 📲 Server酱 (微信推送)
                   </label>
                 </div>
               </div>
@@ -196,9 +204,6 @@
               <div class="form-item" v-if="notifyForm.notify_type === 'serverchan'">
                 <label>Server酱 SendKey：</label>
                 <input v-model="notifyForm.serverchan_key" type="text" class="cyber-input font-mono" placeholder="SCTxxxxxxxxxx" />
-                <div class="input-hint">
-                  💡 未申请过？前往 <a href="https://sct.ftqq.com/" target="_blank" class="cyber-link">Server酱官网</a> 微信扫码获取 SendKey。
-                </div>
               </div>
 
               <div class="btn-group" style="margin-top: 15px;">
@@ -227,9 +232,8 @@
         </div>
       </div>
 
-      <!-- 3. 管理员控制台：全屏动态自适应 -->
+      <!-- 3. 管理员控制台 -->
       <div v-else-if="currentUser.role === 'admin'" class="admin-wrapper">
-        <!-- 顶部主卡片切换导航 -->
         <div class="card-tabs-nav">
           <button class="tab-card-btn" :class="{ active: activeTab === 'users' }" @click="activeTab = 'users'">
             <span class="tab-icon">👥</span>
@@ -238,6 +242,15 @@
               <div class="tab-sub">配额/时效治理、凭证封禁、二维码与密码重置</div>
             </div>
             <span class="count-tag">{{ adminUsers.length }} 位用户</span>
+          </button>
+
+          <button class="tab-card-btn" :class="{ active: activeTab === 'nodes' }" @click="openNodesTab">
+            <span class="tab-icon">🌐</span>
+            <div class="tab-text">
+              <div class="tab-title">远程节点 (xray_core) 集群</div>
+              <div class="tab-sub">多节点公钥监管、在线状态、别名修改与接入</div>
+            </div>
+            <span class="count-tag">{{ adminNodes.length }} 个节点</span>
           </button>
 
           <button class="tab-card-btn" :class="{ active: activeTab === 'cards' }" @click="activeTab = 'cards'">
@@ -253,7 +266,7 @@
             <span class="tab-icon">⚙️</span>
             <div class="tab-text">
               <div class="tab-title">系统发信与全局运维配置</div>
-              <div class="tab-sub">节点域名、公告配置、SMTP、巡检与注册配额</div>
+              <div class="tab-sub">公告设置、SMTP 配置、巡检预警与个人通知</div>
             </div>
             <span class="count-tag">配置中心</span>
           </button>
@@ -275,7 +288,6 @@
                   <th>到期时间</th>
                   <th>套餐特性</th>
                   <th>通知通道</th>
-                  <th>专属凭证</th>
                   <th style="width: 250px;">治理操作</th>
                 </tr>
               </thead>
@@ -301,9 +313,6 @@
                   </td>
                   <td><span class="role-badge user">{{ u.notify_type }}</span></td>
                   <td>
-                    <button class="btn-sm btn-action" @click="openQrModal(u.sub_link, u.username)">📱 凭证/二维码</button>
-                  </td>
-                  <td>
                     <div class="action-btn-row">
                       <button class="btn-sm btn-reset" @click="openResetPwdModal(u.username)">🔑 重置密码</button>
                       <button class="btn-sm btn-edit" @click="openEditModal(u)">✏️ 改配额</button>
@@ -318,7 +327,68 @@
           </div>
         </div>
 
-        <!-- 主选项卡 2: 卡密管理 -->
+        <!-- 主选项卡 2: 远程节点集群管理 -->
+        <div v-else-if="activeTab === 'nodes'" class="cyber-card tab-content-card">
+          <div class="card-header">
+            <h3>🌐 已接入的远程 xray_core 节点集群</h3>
+            <button class="btn-cyber-refresh" @click="openNodesTab">🔄 刷新节点</button>
+          </div>
+
+          <div class="table-container">
+            <table class="cyber-table">
+              <thead>
+                <tr>
+                  <th>节点名称 (可点击修改)</th>
+                  <th>IP / 端口</th>
+                  <th>REALITY 公钥 (自动回传)</th>
+                  <th>ShortId</th>
+                  <th>心跳在线状态</th>
+                  <th>操作</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="n in adminNodes" :key="n.id">
+                  <td>
+                    <input v-model="n.name" class="cyber-input" style="width: 180px; padding: 4px 8px;" />
+                  </td>
+                  <td>{{ n.ip }}:{{ n.port }}</td>
+                  <td class="font-mono text-green" style="font-size: 11px;">{{ n.pbk }}</td>
+                  <td class="font-mono text-cyan">{{ n.sid }}</td>
+                  <td>
+                    <span class="badge badge-ready">🟢 在线 ({{ n.last_heartbeat }})</span>
+                  </td>
+                  <td>
+                    <div class="action-btn-row">
+                      <button class="btn-sm btn-edit" @click="saveNodeName(n)">保存名称</button>
+                      <button class="btn-sm btn-del" @click="deleteNode(n.node_id)">移除节点</button>
+                    </div>
+                  </td>
+                </tr>
+                <tr v-if="adminNodes.length === 0">
+                  <td colspan="6" style="text-align: center; color: #64748b; padding: 20px;">
+                    暂无远程节点接入，请在任意海外服务器执行下方命令拉起 xray_core 节点。
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <!-- 远程节点接入命令 -->
+          <div class="panel-card" style="margin-top: 25px;">
+            <h4 style="margin: 0 0 10px 0; color: #38bdf8;">🖥️ 远程海外 VPS 一键接入指令</h4>
+            <p class="card-desc">在任意香港、日本或美国 VPS 执行，节点秒级上线，自动向本面板回传真实公钥与参数：</p>
+            <div class="node-field">
+              <div class="code-display text-cyan">
+                docker run -d --name xray-node --network host --restart always -e PANEL_URL="http://{{ publicMasterHost }}:3000" -e NODE_KEY="{{ settingsForm.node_key }}" -v $(pwd)/data:/data wimotek/xray:core
+              </div>
+            </div>
+            <button class="btn-sm btn-action" @click="copyText(`docker run -d --name xray-node --network host --restart always -e PANEL_URL='http://${publicMasterHost}:3000' -e NODE_KEY='${settingsForm.node_key}' -v $(pwd)/data:/data wimotek/xray:core`)">
+              📋 复制接入命令
+            </button>
+          </div>
+        </div>
+
+        <!-- 主选项卡 3: 卡密管理 -->
         <div v-else-if="activeTab === 'cards'" class="cyber-card tab-content-card">
           <div class="sub-tab-nav">
             <button class="sub-tab-btn" :class="{ active: cardSubTab === 'inventory' }" @click="cardSubTab = 'inventory'">
@@ -329,18 +399,15 @@
             </button>
           </div>
 
-          <!-- 子卡 A: 批量制卡与库存 -->
           <div v-if="cardSubTab === 'inventory'" class="sub-tab-pane">
-            <div class="card-header">
-              <h3>🛠️ 批量生成卡密</h3>
-            </div>
+            <div class="card-header"><h3>🛠️ 批量生成卡密</h3></div>
             <div class="gen-form">
               <div>
-                <label>流量配额 (GB, 填0为不限)</label>
+                <label>流量配额 (GB, 0为不限)</label>
                 <input v-model.number="cardGenForm.traffic_gb" type="number" class="cyber-input" placeholder="0=不限" />
               </div>
               <div>
-                <label>有效时限 (天, 填36500为永久)</label>
+                <label>有效时限 (天, 36500为永久)</label>
                 <input v-model.number="cardGenForm.days" type="number" class="cyber-input" placeholder="36500=永久" />
               </div>
               <div>
@@ -349,7 +416,7 @@
               </div>
               <div style="display: flex; flex-direction: column; justify-content: flex-end;">
                 <label class="radio-label" style="margin-bottom: 8px;">
-                  <input type="checkbox" v-model="cardGenForm.is_monthly" /> 设为每月固定重置套餐卡
+                  <input type="checkbox" v-model="cardGenForm.is_monthly" /> 设为每月固定重置卡
                 </label>
                 <button class="btn-cyber-success" @click="generateCards">立即批量制卡</button>
               </div>
@@ -360,7 +427,6 @@
               <button class="btn-cyber-refresh" @click="loadAdminData">🔄 刷新列表</button>
             </div>
 
-            <!-- 导出工具栏 -->
             <div class="export-toolbar">
               <div class="date-filter-group">
                 <span class="filter-label">📅 日期范围:</span>
@@ -387,7 +453,7 @@
                     <th style="width: 40px; text-align: center;">
                       <input type="checkbox" :checked="isAllSelected" @change="toggleSelectAll" title="全选未售卡密" />
                     </th>
-                    <th>兑换卡密编号</th>
+                    <th>卡密编号</th>
                     <th>套餐配额</th>
                     <th>套餐属性</th>
                     <th>核销状态</th>
@@ -398,30 +464,23 @@
                 </thead>
                 <tbody>
                   <tr v-for="c in adminCards" :key="c.code">
-                    <td style="text-align: center;">
-                      <input type="checkbox" :value="c.code" v-model="selectedCards" />
-                    </td>
+                    <td style="text-align: center;"><input type="checkbox" :value="c.code" v-model="selectedCards" /></td>
                     <td class="font-mono text-cyan">{{ c.code }}</td>
-                    <td style="white-space: nowrap;">{{ c.traffic_gb === 0 ? '♾️ 不限' : c.traffic_gb + ' GB' }} / {{ c.days >= 3650 ? '永久' : c.days + ' 天' }}</td>
+                    <td>{{ c.traffic_gb === 0 ? '♾️ 不限' : c.traffic_gb + ' GB' }} / {{ c.days >= 3650 ? '永久' : c.days + ' 天' }}</td>
                     <td>
                       <span v-if="c.is_monthly === 1" class="badge badge-monthly">每月重置</span>
                       <span v-else class="text-muted" style="font-size: 11px;">普通固定</span>
                     </td>
-                    <td>
-                      <span class="badge" :class="c.is_used ? 'badge-used' : 'badge-ready'">
-                        {{ c.is_used ? '已核销' : '待售出/有效' }}
-                      </span>
-                    </td>
-                    <td class="text-muted" style="white-space: nowrap;">{{ c.created_at || '早期生成' }}</td>
+                    <td><span class="badge" :class="c.is_used ? 'badge-used' : 'badge-ready'">{{ c.is_used ? '已核销' : '待售/有效' }}</span></td>
+                    <td class="text-muted">{{ c.created_at || '早期' }}</td>
                     <td>{{ c.used_by || '-' }}</td>
-                    <td><button class="btn-sm btn-action" @click="copyText(c.code)">一键复制</button></td>
+                    <td><button class="btn-sm btn-action" @click="copyText(c.code)">复制</button></td>
                   </tr>
                 </tbody>
               </table>
             </div>
           </div>
 
-          <!-- 子卡 B: API 自动发卡 -->
           <div v-else-if="cardSubTab === 'api'" class="sub-tab-pane">
             <div class="panel-card">
               <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; border-bottom: 1px solid #1e293b; padding-bottom: 10px;">
@@ -434,269 +493,131 @@
                 </label>
               </div>
 
-              <p class="card-desc">买家在独角数卡等发卡平台付款后，发卡系统可自动请求此 API 现场生成卡密交付，支持设定 <code>&amp;is_monthly=1</code> 出每月重置卡：</p>
-
               <div class="form-item">
                 <label>API 通信验证 TOKEN (密钥)：</label>
                 <div style="display: flex; gap: 8px;">
                   <input v-model="settingsForm.faka_api_token" type="text" class="cyber-input font-mono" placeholder="自定义出卡令牌" />
-                  <button class="btn-sm btn-action" style="padding: 0 14px; white-space: nowrap;" @click="generateRandomToken">🎲 随机生成</button>
-                  <button class="btn-sm btn-cyber-success" style="padding: 0 14px; white-space: nowrap;" @click="saveAllSettings">保存密钥</button>
+                  <button class="btn-sm btn-action" @click="generateRandomToken">🎲 随机</button>
+                  <button class="btn-sm btn-cyber-success" @click="saveAllSettings">保存</button>
                 </div>
-                <span class="input-hint">第三方发卡系统调用出卡接口时必须携带此 Token 进行身份鉴权</span>
               </div>
 
               <div class="node-field" style="margin-top: 18px;">
-                <label>独角数卡自定义发卡调用 URL (GET / POST)：</label>
+                <label>独角数卡发卡调用 URL (GET / POST)：</label>
                 <div class="code-display text-cyan">{{ fakaApiUrlSample }}</div>
               </div>
 
-              <div class="btn-group">
-                <button class="btn-cyber-action" @click="copyText(fakaApiUrlSample)">复制 API 完整调用地址</button>
-              </div>
+              <button class="btn-cyber-action" style="margin-top: 10px;" @click="copyText(fakaApiUrlSample)">复制 API 完整调用地址</button>
             </div>
           </div>
         </div>
 
-        <!-- 主选项卡 3: 系统与发信设置 -->
+        <!-- 主选项卡 4: 系统设置 -->
         <div v-else-if="activeTab === 'settings'" class="cyber-card tab-content-card">
           <div class="card-header" style="margin-bottom: 22px;">
-            <h3>⚙️ 系统发信、节点连接与全局运维中枢</h3>
-            <button class="btn-cyber-success" @click="saveAllSettings">💾 保存全部系统设置</button>
+            <h3>⚙️ 系统发信、定时巡检与全局设置</h3>
+            <button class="btn-cyber-success" @click="saveAllSettings">💾 保存系统设置</button>
           </div>
 
           <div class="settings-2col-layout">
-            <!-- 栏目 1 (左列): 公告、新用户配额与管理员安全 -->
             <div class="column-stack">
-              <!-- 左卡片 A: 登录页公告与新注册配额设置 -->
               <div class="panel-card">
                 <div class="panel-card-header">
-                  <div class="panel-title-wrap">
-                    <span class="panel-icon">📢</span>
-                    <div>
-                      <strong class="panel-title">系统公告与新注册用户默认配额</strong>
-                      <div class="panel-sub">登录页横幅公告展示与新用户免费体验配额</div>
-                    </div>
-                  </div>
+                  <div class="panel-title-wrap"><span class="panel-icon">📢</span><strong class="panel-title">系统公告与新用户默认配额</strong></div>
                 </div>
-
                 <div class="form-item">
-                  <label>登录页系统公告内容 (留空则不显示公告)：</label>
-                  <textarea v-model="settingsForm.system_notice" rows="3" class="cyber-input cyber-textarea" placeholder="例如：欢迎加入！新节点已上线，高速晚高峰不卡顿..."></textarea>
-                  <span class="input-hint">保存后，前台用户打开登录卡片顶部将即时看到此公告</span>
+                  <label>登录页系统公告内容 (留空不显示)：</label>
+                  <textarea v-model="settingsForm.system_notice" rows="3" class="cyber-input cyber-textarea" placeholder="例如：全节点已完成维护，极速晚高峰..."></textarea>
                 </div>
-
                 <div class="form-row-2" style="margin-top: 15px;">
                   <div class="form-item">
-                    <label>新注册默认赠送流量 (MB)</label>
-                    <input v-model.number="settingsForm.reg_traffic_mb" type="number" class="cyber-input" placeholder="例如 1024" />
-                    <span class="input-hint">填 0 为不赠送流量</span>
+                    <label>新注册默认流量 (MB)</label>
+                    <input v-model.number="settingsForm.reg_traffic_mb" type="number" class="cyber-input" placeholder="1024" />
                   </div>
                   <div class="form-item">
-                    <label>新注册默认有效天数 (天)</label>
-                    <input v-model.number="settingsForm.reg_expire_days" type="number" class="cyber-input" placeholder="例如 1 或 3" />
-                    <span class="input-hint">填 36500 为永久有效</span>
+                    <label>新注册有效天数 (天)</label>
+                    <input v-model.number="settingsForm.reg_expire_days" type="number" class="cyber-input" placeholder="1" />
                   </div>
                 </div>
               </div>
 
-              <!-- 左卡片 B: 管理员通知通道与改密 -->
               <div class="panel-card">
                 <div class="panel-card-header">
-                  <div class="panel-title-wrap">
-                    <span class="panel-icon">👤</span>
-                    <div>
-                      <strong class="panel-title">管理员通知通道与改密</strong>
-                      <div class="panel-sub">当前登录管理员: <b>{{ currentUser.username }}</b></div>
-                    </div>
-                  </div>
+                  <div class="panel-title-wrap"><span class="panel-icon">👤</span><strong class="panel-title">管理员通知通道与改密</strong></div>
                 </div>
-
                 <div class="form-item">
-                  <label>告警通知通道选择</label>
+                  <label>告警通道选择</label>
                   <div class="radio-group">
-                    <label class="radio-label">
-                      <input type="radio" value="email" v-model="notifyForm.notify_type" />
-                      📧 电子邮箱接收 ({{ currentUser.email || '未绑定邮箱' }})
-                    </label>
-                    <label class="radio-label">
-                      <input type="radio" value="serverchan" v-model="notifyForm.notify_type" />
-                      📲 Server酱 (微信即时推送)
-                    </label>
+                    <label class="radio-label"><input type="radio" value="email" v-model="notifyForm.notify_type" /> 📧 电子邮箱接收</label>
+                    <label class="radio-label"><input type="radio" value="serverchan" v-model="notifyForm.notify_type" /> 📲 Server酱 (微信推送)</label>
                   </div>
                 </div>
-
                 <div class="form-item" v-if="notifyForm.notify_type === 'serverchan'">
                   <label>Server酱 SendKey：</label>
                   <input v-model="notifyForm.serverchan_key" type="text" class="cyber-input font-mono" placeholder="SCTxxxxxxxxxx" />
-                  <div class="input-hint">
-                    💡 前往 <a href="https://sct.ftqq.com/" target="_blank" class="cyber-link">Server酱官网</a> 微信扫码获取 SendKey。
-                  </div>
                 </div>
-
                 <div class="btn-group" style="margin-top: 14px;">
-                  <button class="btn-cyber-success" style="padding: 6px 14px; font-size: 12px;" @click="saveNotifySettings">保存通知设置</button>
-                  <button class="btn-cyber-action" style="padding: 6px 14px; font-size: 12px;" @click="testUserNotify">发送测试通知</button>
+                  <button class="btn-cyber-success" style="padding: 6px 14px; font-size: 12px;" @click="saveNotifySettings">保存通知偏好</button>
+                  <button class="btn-cyber-action" style="padding: 6px 14px; font-size: 12px;" @click="testUserNotify">测试通知</button>
                 </div>
-
                 <div class="inner-divider">
                   <div class="inner-divider-title">🔑 修改管理员自身登录密码</div>
-                  <div class="form-item" style="margin-bottom: 8px;">
-                    <input v-model="pwdForm.old_pwd" type="password" class="cyber-input" placeholder="输入当前原密码" />
-                  </div>
-                  <div class="form-item" style="margin-bottom: 8px;">
-                    <input v-model="pwdForm.new_pwd" type="password" class="cyber-input" placeholder="设置新密码 (至少6位)" />
-                  </div>
-                  <div class="form-item" style="margin-bottom: 12px;">
-                    <input v-model="pwdForm.confirm_pwd" type="password" class="cyber-input" placeholder="再次确认新密码" />
-                  </div>
+                  <div class="form-item" style="margin-bottom: 8px;"><input v-model="pwdForm.old_pwd" type="password" class="cyber-input" placeholder="当前原密码" /></div>
+                  <div class="form-item" style="margin-bottom: 8px;"><input v-model="pwdForm.new_pwd" type="password" class="cyber-input" placeholder="新密码" /></div>
+                  <div class="form-item" style="margin-bottom: 12px;"><input v-model="pwdForm.confirm_pwd" type="password" class="cyber-input" placeholder="确认新密码" /></div>
                   <button class="btn-cyber-primary" style="width: auto; padding: 7px 20px; font-size: 12px;" @click="submitChangePassword">确认变更密码</button>
                 </div>
               </div>
             </div>
 
-            <!-- 栏目 2 (右列): 节点连接地址、定时任务与发信中枢 -->
             <div class="column-stack">
-              <!-- 右卡片 A: 节点客户端连接地址配置 -->
               <div class="panel-card">
                 <div class="panel-card-header">
-                  <div class="panel-title-wrap">
-                    <span class="panel-icon">🌐</span>
-                    <div>
-                      <strong class="panel-title">节点客户端连接地址 (域名或 IP)</strong>
-                      <div class="panel-sub">客户端配置与订阅链接中使用的主机地址</div>
-                    </div>
-                  </div>
-                </div>
-
-                <div class="form-item">
-                  <input v-model="settingsForm.custom_host" type="text" class="cyber-input" placeholder="留空则自动获取服务器真实外网 IP" />
-                  <span class="input-hint">
-                    💡 可输入解析到本机的专属域名（如 <code>hk.node.com</code>）或中转 IP。<br>
-                    <b>清空该输入框并保存时，系统将全自动恢复为自动检测的外网公网 IP。</b>
-                  </span>
-                </div>
-              </div>
-
-              <!-- 右卡片 B: 定时自动巡检任务 -->
-              <div class="panel-card">
-                <div class="panel-card-header">
-                  <div class="panel-title-wrap">
-                    <span class="panel-icon">⏰</span>
-                    <div>
-                      <strong class="panel-title">定时巡检、预警与每月固定流量刷新</strong>
-                      <div class="panel-sub">后台自动定时轮询配额、执行每月重置与到期推送</div>
-                    </div>
-                  </div>
-                  <label class="radio-label" style="font-weight: 600; font-size: 13px; margin: 0; white-space: nowrap;">
+                  <div class="panel-title-wrap"><span class="panel-icon">⏰</span><strong class="panel-title">定时巡检与每月流量重置</strong></div>
+                  <label class="radio-label" style="margin: 0;">
                     <input type="checkbox" v-model="settingsForm.task_notify_enable" />
-                    <span :style="{ color: settingsForm.task_notify_enable ? '#10b981' : '#ef4444' }">
-                      {{ settingsForm.task_notify_enable ? '🟢 巡检中' : '🔴 已暂停' }}
-                    </span>
+                    <span :style="{ color: settingsForm.task_notify_enable ? '#10b981' : '#ef4444' }">{{ settingsForm.task_notify_enable ? '🟢 运行中' : '🔴 暂停' }}</span>
                   </label>
                 </div>
-
                 <div class="form-item">
-                  <label>轮询检测执行周期 (小时)</label>
-                  <div class="input-with-addon">
-                    <input v-model.number="settingsForm.task_interval_hours" type="number" class="cyber-input" placeholder="12" />
-                    <span class="addon-text">小时 / 次</span>
-                  </div>
-                  <span class="input-hint">建议设为 12 或 24 小时</span>
+                  <label>检测周期 (小时)</label>
+                  <div class="input-with-addon"><input v-model.number="settingsForm.task_interval_hours" type="number" class="cyber-input" /><span class="addon-text">小时 / 次</span></div>
                 </div>
-
                 <div class="form-item">
                   <label>流量不足告警阈值 (%)</label>
-                  <div class="input-with-addon">
-                    <input v-model.number="settingsForm.task_traffic_threshold" type="number" class="cyber-input" placeholder="80" />
-                    <span class="addon-text">%</span>
-                  </div>
-                  <span class="input-hint">已用达该比例提醒 (设为不限流量的用户自动跳过)</span>
+                  <div class="input-with-addon"><input v-model.number="settingsForm.task_traffic_threshold" type="number" class="cyber-input" /><span class="addon-text">%</span></div>
                 </div>
-
                 <div class="form-item">
                   <label>套餐到期告警阈值 (天)</label>
-                  <div class="input-with-addon">
-                    <input v-model.number="settingsForm.task_expire_days" type="number" class="cyber-input" placeholder="3" />
-                    <span class="addon-text">天</span>
-                  </div>
-                  <span class="input-hint">到期前不足该天数提醒 (永久有效用户自动跳过)</span>
+                  <div class="input-with-addon"><input v-model.number="settingsForm.task_expire_days" type="number" class="cyber-input" /><span class="addon-text">天</span></div>
                 </div>
-
                 <div class="inner-divider">
-                  <div style="font-size: 12px; color: #94a3b8; margin-bottom: 10px;">
-                    最近自动扫描完成时间：<b class="text-cyan">{{ settingsForm.task_last_run }}</b>
-                    <div style="font-size: 11px; color: #64748b; margin-top: 2px;">若用户为每月固定套餐，到达重置日时系统将自动清零 Xray 流量并推送通知</div>
-                  </div>
+                  <div style="font-size: 12px; color: #94a3b8; margin-bottom: 10px;">最近扫描时间：<b class="text-cyan">{{ settingsForm.task_last_run }}</b></div>
                   <button class="btn-cyber-primary" :disabled="triggeringTask" style="width: auto; padding: 7px 18px; font-size: 12px;" @click="triggerManualTask">
-                    {{ triggeringTask ? '正在扫描并推送...' : '⚡ 立即执行一次巡检与重置' }}
+                    {{ triggeringTask ? '扫描中...' : '⚡ 立即执行一次巡检' }}
                   </button>
                 </div>
               </div>
 
-              <!-- 右卡片 C: SMTP 邮件服务器配置与测试 -->
               <div class="panel-card">
                 <div class="panel-card-header">
-                  <div class="panel-title-wrap">
-                    <span class="panel-icon">📧</span>
-                    <div>
-                      <strong class="panel-title">SMTP 发信服务器参数配置</strong>
-                      <div class="panel-sub">发送账号激活验证码与预警邮件</div>
-                    </div>
-                  </div>
+                  <div class="panel-title-wrap"><span class="panel-icon">📧</span><strong class="panel-title">SMTP 发信服务器参数配置</strong></div>
                 </div>
-
                 <div class="smtp-status-box" :class="settingsForm.is_smtp_configured ? 'smtp-ready' : 'smtp-empty'">
-                  <span>{{ settingsForm.is_smtp_configured ? '🟢 SMTP 状态：已配置就绪 (可正常发信)' : '⚪ SMTP 状态：尚未完整配置 (无法发信)' }}</span>
+                  <span>{{ settingsForm.is_smtp_configured ? '🟢 SMTP 状态：就绪' : '⚪ SMTP 状态：未配置' }}</span>
                 </div>
-
-                <div class="form-item">
-                  <label>SMTP 服务器地址</label>
-                  <input v-model="settingsForm.smtp_host" type="text" class="cyber-input" placeholder="例如: smtp.qq.com / smtp.163.com" />
-                </div>
-
+                <div class="form-item"><label>SMTP 服务器</label><input v-model="settingsForm.smtp_host" type="text" class="cyber-input" placeholder="smtp.qq.com" /></div>
                 <div class="form-row-2">
-                  <div class="form-item">
-                    <label>端口 (默认 465)</label>
-                    <input v-model="settingsForm.smtp_port" type="text" class="cyber-input" placeholder="465" />
-                  </div>
-                  <div class="form-item">
-                    <label>发件人显示名称</label>
-                    <input v-model="settingsForm.smtp_sender" type="text" class="cyber-input" placeholder="Xray 节点中心" />
-                  </div>
+                  <div class="form-item"><label>端口</label><input v-model="settingsForm.smtp_port" type="text" class="cyber-input" placeholder="465" /></div>
+                  <div class="form-item"><label>发件人</label><input v-model="settingsForm.smtp_sender" type="text" class="cyber-input" placeholder="Xray 节点中心" /></div>
                 </div>
-
-                <div class="form-item">
-                  <label>发信邮箱账号 (User)</label>
-                  <input v-model="settingsForm.smtp_user" type="text" class="cyber-input" placeholder="service@example.com" />
-                </div>
-
-                <div class="form-item">
-                  <label>邮箱授权码 / 密码 (Password)</label>
-                  <input
-                    v-model="settingsForm.smtp_pass"
-                    type="password"
-                    class="cyber-input"
-                    :placeholder="settingsForm.has_smtp_pass ? '●●●●●●●● (已安全保存，留空保持原密码)' : '请输入第三方客户端授权码'"
-                  />
-                  <span class="input-hint">
-                    {{ settingsForm.has_smtp_pass ? '✅ 系统已安全保存授权码。若无需更换，请直接留空保存即可。' : '⚠️ 尚未配置授权码，配置后方可发送邮件。' }}
-                  </span>
-                </div>
-
-                <div class="form-item">
-                  <label class="radio-label">
-                    <input type="checkbox" v-model="settingsForm.smtp_ssl" /> 启用 SSL 安全加密连接 (推荐开启)
-                  </label>
-                </div>
-
+                <div class="form-item"><label>发信账号</label><input v-model="settingsForm.smtp_user" type="text" class="cyber-input" placeholder="service@example.com" /></div>
+                <div class="form-item"><label>授权码 / 密码</label><input v-model="settingsForm.smtp_pass" type="password" class="cyber-input" :placeholder="settingsForm.has_smtp_pass ? '●●●●●● (留空保持原密码)' : '输入授权码'" /></div>
+                <div class="form-item"><label class="radio-label"><input type="checkbox" v-model="settingsForm.smtp_ssl" /> 启用 SSL 加密</label></div>
                 <div class="inner-divider">
-                  <label style="font-size: 12px; color: #94a3b8; display: block; margin-bottom: 6px;">发信连通性验证 (收件邮箱)</label>
                   <div style="display: flex; gap: 8px;">
                     <input v-model="testEmailTo" type="email" class="cyber-input" placeholder="test@example.com" />
-                    <button class="btn-cyber-action" :disabled="testingEmail" style="padding: 6px 14px; font-size: 12px; white-space: nowrap;" @click="sendTestEmail">
-                      {{ testingEmail ? '发送中...' : '测试发信' }}
-                    </button>
+                    <button class="btn-cyber-action" :disabled="testingEmail" style="padding: 6px 14px; font-size: 12px; white-space: nowrap;" @click="sendTestEmail">{{ testingEmail ? '...' : '发信测试' }}</button>
                   </div>
                 </div>
               </div>
@@ -724,40 +645,31 @@
       </div>
     </div>
 
-    <!-- 弹窗 2：管理员修改用户配额 (支持每月重置与永久有效) -->
+    <!-- 弹窗 2：管理员修改用户配额 -->
     <div v-if="showEditModal" class="modal-backdrop" @click="showEditModal = false">
       <div class="cyber-modal" style="max-width: 440px; text-align: left;" @click.stop>
         <h3>✏️ 调整用户 [{{ editForm.username }}] 属性</h3>
-        
         <div class="form-item" style="margin-top: 15px;">
           <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
             <label style="margin: 0;">总流量限制配额 (MB)</label>
             <button class="btn-link-action" @click="editForm.limit_mb = 0">♾️ 设为不限流量</button>
           </div>
           <input v-model.number="editForm.limit_mb" type="number" class="cyber-input modal-input" />
-          <span style="font-size: 11px; color: #64748b;">提示：填 0 表示不限制流量 | 100GB = 102400MB</span>
         </div>
-
         <div class="form-item">
           <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
             <label style="margin: 0;">套餐到期时限</label>
             <button class="btn-link-action" @click="editForm.expire_date = '2099-12-31 23:59:59'">♾️ 设为永久有效</button>
           </div>
           <input v-model="editForm.expire_date" type="text" class="cyber-input modal-input" />
-          <span style="font-size: 11px; color: #64748b;">提示：填 2099-12-31 表示永久有效</span>
         </div>
-
         <div class="form-item">
-          <label class="radio-label">
-            <input type="checkbox" v-model="editForm.is_monthly" /> 开启每月固定重置流量套餐
-          </label>
+          <label class="radio-label"><input type="checkbox" v-model="editForm.is_monthly" /> 开启每月固定重置流量套餐</label>
         </div>
-
         <div class="form-item" v-if="editForm.is_monthly">
-          <label>每月流量重置日期 (1~28 号)</label>
-          <input v-model.number="editForm.reset_day" type="number" min="1" max="28" class="cyber-input modal-input" placeholder="例如每月 1 号" />
+          <label>每月重置日期 (1~28 号)</label>
+          <input v-model.number="editForm.reset_day" type="number" min="1" max="28" class="cyber-input modal-input" />
         </div>
-
         <div class="btn-group" style="justify-content: flex-end; margin-top: 20px;">
           <button class="btn-cyber-action" @click="showEditModal = false">取消</button>
           <button class="btn-cyber-success" @click="submitUserEdit">保存修改</button>
@@ -770,9 +682,8 @@
       <div class="cyber-modal" style="max-width: 380px; text-align: left;" @click.stop>
         <h3>🔑 重置用户 [{{ resetTargetUser }}] 密码</h3>
         <div class="form-item" style="margin-top: 15px;">
-          <label>为该用户设置的新密码</label>
+          <label>新密码</label>
           <input v-model="resetNewPassword" type="text" class="cyber-input modal-input" placeholder="输入新密码" />
-          <span style="font-size: 11px; color: #64748b;">重置后系统会自动向其邮箱/微信推送新密码通知</span>
         </div>
         <div class="btn-group" style="justify-content: flex-end; margin-top: 20px;">
           <button class="btn-cyber-action" @click="showResetPwdModal = false">取消</button>
@@ -798,7 +709,6 @@ const authMode = ref('login')
 const countdown = ref(0)
 const sendingCode = ref(false)
 const downloadingClient = ref(false)
-
 const systemNotice = ref('')
 
 const showQrModal = ref(false)
@@ -812,7 +722,7 @@ const showResetPwdModal = ref(false)
 const resetTargetUser = ref('')
 const resetNewPassword = ref('')
 
-const currentUser = reactive({ username: '', email: '', role: '', used_mb: 0, limit_mb: 0, expire_date: '', is_monthly: 0, reset_day: 1, public_key: '', sub_link: '' })
+const currentUser = reactive({ username: '', email: '', role: '', used_mb: 0, limit_mb: 0, expire_date: '', is_monthly: 0, reset_day: 1, sub_url: '', nodes: [] })
 const authForm = reactive({ username: '', email: '', code: '', password: '' })
 const forgotForm = reactive({ email: '', code: '', new_password: '' })
 const cardGenForm = reactive({ traffic_gb: 50, days: 30, count: 5, is_monthly: false })
@@ -838,7 +748,7 @@ const settingsForm = reactive({
   task_last_run: '尚未执行',
   faka_api_enable: true,
   faka_api_token: 'faka_secret_token_8899',
-  custom_host: '',
+  node_key: 'xray_cluster_secret_key_2026',
   system_notice: '',
   reg_traffic_mb: 1024,
   reg_expire_days: 1
@@ -850,6 +760,7 @@ const triggeringTask = ref(false)
 
 const adminCards = ref([])
 const adminUsers = ref([])
+const adminNodes = ref([])
 
 onMounted(async () => {
   const savedSession = localStorage.getItem('xray_auth_session')
@@ -864,6 +775,7 @@ onMounted(async () => {
         notifyForm.serverchan_key = parsed.user.serverchan_key || ''
         if (currentUser.role === 'admin') {
           loadAdminData()
+          openNodesTab()
         }
       }
     } catch (_) {
@@ -912,6 +824,8 @@ const fakaApiUrlSample = computed(() => {
   return `${host}/api/open/faka_generate?gb=100&days=30&is_monthly=1&token=${token}`
 })
 
+const publicMasterHost = computed(() => window.location.hostname)
+
 const isAllSelected = computed(() => {
   const unusedList = adminCards.value.filter(c => !c.is_used)
   if (unusedList.length === 0) return false
@@ -929,14 +843,11 @@ const toggleSelectAll = (e) => {
 const generateRandomToken = () => {
   const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789'
   let token = 'FAKA_'
-  for (let i = 0; i < 20; i++) {
-    token += chars.charAt(Math.floor(Math.random() * chars.length))
-  }
+  for (let i = 0; i < 20; i++) token += chars.charAt(Math.floor(Math.random() * chars.length))
   settingsForm.faka_api_token = token
-  ElMessage.success('已随机生成新出卡 Token，请记得点击保存')
+  ElMessage.success('已随机生成新出卡 Token')
 }
 
-// 统一导出底层 (全局仅此一处定义)
 const executeExport = async (payload, successTip) => {
   try {
     const adminUser = currentUser.username || authForm.username
@@ -946,11 +857,9 @@ const executeExport = async (payload, successTip) => {
       ...payload
     })
     if (res.data.code === 200) {
-      if (res.data.count === 0) {
-        return ElMessage.warning('筛选条件下暂无可导出的未核销卡密')
-      }
+      if (res.data.count === 0) return ElMessage.warning('暂无可导出的未核销卡密')
       copyText(res.data.text)
-      ElMessage.success(`${successTip}（共 ${res.data.count} 张，已符合独角数卡格式）`)
+      ElMessage.success(`${successTip}（共 ${res.data.count} 张）`)
     } else {
       ElMessage.error(res.data.msg)
     }
@@ -959,27 +868,17 @@ const executeExport = async (payload, successTip) => {
   }
 }
 
-// 唯一声明：勾选导出
 const exportSelectedCards = () => {
   if (selectedCards.value.length === 0) return ElMessage.warning('请先在表格左侧勾选要导出的卡密')
   executeExport({ selected_codes: selectedCards.value }, '已复制选中的卡密')
 }
 
-// 唯一声明：日期范围导出
 const exportByDateRange = () => {
-  if (!exportFilter.startDate && !exportFilter.endDate) {
-    return ElMessage.warning('请先选择开始日期或结束日期')
-  }
-  executeExport({
-    start_date: exportFilter.startDate,
-    end_date: exportFilter.endDate
-  }, '已导出指定日期范围内的未售卡密')
+  if (!exportFilter.startDate && !exportFilter.endDate) return ElMessage.warning('请先选择日期范围')
+  executeExport({ start_date: exportFilter.startDate, end_date: exportFilter.endDate }, '已导出指定日期范围内的未售卡密')
 }
 
-// 唯一声明：全部未售导出
-const exportAllUnusedCards = () => {
-  executeExport({}, '已复制全部未售卡密')
-}
+const exportAllUnusedCards = () => executeExport({}, '已复制全部未售卡密')
 
 const startCountdown = () => {
   countdown.value = 60
@@ -990,9 +889,7 @@ const startCountdown = () => {
 }
 
 const sendRegisterCode = async () => {
-  if (!authForm.email || !authForm.email.includes('@')) {
-    return ElMessage.warning('请先输入合法的电子邮箱')
-  }
+  if (!authForm.email || !authForm.email.includes('@')) return ElMessage.warning('请输入合法电子邮箱')
   sendingCode.value = true
   try {
     const res = await axios.post('/api/auth/send_register_code', { email: authForm.email })
@@ -1003,16 +900,14 @@ const sendRegisterCode = async () => {
       ElMessage.error(res.data.msg)
     }
   } catch (_) {
-    ElMessage.error('验证码发送请求失败，请确保后台已配置发信参数')
+    ElMessage.error('验证码发送失败')
   } finally {
     sendingCode.value = false
   }
 }
 
 const sendForgotCode = async () => {
-  if (!forgotForm.email || !forgotForm.email.includes('@')) {
-    return ElMessage.warning('请输入绑定的注册电子邮箱')
-  }
+  if (!forgotForm.email || !forgotForm.email.includes('@')) return ElMessage.warning('请输入绑定的注册邮箱')
   sendingCode.value = true
   try {
     const res = await axios.post('/api/auth/send_reset_code', { email: forgotForm.email })
@@ -1023,19 +918,14 @@ const sendForgotCode = async () => {
       ElMessage.error(res.data.msg)
     }
   } catch (_) {
-    ElMessage.error('验证码发送请求失败')
+    ElMessage.error('请求失败')
   } finally {
     sendingCode.value = false
   }
 }
 
 const submitForgotPassword = async () => {
-  if (!forgotForm.email || !forgotForm.code || !forgotForm.new_password) {
-    return ElMessage.warning('请完整填写邮箱、重置码与新密码')
-  }
-  if (forgotForm.new_password.length < 6) {
-    return ElMessage.warning('新密码长度不能少于 6 位')
-  }
+  if (!forgotForm.email || !forgotForm.code || !forgotForm.new_password) return ElMessage.warning('请填写完整重置信息')
   loading.value = true
   try {
     const res = await axios.post('/api/auth/reset_password', forgotForm)
@@ -1048,14 +938,14 @@ const submitForgotPassword = async () => {
       ElMessage.error(res.data.msg)
     }
   } catch (_) {
-    ElMessage.error('重置密码提交失败')
+    ElMessage.error('重置失败')
   } finally {
     loading.value = false
   }
 }
 
 const openQrModal = (link, uname) => {
-  if (!link) return ElMessage.warning('链接无效或公钥未初始化')
+  if (!link) return ElMessage.warning('节点连接无效')
   targetModalUser.value = uname
   targetModalLink.value = link
   showQrModal.value = true
@@ -1093,7 +983,7 @@ const submitResetPassword = async () => {
       ElMessage.error(res.data.msg)
     }
   } catch (_) {
-    ElMessage.error('重置密码操作失败')
+    ElMessage.error('重置失败')
   }
 }
 
@@ -1139,12 +1029,12 @@ const handleStatusToggle = async (targetUser, newStatus) => {
       ElMessage.error(res.data.msg)
     }
   } catch (_) {
-    ElMessage.error('网络或权限异常')
+    ElMessage.error('操作异常')
   }
 }
 
 const handleDeleteUser = async (targetUser) => {
-  if (!confirm(`⚠️ 警告：确定要彻底删除用户 [${targetUser}] 吗？数据无法恢复！`)) return
+  if (!confirm(`⚠️ 警告：确定要彻底删除用户 [${targetUser}] 吗？`)) return
   try {
     const adminUser = currentUser.username || authForm.username
     const res = await axios.post('/api/admin/users/delete', {
@@ -1159,7 +1049,7 @@ const handleDeleteUser = async (targetUser) => {
       ElMessage.error(res.data.msg)
     }
   } catch (_) {
-    ElMessage.error('删除操作失败')
+    ElMessage.error('删除失败')
   }
 }
 
@@ -1182,7 +1072,7 @@ const saveNotifySettings = async () => {
       ElMessage.error(res.data.msg)
     }
   } catch (_) {
-    ElMessage.error('保存设置失败')
+    ElMessage.error('保存失败')
   }
 }
 
@@ -1200,15 +1090,8 @@ const testUserNotify = async () => {
 }
 
 const submitChangePassword = async () => {
-  if (!pwdForm.old_pwd || !pwdForm.new_pwd) {
-    return ElMessage.warning('请输入当前旧密码和新密码')
-  }
-  if (pwdForm.new_pwd.length < 6) {
-    return ElMessage.warning('新密码长度不能少于 6 位')
-  }
-  if (pwdForm.new_pwd !== pwdForm.confirm_pwd) {
-    return ElMessage.warning('两次输入的新密码不一致')
-  }
+  if (!pwdForm.old_pwd || !pwdForm.new_pwd) return ElMessage.warning('请输入密码')
+  if (pwdForm.new_pwd !== pwdForm.confirm_pwd) return ElMessage.warning('两次密码不一致')
   try {
     const res = await axios.post('/api/user/change_password', {
       username: currentUser.username,
@@ -1217,35 +1100,78 @@ const submitChangePassword = async () => {
     })
     if (res.data.code === 200) {
       ElMessage.success(res.data.msg)
-      pwdForm.old_pwd = ''
-      pwdForm.new_pwd = ''
-      pwdForm.confirm_pwd = ''
       localStorage.removeItem('xray_auth_session')
       setTimeout(() => location.reload(), 1500)
     } else {
       ElMessage.error(res.data.msg)
     }
   } catch (_) {
-    ElMessage.error('密码修改失败，请核对旧密码')
+    ElMessage.error('改密失败')
   }
 }
 
-const downloadWindowsClient = () => {
+const downloadWindowsClient = (nodeId = '', nodeName = '') => {
   if (!currentUser.username) return ElMessage.warning('用户未就绪')
-  downloadingClient.value = true
-  ElMessage.info('系统正在为您实时调取核心并组装专属配置，请稍候...')
+  ElMessage.info(`正在为您打包 ${nodeName || '默认节点'} 的 Windows 开箱即用客户端...`)
 
-  const downloadUrl = `/api/user/download_client?username=${encodeURIComponent(currentUser.username)}`
+  const downloadUrl = `/api/user/download_client?username=${encodeURIComponent(currentUser.username)}&node_id=${nodeId}`
   const a = document.createElement('a')
   a.href = downloadUrl
   a.download = `Xray_Windows_${currentUser.username}.zip`
   document.body.appendChild(a)
   a.click()
   document.body.removeChild(a)
+}
 
-  setTimeout(() => {
-    downloadingClient.value = false
-  }, 3000)
+const openNodesTab = async () => {
+  activeTab.value = 'nodes'
+  try {
+    const adminUser = currentUser.username || authForm.username
+    const res = await axios.post('/api/admin/nodes/list', {
+      admin_user: adminUser,
+      admin_pwd: authForm.password
+    })
+    if (res.data.code === 200) {
+      adminNodes.value = res.data.data
+    }
+  } catch (_) {}
+}
+
+const saveNodeName = async (node) => {
+  try {
+    const adminUser = currentUser.username || authForm.username
+    const res = await axios.post('/api/admin/nodes/edit', {
+      admin_user: adminUser,
+      admin_pwd: authForm.password,
+      node_id: node.node_id,
+      name: node.name,
+      status: node.status
+    })
+    if (res.data.code === 200) {
+      ElMessage.success('节点别名保存成功')
+      openNodesTab()
+    }
+  } catch (_) {
+    ElMessage.error('保存失败')
+  }
+}
+
+const deleteNode = async (nodeId) => {
+  if (!confirm('确定要从集群中移除该节点吗？')) return
+  try {
+    const adminUser = currentUser.username || authForm.username
+    const res = await axios.post('/api/admin/nodes/delete', {
+      admin_user: adminUser,
+      admin_pwd: authForm.password,
+      node_id: nodeId
+    })
+    if (res.data.code === 200) {
+      ElMessage.success('节点已成功移除')
+      openNodesTab()
+    }
+  } catch (_) {
+    ElMessage.error('移除失败')
+  }
 }
 
 const openSettingsTab = async () => {
@@ -1270,7 +1196,7 @@ const openSettingsTab = async () => {
       settingsForm.task_last_run = d.task_last_run || '尚未执行'
       settingsForm.faka_api_enable = d.faka_api_enable === 'true'
       settingsForm.faka_api_token = d.faka_api_token || 'faka_secret_token_8899'
-      settingsForm.custom_host = d.custom_host || ''
+      settingsForm.node_key = d.node_key || 'xray_cluster_secret_key_2026'
       settingsForm.system_notice = d.system_notice || ''
       settingsForm.reg_traffic_mb = Number(d.reg_traffic_mb) || 1024
       settingsForm.reg_expire_days = Number(d.reg_expire_days) || 1
@@ -1317,7 +1243,7 @@ const sendTestEmail = async () => {
       ElMessage.error(res.data.msg)
     }
   } catch (_) {
-    ElMessage.error('发信异常，请核对端口与授权码')
+    ElMessage.error('发信异常')
   } finally {
     testingEmail.value = false
   }
@@ -1363,12 +1289,11 @@ const copyText = async (text) => {
     document.execCommand('copy')
     ElMessage.success('已复制到剪贴板！')
   } catch (_) {
-    ElMessage.error('快捷复制失败，请手动长按复制')
+    ElMessage.error('复制失败，请手动选择复制')
   }
   document.body.removeChild(ta)
 }
 
-// 核心自检确认：copyText 下方直接衔接 handleAuth，绝无重复 export 函数
 const handleAuth = async () => {
   if (!authForm.username || !authForm.password) return ElMessage.warning('请填写账号与密码')
   loading.value = true
@@ -1390,7 +1315,10 @@ const handleAuth = async () => {
           password: authForm.password
         }))
 
-        if (currentUser.role === 'admin') loadAdminData()
+        if (currentUser.role === 'admin') {
+          loadAdminData()
+          openNodesTab()
+        }
       }
     } else {
       ElMessage.error(res.data.msg)
@@ -1484,7 +1412,48 @@ const logout = () => {
 .dashboard-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
 .col-span-2 { grid-column: span 2; }
 
-/* 登录页科技公告卡片 */
+/* 多节点卡片网格 */
+.node-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 16px;
+  margin-top: 15px;
+}
+.node-card {
+  background: #0b1120;
+  border: 1px solid #1e293b;
+  border-radius: 8px;
+  padding: 16px;
+  transition: all 0.2s;
+}
+.node-card:hover {
+  border-color: #38bdf8;
+  box-shadow: 0 0 15px rgba(56, 189, 248, 0.15);
+}
+.node-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+}
+.node-title {
+  font-weight: 700;
+  font-size: 14px;
+  color: #f1f5f9;
+}
+.node-detail {
+  font-size: 12px;
+  color: #64748b;
+  font-family: monospace;
+}
+.empty-node-tip {
+  grid-column: 1 / -1;
+  text-align: center;
+  padding: 30px;
+  color: #64748b;
+  font-size: 13px;
+}
+
 .cyber-notice-card {
   max-width: 420px;
   margin: 0 auto 16px auto;
@@ -1812,18 +1781,13 @@ const logout = () => {
   background: linear-gradient(135deg, #10b981, #059669);
   color: white;
   border: none;
-  padding: 10px 18px;
-  border-radius: 6px;
+  padding: 6px 14px;
+  border-radius: 4px;
   font-weight: 700;
   cursor: pointer;
   white-space: nowrap;
-  box-shadow: 0 0 10px rgba(16, 185, 129, 0.3);
+  font-size: 11px;
 }
-.btn-cyber-download:hover {
-  background: linear-gradient(135deg, #059669, #047857);
-  box-shadow: 0 0 15px rgba(16, 185, 129, 0.5);
-}
-.btn-cyber-download:disabled { opacity: 0.5; cursor: not-allowed; }
 
 .node-field { margin-bottom: 14px; }
 .node-field label { display: block; font-size: 12px; color: #94a3b8; margin-bottom: 6px; }
@@ -1897,11 +1861,8 @@ const logout = () => {
     min-width: 0 !important;
     max-width: 100% !important;
   }
-  .form-row-2 {
-    grid-template-columns: 1fr;
-  }
-  .gen-form {
-    grid-template-columns: 1fr;
-  }
+  .form-row-2 { grid-template-columns: 1fr; }
+  .gen-form { grid-template-columns: 1fr; }
+  .node-grid { grid-template-columns: 1fr; }
 }
 </style>

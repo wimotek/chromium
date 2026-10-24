@@ -4,7 +4,6 @@ import json
 import zipfile
 import urllib.request
 import shutil
-from xray import get_xray_reality_params
 
 CACHE_DIR = "/data/cache"
 CLIENT_CACHE_FILE = os.path.join(CACHE_DIR, "Xray-windows-64.zip")
@@ -41,25 +40,20 @@ def ensure_base_windows_client() -> str:
             os.remove(tmp_download)
 
     if not os.path.exists(CLIENT_CACHE_FILE):
-        raise RuntimeError("无法连接 GitHub 获取客户端基础包，请手动放置 Xray-windows-64.zip 至 ./data/cache")
+        raise RuntimeError("无法连接 GitHub 下载基础客户端包，请手动放置 Xray-windows-64.zip 至 ./data/cache")
     return CLIENT_CACHE_FILE
 
-def build_windows_client_config(user_uuid: str) -> str:
-    params = get_xray_reality_params()
+def build_windows_client_config(user_uuid: str, node: dict) -> str:
     config = {
         "log": { "loglevel": "warning" },
         "inbounds": [
             {
-                "listen": "127.0.0.1",
-                "port": 10808,
-                "protocol": "socks",
+                "listen": "127.0.0.1", "port": 10808, "protocol": "socks",
                 "sniffing": { "enabled": True, "destOverride": ["http", "tls"] },
                 "settings": { "auth": "noauth", "udp": True }
             },
             {
-                "listen": "127.0.0.1",
-                "port": 10809,
-                "protocol": "http",
+                "listen": "127.0.0.1", "port": 10809, "protocol": "http",
                 "sniffing": { "enabled": True, "destOverride": ["http", "tls"] }
             }
         ],
@@ -67,23 +61,19 @@ def build_windows_client_config(user_uuid: str) -> str:
             {
                 "protocol": "vless",
                 "settings": {
-                    "vnext": [
-                        {
-                            "address": params["host"],
-                            "port": params["port"],
-                            "users": [{ "id": user_uuid, "encryption": "none", "flow": "xtls-rprx-vision" }]
-                        }
-                    ]
+                    "vnext": [{
+                        "address": node["ip"],
+                        "port": node["port"],
+                        "users": [{ "id": user_uuid, "encryption": "none", "flow": "xtls-rprx-vision" }]
+                    }]
                 },
                 "streamSettings": {
-                    "network": "tcp",
-                    "security": "reality",
+                    "network": "tcp", "security": "reality",
                     "realitySettings": {
-                        "show": False,
-                        "fingerprint": "chrome",
-                        "serverName": params["sni"],
-                        "publicKey": params["pbk"],
-                        "shortId": params["sid"],
+                        "show": False, "fingerprint": "chrome",
+                        "serverName": node["sni"],
+                        "publicKey": node["pbk"],
+                        "shortId": node["sid"],
                         "spiderX": ""
                     }
                 },
@@ -103,17 +93,18 @@ def build_windows_client_config(user_uuid: str) -> str:
     }
     return json.dumps(config, indent=2, ensure_ascii=False)
 
-def generate_windows_package(user: dict) -> io.BytesIO:
+def generate_windows_package(user: dict, node: dict) -> io.BytesIO:
     base_zip_path = ensure_base_windows_client()
     user_uuid = user.get("uuid", "")
     username = user.get("username", "user")
+    node_name = node.get("name", "默认节点")
 
     start_bat = (
         "@echo off\r\n"
         "chcp 65001 >nul\r\n"
-        "title Xray Windows Client - Powered by Xray Reality\r\n"
+        f"title Xray Windows Client - [{node_name}]\r\n"
         "echo ======================================================\r\n"
-        f"echo        正在启动 Xray 客户端 [用户: {username}]\r\n"
+        f"echo        正在启动 Xray 客户端 [用户: {username} | 节点: {node_name}]\r\n"
         "echo ======================================================\r\n"
         "reg add \"HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings\" /v ProxyEnable /t REG_DWORD /d 1 /f >nul\r\n"
         "reg add \"HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings\" /v ProxyServer /d \"127.0.0.1:10809\" /f >nul\r\n"
@@ -121,7 +112,7 @@ def generate_windows_package(user: dict) -> io.BytesIO:
         "echo [√] 系统代理已成功激活！(国内直连，海外加速)\r\n"
         "echo [√] Xray 核心运行中... 请保持本窗口开启！\r\n"
         "echo ------------------------------------------------------\r\n"
-        "echo 如需退出，请直接关闭本黑框，或双击 [停止代理.bat]\r\n"
+        "echo 如需退出，请直接关闭本黑框，或运行 [停止代理.bat]\r\n"
         "echo ======================================================\r\n"
         "xray.exe run -c config.json\r\n"
         "reg add \"HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings\" /v ProxyEnable /t REG_DWORD /d 0 /f >nul\r\n"
@@ -140,7 +131,7 @@ def generate_windows_package(user: dict) -> io.BytesIO:
     readme_txt = (
         "======================================================\r\n"
         f"      Xray REALITY Windows 专属客户端使用说明\r\n"
-        f"      授权账号: {username}\r\n"
+        f"      授权账号: {username} | 当前预设节点: {node_name}\r\n"
         "======================================================\r\n\r\n"
         "1. 将本压缩包解压到任意文件夹；\r\n"
         "2. 双击运行 [一键启动代理(自动配置系统代理).bat]；\r\n"
@@ -149,7 +140,7 @@ def generate_windows_package(user: dict) -> io.BytesIO:
         "退出方法：直接关闭黑框窗口，或运行 [一键停止代理(关闭系统代理).bat] 即可。\r\n"
     )
 
-    client_config_json = build_windows_client_config(user_uuid)
+    client_config_json = build_windows_client_config(user_uuid, node)
     mem_zip = io.BytesIO()
     with zipfile.ZipFile(base_zip_path, 'r') as src_zf, zipfile.ZipFile(mem_zip, 'w', compression=zipfile.ZIP_DEFLATED) as dst_zf:
         for item in src_zf.infolist():

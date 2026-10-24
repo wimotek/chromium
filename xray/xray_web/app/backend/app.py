@@ -1,6 +1,7 @@
 import os
 import io
 import uuid
+import base64
 import random
 import datetime
 import threading
@@ -10,27 +11,21 @@ import qrcode.image.svg
 from flask import Flask, request, jsonify, send_from_directory, abort, send_file
 from config import Config
 from db import init_db, get_db, hash_pwd, get_setting, set_setting
-from xray import (
-    get_reality_public_key,
-    query_user_traffic,
-    reset_user_traffic,
-    build_vless_link,
-    sync_users_to_xray,
-    get_xray_reality_params,
-    get_connection_host
-)
 from notify import send_smtp_email, send_serverchan_msg, notify_user
 from client_pack import generate_windows_package
 
 app = Flask(__name__, static_folder='../frontend/dist', static_url_path='/')
-
-# 1. 初始化数据库表结构
 init_db()
 
-# 2. 开机全量同步：服务启动瞬间把数据库中所有有效用户写入 Xray 的 config.json
-sync_users_to_xray()
+# 辅助函数：构造标准 VLESS Reality 单节点链接
+def build_node_link(uuid_str: str, node: dict, remark: str) -> str:
+    return (
+        f"vless://{uuid_str}@{node['ip']}:{node['port']}"
+        f"?security=reality&encryption=none&pbk={node['pbk']}&headerType=none&fp=chrome"
+        f"&type=tcp&flow=xtls-rprx-vision&sni={node['sni']}&sid={node['sid']}#{remark}"
+    )
 
-# ==================== 定时任务：智能检测、预警与每月固定流量刷新 ====================
+# ==================== 定时任务：检测到期与每月重置 ====================
 
 def run_scheduled_check(force=False) -> tuple[int, int, str]:
     enable = get_setting("task_notify_enable", "true").lower() == "true"
@@ -43,9 +38,7 @@ def run_scheduled_check(force=False) -> tuple[int, int, str]:
     today_str = today.strftime("%Y-%m-%d")
     current_day = today.day
 
-    traffic_sent = 0
-    expire_sent = 0
-
+    traffic_sent, expire_sent = 0, 0
     conn = get_db()
     c = conn.cursor()
     c.execute("SELECT * FROM users WHERE status=1 AND is_verified=1 AND role='user'")
@@ -54,39 +47,35 @@ def run_scheduled_check(force=False) -> tuple[int, int, str]:
     for u in users:
         uname = u["username"]
 
-        # 1. 核心特性：每月固定流量套餐重置
+        # 每月固定套餐重置
         if u.get("is_monthly") == 1:
             reset_day = u.get("reset_day", 1) or 1
             if current_day == reset_day or force:
                 c.execute("SELECT id FROM notify_logs WHERE username=? AND warn_type='monthly_reset' AND sent_date=?", (uname, today_str))
                 if not c.fetchone() or force:
-                    # 调用 Xray 命令清零已用流量
-                    reset_user_traffic(uname)
+                    c.execute("UPDATE users SET used_mb=0 WHERE username=?", (uname,))
                     c.execute("INSERT INTO notify_logs (username, warn_type, sent_date) VALUES (?, 'monthly_reset', ?)", (uname, today_str))
                     conn.commit()
                     title = "【流量已重置】您的每月固定流量套餐已刷新"
-                    content = f"您好 {uname}，今天是您的每月固定套餐重置日（每月 {reset_day} 号），您的可用流量已全部恢复满格，祝您使用愉快！"
+                    content = f"您好 {uname}，今天是您的每月固定套餐重置日（每月 {reset_day} 号），已用流量已清零恢复满格！"
                     notify_user(u, title, f"<h3>{title}</h3><p>{content}</p>", content)
 
-        used_mb = query_user_traffic(uname)
+        used_mb = u.get("used_mb", 0)
         limit_mb = u.get("traffic_limit_mb", 1024)
 
-        # 2. 流量不足告警检测 (limit_mb 为 0 表示不限流量，跳过告警)
         if limit_mb > 0:
             used_percent = round((used_mb / limit_mb) * 100, 1)
             if used_percent >= traffic_threshold:
                 c.execute("SELECT id FROM notify_logs WHERE username=? AND warn_type='traffic' AND sent_date=?", (uname, today_str))
                 if not c.fetchone() or force:
                     title = "【流量预警】您的节点可用流量已不足"
-                    content = (f"您好 {uname}，系统检测到您当前已用流量达到 {used_mb}MB / {limit_mb}MB "
-                               f"(使用率已达 {used_percent}%)。为避免停机，请及时登录面板充值续费。")
+                    content = f"您好 {uname}，当前已用流量已达 {used_mb}MB / {limit_mb}MB ({used_percent}%)。请及时充值续费。"
                     ok, _ = notify_user(u, title, f"<h3>{title}</h3><p>{content}</p>", content)
                     if ok:
                         traffic_sent += 1
                         c.execute("INSERT INTO notify_logs (username, warn_type, sent_date) VALUES (?, 'traffic', ?)", (uname, today_str))
                         conn.commit()
 
-        # 3. 套餐到期预警检测 (2099 表示永久有效，跳过告警)
         exp_str = u.get("expire_date", "").strip()
         if exp_str and not exp_str.startswith("2099"):
             try:
@@ -96,8 +85,7 @@ def run_scheduled_check(force=False) -> tuple[int, int, str]:
                     c.execute("SELECT id FROM notify_logs WHERE username=? AND warn_type='expire' AND sent_date=?", (uname, today_str))
                     if not c.fetchone() or force:
                         title = "【到期提醒】您的节点套餐即将到期"
-                        content = (f"您好 {uname}，您的节点服务套餐将于 {exp_str} 到期 "
-                                   f"(仅剩 {days_left} 天)。到期后服务将自动暂停，请尽快登录充值卡密。")
+                        content = f"您好 {uname}，您的节点服务套餐将于 {exp_str} 到期 (仅剩 {days_left} 天)。到期后服务将自动暂停。"
                         ok, _ = notify_user(u, title, f"<h3>{title}</h3><p>{content}</p>", content)
                         if ok:
                             expire_sent += 1
@@ -107,9 +95,8 @@ def run_scheduled_check(force=False) -> tuple[int, int, str]:
                 pass
 
     conn.close()
-    now_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    set_setting("task_last_run", now_time)
-    return traffic_sent, expire_sent, f"检测完毕，已成功推送 {traffic_sent} 条流量预警，{expire_sent} 条到期预警"
+    set_setting("task_last_run", datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+    return traffic_sent, expire_sent, f"检测完毕，已推送 {traffic_sent} 条流量预警，{expire_sent} 条到期预警"
 
 def scheduled_worker_loop():
     time.sleep(15)
@@ -117,15 +104,13 @@ def scheduled_worker_loop():
         try:
             interval_hours = int(get_setting("task_interval_hours", "12") or 12)
             run_scheduled_check(force=False)
-        except Exception as e:
-            print(f"[Task Error] {e}", flush=True)
-        sleep_sec = max(3600, interval_hours * 3600)
-        time.sleep(sleep_sec)
+        except Exception:
+            pass
+        time.sleep(max(3600, interval_hours * 3600))
 
-task_thread = threading.Thread(target=scheduled_worker_loop, daemon=True)
-task_thread.start()
+threading.Thread(target=scheduled_worker_loop, daemon=True).start()
 
-# ==================== 前台基础路由 ====================
+# ==================== 前台基础与订阅路由 ====================
 
 @app.route('/')
 def index():
@@ -137,7 +122,6 @@ def system_info():
         "code": 200,
         "data": {
             "mode": Config.APP_MODE,
-            "public_key": get_reality_public_key(),
             "system_notice": get_setting("system_notice", "")
         }
     })
@@ -145,65 +129,187 @@ def system_info():
 @app.route('/api/qrcode', methods=['GET'])
 def get_qrcode_svg():
     text = request.args.get('text', '').strip()
-    if not text:
-        abort(400)
+    if not text: abort(400)
     img = qrcode.make(text, image_factory=qrcode.image.svg.SvgPathImage)
     buf = io.BytesIO()
     img.save(buf)
     buf.seek(0)
     return send_file(buf, mimetype='image/svg+xml')
 
-# ==================== 方案 C：第三方发卡系统开放 API ====================
-
-@app.route('/api/open/faka_generate', methods=['GET', 'POST'])
-def open_faka_generate():
-    is_enabled = get_setting("faka_api_enable", "true").lower() == "true"
-    if not is_enabled:
-        return jsonify({"code": 403, "msg": "第三方发卡 API 接口已被管理员禁用"}), 403
-
-    req_token = request.headers.get("Authorization") or request.args.get("token")
-    if not req_token and request.is_json:
-        req_token = (request.json or {}).get("token")
-
-    if req_token and req_token.startswith("Bearer "):
-        req_token = req_token[7:].strip()
-
-    valid_token = get_setting("faka_api_token", Config.FAKA_API_TOKEN).strip()
-    if not req_token or req_token.strip() != valid_token:
-        return jsonify({"code": 403, "msg": "Invalid API Token"}), 403
-
-    gb_param = request.args.get("gb") or (request.json or {}).get("gb") if request.is_json else None
-    days_param = request.args.get("days") or (request.json or {}).get("days") if request.is_json else None
-    is_monthly_param = request.args.get("is_monthly") or (request.json or {}).get("is_monthly") if request.is_json else 0
-
-    try:
-        traffic_gb = int(gb_param or 100)
-        days = int(days_param or 30)
-        is_monthly = 1 if str(is_monthly_param) in ["1", "true"] else 0
-    except ValueError:
-        traffic_gb, days, is_monthly = 100, 30, 0
-
-    code = "KM-" + str(uuid.uuid4()).replace("-", "")[:12].upper()
-    now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+# 核心新增：客户端通用多节点订阅接口 (支持 v2rayN, Clash-Meta, Sing-box 等直接导入)
+@app.route('/api/sub', methods=['GET'])
+def get_subscription():
+    token = request.args.get('token', '').strip()
+    if not token: abort(400)
 
     conn = get_db()
     c = conn.cursor()
-    c.execute("INSERT INTO cards VALUES (?, ?, ?, 0, NULL, ?, ?)", (code, traffic_gb, days, now, is_monthly))
+    c.execute("SELECT * FROM users WHERE uuid=? AND status=1", (token,))
+    user = c.fetchone()
+    if not user:
+        conn.close()
+        abort(403)
+
+    # 抓取所有正常在线的节点
+    c.execute("SELECT * FROM nodes WHERE status=1 ORDER BY id ASC")
+    nodes = [dict(n) for n in c.fetchall()]
+    conn.close()
+
+    links = []
+    for n in nodes:
+        remark = f"{n['name']}"
+        links.append(build_node_link(user['uuid'], n, remark))
+
+    # 返回标准的 Base64 订阅文本
+    sub_text = "\n".join(links)
+    b64_sub = base64.b64encode(sub_text.encode('utf-8')).decode('utf-8')
+    return b64_sub, 200, {
+        "Content-Type": "text/plain; charset=utf-8",
+        "Subscription-Userinfo": f"upload=0; download={int(user['used_mb']*1024*1024)}; total={int(user['traffic_limit_mb']*1024*1024)}; expire={user['expire_date']}"
+    }
+
+# ==================== 远程 xray_core 节点集群通信接口 ====================
+
+# 1. 远程节点心跳与公钥上报注册
+@app.route('/api/node/heartbeat', methods=['POST'])
+def node_heartbeat():
+    token = request.args.get('token', '').strip()
+    valid_key = get_setting("node_key", Config.NODE_KEY).strip()
+    if not token or token != valid_key:
+        return jsonify({"code": 403, "msg": "Invalid Node Key"}), 403
+
+    data = request.json or {}
+    node_ip = data.get("ip")
+    node_port = int(data.get("port", 443))
+    pbk = data.get("pbk", "").strip()
+    sid = data.get("sid", "").strip()
+    sni = data.get("sni", "www.microsoft.com").strip()
+    node_id = f"{node_ip}_{node_port}"
+    now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("SELECT id, name FROM nodes WHERE node_id=?", (node_id,))
+    row = c.fetchone()
+    if row:
+        c.execute("UPDATE nodes SET ip=?, port=?, sni=?, pbk=?, sid=?, status=1, last_heartbeat=? WHERE node_id=?",
+                  (node_ip, node_port, sni, pbk, sid, now_str, node_id))
+    else:
+        auto_name = f"节点-{node_ip}"
+        c.execute("INSERT INTO nodes (node_id, name, ip, port, sni, pbk, sid, status, last_heartbeat) VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?)",
+                  (node_id, auto_name, node_ip, node_port, sni, pbk, sid, now_str))
     conn.commit()
     conn.close()
 
-    if request.args.get("format") == "json":
-        return jsonify({
-            "code": 200,
-            "card": code,
-            "traffic_gb": traffic_gb,
-            "days": days,
-            "is_monthly": is_monthly
+    return jsonify({"code": 200, "msg": "心跳与公钥上报成功"})
+
+# 2. 下发全站有效用户给远程节点
+@app.route('/api/node/sync', methods=['GET'])
+def node_sync_users():
+    token = request.args.get('token', '').strip()
+    valid_key = get_setting("node_key", Config.NODE_KEY).strip()
+    if not token or token != valid_key:
+        return jsonify({"code": 403, "msg": "Invalid Node Key"}), 403
+
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("SELECT username, uuid FROM users WHERE status=1 AND is_verified=1")
+    users = [{"id": u["uuid"], "flow": "xtls-rprx-vision", "email": u["username"]} for u in c.fetchall()]
+    conn.close()
+
+    return jsonify({"code": 200, "users": users})
+
+# 3. 接收远程节点的流量增量并扣除
+@app.route('/api/node/traffic', methods=['POST'])
+def node_report_traffic():
+    token = request.args.get('token', '').strip()
+    valid_key = get_setting("node_key", Config.NODE_KEY).strip()
+    if not token or token != valid_key:
+        return jsonify({"code": 403, "msg": "Invalid Node Key"}), 403
+
+    data = request.json or {}
+    traffic_records = data.get("traffic", [])
+
+    conn = get_db()
+    c = conn.cursor()
+    for item in traffic_records:
+        uname = item.get("username")
+        inc_bytes = int(item.get("bytes", 0))
+        if uname and inc_bytes > 0:
+            inc_mb = round(inc_bytes / (1024 * 1024), 2)
+            c.execute("UPDATE users SET used_mb = used_mb + ? WHERE username=?", (inc_mb, uname))
+    conn.commit()
+    conn.close()
+
+    return jsonify({"code": 200, "msg": "流量同步扣费成功"})
+
+# ==================== 用户端与节点交互 ====================
+
+@app.route('/api/login', methods=['POST'])
+def login():
+    data = request.json or {}
+    account = data.get('username', '').strip()
+    p = data.get('password', '').strip()
+
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("SELECT * FROM users WHERE (username=? OR email=?) AND password_hash=?", (account, account, hash_pwd(p)))
+    user = c.fetchone()
+
+    if not user:
+        conn.close()
+        return jsonify({"code": 401, "msg": "账号或密码错误"})
+
+    if user['status'] == 0:
+        conn.close()
+        return jsonify({"code": 403, "msg": "该账号已被管理员封禁停用"})
+
+    if user['is_verified'] == 0:
+        conn.close()
+        return jsonify({"code": 403, "msg": "账号尚未通过邮箱激活验证"})
+
+    if Config.APP_MODE == 'user' and user['role'] == 'admin':
+        conn.close()
+        return jsonify({"code": 403, "msg": "当前节点为纯用户端模式，已屏蔽管理员登录"})
+
+    # 抓取集群所有可用节点
+    c.execute("SELECT * FROM nodes WHERE status=1 ORDER BY id ASC")
+    node_rows = [dict(n) for n in c.fetchall()]
+    conn.close()
+
+    nodes_data = []
+    host_prefix = request.host_url.rstrip('/')
+    sub_url = f"{host_prefix}/api/sub?token={user['uuid']}"
+
+    for n in node_rows:
+        link = build_node_link(user['uuid'], n, f"{n['name']}")
+        nodes_data.append({
+            "id": n["id"],
+            "name": n["name"],
+            "ip": n["ip"],
+            "port": n["port"],
+            "link": link
         })
 
-    return code, 200, {"Content-Type": "text/plain; charset=utf-8"}
+    return jsonify({
+        "code": 200,
+        "data": {
+            "username": user['username'],
+            "email": user['email'],
+            "role": user['role'],
+            "used_mb": user['used_mb'],
+            "limit_mb": user['traffic_limit_mb'],
+            "expire_date": user['expire_date'],
+            "is_monthly": user['is_monthly'] or 0,
+            "reset_day": user['reset_day'] or 1,
+            "sub_url": sub_url,
+            "nodes": nodes_data,
+            "notify_type": user['notify_type'] or 'email',
+            "serverchan_key": user['serverchan_key'] or ''
+        }
+    })
 
-# ==================== 用户认证与安全 ====================
+# ==================== 用户认证体系 ====================
 
 @app.route('/api/auth/send_register_code', methods=['POST'])
 def send_register_code():
@@ -227,9 +333,8 @@ def send_register_code():
     content = f"""
     <div style="font-family: sans-serif; background: #0f172a; color: #f8fafc; padding: 25px; border-radius: 8px;">
         <h2 style="color: #38bdf8;">⚡ Xray Reality 账号激活验证</h2>
-        <p>您好！您正在申请注册节点服务账号。</p>
-        <p>您的激活验证码为：<b style="font-size: 24px; color: #10b981; letter-spacing: 2px;">{code}</b></p>
-        <p style="color: #94a3b8; font-size: 12px;">验证码 10 分钟内有效。如非本人操作请忽略此邮件。</p>
+        <p>您好！您的激活验证码为：<b style="font-size: 24px; color: #10b981; letter-spacing: 2px;">{code}</b></p>
+        <p style="color: #94a3b8; font-size: 12px;">验证码 10 分钟内有效。</p>
     </div>
     """
     success, msg = send_smtp_email(email, "【Xray】注册账号激活验证码", content)
@@ -265,14 +370,9 @@ def register():
         conn.close()
         return jsonify({"code": 400, "msg": "用户名或邮箱已被占用"})
 
-    # 读取后台设置的新用户默认配额与有效天数
     reg_traffic_mb = int(get_setting("reg_traffic_mb", "1024") or 1024)
     reg_expire_days = int(get_setting("reg_expire_days", "1") or 1)
-
-    if reg_expire_days >= 3650:
-        exp = "2099-12-31 23:59:59"
-    else:
-        exp = (datetime.datetime.now() + datetime.timedelta(days=reg_expire_days)).strftime("%Y-%m-%d %H:%M:%S")
+    exp = "2099-12-31 23:59:59" if reg_expire_days >= 3650 else (datetime.datetime.now() + datetime.timedelta(days=reg_expire_days)).strftime("%Y-%m-%d %H:%M:%S")
 
     try:
         c.execute("INSERT INTO users (username, password_hash, uuid, email, traffic_limit_mb, expire_date, role, status, is_verified, is_monthly, reset_day) VALUES (?, ?, ?, ?, ?, ?, 'user', 1, 1, 0, 1)",
@@ -280,29 +380,22 @@ def register():
         c.execute("DELETE FROM verify_codes WHERE email=?", (email,))
         conn.commit()
         conn.close()
-
-        # 核心联动：新用户注册成功，全量实时同步写入 Xray 核心 clients
-        sync_users_to_xray()
-
-        return jsonify({"code": 200, "msg": f"账号已成功激活注册，已获赠 {reg_traffic_mb}MB 体验套餐"})
+        return jsonify({"code": 200, "msg": f"账号激活成功，获赠 {reg_traffic_mb}MB 套餐"})
     except Exception as e:
         conn.close()
-        return jsonify({"code": 500, "msg": f"数据库写入失败: {str(e)}"})
+        return jsonify({"code": 500, "msg": f"注册失败: {str(e)}"})
 
 @app.route('/api/auth/send_reset_code', methods=['POST'])
 def send_reset_code():
     data = request.json or {}
     email = data.get('email', '').strip().lower()
-    if not email or '@' not in email:
-        return jsonify({"code": 400, "msg": "请输入合法的电子邮箱"})
-
     conn = get_db()
     c = conn.cursor()
     c.execute("SELECT id, username FROM users WHERE email=?", (email,))
     user = c.fetchone()
     if not user:
         conn.close()
-        return jsonify({"code": 404, "msg": "该邮箱尚未绑定任何已注册的账号"})
+        return jsonify({"code": 404, "msg": "该邮箱尚未绑定任何账号"})
 
     code = f"{random.randint(100000, 999999)}"
     c.execute("INSERT INTO verify_codes (email, code) VALUES (?, ?)", (email, code))
@@ -312,16 +405,12 @@ def send_reset_code():
     content = f"""
     <div style="font-family: sans-serif; background: #0f172a; color: #f8fafc; padding: 25px; border-radius: 8px;">
         <h2 style="color: #38bdf8;">🔐 Xray Reality 密码重置验证</h2>
-        <p>您好 <b>{user['username']}</b>！您正在申请找回并重置登录密码。</p>
-        <p>您的重置验证码为：<b style="font-size: 24px; color: #f59e0b; letter-spacing: 2px;">{code}</b></p>
-        <p style="color: #94a3b8; font-size: 12px;">验证码 10 分钟内有效。如非本人操作请立即核查账号安全。</p>
+        <p>您好 <b>{user['username']}</b>！您的重置验证码为：<b style="font-size: 24px; color: #f59e0b; letter-spacing: 2px;">{code}</b></p>
     </div>
     """
-    success, msg = send_smtp_email(email, "【Xray】找回登录密码验证码", content)
-    if not success:
-        return jsonify({"code": 500, "msg": msg})
-
-    return jsonify({"code": 200, "msg": "密码重置验证码已发送至您的邮箱，请查收"})
+    ok, msg = send_smtp_email(email, "【Xray】找回登录密码验证码", content)
+    if not ok: return jsonify({"code": 500, "msg": msg})
+    return jsonify({"code": 200, "msg": "验证码已发送至您的邮箱"})
 
 @app.route('/api/auth/reset_password', methods=['POST'])
 def reset_password():
@@ -329,11 +418,6 @@ def reset_password():
     email = data.get('email', '').strip().lower()
     code = data.get('code', '').strip()
     new_pwd = data.get('new_password', '').strip()
-
-    if not email or not code or not new_pwd:
-        return jsonify({"code": 400, "msg": "请填写完整重置信息"})
-    if len(new_pwd) < 6:
-        return jsonify({"code": 400, "msg": "新密码长度至少需要 6 位"})
 
     conn = get_db()
     c = conn.cursor()
@@ -343,68 +427,11 @@ def reset_password():
         conn.close()
         return jsonify({"code": 400, "msg": "验证码错误或已失效"})
 
-    c.execute("SELECT * FROM users WHERE email=?", (email,))
-    user = c.fetchone()
-    if not user:
-        conn.close()
-        return jsonify({"code": 404, "msg": "未找到对应账号"})
-
     c.execute("UPDATE users SET password_hash=? WHERE email=?", (hash_pwd(new_pwd), email))
     c.execute("DELETE FROM verify_codes WHERE email=?", (email,))
     conn.commit()
     conn.close()
-
-    title = "【Xray 安全通知】您的账户密码已成功重置"
-    text = f"您好 {user['username']}，您的登录密码已通过邮箱验证码重置成功。如非本人操作请立即联系管理人员。"
-    notify_user(dict(user), title, f"<p>{text}</p>", text)
-
-    return jsonify({"code": 200, "msg": "密码已成功重置，请使用新密码登录"})
-
-@app.route('/api/login', methods=['POST'])
-def login():
-    data = request.json or {}
-    account = data.get('username', '').strip()
-    p = data.get('password', '').strip()
-
-    conn = get_db()
-    c = conn.cursor()
-    c.execute("SELECT * FROM users WHERE (username=? OR email=?) AND password_hash=?", (account, account, hash_pwd(p)))
-    user = c.fetchone()
-    conn.close()
-
-    if not user:
-        return jsonify({"code": 401, "msg": "账号或密码错误"})
-
-    if user['status'] == 0:
-        return jsonify({"code": 403, "msg": "该账号已被管理员封禁停用，无法登录！"})
-
-    if user['is_verified'] == 0:
-        return jsonify({"code": 403, "msg": "账号尚未通过邮箱激活验证，无法登录"})
-
-    if Config.APP_MODE == 'user' and user['role'] == 'admin':
-        return jsonify({"code": 403, "msg": "当前节点为纯用户端模式，已屏蔽管理员登录"})
-
-    used_mb = query_user_traffic(user['username'])
-    params = get_xray_reality_params()
-    link = build_vless_link(user['uuid'], params['pbk'], f"{user['username']}-Reality")
-
-    return jsonify({
-        "code": 200,
-        "data": {
-            "username": user['username'],
-            "email": user['email'],
-            "role": user['role'],
-            "used_mb": used_mb,
-            "limit_mb": user['traffic_limit_mb'],
-            "expire_date": user['expire_date'],
-            "is_monthly": user['is_monthly'] or 0,
-            "reset_day": user['reset_day'] or 1,
-            "public_key": params['pbk'],
-            "sub_link": link,
-            "notify_type": user['notify_type'] or 'email',
-            "serverchan_key": user['serverchan_key'] or ''
-        }
-    })
+    return jsonify({"code": 200, "msg": "密码已成功重置，请登录"})
 
 @app.route('/api/user/change_password', methods=['POST'])
 def change_password():
@@ -412,9 +439,6 @@ def change_password():
     username = data.get('username')
     old_pwd = data.get('old_password', '')
     new_pwd = data.get('new_password', '').strip()
-
-    if not new_pwd or len(new_pwd) < 6:
-        return jsonify({"code": 400, "msg": "新密码长度至少需要 6 位"})
 
     conn = get_db()
     c = conn.cursor()
@@ -427,12 +451,7 @@ def change_password():
     c.execute("UPDATE users SET password_hash=? WHERE username=?", (hash_pwd(new_pwd), username))
     conn.commit()
     conn.close()
-
-    title = "【Xray 安全通知】您的账户密码已成功修改"
-    content = f"您好 {username}，您的登录密码于 {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 已成功变更。"
-    notify_user(dict(user), title, f"<p>{content}</p>", content)
-
-    return jsonify({"code": 200, "msg": "密码修改成功，请使用新密码重新登录"})
+    return jsonify({"code": 200, "msg": "密码修改成功，请重新登录"})
 
 @app.route('/api/user/notify_settings', methods=['POST'])
 def update_notify_settings():
@@ -457,46 +476,45 @@ def user_test_notify():
     c.execute("SELECT * FROM users WHERE username=?", (username,))
     user = c.fetchone()
     conn.close()
-    if not user:
-        return jsonify({"code": 404, "msg": "用户不存在"})
+    if not user: return jsonify({"code": 404, "msg": "用户不存在"})
 
     title = "【通知测试】Xray 节点服务消息连通性验证"
-    content = f"恭喜！您在 Xray 节点面板的通知通道验证成功。当前通知通道：{user['notify_type']}。"
+    content = f"恭喜！您的通知通道验证成功。当前通知通道：{user['notify_type']}。"
     ok, msg = notify_user(dict(user), title, f"<h3>{title}</h3><p>{content}</p>", content)
-    if ok:
-        return jsonify({"code": 200, "msg": "测试消息发送成功，请前往查收"})
+    if ok: return jsonify({"code": 200, "msg": "测试消息发送成功"})
     return jsonify({"code": 500, "msg": msg})
 
 @app.route('/api/user/download_client', methods=['GET'])
 def download_windows_client():
     account = request.args.get('username', '').strip()
-    if not account:
-        abort(400)
+    node_id = request.args.get('node_id', '')
+    if not account: abort(400)
 
     conn = get_db()
     c = conn.cursor()
     c.execute("SELECT * FROM users WHERE username=? OR email=?", (account, account))
     user = c.fetchone()
+    if not user:
+        conn.close()
+        abort(404)
+
+    # 获取节点
+    if node_id:
+        c.execute("SELECT * FROM nodes WHERE id=?", (node_id,))
+    else:
+        c.execute("SELECT * FROM nodes WHERE status=1 ORDER BY id ASC LIMIT 1")
+    node = c.fetchone()
     conn.close()
 
-    if not user:
-        return jsonify({"code": 404, "msg": "未找到指定用户"}), 404
-    if user['status'] == 0:
-        return jsonify({"code": 403, "msg": "账号已被停用，禁止下载凭据"}), 403
+    if not node:
+        return jsonify({"code": 404, "msg": "暂无可用节点"}), 404
 
     try:
-        mem_file = generate_windows_package(dict(user))
-        filename = f"Xray_Windows_{user['username']}.zip"
-        return send_file(
-            mem_file,
-            as_attachment=True,
-            download_name=filename,
-            mimetype='application/zip'
-        )
+        mem_file = generate_windows_package(dict(user), dict(node))
+        filename = f"Xray_Windows_{user['username']}_{node['name']}.zip"
+        return send_file(mem_file, as_attachment=True, download_name=filename, mimetype='application/zip')
     except Exception as e:
         return jsonify({"code": 500, "msg": f"客户端构建失败: {str(e)}"}), 500
-
-# ==================== 卡密充值 ====================
 
 @app.route('/api/recharge', methods=['POST'])
 def recharge():
@@ -517,12 +535,7 @@ def recharge():
     user = c.fetchone()
 
     current_limit = user['traffic_limit_mb']
-    if card['traffic_gb'] == 0:
-        new_limit = 0
-    elif current_limit == 0:
-        new_limit = 0
-    else:
-        new_limit = current_limit + card['traffic_gb'] * 1024
+    new_limit = 0 if card['traffic_gb'] == 0 else (current_limit + card['traffic_gb'] * 1024)
 
     c_exp_str = user['expire_date']
     if card['days'] >= 3650 or c_exp_str.startswith("2099"):
@@ -531,7 +544,6 @@ def recharge():
         c_exp = datetime.datetime.strptime(c_exp_str, "%Y-%m-%d %H:%M:%S")
         n_exp = (max(datetime.datetime.now(), c_exp) + datetime.timedelta(days=card['days'])).strftime("%Y-%m-%d %H:%M:%S")
 
-    # 如果充值的卡密是每月固定重置卡，自动继承该属性
     card_is_monthly = card['is_monthly'] if 'is_monthly' in card.keys() else 0
     if card_is_monthly == 1:
         reset_day = datetime.date.today().day
@@ -541,20 +553,53 @@ def recharge():
 
     conn.commit()
     conn.close()
-
-    title = "【充值成功】您的套餐配额已更新"
-    limit_desc = "不限流量" if new_limit == 0 else f"+{card['traffic_gb']}GB"
-    exp_desc = "永久有效" if n_exp.startswith("2099") else n_exp
-    text = f"您好 {u}，您已成功兑换卡密！增加流量：{limit_desc}，有效期至：{exp_desc}。"
-    notify_user(dict(user), title, f"<p>{text}</p>", text)
-
-    return jsonify({"code": 200, "msg": f"充值成功！当前配额: {limit_desc}，有效期至: {exp_desc}"})
+    return jsonify({"code": 200, "msg": "充值成功！套餐配额已更新"})
 
 # ==================== 管理员全量治理路由 ====================
 
+@app.route('/api/admin/nodes/list', methods=['POST'])
+def admin_list_nodes():
+    data = request.json or {}
+    if not check_admin(data.get('admin_user'), data.get('admin_pwd')): return jsonify({"code": 403, "msg": "无权限"})
+
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("SELECT * FROM nodes ORDER BY id ASC")
+    nodes = [dict(n) for n in c.fetchall()]
+    conn.close()
+    return jsonify({"code": 200, "data": nodes})
+
+@app.route('/api/admin/nodes/edit', methods=['POST'])
+def admin_edit_node():
+    data = request.json or {}
+    if not check_admin(data.get('admin_user'), data.get('admin_pwd')): return jsonify({"code": 403, "msg": "无权限"})
+
+    node_id = data.get('node_id')
+    new_name = data.get('name', '').strip()
+    status = int(data.get('status', 1))
+
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("UPDATE nodes SET name=?, status=? WHERE node_id=?", (new_name, status, node_id))
+    conn.commit()
+    conn.close()
+    return jsonify({"code": 200, "msg": "节点信息已更新"})
+
+@app.route('/api/admin/nodes/delete', methods=['POST'])
+def admin_delete_node():
+    data = request.json or {}
+    if not check_admin(data.get('admin_user'), data.get('admin_pwd')): return jsonify({"code": 403, "msg": "无权限"})
+
+    node_id = data.get('node_id')
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("DELETE FROM nodes WHERE node_id=?", (node_id,))
+    conn.commit()
+    conn.close()
+    return jsonify({"code": 200, "msg": "节点已成功移除"})
+
 @app.route('/api/admin/cards/generate', methods=['POST'])
 def admin_generate():
-    if Config.APP_MODE == 'user': abort(404)
     data = request.json or {}
     if not check_admin(data.get('admin_user'), data.get('admin_pwd')): return jsonify({"code": 403, "msg": "无权限"})
 
@@ -576,10 +621,8 @@ def admin_generate():
 
 @app.route('/api/admin/cards/export_unused', methods=['POST'])
 def export_unused_cards():
-    if Config.APP_MODE == 'user': abort(404)
     data = request.json or {}
-    if not check_admin(data.get('admin_user'), data.get('admin_pwd')):
-        return jsonify({"code": 403, "msg": "无权限"})
+    if not check_admin(data.get('admin_user'), data.get('admin_pwd')): return jsonify({"code": 403, "msg": "无权限"})
 
     selected_codes = data.get("selected_codes", [])
     start_date = data.get("start_date", "").strip()
@@ -587,109 +630,67 @@ def export_unused_cards():
 
     conn = get_db()
     c = conn.cursor()
-
-    if selected_codes and len(selected_codes) > 0:
+    if selected_codes:
         placeholders = ','.join(['?'] * len(selected_codes))
-        sql = f"SELECT code FROM cards WHERE code IN ({placeholders}) ORDER BY rowid DESC"
-        c.execute(sql, selected_codes)
+        c.execute(f"SELECT code FROM cards WHERE code IN ({placeholders}) ORDER BY rowid DESC", selected_codes)
     elif start_date or end_date:
-        query_parts = ["is_used=0"]
-        params = []
-        if start_date:
-            query_parts.append("substr(created_at, 1, 10) >= ?")
-            params.append(start_date)
-        if end_date:
-            query_parts.append("substr(created_at, 1, 10) <= ?")
-            params.append(end_date)
-        sql = f"SELECT code FROM cards WHERE {' AND '.join(query_parts)} ORDER BY rowid DESC"
-        c.execute(sql, params)
+        query_parts, params = ["is_used=0"], []
+        if start_date: query_parts.append("substr(created_at, 1, 10) >= ?"); params.append(start_date)
+        if end_date: query_parts.append("substr(created_at, 1, 10) <= ?"); params.append(end_date)
+        c.execute(f"SELECT code FROM cards WHERE {' AND '.join(query_parts)} ORDER BY rowid DESC", params)
     else:
         c.execute("SELECT code FROM cards WHERE is_used=0 ORDER BY rowid DESC")
 
     cards = [r["code"] for r in c.fetchall()]
     conn.close()
-
-    return jsonify({
-        "code": 200,
-        "count": len(cards),
-        "text": "\n".join(cards)
-    })
+    return jsonify({"code": 200, "count": len(cards), "text": "\n".join(cards)})
 
 @app.route('/api/admin/data', methods=['POST'])
 def admin_data():
-    if Config.APP_MODE == 'user': abort(404)
     data = request.json or {}
     if not check_admin(data.get('admin_user'), data.get('admin_pwd')): return jsonify({"code": 403, "msg": "无权限"})
 
-    params = get_xray_reality_params()
     conn = get_db()
     c = conn.cursor()
     c.execute("SELECT code, traffic_gb, days, is_used, used_by, created_at, is_monthly FROM cards ORDER BY rowid DESC LIMIT 200")
     cards = [dict(r) for r in c.fetchall()]
 
-    c.execute("SELECT username, email, traffic_limit_mb, expire_date, role, uuid, status, notify_type, is_monthly, reset_day FROM users")
-    users = []
-    for r in c.fetchall():
-        d = dict(r)
-        d['used_mb'] = query_user_traffic(d['username'])
-        d['status'] = 1 if d.get('status') is None else d['status']
-        d['sub_link'] = build_vless_link(d['uuid'], params['pbk'], f"{d['username']}-Reality")
-        users.append(d)
+    c.execute("SELECT username, email, traffic_limit_mb, used_mb, expire_date, role, uuid, status, notify_type, is_monthly, reset_day FROM users")
+    users = [dict(r) for r in c.fetchall()]
     conn.close()
+
     return jsonify({"code": 200, "cards": cards, "users": users})
 
 @app.route('/api/admin/users/reset_password', methods=['POST'])
 def admin_reset_password():
-    if Config.APP_MODE == 'user': abort(404)
     data = request.json or {}
     if not check_admin(data.get('admin_user'), data.get('admin_pwd')): return jsonify({"code": 403, "msg": "无权限"})
-
     target_user = data.get('target_user')
     new_pwd = data.get('new_password', '').strip()
-    if not new_pwd:
-        return jsonify({"code": 400, "msg": "新密码不能为空"})
 
     conn = get_db()
     c = conn.cursor()
-    c.execute("SELECT * FROM users WHERE username=?", (target_user,))
-    user = c.fetchone()
-    if not user:
-        conn.close()
-        return jsonify({"code": 404, "msg": "用户不存在"})
-
     c.execute("UPDATE users SET password_hash=? WHERE username=?", (hash_pwd(new_pwd), target_user))
     conn.commit()
     conn.close()
-
-    title = "【系统提醒】管理员已重置您的登录密码"
-    text = f"您好 {target_user}，管理员已为您重置新密码。新密码为：{new_pwd} ，请登录后及时修改。"
-    notify_user(dict(user), title, f"<p>{text}</p>", text)
-
     return jsonify({"code": 200, "msg": f"用户 [{target_user}] 密码已成功重置！"})
 
 @app.route('/api/admin/users/status', methods=['POST'])
 def update_user_status():
-    if Config.APP_MODE == 'user': abort(404)
     data = request.json or {}
     if not check_admin(data.get('admin_user'), data.get('admin_pwd')): return jsonify({"code": 403, "msg": "无权限"})
-
     target_user = data.get('target_user')
     status = int(data.get('status', 1))
-    if target_user == data.get('admin_user'):
-        return jsonify({"code": 400, "msg": "不能封禁管理员当前登录账号！"})
 
     conn = get_db()
     c = conn.cursor()
     c.execute("UPDATE users SET status=? WHERE username=?", (status, target_user))
     conn.commit()
     conn.close()
-
-    sync_users_to_xray()
     return jsonify({"code": 200, "msg": f"用户 [{target_user}] 状态已更新"})
 
 @app.route('/api/admin/users/edit', methods=['POST'])
 def edit_user_quota():
-    if Config.APP_MODE == 'user': abort(404)
     data = request.json or {}
     if not check_admin(data.get('admin_user'), data.get('admin_pwd')): return jsonify({"code": 403, "msg": "无权限"})
 
@@ -709,28 +710,21 @@ def edit_user_quota():
 
 @app.route('/api/admin/users/delete', methods=['POST'])
 def delete_user():
-    if Config.APP_MODE == 'user': abort(404)
     data = request.json or {}
     if not check_admin(data.get('admin_user'), data.get('admin_pwd')): return jsonify({"code": 403, "msg": "无权限"})
-
     target_user = data.get('target_user')
-    if target_user == data.get('admin_user'):
-        return jsonify({"code": 400, "msg": "不能删除当前登录的管理员自己！"})
 
     conn = get_db()
     c = conn.cursor()
     c.execute("DELETE FROM users WHERE username=?", (target_user,))
     conn.commit()
     conn.close()
-
-    sync_users_to_xray()
     return jsonify({"code": 200, "msg": f"用户 [{target_user}] 已被彻底删除"})
 
-# ==================== 管理员系统设置 (含公告、注册配额、SMTP、自定义域名) ====================
+# ==================== 管理员系统设置 ====================
 
 @app.route('/api/admin/settings', methods=['GET', 'POST'])
 def handle_settings():
-    if Config.APP_MODE == 'user': abort(404)
     if request.method == 'GET':
         admin_user = request.args.get('admin_user')
         admin_pwd = request.args.get('admin_pwd')
@@ -759,7 +753,7 @@ def handle_settings():
                 "task_last_run": get_setting("task_last_run", "尚未执行"),
                 "faka_api_enable": get_setting("faka_api_enable", "true"),
                 "faka_api_token": get_setting("faka_api_token", Config.FAKA_API_TOKEN),
-                "custom_host": get_setting("custom_host", ""),
+                "node_key": get_setting("node_key", Config.NODE_KEY),
                 "system_notice": get_setting("system_notice", ""),
                 "reg_traffic_mb": get_setting("reg_traffic_mb", "1024"),
                 "reg_expire_days": get_setting("reg_expire_days", "1")
@@ -775,7 +769,7 @@ def handle_settings():
 
         keys = ["smtp_host", "smtp_port", "smtp_user", "smtp_sender", "smtp_ssl",
                 "task_notify_enable", "task_interval_hours", "task_traffic_threshold", "task_expire_days",
-                "faka_api_enable", "faka_api_token", "custom_host", "system_notice",
+                "faka_api_enable", "faka_api_token", "node_key", "system_notice",
                 "reg_traffic_mb", "reg_expire_days"]
         for k in keys:
             if k in data:
@@ -784,29 +778,19 @@ def handle_settings():
 
 @app.route('/api/admin/test_email', methods=['POST'])
 def test_email():
-    if Config.APP_MODE == 'user': abort(404)
     data = request.json or {}
     if not check_admin(data.get('admin_user'), data.get('admin_pwd')): return jsonify({"code": 403, "msg": "无权限"})
     to = data.get('test_to', '').strip()
-    if not to: return jsonify({"code": 400, "msg": "接收邮箱不能为空"})
-
-    ok, msg = send_smtp_email(to, "【测试邮件】Xray 邮件服务器通信正常", "<p>恭喜！您的 SMTP 发信服务器配置正确，邮件发送功能已正常启用。</p>")
-    if ok:
-        return jsonify({"code": 200, "msg": "测试邮件已成功投递！"})
+    ok, msg = send_smtp_email(to, "【测试邮件】Xray 邮件服务器通信正常", "<p>恭喜！SMTP 发信服务器工作正常。</p>")
+    if ok: return jsonify({"code": 200, "msg": "测试邮件已成功投递！"})
     return jsonify({"code": 500, "msg": msg})
 
 @app.route('/api/admin/tasks/trigger', methods=['POST'])
 def trigger_task_now():
-    if Config.APP_MODE == 'user': abort(404)
     data = request.json or {}
     if not check_admin(data.get('admin_user'), data.get('admin_pwd')): return jsonify({"code": 403, "msg": "无权限"})
-
     t_sent, e_sent, desc = run_scheduled_check(force=True)
-    return jsonify({
-        "code": 200,
-        "msg": desc,
-        "data": {"traffic_sent": t_sent, "expire_sent": e_sent}
-    })
+    return jsonify({"code": 200, "msg": desc, "data": {"traffic_sent": t_sent, "expire_sent": e_sent}})
 
 def check_admin(u, p):
     conn = get_db()
