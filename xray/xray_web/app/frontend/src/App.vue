@@ -1,5 +1,6 @@
 <template>
   <div class="dark-theme">
+    <!-- 顶部科技导航 -->
     <header class="cyber-header">
       <div class="header-content">
         <div class="brand">
@@ -29,7 +30,7 @@
         <div class="cyber-card auth-box">
           <h2 class="card-title">{{ authCardTitle }}</h2>
 
-          <!-- A. 登录 -->
+          <!-- A. 登录表单 -->
           <template v-if="authMode === 'login'">
             <div class="form-item">
               <label>ACCOUNT / 用户名 或 注册邮箱</label>
@@ -48,7 +49,7 @@
             </div>
           </template>
 
-          <!-- B. 注册 -->
+          <!-- B. 注册表单 -->
           <template v-else-if="authMode === 'register'">
             <div class="form-item">
               <label>USER IDENTIFIER / 设置用户名</label>
@@ -79,7 +80,7 @@
             </div>
           </template>
 
-          <!-- C. 找回密码 -->
+          <!-- C. 忘记密码表单 -->
           <template v-else-if="authMode === 'forgot'">
             <div class="form-item">
               <label>REGISTERED EMAIL / 绑定的注册邮箱</label>
@@ -108,7 +109,7 @@
         </div>
       </div>
 
-      <!-- 2. 用户仪表盘 -->
+      <!-- 2. 普通用户端仪表盘 (流式全屏) -->
       <div v-else-if="currentUser.role === 'user'" class="dashboard-grid">
         <div class="cyber-card">
           <div class="card-header">
@@ -226,8 +227,9 @@
         </div>
       </div>
 
-      <!-- 3. 管理员控制台 -->
+      <!-- 3. 管理员控制台：全屏动态自适应 -->
       <div v-else-if="currentUser.role === 'admin'" class="admin-wrapper">
+        <!-- 顶部主卡片切换导航 -->
         <div class="card-tabs-nav">
           <button class="tab-card-btn" :class="{ active: activeTab === 'users' }" @click="activeTab = 'users'">
             <span class="tab-icon">👥</span>
@@ -934,6 +936,7 @@ const generateRandomToken = () => {
   ElMessage.success('已随机生成新出卡 Token，请记得点击保存')
 }
 
+// 统一导出底层
 const executeExport = async (payload, successTip) => {
   try {
     const adminUser = currentUser.username || authForm.username
@@ -1751,7 +1754,7 @@ const logout = () => {
   font-size: 11px;
   padding: 2px 8px;
   border-radius: 4px;
-  border: 1px solid rgba(56, 189, 248, 0.3);
+  border: 1px solid rgba(56, 189, 248, 0.4);
 }
 
 .cyber-input {
