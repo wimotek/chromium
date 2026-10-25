@@ -90,38 +90,51 @@ else
     echo "$NODE_ID" > "$NODE_ID_FILE"
 fi
 
-# 3. 密钥处理：未指定则自动生成并固化在本地
+# 核心清洗：剥离 PANEL_URL 里的所有实体引号与末尾斜杠
+if [ -n "$PANEL_URL" ]; then
+    PANEL_URL=$(echo "$PANEL_URL" | tr -d '"'\'' ' | sed 's|/*$||')
+fi
+
+# 3. 密钥处理：自动生成或清洗
 if [ -n "$NODE_KEY" ]; then
+    NODE_KEY=$(echo "$NODE_KEY" | tr -d '"'\'' ')
     echo "$NODE_KEY" > "$NODE_KEY_FILE"
 elif [ -f "$NODE_KEY_FILE" ] && [ -s "$NODE_KEY_FILE" ]; then
     NODE_KEY=$(cat "$NODE_KEY_FILE" | tr -d ' \r\n')
 else
     NODE_KEY=$(openssl rand -hex 16)
     echo "$NODE_KEY" > "$NODE_KEY_FILE"
-    echo "==> [Node Key] 首次启动自动生成唯一通信密钥: $NODE_KEY"
+    echo "==> [Node Key] 首次启动自动生成通信密钥: $NODE_KEY"
 fi
 
-# 4. 远程协同守护进程 (仅需设置 PANEL_URL 即可触发)
+# 4. 远程协同守护进程
 remote_agent_loop() {
-    echo "==> [Cluster Node] 向主控注册上线 (目标: $PANEL_URL, 节点ID: $NODE_ID)..."
+    echo "==> [Cluster Node] 开始连接主控 (地址: $PANEL_URL, 节点ID: $NODE_ID)..."
 
     while true; do
-        # 发送心跳、公钥与 ShortId，同时检测主控是否要求重置密钥
+        # 发送心跳、公钥与 ShortId，带详细报错捕获
         HB_RESP=$(curl -s -X POST "${PANEL_URL}/api/node/heartbeat" \
              -H "Content-Type: application/json" \
-             --max-time 10 \
-             -d "{\"node_id\": \"$NODE_ID\", \"node_key\": \"$NODE_KEY\", \"ip\": \"$SERVER_IP\", \"port\": $PORT, \"sni\": \"$DEST\", \"pbk\": \"$PUBLIC_KEY\", \"sid\": \"$SHORT_ID\"}" || true)
+             --connect-timeout 8 \
+             --max-time 15 \
+             -d "{\"node_id\": \"$NODE_ID\", \"node_key\": \"$NODE_KEY\", \"ip\": \"$SERVER_IP\", \"port\": $PORT, \"sni\": \"$DEST\", \"pbk\": \"$PUBLIC_KEY\", \"sid\": \"$SHORT_ID\"}" 2>&1 || true)
 
-        # 检查是否有重置密钥下发
+        if echo "$HB_RESP" | grep -q '"code":200'; then
+            echo "==> [Heartbeat] 节点心跳正常，已同步登记公钥！"
+        else
+            echo "==> [Heartbeat 警告] 主控心跳响应异常: $HB_RESP"
+        fi
+
+        # 检查主控是否下发重置密钥
         NEW_KEY=$(echo "$HB_RESP" | jq -r '.new_node_key // empty' 2>/dev/null || true)
         if [ -n "$NEW_KEY" ]; then
             NODE_KEY="$NEW_KEY"
             echo "$NODE_KEY" > "$NODE_KEY_FILE"
-            echo "==> [Cluster Node] 收到主控新密钥，已成功热更新！"
+            echo "==> [Cluster Node] 收到主控新密钥，已成功更新本地密钥！"
         fi
 
         # 拉取全站最新合法用户名单
-        USER_RESP=$(curl -s --max-time 10 "${PANEL_URL}/api/node/sync?node_id=${NODE_ID}&token=${NODE_KEY}" || true)
+        USER_RESP=$(curl -s --connect-timeout 8 --max-time 15 "${PANEL_URL}/api/node/sync?node_id=${NODE_ID}&token=${NODE_KEY}" 2>&1 || true)
         if echo "$USER_RESP" | grep -q '"code":200'; then
             REMOTE_USERS=$(echo "$USER_RESP" | jq '.users')
             TMP_SYNC="/tmp/config.agent.sync.json"
@@ -141,14 +154,15 @@ remote_agent_loop() {
             fi
         fi
 
-        # 统计增量流量回传主控扣除
+        # 统计增量流量回传主控
         TRAFFIC_RAW=$(/usr/bin/xray api statsquery --server=127.0.0.1:10085 -pattern "user>>>" -reset=true 2>/dev/null || true)
         if [ -n "$TRAFFIC_RAW" ] && echo "$TRAFFIC_RAW" | grep -q "stat"; then
             TRAFFIC_PAYLOAD=$(echo "$TRAFFIC_RAW" | jq '[.stat[]? | {username: (.name | split(">>>")[1]), bytes: (.value | tonumber)}]')
             curl -s -X POST "${PANEL_URL}/api/node/traffic" \
                  -H "Content-Type: application/json" \
-                 --max-time 10 \
-                 -d "{\"node_id\": \"$NODE_ID\", \"token\": \"$NODE_KEY\", \"traffic\": $TRAFFIC_PAYLOAD}" || true
+                 --connect-timeout 8 \
+                 --max-time 15 \
+                 -d "{\"node_id\": \"$NODE_ID\", \"token\": \"$NODE_KEY\", \"traffic\": $TRAFFIC_PAYLOAD}" >/dev/null 2>&1 || true
         fi
 
         sleep 60
