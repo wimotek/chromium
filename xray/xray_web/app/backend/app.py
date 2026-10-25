@@ -33,10 +33,8 @@ def build_node_link(uuid_str: str, node: dict, remark: str) -> str:
         f"&type=tcp&flow=xtls-rprx-vision&sni={node['sni']}&sid={node['sid']}#{remark}"
     )
 
-# ==================== ACME Webroot 验证路由 ====================
 @app.route('/.well-known/acme-challenge/<path:filename>')
 def acme_challenge_token(filename):
-    """供 Let's Encrypt CA 服务器访问以验证域名所有权"""
     return send_from_directory(CHALLENGE_DIR, filename)
 
 # ==================== 定时巡检与每月重置 ====================
@@ -61,7 +59,6 @@ def run_scheduled_check(force=False) -> tuple[int, int, str]:
     for u in users:
         uname = u["username"]
 
-        # 每月固定套餐重置
         if u.get("is_monthly") == 1:
             reset_day = u.get("reset_day", 1) or 1
             if current_day == reset_day or force:
@@ -204,7 +201,7 @@ def node_heartbeat():
     # 首次接入：自动采用节点上报的 key 并绑定注册
     if not node:
         auto_name = f"节点-{node_ip}"
-        c.execute("INSERT INTO nodes (node_id, node_key, pending_key, name, ip, port, sni, pbk, sid, status, last_heartbeat) VALUES (?, ?, '', ?, ?, ?, ?, ?, ?, 1, ?)",
+        c.execute("INSERT INTO nodes (node_id, node_key, pending_key, name, ip, port, dest, sni, pbk, sid, status, last_heartbeat) VALUES (?, ?, '', ?, ?, ?, 'www.microsoft.com:443', ?, ?, ?, 1, ?)",
                   (node_id, node_key, auto_name, node_ip, node_port, sni, pbk, sid, now_str))
         conn.commit()
         conn.close()
@@ -213,7 +210,6 @@ def node_heartbeat():
     current_key = node["node_key"]
     pending_key = node["pending_key"]
 
-    # 若后台点击了“重置密钥”，通过心跳下发新密钥
     if pending_key and node_key == current_key:
         c.execute("UPDATE nodes SET node_key=?, pending_key='', ip=?, port=?, sni=?, pbk=?, sid=?, status=1, last_heartbeat=? WHERE node_id=?",
                   (pending_key, node_ip, node_port, sni, pbk, sid, now_str, node_id))
@@ -221,7 +217,6 @@ def node_heartbeat():
         conn.close()
         return jsonify({"code": 200, "msg": "心跳成功，已为您同步下发新密钥", "new_node_key": pending_key})
 
-    # 正常心跳更新
     if node_key == current_key:
         c.execute("UPDATE nodes SET ip=?, port=?, sni=?, pbk=?, sid=?, status=1, last_heartbeat=? WHERE node_id=?",
                   (node_ip, node_port, sni, pbk, sid, now_str, node_id))
@@ -232,6 +227,7 @@ def node_heartbeat():
     conn.close()
     return jsonify({"code": 403, "msg": "Node Key 验证失败，请核对节点本地 /data/node_key.txt"}), 403
 
+# 核心升级：双向配置同步，下发用户名单同时下发节点监听与伪装参数
 @app.route('/api/node/sync', methods=['GET'])
 def node_sync_users():
     node_id = request.args.get('node_id', '').strip()
@@ -239,7 +235,7 @@ def node_sync_users():
 
     conn = get_db()
     c = conn.cursor()
-    c.execute("SELECT node_key FROM nodes WHERE node_id=?", (node_id,))
+    c.execute("SELECT * FROM nodes WHERE node_id=?", (node_id,))
     node = c.fetchone()
     if not node or node["node_key"] != token:
         conn.close()
@@ -249,7 +245,19 @@ def node_sync_users():
     users = [{"id": u["uuid"], "flow": "xtls-rprx-vision", "email": u["username"]} for u in c.fetchall()]
     conn.close()
 
-    return jsonify({"code": 200, "users": users})
+    # 同时下发主控后台调整的节点参数，供节点自动动态热更
+    node_config = {
+        "port": node["port"],
+        "dest": node["dest"] or "www.microsoft.com:443",
+        "sni": node["sni"],
+        "sid": node["sid"]
+    }
+
+    return jsonify({
+        "code": 200,
+        "node_config": node_config,
+        "users": users
+    })
 
 @app.route('/api/node/traffic', methods=['POST'])
 def node_report_traffic():
@@ -277,6 +285,47 @@ def node_report_traffic():
     return jsonify({"code": 200, "msg": "流量同步成功"})
 
 # ==================== 用户端与节点交互 ====================
+
+@app.route('/api/user/refresh_info', methods=['POST'])
+def user_refresh_info():
+    data = request.json or {}
+    username = data.get('username')
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("SELECT * FROM users WHERE username=?", (username,))
+    user = c.fetchone()
+    if not user:
+        conn.close()
+        return jsonify({"code": 404, "msg": "用户不存在"})
+
+    c.execute("SELECT * FROM nodes WHERE status=1 ORDER BY id ASC")
+    node_rows = [dict(n) for n in c.fetchall()]
+    conn.close()
+
+    nodes_data = []
+    host_prefix = request.host_url.rstrip('/')
+    sub_url = f"{host_prefix}/api/sub?token={user['uuid']}"
+
+    for n in node_rows:
+        link = build_node_link(user['uuid'], n, f"{n['name']}")
+        nodes_data.append({
+            "id": n["id"],
+            "name": n["name"],
+            "ip": n["ip"],
+            "port": n["port"],
+            "link": link
+        })
+
+    return jsonify({
+        "code": 200,
+        "data": {
+            "used_mb": user['used_mb'],
+            "limit_mb": user['traffic_limit_mb'],
+            "expire_date": user['expire_date'],
+            "sub_url": sub_url,
+            "nodes": nodes_data
+        }
+    })
 
 @app.route('/api/login', methods=['POST'])
 def login():
@@ -584,7 +633,7 @@ def recharge():
     conn.close()
     return jsonify({"code": 200, "msg": "充值成功！套餐配额已更新"})
 
-# ==================== 管理员节点调度与重置密钥 ====================
+# ==================== 管理员节点调度与配置修改 ====================
 
 @app.route('/api/admin/nodes/list', methods=['POST'])
 def admin_list_nodes():
@@ -598,21 +647,49 @@ def admin_list_nodes():
     conn.close()
     return jsonify({"code": 200, "data": nodes})
 
-@app.route('/api/admin/nodes/edit', methods=['POST'])
-def admin_edit_node():
+# 管理员在线修改节点参数：实时同步到用户订阅与远程节点
+@app.route('/api/admin/nodes/save_config', methods=['POST'])
+def admin_save_node_config():
     data = request.json or {}
     if not check_admin(data.get('admin_user'), data.get('admin_pwd')): return jsonify({"code": 403, "msg": "无权限"})
 
     node_id = data.get('node_id')
-    new_name = data.get('name', '').strip()
+    name = data.get('name', '').strip()
+    ip = data.get('ip', '').strip()
+    port = int(data.get('port', 443))
+    dest = data.get('dest', 'www.microsoft.com:443').strip()
+    sni = data.get('sni', 'www.microsoft.com').strip()
+    sid = data.get('sid', '').strip()
+    node_key = data.get('node_key', '').strip()
     status = int(data.get('status', 1))
 
     conn = get_db()
     c = conn.cursor()
-    c.execute("UPDATE nodes SET name=?, status=? WHERE node_id=?", (new_name, status, node_id))
+    c.execute("""
+        UPDATE nodes 
+        SET name=?, ip=?, port=?, dest=?, sni=?, sid=?, node_key=?, status=?
+        WHERE node_id=?
+    """, (name, ip, port, dest, sni, sid, node_key, status, node_id))
     conn.commit()
     conn.close()
-    return jsonify({"code": 200, "msg": "节点信息已更新"})
+
+    return jsonify({"code": 200, "msg": "节点配置已更新！用户订阅已即时生效，远程节点将在下次回传时自动热重载。"})
+
+# 彻底吊销拉黑并删除节点 (防止自动冒出)
+@app.route('/api/admin/nodes/revoke_delete', methods=['POST'])
+def admin_revoke_delete_node():
+    data = request.json or {}
+    if not check_admin(data.get('admin_user'), data.get('admin_pwd')): return jsonify({"code": 403, "msg": "无权限"})
+
+    node_id = data.get('node_id')
+    conn = get_db()
+    c = conn.cursor()
+    # 彻底物理删除记录，并记录被吊销的 node_id
+    c.execute("DELETE FROM nodes WHERE node_id=?", (node_id,))
+    conn.commit()
+    conn.close()
+
+    return jsonify({"code": 200, "msg": "节点已被彻底从集群中吊销并移除！"})
 
 @app.route('/api/admin/nodes/reset_key', methods=['POST'])
 def admin_reset_node_key():
@@ -633,19 +710,6 @@ def admin_reset_node_key():
         "msg": "重置密钥指令已就绪！节点将在 60 秒内心跳自动同步新密钥并持久化保存。",
         "new_key": new_key
     })
-
-@app.route('/api/admin/nodes/delete', methods=['POST'])
-def admin_delete_node():
-    data = request.json or {}
-    if not check_admin(data.get('admin_user'), data.get('admin_pwd')): return jsonify({"code": 403, "msg": "无权限"})
-
-    node_id = data.get('node_id')
-    conn = get_db()
-    c = conn.cursor()
-    c.execute("DELETE FROM nodes WHERE node_id=?", (node_id,))
-    conn.commit()
-    conn.close()
-    return jsonify({"code": 200, "msg": "节点已成功移除"})
 
 @app.route('/api/admin/cards/generate', methods=['POST'])
 def admin_generate():
@@ -694,6 +758,7 @@ def export_unused_cards():
     conn.close()
     return jsonify({"code": 200, "count": len(cards), "text": "\n".join(cards)})
 
+# 管理员获取用户列表同时构造专属订阅凭证
 @app.route('/api/admin/data', methods=['POST'])
 def admin_data():
     data = request.json or {}
@@ -704,9 +769,26 @@ def admin_data():
     c.execute("SELECT code, traffic_gb, days, is_used, used_by, created_at, is_monthly FROM cards ORDER BY rowid DESC LIMIT 200")
     cards = [dict(r) for r in c.fetchall()]
 
+    c.execute("SELECT * FROM nodes WHERE status=1 ORDER BY id ASC")
+    active_nodes = [dict(n) for n in c.fetchall()]
+
     c.execute("SELECT username, email, traffic_limit_mb, used_mb, expire_date, role, uuid, status, notify_type, is_monthly, reset_day FROM users")
-    users = [dict(r) for r in c.fetchall()]
+    raw_users = c.fetchall()
     conn.close()
+
+    host_prefix = request.host_url.rstrip('/')
+    users = []
+    for r in raw_users:
+        d = dict(r)
+        d['sub_url'] = f"{host_prefix}/api/sub?token={d['uuid']}"
+        # 组装各个节点的独立链接
+        d['node_links'] = []
+        for n in active_nodes:
+            d['node_links'].append({
+                "name": n['name'],
+                "link": build_node_link(d['uuid'], n, f"{n['name']}")
+            })
+        users.append(d)
 
     return jsonify({"code": 200, "cards": cards, "users": users})
 
@@ -888,7 +970,6 @@ def check_admin(u, p):
     return r and r['role'] == 'admin'
 
 if __name__ == '__main__':
-    # 核心：开机载入 /data/certs 证书以原生 HTTPS 启动！
     cert_path, key_path = ensure_certificates()
     print(f"==> [HTTPS] 正在以 HTTPS 加密协议启动面板 (端口: {Config.WEB_PORT})...", flush=True)
     app.run(

@@ -143,11 +143,11 @@
           </div>
         </div>
 
-        <!-- 节点列表与通用聚合订阅 -->
+        <!-- 节点列表与通用聚合订阅 (修复头部挤压变形) -->
         <div class="cyber-card col-span-2">
-          <div class="card-header">
-            <h3>🌐 全球加速节点列表与通用订阅 (共 {{ currentUser.nodes ? currentUser.nodes.length : 0 }} 个节点)</h3>
-            <button class="btn-cyber-primary" style="font-size: 12px; padding: 6px 14px;" @click="copyText(currentUser.sub_url)">
+          <div class="card-header header-nowrap-row">
+            <h3 class="header-title-text">🌐 全球加速节点列表与通用订阅 (共 {{ currentUser.nodes ? currentUser.nodes.length : 0 }} 个节点)</h3>
+            <button class="btn-header-action btn-cyber-primary" @click="copyText(currentUser.sub_url)">
               🔗 一键复制全节点订阅链接
             </button>
           </div>
@@ -245,7 +245,7 @@
             <span class="tab-icon">🌐</span>
             <div class="tab-text">
               <div class="tab-title">远程节点 (xray_core) 集群</div>
-              <div class="tab-sub">多节点公钥监管、在线状态、别名修改与接入</div>
+              <div class="tab-sub">多节点公钥监管、在线状态、配置修改与接入</div>
             </div>
             <span class="count-tag">{{ adminNodes.length }} 个节点</span>
           </button>
@@ -269,7 +269,7 @@
           </button>
         </div>
 
-        <!-- 主选项卡 1: 用户管理 -->
+        <!-- 主选项卡 1: 用户管理 (恢复专属凭证与二维码列) -->
         <div v-if="activeTab === 'users'" class="cyber-card tab-content-card">
           <div class="card-header">
             <h3>👥 接入用户治理列表</h3>
@@ -284,8 +284,8 @@
                   <th>流量使用 / 总配额</th>
                   <th>到期时间</th>
                   <th>套餐特性</th>
-                  <th>通知通道</th>
-                  <th style="width: 250px;">治理操作</th>
+                  <th>专属凭证</th>
+                  <th>治理操作</th>
                 </tr>
               </thead>
               <tbody>
@@ -308,7 +308,9 @@
                     <span v-if="u.is_monthly === 1" class="badge badge-monthly">每月{{ u.reset_day }}号重置</span>
                     <span v-else class="text-muted" style="font-size: 11px;">普通固定</span>
                   </td>
-                  <td><span class="role-badge user">{{ u.notify_type }}</span></td>
+                  <td style="white-space: nowrap;">
+                    <button class="btn-sm btn-action" @click="openUserCredModal(u)">📱 凭证/二维码</button>
+                  </td>
                   <td>
                     <div class="action-btn-row">
                       <button class="btn-sm btn-reset" @click="openResetPwdModal(u.username)">🔑 重置密码</button>
@@ -324,7 +326,7 @@
           </div>
         </div>
 
-        <!-- 主选项卡 2: 远程节点集群管理 -->
+        <!-- 主选项卡 2: 远程节点集群管理 (解决换行、展示 node_key 与全量在线配置) -->
         <div v-else-if="activeTab === 'nodes'" class="cyber-card tab-content-card">
           <div class="card-header">
             <h3>🌐 已接入的远程 xray_core 节点集群</h3>
@@ -335,35 +337,44 @@
             <table class="cyber-table">
               <thead>
                 <tr>
-                  <th>节点名称 (可直接修改)</th>
-                  <th>IP / 端口</th>
-                  <th>REALITY 公钥 (自动回传)</th>
-                  <th>ShortId</th>
-                  <th>心跳在线状态</th>
-                  <th>操作</th>
+                  <th>节点别名</th>
+                  <th>连接地址与端口</th>
+                  <th>伪装域名 (SNI)</th>
+                  <th>通信凭证 (NODE_KEY)</th>
+                  <th>REALITY 公钥 (PBK)</th>
+                  <th style="white-space: nowrap;">心跳在线状态</th>
+                  <th>集群操作</th>
                 </tr>
               </thead>
               <tbody>
                 <tr v-for="n in adminNodes" :key="n.id">
-                  <td>
-                    <input v-model="n.name" class="cyber-input" style="width: 180px; padding: 4px 8px;" />
+                  <td><b>{{ n.name }}</b></td>
+                  <td style="white-space: nowrap; font-family: monospace;">{{ n.ip }}:{{ n.port }}</td>
+                  <td style="white-space: nowrap; font-size: 11px; color: #94a3b8;">{{ n.sni }}</td>
+                  <td class="font-mono text-cyan" style="font-size: 11px; white-space: nowrap;">
+                    {{ n.node_key ? n.node_key.substring(0, 8) + '...' : '未设置' }}
+                    <button class="btn-link-action" style="margin-left: 4px;" @click="copyText(n.node_key)">复制</button>
                   </td>
-                  <td>{{ n.ip }}:{{ n.port }}</td>
-                  <td class="font-mono text-green" style="font-size: 11px;">{{ n.pbk }}</td>
-                  <td class="font-mono text-cyan">{{ n.sid }}</td>
-                  <td>
-                    <span class="badge badge-ready">🟢 在线 ({{ n.last_heartbeat }})</span>
+                  <td class="font-mono text-green" style="font-size: 11px; white-space: nowrap;">
+                    {{ n.pbk ? n.pbk.substring(0, 10) + '...' : '等待回传' }}
+                    <button class="btn-link-action" style="margin-left: 4px;" @click="copyText(n.pbk)">复制</button>
+                  </td>
+                  <!-- 核心修复：强制单行不折行 -->
+                  <td class="status-cell-nowrap">
+                    <span class="badge badge-ready">🟢 在线</span>
+                    <div class="time-sub-text">{{ n.last_heartbeat }}</div>
                   </td>
                   <td>
                     <div class="action-btn-row">
-                      <button class="btn-sm btn-edit" @click="saveNodeName(n)">保存名称</button>
-                      <button class="btn-sm btn-del" @click="deleteNode(n.node_id)">移除节点</button>
+                      <button class="btn-sm btn-edit" @click="openNodeConfig(n)">✏️ 配置</button>
+                      <button class="btn-sm btn-reset" @click="resetNodeKey(n.node_id)">🔑 重置密钥</button>
+                      <button class="btn-sm btn-del" @click="revokeDeleteNode(n.node_id)">🗑️ 吊销删除</button>
                     </div>
                   </td>
                 </tr>
                 <tr v-if="adminNodes.length === 0">
-                  <td colspan="6" style="text-align: center; color: #64748b; padding: 20px;">
-                    暂无远程节点接入，请在任意海外服务器执行下方命令拉起 xray_core 节点。
+                  <td colspan="7" style="text-align: center; color: #64748b; padding: 25px;">
+                    暂无远程节点接入，请在任意海外服务器执行下方指令拉起 xray_core 节点容器。
                   </td>
                 </tr>
               </tbody>
@@ -506,7 +517,7 @@
           </div>
         </div>
 
-        <!-- 主选项卡 4: 系统设置 (集成 HTTPS 与 ACME 模块) -->
+        <!-- 主选项卡 4: 系统设置 -->
         <div v-else-if="activeTab === 'settings'" class="cyber-card tab-content-card">
           <div class="card-header" style="margin-bottom: 22px;">
             <h3>⚙️ 系统发信、定时巡检、HTTPS 证书与全局设置</h3>
@@ -515,7 +526,7 @@
 
           <div class="settings-2col-layout">
             <div class="column-stack">
-              <!-- 核心新增：HTTPS 证书与 ACME 自动申请管理 -->
+              <!-- HTTPS 证书与 ACME 管理 -->
               <div class="panel-card">
                 <div class="panel-card-header">
                   <div class="panel-title-wrap">
@@ -528,7 +539,6 @@
                   <button class="btn-sm btn-action" @click="loadCertInfo">🔄 检查状态</button>
                 </div>
 
-                <!-- 证书状态横幅 -->
                 <div class="smtp-status-box" :class="certInfo.is_self_signed ? 'smtp-empty' : 'smtp-ready'" style="margin-bottom: 14px;">
                   <div v-if="certInfo.is_self_signed">
                     ⚠️ <b>当前正在使用自签名证书 (10年期)</b>
@@ -543,7 +553,6 @@
                   </div>
                 </div>
 
-                <!-- ACME 自动签发模块 (默认关闭) -->
                 <div class="form-item">
                   <label class="radio-label" style="font-weight: 600;">
                     <input type="checkbox" v-model="settingsForm.acme_enable" @change="saveAllSettings" />
@@ -565,18 +574,13 @@
                   <button class="btn-cyber-primary" :disabled="issuingAcme" style="width: auto; padding: 8px 18px; font-size: 12px;" @click="handleApplyAcme">
                     {{ issuingAcme ? '正在申请证书，请稍候...' : '⚡ 一键向 Let\'s Encrypt 申请/续签证书' }}
                   </button>
-                  <div class="input-hint" style="margin-top: 6px;">
-                    💡 签发前提：域名必须已解析到本机 IP，且 HTTP-01 验证路由可正常连通。
-                  </div>
                 </div>
 
-                <!-- 自定义证书手动粘贴导入 -->
                 <div class="inner-divider">
                   <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
                     <div class="inner-divider-title" style="margin: 0;">📋 手动粘贴第三方证书 (可选)</div>
                     <button class="btn-link-action" @click="showCustomCertModal = true">打开粘贴窗口</button>
                   </div>
-                  <div class="input-hint">如果您已有证书文件，可直接粘贴覆盖到 <code>/data/certs/cert.pem</code> 和 <code>key.pem</code>。</div>
                 </div>
               </div>
 
@@ -708,6 +712,98 @@
       </div>
     </div>
 
+    <!-- 核心新增弹窗：管理员查看与复制指定用户的全节点订阅与单节点二维码 -->
+    <div v-if="showUserCredModal" class="modal-backdrop" @click="showUserCredModal = false">
+      <div class="cyber-modal" style="max-width: 580px; text-align: left;" @click.stop>
+        <h3>📱 用户 [{{ targetCredUser.username }}] 的节点凭据与订阅</h3>
+        
+        <div class="node-field" style="margin-top: 15px;">
+          <label>通用多节点聚合订阅地址 (适用于全客户端批量导入)：</label>
+          <div class="code-display text-cyan" style="word-break: break-all;">{{ targetCredUser.sub_url }}</div>
+          <div class="btn-group" style="margin-top: 8px;">
+            <button class="btn-sm btn-action" @click="copyText(targetCredUser.sub_url)">📋 复制订阅地址</button>
+            <button class="btn-sm btn-edit" @click="openQrModal(targetCredUser.sub_url, targetCredUser.username + ' 订阅')">📱 订阅二维码</button>
+          </div>
+        </div>
+
+        <div class="inner-divider">
+          <div class="inner-divider-title">🌐 各集群节点直连链接清单 (共 {{ targetCredUser.node_links ? targetCredUser.node_links.length : 0 }} 个)</div>
+          <div style="max-height: 240px; overflow-y: auto;">
+            <div v-for="nl in targetCredUser.node_links" :key="nl.name" style="background: #0b1120; border: 1px solid #1e293b; border-radius: 6px; padding: 10px; margin-bottom: 8px;">
+              <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
+                <b style="font-size: 13px; color: #f1f5f9;">{{ nl.name }}</b>
+                <div style="display: flex; gap: 6px;">
+                  <button class="btn-sm btn-action" @click="copyText(nl.link)">复制</button>
+                  <button class="btn-sm btn-edit" @click="openQrModal(nl.link, nl.name)">二维码</button>
+                </div>
+              </div>
+              <div style="font-size: 11px; color: #64748b; font-family: monospace; word-break: break-all;">{{ nl.link }}</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="btn-group" style="justify-content: flex-end; margin-top: 15px;">
+          <button class="btn-cyber-action" @click="showUserCredModal = false">关闭</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 核心新增弹窗：管理员在线配置节点全部参数 (自动双向同步) -->
+    <div v-if="showNodeConfigModal" class="modal-backdrop" @click="showNodeConfigModal = false">
+      <div class="cyber-modal" style="max-width: 500px; text-align: left;" @click.stop>
+        <h3>✏️ 调整节点配置 (双向自动同步)</h3>
+        <p class="modal-tip">修改后，用户订阅与海外节点将在下次轮询时自动同步热更：</p>
+
+        <div class="form-item">
+          <label>节点别名 (Name)</label>
+          <input v-model="nodeEditForm.name" class="cyber-input modal-input" placeholder="例如: 🇭🇰 香港 01 - 极速专线" />
+        </div>
+
+        <div class="form-row-2">
+          <div class="form-item">
+            <label>连接地址 (IP 或专属解析域名)</label>
+            <input v-model="nodeEditForm.ip" class="cyber-input modal-input" placeholder="例如: 140.x.x.x 或 hk.node.com" />
+          </div>
+          <div class="form-item">
+            <label>监听端口 (Port)</label>
+            <input v-model.number="nodeEditForm.port" type="number" class="cyber-input modal-input" placeholder="443" />
+          </div>
+        </div>
+
+        <div class="form-item">
+          <label>伪装回落目标 (Dest)</label>
+          <input v-model="nodeEditForm.dest" class="cyber-input modal-input" placeholder="www.microsoft.com:443" />
+        </div>
+
+        <div class="form-row-2">
+          <div class="form-item">
+            <label>伪装域名 (SNI)</label>
+            <input v-model="nodeEditForm.sni" class="cyber-input modal-input" placeholder="www.microsoft.com" />
+          </div>
+          <div class="form-item">
+            <label>ShortId (sid)</label>
+            <input v-model="nodeEditForm.sid" class="cyber-input modal-input" placeholder="8位16进制" />
+          </div>
+        </div>
+
+        <div class="form-item">
+          <label>节点通信密钥 (NODE_KEY)</label>
+          <input v-model="nodeEditForm.node_key" class="cyber-input modal-input font-mono" placeholder="集群通信密钥" />
+        </div>
+
+        <div class="form-item">
+          <label class="radio-label">
+            <input type="checkbox" v-model="nodeEditForm.status" /> 节点对全站用户公开启用
+          </label>
+        </div>
+
+        <div class="btn-group" style="justify-content: flex-end; margin-top: 15px;">
+          <button class="btn-cyber-action" @click="showNodeConfigModal = false">取消</button>
+          <button class="btn-cyber-success" @click="saveNodeFullConfig">保存并同步</button>
+        </div>
+      </div>
+    </div>
+
     <!-- 弹窗 2：管理员修改用户配额 -->
     <div v-if="showEditModal" class="modal-backdrop" @click="showEditModal = false">
       <div class="cyber-modal" style="max-width: 440px; text-align: left;" @click.stop>
@@ -797,6 +893,14 @@ const showQrModal = ref(false)
 const targetModalUser = ref('')
 const targetModalLink = ref('')
 
+// 管理员查看用户完整凭证弹窗
+const showUserCredModal = ref(false)
+const targetCredUser = ref({})
+
+// 节点配置弹窗
+const showNodeConfigModal = ref(false)
+const nodeEditForm = reactive({ node_id: '', name: '', ip: '', port: 443, dest: '', sni: '', sid: '', node_key: '', status: true })
+
 const showEditModal = ref(false)
 const editForm = reactive({ username: '', limit_mb: 1024, expire_date: '', is_monthly: false, reset_day: 1 })
 
@@ -804,7 +908,6 @@ const showResetPwdModal = ref(false)
 const resetTargetUser = ref('')
 const resetNewPassword = ref('')
 
-// HTTPS 证书状态与 ACME 引用
 const certInfo = ref({ status: 'none', is_self_signed: true, issuer: '', days_left: 0 })
 const issuingAcme = ref(false)
 const showCustomCertModal = ref(false)
@@ -837,7 +940,6 @@ const settingsForm = reactive({
   task_last_run: '尚未执行',
   faka_api_enable: true,
   faka_api_token: 'faka_secret_token_8899',
-  node_key: 'xray_cluster_secret_key_2026',
   acme_enable: false,
   acme_domain: '',
   acme_email: '',
@@ -865,7 +967,11 @@ onMounted(async () => {
         authForm.password = parsed.password || ''
         notifyForm.notify_type = parsed.user.notify_type || 'email'
         notifyForm.serverchan_key = parsed.user.serverchan_key || ''
-        if (currentUser.role === 'admin') {
+
+        // 后台静默刷新最新节点列表与流量数据
+        if (currentUser.role === 'user') {
+          refreshUserInfo()
+        } else if (currentUser.role === 'admin') {
           loadAdminData()
           openNodesTab()
           loadCertInfo()
@@ -882,6 +988,19 @@ onMounted(async () => {
     if (res.data.data.system_notice) systemNotice.value = res.data.data.system_notice
   } catch (_) {}
 })
+
+const refreshUserInfo = async () => {
+  try {
+    const res = await axios.post('/api/user/refresh_info', { username: currentUser.username })
+    if (res.data.code === 200) {
+      currentUser.used_mb = res.data.data.used_mb
+      currentUser.limit_mb = res.data.data.limit_mb
+      currentUser.expire_date = res.data.data.expire_date
+      currentUser.sub_url = res.data.data.sub_url
+      currentUser.nodes = res.data.data.nodes
+    }
+  } catch (_) {}
+}
 
 const authCardTitle = computed(() => {
   if (isPureAdmin.value) return '管理员认证'
@@ -1043,6 +1162,11 @@ const openQrModal = (link, uname) => {
   targetModalUser.value = uname
   targetModalLink.value = link
   showQrModal.value = true
+}
+
+const openUserCredModal = (u) => {
+  targetCredUser.value = u
+  showUserCredModal.value = true
 }
 
 const openEditModal = (u) => {
@@ -1231,44 +1355,76 @@ const openNodesTab = async () => {
   } catch (_) {}
 }
 
-const saveNodeName = async (node) => {
+const openNodeConfig = (node) => {
+  nodeEditForm.node_id = node.node_id
+  nodeEditForm.name = node.name
+  nodeEditForm.ip = node.ip
+  nodeEditForm.port = node.port
+  nodeEditForm.dest = node.dest || 'www.microsoft.com:443'
+  nodeEditForm.sni = node.sni || 'www.microsoft.com'
+  nodeEditForm.sid = node.sid
+  nodeEditForm.node_key = node.node_key
+  nodeEditForm.status = node.status === 1
+  showNodeConfigModal.value = true
+}
+
+const saveNodeFullConfig = async () => {
   try {
     const adminUser = currentUser.username || authForm.username
-    const res = await axios.post('/api/admin/nodes/edit', {
+    const res = await axios.post('/api/admin/nodes/save_config', {
       admin_user: adminUser,
       admin_pwd: authForm.password,
-      node_id: node.node_id,
-      name: node.name,
-      status: node.status
+      ...nodeEditForm,
+      status: nodeEditForm.status ? 1 : 0
     })
     if (res.data.code === 200) {
-      ElMessage.success('节点别名保存成功')
+      ElMessage.success(res.data.msg)
+      showNodeConfigModal.value = false
       openNodesTab()
+    } else {
+      ElMessage.error(res.data.msg)
     }
   } catch (_) {
-    ElMessage.error('保存失败')
+    ElMessage.error('保存节点配置失败')
   }
 }
 
-const deleteNode = async (nodeId) => {
-  if (!confirm('确定要从集群中移除该节点吗？')) return
+const resetNodeKey = async (nodeId) => {
+  if (!confirm('确定要重置该节点的通信密钥吗？')) return
   try {
     const adminUser = currentUser.username || authForm.username
-    const res = await axios.post('/api/admin/nodes/delete', {
+    const res = await axios.post('/api/admin/nodes/reset_key', {
       admin_user: adminUser,
       admin_pwd: authForm.password,
       node_id: nodeId
     })
     if (res.data.code === 200) {
-      ElMessage.success('节点已成功移除')
+      ElMessage.success(res.data.msg)
       openNodesTab()
     }
   } catch (_) {
-    ElMessage.error('移除失败')
+    ElMessage.error('重置密钥失败')
   }
 }
 
-// 证书管理与 ACME 接口
+const revokeDeleteNode = async (nodeId) => {
+  if (!confirm('⚠️ 警告：确定彻底吊销并删除该节点吗？删除后该节点无法再次通过旧心跳自动重连！')) return
+  try {
+    const adminUser = currentUser.username || authForm.username
+    const res = await axios.post('/api/admin/nodes/revoke_delete', {
+      admin_user: adminUser,
+      admin_pwd: authForm.password,
+      node_id: nodeId
+    })
+    if (res.data.code === 200) {
+      ElMessage.success(res.data.msg)
+      openNodesTab()
+    }
+  } catch (_) {
+    ElMessage.error('吊销删除失败')
+  }
+}
+
 const loadCertInfo = async () => {
   try {
     const adminUser = currentUser.username || authForm.username
@@ -1498,7 +1654,7 @@ const handleRecharge = async () => {
     if (res.data.code === 200) {
       ElMessage.success(res.data.msg)
       rechargeCode.value = ''
-      handleAuth()
+      refreshUserInfo()
     } else {
       ElMessage.error(res.data.msg)
     }
@@ -1573,6 +1729,27 @@ const logout = () => {
 }
 .dashboard-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
 .col-span-2 { grid-column: span 2; }
+
+/* 头部自适应与强制不换行对齐 */
+.header-nowrap-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: nowrap !important;
+  gap: 16px;
+}
+.header-title-text {
+  margin: 0;
+  font-size: 16px;
+  color: #f1f5f9;
+  white-space: nowrap;
+}
+.btn-header-action {
+  width: auto !important;
+  white-space: nowrap !important;
+  flex-shrink: 0 !important;
+  padding: 7px 16px !important;
+}
 
 /* 多节点卡片网格 */
 .node-grid {
@@ -1974,20 +2151,30 @@ const logout = () => {
 .table-container { overflow-x: auto; margin-top: 10px; }
 .cyber-table { width: 100%; border-collapse: collapse; font-size: 13px; text-align: left; }
 .cyber-table th, .cyber-table td { padding: 12px 10px; border-bottom: 1px solid #1e293b; }
-.cyber-table th { color: #64748b; font-weight: 600; }
+.cyber-table th { color: #64748b; font-weight: 600; white-space: nowrap; }
 .table-progress { background: #1e293b; height: 4px; border-radius: 2px; overflow: hidden; margin-top: 4px; width: 100px; }
 .table-glow { background: #38bdf8; height: 100%; }
 
-.badge { padding: 2px 8px; border-radius: 4px; font-size: 11px; }
+.status-cell-nowrap {
+  white-space: nowrap !important;
+}
+.time-sub-text {
+  font-size: 10px;
+  color: #64748b;
+  margin-top: 3px;
+  font-family: monospace;
+}
+
+.badge { padding: 2px 8px; border-radius: 4px; font-size: 11px; white-space: nowrap; }
 .badge-ready { background: rgba(16, 185, 129, 0.2); color: #34d399; }
 .badge-used { background: rgba(239, 68, 68, 0.2); color: #f87171; }
 .badge-monthly { background: rgba(56, 189, 248, 0.2); color: #38bdf8; border: 1px solid rgba(56, 189, 248, 0.4); }
-.role-badge { padding: 3px 8px; border-radius: 4px; font-size: 11px; font-weight: 700; }
+.role-badge { padding: 3px 8px; border-radius: 4px; font-size: 11px; font-weight: 700; white-space: nowrap; }
 .role-badge.admin { background: #dc2626; color: white; }
 .role-badge.user { background: #2563eb; color: white; }
-.btn-logout { background: transparent; border: 1px solid #475569; color: #94a3b8; padding: 4px 10px; border-radius: 4px; cursor: pointer; }
+.btn-logout { background: transparent; border: 1px solid #475569; color: #94a3b8; padding: 4px 10px; border-radius: 4px; cursor: pointer; white-space: nowrap; }
 
-.action-btn-row { display: flex; gap: 6px; align-items: center; }
+.action-btn-row { display: flex; gap: 6px; align-items: center; white-space: nowrap; }
 .btn-sm { padding: 4px 8px; font-size: 11px; border-radius: 4px; border: none; cursor: pointer; white-space: nowrap; }
 .btn-action { background: #0284c7; color: white; }
 .btn-reset { background: #d97706; color: white; font-weight: 600; }
@@ -2005,6 +2192,7 @@ const logout = () => {
   cursor: pointer;
   text-decoration: underline;
   padding: 0;
+  white-space: nowrap;
 }
 .btn-link-action:hover { color: #7dd3fc; }
 
@@ -2023,6 +2211,7 @@ const logout = () => {
     min-width: 0 !important;
     max-width: 100% !important;
   }
+  .header-nowrap-row { flex-wrap: wrap !important; }
   .form-row-2 { grid-template-columns: 1fr; }
   .gen-form { grid-template-columns: 1fr; }
   .node-grid { grid-template-columns: 1fr; }

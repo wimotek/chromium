@@ -38,7 +38,7 @@ def init_db():
         reset_day INTEGER DEFAULT 1
     )''')
 
-    # 2. 节点集群表 (存储各节点公钥与通信密钥)
+    # 2. 节点集群表
     c.execute('''CREATE TABLE IF NOT EXISTS nodes (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         node_id TEXT UNIQUE NOT NULL,
@@ -47,6 +47,7 @@ def init_db():
         name TEXT NOT NULL,
         ip TEXT NOT NULL,
         port INTEGER NOT NULL,
+        dest TEXT DEFAULT 'www.microsoft.com:443',
         sni TEXT NOT NULL,
         pbk TEXT NOT NULL,
         sid TEXT NOT NULL,
@@ -94,9 +95,9 @@ def init_db():
 
     try_add_column("ALTER TABLE nodes ADD COLUMN node_key TEXT DEFAULT ''")
     try_add_column("ALTER TABLE nodes ADD COLUMN pending_key TEXT DEFAULT ''")
+    try_add_column("ALTER TABLE nodes ADD COLUMN dest TEXT DEFAULT 'www.microsoft.com:443'")
     try_add_column("ALTER TABLE users ADD COLUMN used_mb REAL DEFAULT 0")
 
-    # 默认管理员引导
     c.execute("SELECT id FROM users WHERE role='admin'")
     if not c.fetchone():
         admin_user = os.getenv("ADMIN_USERNAME") or "admin"

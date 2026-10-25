@@ -41,7 +41,7 @@ SERVER_NAMES="${SERVER_NAMES:-www.microsoft.com,microsoft.com}"
 
 SERVER_NAMES_JSON=$(echo "$SERVER_NAMES" | awk -F',' '{printf "["; for(i=1; i<=NF; i++) {printf "\"%s\"", $i; if(i<NF) printf ","} printf "]"}')
 
-# 密钥与公钥持久化
+# 密钥持久化与公钥计算
 if [ -f "$PRIVATE_KEY_FILE" ] && [ -s "$PRIVATE_KEY_FILE" ]; then
     PRIVATE_KEY=$(cat "$PRIVATE_KEY_FILE" | tr -d ' \r\n')
 fi
@@ -107,12 +107,12 @@ else
     echo "==> [Node Key] 首次启动自动生成通信密钥: $NODE_KEY"
 fi
 
-# 4. 远程协同守护进程 (全面增加 -k 保证支持 HTTPS 与自签证书)
+# 4. 远程协同守护进程 (全量增加 -k 支持自签与真实 HTTPS)
 remote_agent_loop() {
     echo "==> [Cluster Node] 开始连接主控 (地址: $PANEL_URL, 节点ID: $NODE_ID)..."
 
     while true; do
-        # 1. 发送心跳、公钥与 ShortId，带 -k 信任参数，避免 HTTPS 自签名证书抛出 60 报错
+        # 发送心跳、公钥与 ShortId
         HB_RESP=$(curl -k -s -X POST "${PANEL_URL}/api/node/heartbeat" \
              -H "Content-Type: application/json" \
              --connect-timeout 8 \
@@ -133,28 +133,45 @@ remote_agent_loop() {
             echo "==> [Cluster Node] 收到主控新密钥，已成功更新本地密钥！"
         fi
 
-        # 2. 拉取全站最新合法用户名单 (带 -k 参数)
+        # 拉取用户名单与主控下发的新节点参数
         USER_RESP=$(curl -k -s --connect-timeout 8 --max-time 15 "${PANEL_URL}/api/node/sync?node_id=${NODE_ID}&token=${NODE_KEY}" 2>&1 || true)
         if echo "$USER_RESP" | grep -q '"code":200'; then
             REMOTE_USERS=$(echo "$USER_RESP" | jq '.users')
             TMP_SYNC="/tmp/config.agent.sync.json"
 
+            # 检查是否有主控下发的端口/伪装配置变动
+            REMOTE_PORT=$(echo "$USER_RESP" | jq -r '.node_config.port // empty')
+            REMOTE_DEST=$(echo "$USER_RESP" | jq -r '.node_config.dest // empty')
+            REMOTE_SNI=$(echo "$USER_RESP" | jq -r '.node_config.sni // empty')
+            REMOTE_SID=$(echo "$USER_RESP" | jq -r '.node_config.sid // empty')
+
+            # 双向同步：同时更新客户列表与网络参数
             jq --argjson new_clients "$REMOTE_USERS" \
-               '.inbounds[0].settings.clients = $new_clients' \
+               --arg port "$REMOTE_PORT" \
+               --arg dest "$REMOTE_DEST" \
+               --arg sni "$REMOTE_SNI" \
+               --arg sid "$REMOTE_SID" \
+               '
+               .inbounds[0].settings.clients = $new_clients |
+               (if $port != "" then .inbounds[0].port = ($port | tonumber) else . end) |
+               (if $dest != "" then .inbounds[0].streamSettings.realitySettings.dest = $dest else . end) |
+               (if $sni != "" then .inbounds[0].streamSettings.realitySettings.serverNames = [$sni] else . end) |
+               (if $sid != "" then .inbounds[0].streamSettings.realitySettings.shortIds = [$sid] else . end)
+               ' \
                "$CONFIG_FILE" > "$TMP_SYNC"
 
             if [ -s "$TMP_SYNC" ]; then
                 if ! cmp -s "$TMP_SYNC" "$CONFIG_FILE"; then
                     mv "$TMP_SYNC" "$CONFIG_FILE"
                     killall -HUP xray 2>/dev/null || pkill -HUP xray 2>/dev/null || true
-                    echo "==> [Cluster Node] 用户名单已自动重载生效！"
+                    echo "==> [Cluster Node] 用户名单或网络参数已由主控热更新并生效！"
                 else
                     rm -f "$TMP_SYNC"
                 fi
             fi
         fi
 
-        # 3. 统计增量流量回传主控 (带 -k 参数)
+        # 统计增量流量回传主控扣除
         TRAFFIC_RAW=$(/usr/bin/xray api statsquery --server=127.0.0.1:10085 -pattern "user>>>" -reset=true 2>/dev/null || true)
         if [ -n "$TRAFFIC_RAW" ] && echo "$TRAFFIC_RAW" | grep -q "stat"; then
             TRAFFIC_PAYLOAD=$(echo "$TRAFFIC_RAW" | jq '[.stat[]? | {username: (.name | split(">>>")[1]), bytes: (.value | tonumber)}]')
