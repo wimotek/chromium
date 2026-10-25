@@ -1,6 +1,5 @@
 <template>
   <div class="dark-theme">
-    <!-- 顶部科技导航 -->
     <header class="cyber-header">
       <div class="header-content">
         <div class="brand">
@@ -18,19 +17,14 @@
     <main class="main-body">
       <!-- 1. 登录 / 注册 / 找回密码 模块 -->
       <div v-if="!currentUser.username" class="auth-center">
-        <!-- 登录页系统公告展示栏 -->
         <div v-if="systemNotice" class="cyber-notice-card">
-          <div class="notice-header">
-            <span class="notice-icon">📢</span>
-            <strong>系统公告 NOTICE</strong>
-          </div>
+          <div class="notice-header"><span class="notice-icon">📢</span><strong>系统公告 NOTICE</strong></div>
           <div class="notice-body">{{ systemNotice }}</div>
         </div>
 
         <div class="cyber-card auth-box">
           <h2 class="card-title">{{ authCardTitle }}</h2>
 
-          <!-- A. 登录 -->
           <template v-if="authMode === 'login'">
             <div class="form-item">
               <label>ACCOUNT / 用户名 或 注册邮箱</label>
@@ -49,7 +43,6 @@
             </div>
           </template>
 
-          <!-- B. 注册 -->
           <template v-else-if="authMode === 'register'">
             <div class="form-item">
               <label>USER IDENTIFIER / 设置用户名</label>
@@ -80,7 +73,6 @@
             </div>
           </template>
 
-          <!-- C. 找回密码 -->
           <template v-else-if="authMode === 'forgot'">
             <div class="form-item">
               <label>REGISTERED EMAIL / 绑定的注册邮箱</label>
@@ -151,12 +143,12 @@
           </div>
         </div>
 
-        <!-- 多节点选择与通用订阅 -->
+        <!-- 节点列表与通用聚合订阅 -->
         <div class="cyber-card col-span-2">
           <div class="card-header">
             <h3>🌐 全球加速节点列表与通用订阅 (共 {{ currentUser.nodes ? currentUser.nodes.length : 0 }} 个节点)</h3>
-            <button class="btn-cyber-primary" style="font-size: 12px; padding: 6px 14px; width: auto;" @click="copyText(currentUser.sub_url)">
-              🔗 一键复制全节点通用订阅链接
+            <button class="btn-cyber-primary" style="font-size: 12px; padding: 6px 14px;" @click="copyText(currentUser.sub_url)">
+              🔗 一键复制全节点订阅链接
             </button>
           </div>
 
@@ -174,14 +166,14 @@
                 <span>地址: {{ node.ip }}:{{ node.port }}</span>
               </div>
               <div class="btn-group" style="margin-top: 12px; gap: 6px;">
-                <button class="btn-sm btn-action" @click="copyText(node.link)">📋 复制节点</button>
+                <button class="btn-sm btn-action" @click="copyText(node.link)">📋 复制</button>
                 <button class="btn-sm btn-edit" @click="openQrModal(node.link, node.name)">📱 扫码</button>
                 <button class="btn-sm btn-cyber-download" @click="downloadWindowsClient(node.id, node.name)">🖥️ 下载客户端</button>
               </div>
             </div>
 
             <div v-if="!currentUser.nodes || currentUser.nodes.length === 0" class="empty-node-tip">
-              暂无在线节点，请等待管理员启动接入远程海外节点。
+              暂无在线节点，请等待管理员启动并接入 xray_core 远程节点。
             </div>
           </div>
         </div>
@@ -253,7 +245,7 @@
             <span class="tab-icon">🌐</span>
             <div class="tab-text">
               <div class="tab-title">远程节点 (xray_core) 集群</div>
-              <div class="tab-sub">自动生成密钥、公钥回传、一键重置与别名维护</div>
+              <div class="tab-sub">多节点公钥监管、在线状态、别名修改与接入</div>
             </div>
             <span class="count-tag">{{ adminNodes.length }} 个节点</span>
           </button>
@@ -271,7 +263,7 @@
             <span class="tab-icon">⚙️</span>
             <div class="tab-text">
               <div class="tab-title">系统发信与全局运维配置</div>
-              <div class="tab-sub">公告设置、SMTP 配置、巡检预警与个人通知</div>
+              <div class="tab-sub">公告设置、SMTP 配置、巡检预警与 HTTPS 证书</div>
             </div>
             <span class="count-tag">配置中心</span>
           </button>
@@ -343,8 +335,7 @@
             <table class="cyber-table">
               <thead>
                 <tr>
-                  <th>节点名称</th>
-                  <th>通信密钥 (Node Key)</th>
+                  <th>节点名称 (可直接修改)</th>
                   <th>IP / 端口</th>
                   <th>REALITY 公钥 (自动回传)</th>
                   <th>ShortId</th>
@@ -355,29 +346,24 @@
               <tbody>
                 <tr v-for="n in adminNodes" :key="n.id">
                   <td>
-                    <input v-model="n.name" class="cyber-input" style="width: 150px; padding: 4px 8px;" />
+                    <input v-model="n.name" class="cyber-input" style="width: 180px; padding: 4px 8px;" />
                   </td>
-                  <td>
-                    <span class="font-mono" style="font-size: 11px; color: #f59e0b;">{{ n.node_key }}</span>
-                    <div v-if="n.pending_key" style="font-size: 10px; color: #38bdf8;">(重置待生效: {{ n.pending_key.substring(0, 8) }}...)</div>
-                  </td>
-                  <td style="white-space: nowrap;">{{ n.ip }}:{{ n.port }}</td>
-                  <td class="font-mono text-green" style="font-size: 11px; max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" :title="n.pbk">{{ n.pbk }}</td>
+                  <td>{{ n.ip }}:{{ n.port }}</td>
+                  <td class="font-mono text-green" style="font-size: 11px;">{{ n.pbk }}</td>
                   <td class="font-mono text-cyan">{{ n.sid }}</td>
-                  <td style="white-space: nowrap;">
+                  <td>
                     <span class="badge badge-ready">🟢 在线 ({{ n.last_heartbeat }})</span>
                   </td>
                   <td>
                     <div class="action-btn-row">
-                      <button class="btn-sm btn-action" @click="saveNodeName(n)">保存名称</button>
-                      <button class="btn-sm btn-reset" @click="resetNodeKey(n)">🔑 重置密钥</button>
-                      <button class="btn-sm btn-del" @click="deleteNode(n.node_id)">移除</button>
+                      <button class="btn-sm btn-edit" @click="saveNodeName(n)">保存名称</button>
+                      <button class="btn-sm btn-del" @click="deleteNode(n.node_id)">移除节点</button>
                     </div>
                   </td>
                 </tr>
                 <tr v-if="adminNodes.length === 0">
-                  <td colspan="7" style="text-align: center; color: #64748b; padding: 25px;">
-                    暂无远程节点接入，只需在任意海外 VPS 运行下方单变量命令拉起即可！
+                  <td colspan="6" style="text-align: center; color: #64748b; padding: 20px;">
+                    暂无远程节点接入，请在任意海外服务器执行下方命令拉起 xray_core 节点。
                   </td>
                 </tr>
               </tbody>
@@ -385,15 +371,15 @@
           </div>
 
           <div class="panel-card" style="margin-top: 25px;">
-            <h4 style="margin: 0 0 10px 0; color: #38bdf8;">🖥️ 海外 VPS 极简单变量接入指令 (NODE_KEY 无需填写)</h4>
-            <p class="card-desc">在任意香港、日本或美国 VPS 执行即可，节点启动时<b>自动生成专属密钥与公钥</b>并回传登记到本面板：</p>
+            <h4 style="margin: 0 0 10px 0; color: #38bdf8;">🖥️ 远程海外 VPS 一键接入指令 (HTTPS 模式)</h4>
+            <p class="card-desc">节点秒级上线，自动推导并向本面板回传真实公钥与网络参数：</p>
             <div class="node-field">
               <div class="code-display text-cyan">
-                docker run -d --name xray-node --network host --restart always -e PANEL_URL="http://{{ publicMasterHost }}:3000" -v $(pwd)/data:/data wimotek/xray:core
+                docker run -d --name xray-node --network host --restart always -e PANEL_URL="https://{{ publicMasterHost }}:3000" -v $(pwd)/data:/data wimotek/xray:core
               </div>
             </div>
-            <button class="btn-sm btn-action" @click="copyText(`docker run -d --name xray-node --network host --restart always -e PANEL_URL='http://${publicMasterHost}:3000' -v $(pwd)/data:/data wimotek/xray:core`)">
-              📋 复制极简单变量运行命令
+            <button class="btn-sm btn-action" @click="copyText(`docker run -d --name xray-node --network host --restart always -e PANEL_URL='https://${publicMasterHost}:3000' -v $(pwd)/data:/data wimotek/xray:core`)">
+              📋 复制接入命令
             </button>
           </div>
         </div>
@@ -460,7 +446,7 @@
               <table class="cyber-table">
                 <thead>
                   <tr>
-                    <th style="width: 40px; text-align: center;"><input type="checkbox" :checked="isAllSelected" @change="toggleSelectAll" title="全选未售卡密" /></th>
+                    <th style="width: 40px; text-align: center;"><input type="checkbox" :checked="isAllSelected" @change="toggleSelectAll" title="全选" /></th>
                     <th>卡密编号</th>
                     <th>套餐配额</th>
                     <th>套餐属性</th>
@@ -474,13 +460,13 @@
                   <tr v-for="c in adminCards" :key="c.code">
                     <td style="text-align: center;"><input type="checkbox" :value="c.code" v-model="selectedCards" /></td>
                     <td class="font-mono text-cyan">{{ c.code }}</td>
-                    <td style="white-space: nowrap;">{{ c.traffic_gb === 0 ? '♾️ 不限' : c.traffic_gb + ' GB' }} / {{ c.days >= 3650 ? '永久' : c.days + ' 天' }}</td>
+                    <td>{{ c.traffic_gb === 0 ? '♾️ 不限' : c.traffic_gb + ' GB' }} / {{ c.days >= 3650 ? '永久' : c.days + ' 天' }}</td>
                     <td>
                       <span v-if="c.is_monthly === 1" class="badge badge-monthly">每月重置</span>
                       <span v-else class="text-muted" style="font-size: 11px;">普通固定</span>
                     </td>
                     <td><span class="badge" :class="c.is_used ? 'badge-used' : 'badge-ready'">{{ c.is_used ? '已核销' : '待售/有效' }}</span></td>
-                    <td class="text-muted" style="white-space: nowrap;">{{ c.created_at || '早期' }}</td>
+                    <td class="text-muted">{{ c.created_at || '早期' }}</td>
                     <td>{{ c.used_by || '-' }}</td>
                     <td><button class="btn-sm btn-action" @click="copyText(c.code)">复制</button></td>
                   </tr>
@@ -520,15 +506,81 @@
           </div>
         </div>
 
-        <!-- 主选项卡 4: 系统设置 -->
+        <!-- 主选项卡 4: 系统设置 (集成 HTTPS 与 ACME 模块) -->
         <div v-else-if="activeTab === 'settings'" class="cyber-card tab-content-card">
           <div class="card-header" style="margin-bottom: 22px;">
-            <h3>⚙️ 系统发信、定时巡检与全局设置</h3>
-            <button class="btn-cyber-success" @click="saveAllSettings">💾 保存系统设置</button>
+            <h3>⚙️ 系统发信、定时巡检、HTTPS 证书与全局设置</h3>
+            <button class="btn-cyber-success" @click="saveAllSettings">💾 保存全部配置</button>
           </div>
 
           <div class="settings-2col-layout">
             <div class="column-stack">
+              <!-- 核心新增：HTTPS 证书与 ACME 自动申请管理 -->
+              <div class="panel-card">
+                <div class="panel-card-header">
+                  <div class="panel-title-wrap">
+                    <span class="panel-icon">🔐</span>
+                    <div>
+                      <strong class="panel-title">HTTPS 安全证书与 ACME 管理</strong>
+                      <div class="panel-sub">管理 /data/certs 证书与 Let's Encrypt 自动签发</div>
+                    </div>
+                  </div>
+                  <button class="btn-sm btn-action" @click="loadCertInfo">🔄 检查状态</button>
+                </div>
+
+                <!-- 证书状态横幅 -->
+                <div class="smtp-status-box" :class="certInfo.is_self_signed ? 'smtp-empty' : 'smtp-ready'" style="margin-bottom: 14px;">
+                  <div v-if="certInfo.is_self_signed">
+                    ⚠️ <b>当前正在使用自签名证书 (10年期)</b>
+                    <div style="font-size: 11px; margin-top: 2px;">浏览器首次访问会显示不安全提示；可开启下方 ACME 签发免费受信任证书。</div>
+                  </div>
+                  <div v-else-if="certInfo.status === 'valid'">
+                    🟢 <b>当前证书工作正常 (受信任证书)</b>
+                    <div style="font-size: 11px; margin-top: 2px;">签发机构: {{ certInfo.issuer }} | 剩余天数: {{ certInfo.days_left }} 天</div>
+                  </div>
+                  <div v-else>
+                    ⚪ 证书状态未知，开机将自动生成自签名证书兜底。
+                  </div>
+                </div>
+
+                <!-- ACME 自动签发模块 (默认关闭) -->
+                <div class="form-item">
+                  <label class="radio-label" style="font-weight: 600;">
+                    <input type="checkbox" v-model="settingsForm.acme_enable" @change="saveAllSettings" />
+                    <span :style="{ color: settingsForm.acme_enable ? '#10b981' : '#94a3b8' }">
+                      {{ settingsForm.acme_enable ? '🟢 ACME 自动签发功能：已开启' : '⚪ ACME 自动签发功能：已停用 (默认关闭)' }}
+                    </span>
+                  </label>
+                </div>
+
+                <div v-if="settingsForm.acme_enable" style="background: rgba(56, 189, 248, 0.05); border: 1px dashed rgba(56, 189, 248, 0.3); border-radius: 8px; padding: 14px; margin-bottom: 14px;">
+                  <div class="form-item">
+                    <label>解析到本机的域名 (Domain)：</label>
+                    <input v-model="settingsForm.acme_domain" type="text" class="cyber-input" placeholder="例如: panel.example.com" />
+                  </div>
+                  <div class="form-item">
+                    <label>Let's Encrypt 登记邮箱 (Email)：</label>
+                    <input v-model="settingsForm.acme_email" type="email" class="cyber-input" placeholder="admin@example.com" />
+                  </div>
+                  <button class="btn-cyber-primary" :disabled="issuingAcme" style="width: auto; padding: 8px 18px; font-size: 12px;" @click="handleApplyAcme">
+                    {{ issuingAcme ? '正在申请证书，请稍候...' : '⚡ 一键向 Let\'s Encrypt 申请/续签证书' }}
+                  </button>
+                  <div class="input-hint" style="margin-top: 6px;">
+                    💡 签发前提：域名必须已解析到本机 IP，且 HTTP-01 验证路由可正常连通。
+                  </div>
+                </div>
+
+                <!-- 自定义证书手动粘贴导入 -->
+                <div class="inner-divider">
+                  <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+                    <div class="inner-divider-title" style="margin: 0;">📋 手动粘贴第三方证书 (可选)</div>
+                    <button class="btn-link-action" @click="showCustomCertModal = true">打开粘贴窗口</button>
+                  </div>
+                  <div class="input-hint">如果您已有证书文件，可直接粘贴覆盖到 <code>/data/certs/cert.pem</code> 和 <code>key.pem</code>。</div>
+                </div>
+              </div>
+
+              <!-- 系统公告与新用户默认配额 -->
               <div class="panel-card">
                 <div class="panel-card-header">
                   <div class="panel-title-wrap"><span class="panel-icon">📢</span><strong class="panel-title">系统公告与新用户默认配额</strong></div>
@@ -548,7 +600,10 @@
                   </div>
                 </div>
               </div>
+            </div>
 
+            <div class="column-stack">
+              <!-- 管理员通知通道与改密 -->
               <div class="panel-card">
                 <div class="panel-card-header">
                   <div class="panel-title-wrap"><span class="panel-icon">👤</span><strong class="panel-title">管理员通知通道与改密</strong></div>
@@ -572,13 +627,12 @@
                   <div class="inner-divider-title">🔑 修改管理员自身登录密码</div>
                   <div class="form-item" style="margin-bottom: 8px;"><input v-model="pwdForm.old_pwd" type="password" class="cyber-input" placeholder="当前原密码" /></div>
                   <div class="form-item" style="margin-bottom: 8px;"><input v-model="pwdForm.new_pwd" type="password" class="cyber-input" placeholder="新密码" /></div>
-                  <div class="form-item" style="margin-bottom: 12px;"><input v-model="pwdForm.confirm_pwd" type="password" class="cyber-input" placeholder="再次确认新密码" /></div>
+                  <div class="form-item" style="margin-bottom: 12px;"><input v-model="pwdForm.confirm_pwd" type="password" class="cyber-input" placeholder="确认新密码" /></div>
                   <button class="btn-cyber-primary" style="width: auto; padding: 7px 20px; font-size: 12px;" @click="submitChangePassword">确认变更密码</button>
                 </div>
               </div>
-            </div>
 
-            <div class="column-stack">
+              <!-- 定时巡检与每月流量重置 -->
               <div class="panel-card">
                 <div class="panel-card-header">
                   <div class="panel-title-wrap"><span class="panel-icon">⏰</span><strong class="panel-title">定时巡检与每月流量重置</strong></div>
@@ -607,6 +661,7 @@
                 </div>
               </div>
 
+              <!-- SMTP 发信服务器参数配置 -->
               <div class="panel-card">
                 <div class="panel-card-header">
                   <div class="panel-title-wrap"><span class="panel-icon">📧</span><strong class="panel-title">SMTP 发信服务器参数配置</strong></div>
@@ -699,6 +754,26 @@
         </div>
       </div>
     </div>
+
+    <!-- 弹窗 4：手动粘贴上传证书 PEM 弹窗 -->
+    <div v-if="showCustomCertModal" class="modal-backdrop" @click="showCustomCertModal = false">
+      <div class="cyber-modal" style="max-width: 520px; text-align: left;" @click.stop>
+        <h3>📋 手动安装第三方 HTTPS 证书</h3>
+        <p class="modal-tip">直接粘贴 PEM 编码的证书与私钥，将覆盖写入 <code>/data/certs/</code> 目录：</p>
+        <div class="form-item">
+          <label>公钥证书 (cert.pem / fullchain.pem)</label>
+          <textarea v-model="customCertPem" rows="6" class="cyber-input cyber-textarea" placeholder="-----BEGIN CERTIFICATE-----..."></textarea>
+        </div>
+        <div class="form-item">
+          <label>私钥 (key.pem / privkey.pem)</label>
+          <textarea v-model="customKeyPem" rows="6" class="cyber-input cyber-textarea" placeholder="-----BEGIN RSA PRIVATE KEY-----..."></textarea>
+        </div>
+        <div class="btn-group" style="justify-content: flex-end; margin-top: 20px;">
+          <button class="btn-cyber-action" @click="showCustomCertModal = false">取消</button>
+          <button class="btn-cyber-success" @click="handleSaveCustomCert">保存并载入证书</button>
+        </div>
+      </div>
+    </div>
   </div>
 </template>
 
@@ -716,7 +791,6 @@ const cardSubTab = ref('inventory')
 const authMode = ref('login')
 const countdown = ref(0)
 const sendingCode = ref(false)
-const downloadingClient = ref(false)
 const systemNotice = ref('')
 
 const showQrModal = ref(false)
@@ -729,6 +803,13 @@ const editForm = reactive({ username: '', limit_mb: 1024, expire_date: '', is_mo
 const showResetPwdModal = ref(false)
 const resetTargetUser = ref('')
 const resetNewPassword = ref('')
+
+// HTTPS 证书状态与 ACME 引用
+const certInfo = ref({ status: 'none', is_self_signed: true, issuer: '', days_left: 0 })
+const issuingAcme = ref(false)
+const showCustomCertModal = ref(false)
+const customCertPem = ref('')
+const customKeyPem = ref('')
 
 const currentUser = reactive({ username: '', email: '', role: '', used_mb: 0, limit_mb: 0, expire_date: '', is_monthly: 0, reset_day: 1, sub_url: '', nodes: [] })
 const authForm = reactive({ username: '', email: '', code: '', password: '' })
@@ -756,6 +837,10 @@ const settingsForm = reactive({
   task_last_run: '尚未执行',
   faka_api_enable: true,
   faka_api_token: 'faka_secret_token_8899',
+  node_key: 'xray_cluster_secret_key_2026',
+  acme_enable: false,
+  acme_domain: '',
+  acme_email: '',
   system_notice: '',
   reg_traffic_mb: 1024,
   reg_expire_days: 1
@@ -783,6 +868,7 @@ onMounted(async () => {
         if (currentUser.role === 'admin') {
           loadAdminData()
           openNodesTab()
+          loadCertInfo()
         }
       }
     } catch (_) {
@@ -855,7 +941,7 @@ const generateRandomToken = () => {
   ElMessage.success('已随机生成新出卡 Token')
 }
 
-// 导出底层
+// 统一导出底层 (全局唯一声明)
 const executeExport = async (payload, successTip) => {
   try {
     const adminUser = currentUser.username || authForm.username
@@ -876,19 +962,16 @@ const executeExport = async (payload, successTip) => {
   }
 }
 
-// 唯一保留：勾选导出
 const exportSelectedCards = () => {
-  if (selectedCards.value.length === 0) return ElMessage.warning('请先在表格左侧勾选要导出的卡密')
+  if (selectedCards.value.length === 0) return ElMessage.warning('请先勾选要导出的卡密')
   executeExport({ selected_codes: selectedCards.value }, '已复制选中的卡密')
 }
 
-// 唯一保留：日期范围导出
 const exportByDateRange = () => {
   if (!exportFilter.startDate && !exportFilter.endDate) return ElMessage.warning('请先选择日期范围')
   executeExport({ start_date: exportFilter.startDate, end_date: exportFilter.endDate }, '已导出指定日期范围内的未售卡密')
 }
 
-// 唯一保留：全部未售导出
 const exportAllUnusedCards = () => executeExport({}, '已复制全部未售卡密')
 
 const startCountdown = () => {
@@ -1123,7 +1206,7 @@ const submitChangePassword = async () => {
 
 const downloadWindowsClient = (nodeId = '', nodeName = '') => {
   if (!currentUser.username) return ElMessage.warning('用户未就绪')
-  ElMessage.info(`正在为您打包 ${nodeName || '默认节点'} 的 Windows 开箱即用客户端...`)
+  ElMessage.info(`正在为您打包 ${nodeName || '默认节点'} 的客户端...`)
 
   const downloadUrl = `/api/user/download_client?username=${encodeURIComponent(currentUser.username)}&node_id=${nodeId}`
   const a = document.createElement('a')
@@ -1167,26 +1250,6 @@ const saveNodeName = async (node) => {
   }
 }
 
-const resetNodeKey = async (node) => {
-  if (!confirm(`确定要重置节点 [${node.name}] 的通信密钥 (Node Key) 吗？\n重置后节点将在 60 秒内通过心跳自动同步新密钥。`)) return
-  try {
-    const adminUser = currentUser.username || authForm.username
-    const res = await axios.post('/api/admin/nodes/reset_key', {
-      admin_user: adminUser,
-      admin_pwd: authForm.password,
-      node_id: node.node_id
-    })
-    if (res.data.code === 200) {
-      ElMessage.success(res.data.msg)
-      openNodesTab()
-    } else {
-      ElMessage.error(res.data.msg)
-    }
-  } catch (_) {
-    ElMessage.error('重置密钥失败')
-  }
-}
-
 const deleteNode = async (nodeId) => {
   if (!confirm('确定要从集群中移除该节点吗？')) return
   try {
@@ -1202,6 +1265,69 @@ const deleteNode = async (nodeId) => {
     }
   } catch (_) {
     ElMessage.error('移除失败')
+  }
+}
+
+// 证书管理与 ACME 接口
+const loadCertInfo = async () => {
+  try {
+    const adminUser = currentUser.username || authForm.username
+    const res = await axios.post('/api/admin/cert/info', {
+      admin_user: adminUser,
+      admin_pwd: authForm.password
+    })
+    if (res.data.code === 200) {
+      certInfo.value = res.data.data
+    }
+  } catch (_) {}
+}
+
+const handleApplyAcme = async () => {
+  if (!settingsForm.acme_domain) return ElMessage.warning('请填写解析到本机的域名')
+  issuingAcme.value = true
+  ElMessage.info('正在请求 Let\'s Encrypt 执行 HTTP 验证，过程可能需要 15~30 秒...')
+  try {
+    const adminUser = currentUser.username || authForm.username
+    const res = await axios.post('/api/admin/cert/acme', {
+      admin_user: adminUser,
+      admin_pwd: authForm.password,
+      domain: settingsForm.acme_domain,
+      email: settingsForm.acme_email
+    })
+    if (res.data.code === 200) {
+      ElMessage.success(res.data.msg)
+      loadCertInfo()
+    } else {
+      ElMessage.error(res.data.msg)
+    }
+  } catch (_) {
+    ElMessage.error('证书申请请求失败')
+  } finally {
+    issuingAcme.value = false
+  }
+}
+
+const handleSaveCustomCert = async () => {
+  if (!customCertPem.value || !customKeyPem.value) return ElMessage.warning('请粘贴完整的证书和私钥 PEM 内容')
+  try {
+    const adminUser = currentUser.username || authForm.username
+    const res = await axios.post('/api/admin/cert/custom', {
+      admin_user: adminUser,
+      admin_pwd: authForm.password,
+      cert_pem: customCertPem.value,
+      key_pem: customKeyPem.value
+    })
+    if (res.data.code === 200) {
+      ElMessage.success(res.data.msg)
+      showCustomCertModal.value = false
+      customCertPem.value = ''
+      customKeyPem.value = ''
+      loadCertInfo()
+    } else {
+      ElMessage.error(res.data.msg)
+    }
+  } catch (_) {
+    ElMessage.error('证书上传验证失败')
   }
 }
 
@@ -1227,10 +1353,14 @@ const openSettingsTab = async () => {
       settingsForm.task_last_run = d.task_last_run || '尚未执行'
       settingsForm.faka_api_enable = d.faka_api_enable === 'true'
       settingsForm.faka_api_token = d.faka_api_token || 'faka_secret_token_8899'
+      settingsForm.acme_enable = d.acme_enable === 'true'
+      settingsForm.acme_domain = d.acme_domain || ''
+      settingsForm.acme_email = d.acme_email || ''
       settingsForm.system_notice = d.system_notice || ''
       settingsForm.reg_traffic_mb = Number(d.reg_traffic_mb) || 1024
       settingsForm.reg_expire_days = Number(d.reg_expire_days) || 1
     }
+    loadCertInfo()
   } catch (_) {}
 }
 
@@ -1243,7 +1373,8 @@ const saveAllSettings = async () => {
       ...settingsForm,
       smtp_ssl: settingsForm.smtp_ssl ? 'true' : 'false',
       task_notify_enable: settingsForm.task_notify_enable ? 'true' : 'false',
-      faka_api_enable: settingsForm.faka_api_enable ? 'true' : 'false'
+      faka_api_enable: settingsForm.faka_api_enable ? 'true' : 'false',
+      acme_enable: settingsForm.acme_enable ? 'true' : 'false'
     })
     if (res.data.code === 200) {
       ElMessage.success(res.data.msg)
@@ -1348,6 +1479,7 @@ const handleAuth = async () => {
         if (currentUser.role === 'admin') {
           loadAdminData()
           openNodesTab()
+          loadCertInfo()
         }
       }
     } else {
@@ -1442,7 +1574,7 @@ const logout = () => {
 .dashboard-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
 .col-span-2 { grid-column: span 2; }
 
-/* 节点卡片流式网格 */
+/* 多节点卡片网格 */
 .node-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));

@@ -90,7 +90,7 @@ else
     echo "$NODE_ID" > "$NODE_ID_FILE"
 fi
 
-# 核心清洗：剥离 PANEL_URL 里的所有实体引号与末尾斜杠
+# 核心清洗：剥离 PANEL_URL 里的实体引号与末尾斜杠
 if [ -n "$PANEL_URL" ]; then
     PANEL_URL=$(echo "$PANEL_URL" | tr -d '"'\'' ' | sed 's|/*$||')
 fi
@@ -107,13 +107,13 @@ else
     echo "==> [Node Key] 首次启动自动生成通信密钥: $NODE_KEY"
 fi
 
-# 4. 远程协同守护进程
+# 4. 远程协同守护进程 (全面增加 -k 保证支持 HTTPS 与自签证书)
 remote_agent_loop() {
     echo "==> [Cluster Node] 开始连接主控 (地址: $PANEL_URL, 节点ID: $NODE_ID)..."
 
     while true; do
-        # 发送心跳、公钥与 ShortId，带详细报错捕获
-        HB_RESP=$(curl -s -X POST "${PANEL_URL}/api/node/heartbeat" \
+        # 1. 发送心跳、公钥与 ShortId，带 -k 信任参数，避免 HTTPS 自签名证书抛出 60 报错
+        HB_RESP=$(curl -k -s -X POST "${PANEL_URL}/api/node/heartbeat" \
              -H "Content-Type: application/json" \
              --connect-timeout 8 \
              --max-time 15 \
@@ -133,8 +133,8 @@ remote_agent_loop() {
             echo "==> [Cluster Node] 收到主控新密钥，已成功更新本地密钥！"
         fi
 
-        # 拉取全站最新合法用户名单
-        USER_RESP=$(curl -s --connect-timeout 8 --max-time 15 "${PANEL_URL}/api/node/sync?node_id=${NODE_ID}&token=${NODE_KEY}" 2>&1 || true)
+        # 2. 拉取全站最新合法用户名单 (带 -k 参数)
+        USER_RESP=$(curl -k -s --connect-timeout 8 --max-time 15 "${PANEL_URL}/api/node/sync?node_id=${NODE_ID}&token=${NODE_KEY}" 2>&1 || true)
         if echo "$USER_RESP" | grep -q '"code":200'; then
             REMOTE_USERS=$(echo "$USER_RESP" | jq '.users')
             TMP_SYNC="/tmp/config.agent.sync.json"
@@ -154,11 +154,11 @@ remote_agent_loop() {
             fi
         fi
 
-        # 统计增量流量回传主控
+        # 3. 统计增量流量回传主控 (带 -k 参数)
         TRAFFIC_RAW=$(/usr/bin/xray api statsquery --server=127.0.0.1:10085 -pattern "user>>>" -reset=true 2>/dev/null || true)
         if [ -n "$TRAFFIC_RAW" ] && echo "$TRAFFIC_RAW" | grep -q "stat"; then
             TRAFFIC_PAYLOAD=$(echo "$TRAFFIC_RAW" | jq '[.stat[]? | {username: (.name | split(">>>")[1]), bytes: (.value | tonumber)}]')
-            curl -s -X POST "${PANEL_URL}/api/node/traffic" \
+            curl -k -s -X POST "${PANEL_URL}/api/node/traffic" \
                  -H "Content-Type: application/json" \
                  --connect-timeout 8 \
                  --max-time 15 \

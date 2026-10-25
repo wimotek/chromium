@@ -14,6 +14,14 @@ from config import Config
 from db import init_db, get_db, hash_pwd, get_setting, set_setting
 from notify import send_smtp_email, send_serverchan_msg, notify_user
 from client_pack import generate_windows_package
+from cert_manager import (
+    ensure_certificates,
+    get_cert_info,
+    save_custom_certificate,
+    issue_acme_certificate,
+    generate_self_signed_cert,
+    CHALLENGE_DIR
+)
 
 app = Flask(__name__, static_folder='../frontend/dist', static_url_path='/')
 init_db()
@@ -24,6 +32,12 @@ def build_node_link(uuid_str: str, node: dict, remark: str) -> str:
         f"?security=reality&encryption=none&pbk={node['pbk']}&headerType=none&fp=chrome"
         f"&type=tcp&flow=xtls-rprx-vision&sni={node['sni']}&sid={node['sid']}#{remark}"
     )
+
+# ==================== ACME Webroot 验证路由 ====================
+@app.route('/.well-known/acme-challenge/<path:filename>')
+def acme_challenge_token(filename):
+    """供 Let's Encrypt CA 服务器访问以验证域名所有权"""
+    return send_from_directory(CHALLENGE_DIR, filename)
 
 # ==================== 定时巡检与每月重置 ====================
 
@@ -167,7 +181,6 @@ def get_subscription():
 
 # ==================== 远程节点协同通信接口 ====================
 
-# 1. 节点心跳与公钥上报
 @app.route('/api/node/heartbeat', methods=['POST'])
 def node_heartbeat():
     data = request.json or {}
@@ -219,7 +232,6 @@ def node_heartbeat():
     conn.close()
     return jsonify({"code": 403, "msg": "Node Key 验证失败，请核对节点本地 /data/node_key.txt"}), 403
 
-# 2. 下发用户名单
 @app.route('/api/node/sync', methods=['GET'])
 def node_sync_users():
     node_id = request.args.get('node_id', '').strip()
@@ -239,7 +251,6 @@ def node_sync_users():
 
     return jsonify({"code": 200, "users": users})
 
-# 3. 接收流量回传并汇总扣除
 @app.route('/api/node/traffic', methods=['POST'])
 def node_report_traffic():
     data = request.json or {}
@@ -603,7 +614,6 @@ def admin_edit_node():
     conn.close()
     return jsonify({"code": 200, "msg": "节点信息已更新"})
 
-# 管理员一键重置指定节点的通信密钥 (Node Key)
 @app.route('/api/admin/nodes/reset_key', methods=['POST'])
 def admin_reset_node_key():
     data = request.json or {}
@@ -614,7 +624,6 @@ def admin_reset_node_key():
 
     conn = get_db()
     c = conn.cursor()
-    # 写入 pending_key，节点下次心跳（60秒内）将自动收到并替换本地文件
     c.execute("UPDATE nodes SET pending_key=? WHERE node_id=?", (new_key, node_id))
     conn.commit()
     conn.close()
@@ -761,7 +770,43 @@ def delete_user():
     conn.close()
     return jsonify({"code": 200, "msg": f"用户 [{target_user}] 已被彻底删除"})
 
-# ==================== 管理员系统设置 ====================
+# ==================== 管理员系统与证书管理 ====================
+
+@app.route('/api/admin/cert/info', methods=['POST'])
+def admin_cert_info():
+    data = request.json or {}
+    if not check_admin(data.get('admin_user'), data.get('admin_pwd')): return jsonify({"code": 403, "msg": "无权限"})
+    return jsonify({"code": 200, "data": get_cert_info()})
+
+@app.route('/api/admin/cert/custom', methods=['POST'])
+def admin_cert_custom():
+    data = request.json or {}
+    if not check_admin(data.get('admin_user'), data.get('admin_pwd')): return jsonify({"code": 403, "msg": "无权限"})
+    cert_pem = data.get("cert_pem", "")
+    key_pem = data.get("key_pem", "")
+
+    ok, msg = save_custom_certificate(cert_pem, key_pem)
+    if ok: return jsonify({"code": 200, "msg": msg})
+    return jsonify({"code": 500, "msg": msg})
+
+@app.route('/api/admin/cert/acme', methods=['POST'])
+def admin_cert_acme():
+    data = request.json or {}
+    if not check_admin(data.get('admin_user'), data.get('admin_pwd')): return jsonify({"code": 403, "msg": "无权限"})
+
+    domain = data.get("domain", "").strip()
+    email = data.get("email", "").strip()
+
+    ok, msg = issue_acme_certificate(domain, email)
+    if ok: return jsonify({"code": 200, "msg": msg})
+    return jsonify({"code": 500, "msg": msg})
+
+@app.route('/api/admin/cert/self_signed', methods=['POST'])
+def admin_cert_self_signed():
+    data = request.json or {}
+    if not check_admin(data.get('admin_user'), data.get('admin_pwd')): return jsonify({"code": 403, "msg": "无权限"})
+    generate_self_signed_cert()
+    return jsonify({"code": 200, "msg": "已重新生成 10 年期自签证书"})
 
 @app.route('/api/admin/settings', methods=['GET', 'POST'])
 def handle_settings():
@@ -793,6 +838,9 @@ def handle_settings():
                 "task_last_run": get_setting("task_last_run", "尚未执行"),
                 "faka_api_enable": get_setting("faka_api_enable", "true"),
                 "faka_api_token": get_setting("faka_api_token", Config.FAKA_API_TOKEN),
+                "acme_enable": get_setting("acme_enable", "false"),
+                "acme_domain": get_setting("acme_domain", ""),
+                "acme_email": get_setting("acme_email", ""),
                 "system_notice": get_setting("system_notice", ""),
                 "reg_traffic_mb": get_setting("reg_traffic_mb", "1024"),
                 "reg_expire_days": get_setting("reg_expire_days", "1")
@@ -808,8 +856,8 @@ def handle_settings():
 
         keys = ["smtp_host", "smtp_port", "smtp_user", "smtp_sender", "smtp_ssl",
                 "task_notify_enable", "task_interval_hours", "task_traffic_threshold", "task_expire_days",
-                "faka_api_enable", "faka_api_token", "system_notice",
-                "reg_traffic_mb", "reg_expire_days"]
+                "faka_api_enable", "faka_api_token", "acme_enable", "acme_domain", "acme_email",
+                "system_notice", "reg_traffic_mb", "reg_expire_days"]
         for k in keys:
             if k in data:
                 set_setting(k, str(data[k]).strip())
@@ -840,4 +888,11 @@ def check_admin(u, p):
     return r and r['role'] == 'admin'
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=Config.WEB_PORT)
+    # 核心：开机载入 /data/certs 证书以原生 HTTPS 启动！
+    cert_path, key_path = ensure_certificates()
+    print(f"==> [HTTPS] 正在以 HTTPS 加密协议启动面板 (端口: {Config.WEB_PORT})...", flush=True)
+    app.run(
+        host='0.0.0.0',
+        port=Config.WEB_PORT,
+        ssl_context=(cert_path, key_path)
+    )

@@ -15,6 +15,7 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     curl \
+    openssl \
     && rm -rf /var/lib/apt/lists/*
 
 COPY app/backend/requirements.txt ./backend/
