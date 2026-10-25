@@ -20,6 +20,7 @@ from cert_manager import (
     save_custom_certificate,
     issue_acme_certificate,
     generate_self_signed_cert,
+    auto_renew_acme_job,
     CHALLENGE_DIR
 )
 
@@ -33,11 +34,13 @@ def build_node_link(uuid_str: str, node: dict, remark: str) -> str:
         f"&type=tcp&flow=xtls-rprx-vision&sni={node['sni']}&sid={node['sid']}#{remark}"
     )
 
+# ==================== ACME Webroot 挑战路由 ====================
 @app.route('/.well-known/acme-challenge/<path:filename>')
 def acme_challenge_token(filename):
+    """供 Let's Encrypt CA 服务器访问以验证域名所有权"""
     return send_from_directory(CHALLENGE_DIR, filename)
 
-# ==================== 定时巡检与每月重置 ====================
+# ==================== 定时巡检、每月重置与证书自动续签 ====================
 
 def run_scheduled_check(force=False) -> tuple[int, int, str]:
     enable = get_setting("task_notify_enable", "true").lower() == "true"
@@ -59,6 +62,7 @@ def run_scheduled_check(force=False) -> tuple[int, int, str]:
     for u in users:
         uname = u["username"]
 
+        # 1. 每月固定套餐重置
         if u.get("is_monthly") == 1:
             reset_day = u.get("reset_day", 1) or 1
             if current_day == reset_day or force:
@@ -74,6 +78,7 @@ def run_scheduled_check(force=False) -> tuple[int, int, str]:
         used_mb = u.get("used_mb", 0)
         limit_mb = u.get("traffic_limit_mb", 1024)
 
+        # 2. 流量不足告警
         if limit_mb > 0:
             used_percent = round((used_mb / limit_mb) * 100, 1)
             if used_percent >= traffic_threshold:
@@ -87,6 +92,7 @@ def run_scheduled_check(force=False) -> tuple[int, int, str]:
                         c.execute("INSERT INTO notify_logs (username, warn_type, sent_date) VALUES (?, 'traffic', ?)", (uname, today_str))
                         conn.commit()
 
+        # 3. 到期预警
         exp_str = u.get("expire_date", "").strip()
         if exp_str and not exp_str.startswith("2099"):
             try:
@@ -115,8 +121,12 @@ def scheduled_worker_loop():
         try:
             interval_hours = int(get_setting("task_interval_hours", "12") or 12)
             run_scheduled_check(force=False)
-        except Exception:
-            pass
+
+            # 核心新增：每轮自动检测 HTTPS 证书是否快到期（<=20天自动触发续签）
+            auto_renew_acme_job()
+        except Exception as e:
+            print(f"[Worker Error] {e}", flush=True)
+
         time.sleep(max(3600, interval_hours * 3600))
 
 threading.Thread(target=scheduled_worker_loop, daemon=True).start()
@@ -176,6 +186,56 @@ def get_subscription():
         "Subscription-Userinfo": f"upload=0; download={int(user['used_mb']*1024*1024)}; total={int(user['traffic_limit_mb']*1024*1024)}; expire={user['expire_date']}"
     }
 
+# ==================== 第三方发卡 API 实时出卡 ====================
+
+@app.route('/api/open/faka_generate', methods=['GET', 'POST'])
+def open_faka_generate():
+    is_enabled = get_setting("faka_api_enable", "true").lower() == "true"
+    if not is_enabled:
+        return jsonify({"code": 403, "msg": "第三方发卡 API 接口已被管理员禁用"}), 403
+
+    req_token = request.headers.get("Authorization") or request.args.get("token")
+    if not req_token and request.is_json:
+        req_token = (request.json or {}).get("token")
+
+    if req_token and req_token.startswith("Bearer "):
+        req_token = req_token[7:].strip()
+
+    valid_token = get_setting("faka_api_token", Config.FAKA_API_TOKEN).strip()
+    if not req_token or req_token.strip() != valid_token:
+        return jsonify({"code": 403, "msg": "Invalid API Token"}), 403
+
+    gb_param = request.args.get("gb") or (request.json or {}).get("gb") if request.is_json else None
+    days_param = request.args.get("days") or (request.json or {}).get("days") if request.is_json else None
+    is_monthly_param = request.args.get("is_monthly") or (request.json or {}).get("is_monthly") if request.is_json else 0
+
+    try:
+        traffic_gb = int(gb_param or 100)
+        days = int(days_param or 30)
+        is_monthly = 1 if str(is_monthly_param) in ["1", "true"] else 0
+    except ValueError:
+        traffic_gb, days, is_monthly = 100, 30, 0
+
+    code = "KM-" + str(uuid.uuid4()).replace("-", "")[:12].upper()
+    now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("INSERT INTO cards VALUES (?, ?, ?, 0, NULL, ?, ?)", (code, traffic_gb, days, now, is_monthly))
+    conn.commit()
+    conn.close()
+
+    if request.args.get("format") == "json":
+        return jsonify({
+            "code": 200,
+            "card": code,
+            "traffic_gb": traffic_gb,
+            "days": days,
+            "is_monthly": is_monthly
+        })
+
+    return code, 200, {"Content-Type": "text/plain; charset=utf-8"}
+
 # ==================== 远程节点协同通信接口 ====================
 
 @app.route('/api/node/heartbeat', methods=['POST'])
@@ -227,7 +287,6 @@ def node_heartbeat():
     conn.close()
     return jsonify({"code": 403, "msg": "Node Key 验证失败，请核对节点本地 /data/node_key.txt"}), 403
 
-# 核心升级：双向配置同步，下发用户名单同时下发节点监听与伪装参数
 @app.route('/api/node/sync', methods=['GET'])
 def node_sync_users():
     node_id = request.args.get('node_id', '').strip()
@@ -245,7 +304,6 @@ def node_sync_users():
     users = [{"id": u["uuid"], "flow": "xtls-rprx-vision", "email": u["username"]} for u in c.fetchall()]
     conn.close()
 
-    # 同时下发主控后台调整的节点参数，供节点自动动态热更
     node_config = {
         "port": node["port"],
         "dest": node["dest"] or "www.microsoft.com:443",
@@ -284,7 +342,7 @@ def node_report_traffic():
     conn.close()
     return jsonify({"code": 200, "msg": "流量同步成功"})
 
-# ==================== 用户端与节点交互 ====================
+# ==================== 用户端操作 ====================
 
 @app.route('/api/user/refresh_info', methods=['POST'])
 def user_refresh_info():
@@ -389,8 +447,6 @@ def login():
             "serverchan_key": user['serverchan_key'] or ''
         }
     })
-
-# ==================== 用户认证与操作 ====================
 
 @app.route('/api/auth/send_register_code', methods=['POST'])
 def send_register_code():
@@ -647,7 +703,6 @@ def admin_list_nodes():
     conn.close()
     return jsonify({"code": 200, "data": nodes})
 
-# 管理员在线修改节点参数：实时同步到用户订阅与远程节点
 @app.route('/api/admin/nodes/save_config', methods=['POST'])
 def admin_save_node_config():
     data = request.json or {}
@@ -675,7 +730,6 @@ def admin_save_node_config():
 
     return jsonify({"code": 200, "msg": "节点配置已更新！用户订阅已即时生效，远程节点将在下次回传时自动热重载。"})
 
-# 彻底吊销拉黑并删除节点 (防止自动冒出)
 @app.route('/api/admin/nodes/revoke_delete', methods=['POST'])
 def admin_revoke_delete_node():
     data = request.json or {}
@@ -684,7 +738,6 @@ def admin_revoke_delete_node():
     node_id = data.get('node_id')
     conn = get_db()
     c = conn.cursor()
-    # 彻底物理删除记录，并记录被吊销的 node_id
     c.execute("DELETE FROM nodes WHERE node_id=?", (node_id,))
     conn.commit()
     conn.close()
@@ -758,7 +811,6 @@ def export_unused_cards():
     conn.close()
     return jsonify({"code": 200, "count": len(cards), "text": "\n".join(cards)})
 
-# 管理员获取用户列表同时构造专属订阅凭证
 @app.route('/api/admin/data', methods=['POST'])
 def admin_data():
     data = request.json or {}
@@ -781,7 +833,6 @@ def admin_data():
     for r in raw_users:
         d = dict(r)
         d['sub_url'] = f"{host_prefix}/api/sub?token={d['uuid']}"
-        # 组装各个节点的独立链接
         d['node_links'] = []
         for n in active_nodes:
             d['node_links'].append({
