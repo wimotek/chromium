@@ -1,196 +1,175 @@
-# Xray REALITY 可视化智能商业运营套件 (Vue 3 + FastAPI/Flask + SQLite3 专属版)
+# Xray Reality 分布式多节点管理中枢 (Xray-Web & Xray-Core)
 
-本项目是基于 **Xray-core (VLESS-Reality-Vision)**、**Vue 3 (Vite + Tailwind / Element Plus)**、**轻量 API 后端** 与 **SQLite3** 打造的现代化轻量级多用户商业网络节点管理面板。所有凭据由 SQLite3 驱动并严格持久化，具备免删数据无损修改端口、原子写入防 0 字节 EOF 崩溃特性，并实现**用户端自服务与管理端权限隔离**的商业闭环。
+基于 **Xray-core (VLESS-REALITY-Vision)** 打造的高性能分布式节点管理与商业化运营中枢。
 
-镜像地址：`wimotek/xray:web` 或 `ghcr.io/wimotek/xray:web`
-
----
-
-## ✨ 核心特性
-
-- **双重角色与安全隔离 (`APP_MODE`)**：
-  - `user`（默认模式）：仅启动 Xray 核心与**用户个人服务中心**，管理后台接口直接物理熔断（返回 404），彻底隐藏管理端指纹，杜绝全网端口扫描与爆破。
-  - `admin`：仅启动管理控制台，不启动 Xray，便于多节点跨地域或内网独立部署。
-  - `all`：单机全功能一体化模式，同时开放前台与管理后台。
-- **商用卡密发卡闭环**：
-  - 管理员可在后台按“流量（GB）+ 有效期（天）”批量生成兑换卡密，无缝对接各类自动发卡平台（爱发电、发卡云等）。
-  - 用户登录前台输入卡密即时扩容并延期，实现全自动无人值守运营。
-- **用户自服务仪表盘**：
-  - 动态可视化展示**剩余流量百分比（已用 / 总配额）**与**套餐到期倒计时**。
-  - 展示服务端 REALITY 公钥，支持一键获取 `vless://` 链接与动态二维码扫码导入。
-- **REALITY 公钥自动推导与持久化**：
-  - 启动时自动基于服务端私钥通过 `xray x25519` 推导计算 Public Key，并固化至 `/data/public_key.txt`，**彻底解决前端公钥显示空白及重启后公钥变动的 Bug**。
-- **全平台剪贴板复制降级**：
-  - 集成底层兼容算法，在纯 HTTP IP 访问（非安全上下文）环境下也能 100% 成功一键复制节点，杜绝前端报错无反应。
-- **免删库动态配置同步**：
-  - 在 `docker-compose.yml` 中修改 `PORT` 或伪装域名 `DEST` 后，重启容器即可自动打补丁生效，**100% 保护已有用户名单与私钥不丢失**。
-- **严格持久化隔离 (`./data:/data`)**：
-  - 核心数据库 `/data/xray_web.db`、配置文件 `/data/config.json` 与公私密钥对统一持久化存储在宿主机 `./data` 目录下，容器升级或销毁数据零丢失。
+系统采用 **Master-Agent（主控中心 - 边缘工作节点）解耦架构**：
+* **`xray_web` (主控端)**：轻量化 Web 管理面板，负责用户生命周期、数据库、卡密核销、邮件通知、聚合订阅下发与节点集群调度；
+* **`xray_core` (节点端)**：高轻量（无 Python 依赖，仅约 30MB）边缘代理容器，部署于任意海外 VPS，自动向主控上报真实公钥、拉取用户名单并同步回传流量消耗。
 
 ---
 
-## 🚀 快速启动
+## 🌟 核心特性
 
-### 方式 A：使用 Docker Compose（推荐）
-
-在 `xray_web` 目录下创建 `docker-compose.yml`：
-
-```yaml
-services:
-  xray-web:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    container_name: xray-web
-    restart: unless-stopped
-    network_mode: "host"
-    environment:
-      - TZ=Asia/Shanghai
-      # 1. 运行模式: 生产默认使用 user (防公网扫描)，制卡维护时切为 all
-      - APP_MODE=user
-      - WEB_ENABLE=true
-      - WEB_PORT=3000
-      # 2. Xray 节点监听端口 (若 443 被占可任意修改为 8443)
-      - PORT=8443
-      - DEST=www.microsoft.com:443
-      - SERVER_NAMES=www.microsoft.com,microsoft.com
-      - AUTO_UPDATE=true
-      # 3. 初始管理员账号密码 (首次创建完成后，可将这两行直接删掉)
-      - ADMIN_USERNAME=my_private_admin
-      - ADMIN_PASSWORD=SuperStrongPassword#2026
-    volumes:
-      - ./data:/data
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "10m"
-        max-file: "3"
-```
-
-启动服务：
-```bash
-docker compose up -d
-```
+- 🌐 **分布式无感集群对接**：远程海外节点只需单条 Docker 指令即可接入主控，启动时自动推导并上报真实公钥（`pbk`）、`ShortId`、`IP` 与端口，**无需人工在服务器间复制任何密钥**。
+- 🔑 **通信密钥自动握手与重置**：节点启动可不填 `NODE_KEY`，首次接入自动生成唯一凭据；主控后台支持在线一键重置节点密钥，心跳自动下发热更。
+- 🔄 **多种套餐计费模式**：
+  - **普通固定套餐**：流量用完即止，支持有效期顺延；
+  - **每月固定流量套餐**：后台或发卡网可开出“每月重置卡”，定时线程在每月重置日自动向核心下发清零指令并推送微信/邮件提醒；
+  - **无限量 / 永久有效**：支持设置 `0 MB` 不限流量与 `2099` 永久有效，智能跳过告警骚扰。
+- 🔗 **聚合多节点订阅与一键导入**：
+  - 提供聚合订阅地址 `/api/sub?token=用户UUID`，直接导入 **v2rayN、Clash-Meta、Sing-box、Shadowrocket**，全节点自动就位并支持批量测速；
+  - 网页端支持单节点复制与专属高清 SVG 矢量二维码扫码。
+- 🖥️ **Windows 客户端开箱即用一键打包**：
+  - 用户可在前台一键下载为其个性化打包好的绿色版客户端（`.zip`）；
+  - 内置该节点专属配置与自动化批处理脚本，双击 `一键启动代理.bat` 自动改写系统代理翻墙，双击 `停止代理.bat` 恢复网络，纯小白零配置开箱即用。
+- 📢 **登录页系统公告**：后台富文本动态配置，即改即显；留空自动隐身，不占多余空间。
+- 🔌 **方案 C 第三方发卡网 API 实时出卡**：支持独角数卡等发卡平台在买家拍下时现场请求出卡（支持 `&is_monthly=1` 出月重置卡），实现 0 库存全自动发卡。
+- ⏰ **定时巡检与智能预警**：后台自动轮询全站用户配额与到期时限，支持 **SMTP 邮件** 与 **Server酱·Turbo（微信服务号推送）** 双通道精准告警。
+- 🔐 **完备用户中心与持久会话**：邮箱验证码注册/找回密码、密码自主变更、F5 刷新永不退登（`localStorage` 会话持久化）。
 
 ---
 
-### 方式 B：使用 Docker Run 命令行
+
+## 🚀 部署指南
+
+### 第一步：部署 `xray_web` 主控端
+
+> 建议部署在连接性良好的 Linux VPS（主控仅需 3000 端口，无需占用 443）。
+
+1. **克隆项目到服务器**：
+   ```bash
+   git clone https://github.com/wimotek/chromium.git
+   cd chromium/xray/xray_web
+   ```
+
+2. **检查或修改 `docker-compose.yml`**：
+   ```yaml
+   services:
+     xray-web:
+       build:
+         context: .
+         dockerfile: Dockerfile
+       container_name: xray-web-master
+       restart: unless-stopped
+       network_mode: "host"
+       environment:
+         - TZ=Asia/Shanghai
+         - APP_MODE=all
+         - WEB_PORT=3000
+         - NODE_KEY=xray_cluster_secret_key_2026   # 集群通信密钥 (可自定义)
+       volumes:
+         - ./data:/data
+   ```
+
+3. **启动主控容器**：
+   ```bash
+   docker compose up -d --build
+   ```
+
+4. **登录主控面板**：
+   - 访问地址：`http://<主控服务器IP>:3000`
+   - 查看初始管理员账密：
+     ```bash
+     docker logs xray-web-master | grep "初始管理员凭据" -A 3
+     ```
+   - 登录后台后，可在【系统发信与全局运维配置】中配置发件 SMTP 邮箱、节点通信密钥与系统公告。
+
+---
+
+### 第二步：在任意海外 VPS 接入 `xray_core` 工作节点
+
+> 纯核心节点极度轻量（内存占用约 20MB），零 Python 依赖。支持单台主控挂载数十台全球边缘节点。
+
+在海外节点 VPS 上执行如下一条 Docker 指令即可完成自动接入：
 
 ```bash
 docker run -d \
-  --name xray-web \
-  --restart unless-stopped \
+  --name xray-node \
+  --restart always \
   --network host \
-  -e APP_MODE=user \
-  -e WEB_ENABLE=true \
-  -e WEB_PORT=3000 \
-  -e WEB_PASSWORD=admin888 \
-  -e PORT=8443 \
-  -e DEST=www.microsoft.com:443 \
-  -e SERVER_NAMES=www.microsoft.com,microsoft.com \
+  -e PANEL_URL="http://<主控服务器IP>:3000" \
+  -e NODE_KEY="xray_cluster_secret_key_2026" \
+  -e PORT=443 \
+  -e DEST="www.microsoft.com:443" \
+  -e SERVER_NAMES="www.microsoft.com,microsoft.com" \
   -v $(pwd)/data:/data \
-  wimotek/xray:web
+  wimotek/xray:core
 ```
+
+#### 环境变量说明：
+| 变量名 | 说明 | 默认值 / 示例 |
+| :--- | :--- | :--- |
+| `PANEL_URL` | **[必填]** 主控 `xray_web` 的访问地址 | `http://1.2.3.4:3000` |
+| `NODE_KEY` | **[选填]** 节点通信密钥。若留空，节点首次启动将自动生成随机密钥并存入本地 `/data/node_key.txt` | `xray_cluster_secret_key_2026` |
+| `PORT` | 节点 Reality 监听端口 | `443` |
+| `DEST` | 伪装目标回落地址 | `www.microsoft.com:443` |
+| `SERVER_NAMES` | 伪装域名列表 (逗号分隔) | `www.microsoft.com,microsoft.com` |
+| `AUTO_UPDATE` | 每次容器启动是否检测并更新 Xray-core 官方最新核心 | `true` |
 
 ---
 
-## 🖥️ 面板使用与商业运营指南
+## 📱 客户端使用与订阅导入
 
-### 1. 普通用户端操作（默认开启，安全对外）
-- **访问入口**：浏览器打开 `http://<服务器IP>:3000`。
-- **注册与体验**：新用户可直接注册，系统自动分配独立 UUID、赠送初始体验流量与有效期。
-- **个人中心看板**：
-  - 动态查看已用流量、剩余可用配额及套餐到期时间。
-  - 查看当前节点 REALITY Public Key。
-  - **一键导入节点**：点击一键复制标准 `vless://` 链接，或直接扫码导入手机客户端。
-- **卡密自助充值**：
-  - 用户在发卡网购买卡密后，在页面输入 `KM-XXXXX` 卡密，系统即时自动增加流量配额并顺延有效期。
+用户在个人中心即可一览所有可用加速节点，提供多种开箱即用导入方案：
 
-### 2. 管理员控制台（制卡与监控）
-为了保障节点机安全，**生产环境下建议默认保持 `APP_MODE=user`**。需要制卡或管理用户时：
-1. 修改 `docker-compose.yml` 中的环境变量为 `APP_MODE=all`（或在管理机使用 `APP_MODE=admin`）。
-2. 执行 `docker compose up -d` 重新应用。
-3. 访问 `http://<服务器IP>:3000`，输入管理员账号 `admin` 与密码 `WEB_PASSWORD`（默认 `admin888`）进入后台：
-   - **批量生成卡密**：指定套餐流量（GB）、有效天数及制卡张数，一键导出用于发卡网售卖。
-   - **全站用户监控**：实时查看所有注册用户的已用流量、配额上限、到期时间，支持软开关启停凭证。
-4. **安全加固**：制卡或维护完成后，将 `APP_MODE` 切回 `user` 并重启，管理接口即刻物理熔断，外界扫描仅显示普通用户登录。
+### 方案 1：通用聚合订阅（推荐）
+点击用户界面的 **`🔗 一键复制全节点订阅链接`**，直接填入客户端订阅地址中，所有节点一次性批量导入：
+* **v2rayN (Windows)**：订阅设置 -> 添加订阅链接 -> 更新订阅
+* **Clash-Meta / Verge**：配置 -> 导入订阅 URL
+* **Sing-box / Shadowrocket (iOS)**：右上角添加 -> 类型选择 Subscribe 导入
 
-### 3. 纯代理模式（彻底关闭 Web）
-若服务器仅作为中继节点，无需任何网页界面：
-```yaml
-environment:
-  - WEB_ENABLE=false
-```
-重启后容器内将仅运行 Xray-core，Web 服务进程彻底关闭，不占用额外内存。
+### 方案 2：Windows 一键免配置开箱即用客户端
+1. 在网页端节点列表对应的卡片上，点击 **`🖥️ 下载客户端`**；
+2. 下载后直接解压压缩包；
+3. **双击运行 `一键启动代理(自动配置系统代理).bat`**，系统代理即刻自动激活，直接秒开 Google / YouTube；
+4. 退出时双击 `一键停止代理(关闭系统代理).bat`，自动还原 Windows 代理设置，不留任何垃圾。
 
 ---
 
-## 🛠️ 环境变量详细说明
+## 🛒 方案 C：第三方发卡网 API 自动出卡规范
+
+系统支持无库存实时出卡，完美兼容**独角数卡**等自动化发卡平台的“自定义插件”或“GET/POST 异步通知”。
+
+### 1. 接口规范
+* **请求方式**：`GET` 或 `POST`
+* **接口路径**：`/api/open/faka_generate`
+* **URL 示例**：
+  ```text
+  http://<主控IP>:3000/api/open/faka_generate?gb=100&days=30&is_monthly=1&token=你的Token
+  ```
+
+### 2. 请求参数说明
+| 参数名 | 类型 | 必填 | 说明 |
+| :--- | :---: | :---: | :--- |
+| `token` | string | **是** | 发卡 API 专用鉴权密钥（后台设置中查看或生成） |
+| `gb` | int | 否 | 卡密包含的流量（单位 GB，填 `0` 为不限流量，默认 100） |
+| `days` | int | 否 | 有效期天数（填 `36500` 为永久有效，默认 30） |
+| `is_monthly` | int | 否 | 填 `1` 时生成“每月固定重置套餐卡”，填 `0` 为普通固定卡 |
+| `format` | string | 否 | 留空返回纯卡密文本（如 `KM-ABCD1234EF56`），填 `json` 返回完整 JSON 实体 |
 
 ---
 
-###   `xray_core` vs `xray_web` 环境变量与特性对比矩阵
+## 🛡️ 运维与常见故障排查
 
-| 对比维度 / 变量 | `xray_core` (纯核心版) | `xray_web` (可视化商业运营版) | 默认推荐值 | 架构与功能差异说明 |
-| :--- | :---: | :---: | :--- | :--- |
-| **定位与适用群体** | 单一轻量代理 | 多用户商业/团队运营 | - | `xray_core` 适用于无面板个人自用；`xray_web` 具备用户计费与卡密体系。 |
-| **`PORT` (代理端口)** | ✅ 支持 | ✅ 支持 | `8443` 或 `443` | 两个版本均支持修改环境变量后自动免删数据热补丁同步。 |
-| **`DEST` / `SERVER_NAMES`** | ✅ 支持 | ✅ 支持 | `www.microsoft.com:443` | REALITY 伪装配置，逻辑保持 1:1 统一。 |
-| **`SERVER_IP`** | ✅ 支持 | ✅ 支持 | 自动识别 | 自动从 `api.ipify.org` 提取，组装客户端链接。 |
-| **`AUTO_UPDATE`** | ✅ 支持 | ✅ 支持 | `true` | 支持重启热更新 Xray 内核。 |
-| **`WEB_ENABLE`** | ❌ **无此概念** | ✅ **支持** | `true` | `xray_web` 可随时通过置 `false` 降级为与 `xray_core` 相同的无头代理模式。 |
-| **`WEB_PORT`** | ❌ **无此概念** | ✅ **支持** | `3000` | **端口完全解耦**：代理跑 `PORT`，网页跑 `WEB_PORT`，彻底避免端口冲突。 |
-| **`APP_MODE`** | ❌ **无此概念** | ✅ **核心安全参数** | `user` | **防爆破机制**：`user` 模式下管理 API 物理 404 熔断，外部扫描器无法探知后台。 |
-| **`ADMIN_USERNAME` / `PASSWORD`** | ❌ **无此概念** | ✅ **可选种子配置** | 自定义强密码 | 仅作首次建库时的引导凭据，提权专属账号后可完全从配置文件抹除。 |
-| **数据持久化形式** | 单 JSON 配置文件 | **SQLite3 数据库驱动** | `/data/xray_web.db` | `xray_core` 依靠静态文本；`xray_web` 依靠 SQLite 记录配额、到期日与卡密。 |
-| **REALITY 密钥提取** | 写入文本日志 | **自动推导 + 动态修复** | 固化于 `/data` | `xray_web` 具备私钥反推兜底机制，彻底解决前端公钥显示空白问题。 |
-| **剪贴板复制机制** | 控制台手动复制 | **HTTP 降级自适应** | - | `xray_web` 兼容非 HTTPS 环境，点击一键复制 100% 成功，支持二维码扫码。 |
-| **内存常驻开销** | 极低 (~15MB) | 轻量级 (~40MB) | - | `xray_web` 采用单容器托管 Vue 3 静态编译产物 + 极简 API，整机内存消耗极小。 |
+### 1. 节点启动后后台没有显示节点？
+* 检查节点容器日志：
+  ```bash
+  docker logs -f xray-node
+  ```
+* 确认节点服务器是否能够访问主控服务器的 3000 端口（注意主控所在云厂商的**安全组/防火墙规则**需放行 TCP 3000）。
 
+### 2. 如何在线重置节点密钥？
+* 进入主控后台【远程节点 (xray_core) 集群】标签；
+* 找到对应节点点击【重置密钥】，主控会生成一个全新密钥；
+* 远程节点在下一次心跳（60 秒内）会自动收到新密钥并热写入本地 `/data/node_key.txt`，全程无需登录节点服务器。
 
----
-
-## 📂 宿主机挂载目录说明
-
-采用 `./data:/data` 统一挂载映射，所有关键数据均受保护：
-
-- **`./data/xray_web.db`**：**核心数据库文件**。存储所有用户记录、UUID、配额上限、到期时间及卡密库存。备份或换机时，**直接复制该文件即可无缝迁移全站业务**。
-- **`./data/config.json`**：由后端根据 SQLite 数据库与环境变量动态渲染生成的有效 Xray 配置文件。
-- **`./data/public_key.txt`** 与 **`private_key.txt`**：当前节点绑定的 Reality 密钥对，确保容器重建后公钥订阅保持不变。
-- **`./data/client_info.txt`**：初始化时的默认连接信息备份。
+### 3. 数据备份
+所有的核心数据均位于 `./data` 目录：
+* `xray_web/data/xray_web.db`：全站 SQLite 数据库（包含账号、卡密、节点与配置，建议定时备份此文件）；
+* `xray_core/data/`：节点独立的 Reality 密钥对持久化文件，保留此目录可确保节点公钥和私钥永不漂移。
 
 ---
 
-## 🔧 常见维护操作
+## 📄 开源协议
 
-### 1. 修改监听端口或伪装域名
-无需删除 `data` 目录！直接在 `docker-compose.yml` 中修改 `PORT` 或 `DEST`，然后重启：
-```bash
-docker compose restart
-```
-系统会自动将最新端口和域名热补丁写入配置，已有的用户数据与密钥**完全不受影响**。
-
-### 2. 容器启动提示 `exec /entrypoint.sh: no such file or directory`？
-- **原因**：脚本在 Windows 环境下编辑拉取过，换行符被转为 `CRLF`。
-- **解决**：在宿主机执行转换命令并重启：
-```bash
-sed -i -e 's/\r$//' entrypoint.sh
-chmod +x entrypoint.sh
-docker compose up -d --build
-```
-
-### 3. 重置节点公私钥
-如需更换全新的 X25519 密钥对与 ShortId：
-```bash
-docker compose down
-rm -f ./data/config.json ./data/public_key.txt ./data/private_key.txt ./data/client_info.txt
-docker compose up -d
-```
-系统会重新生成全新的一套公私钥，并自动将数据库中保存的用户批量绑定至新节点。
-
-### 4. 宿主机开启 BBR 加速
-```bash
-echo "net.core.default_qdisc=fq" >> /etc/sysctl.conf
-echo "net.ipv4.tcp_congestion_control=bbr" >> /etc/sysctl.conf
-sysctl -p
-```
+本项目采用 [MIT License](LICENSE) 开源授权。

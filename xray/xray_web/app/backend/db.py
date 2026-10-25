@@ -27,6 +27,7 @@ def init_db():
         uuid TEXT NOT NULL,
         email TEXT UNIQUE NOT NULL,
         traffic_limit_mb INTEGER DEFAULT 1024,
+        used_mb REAL DEFAULT 0,
         expire_date TEXT NOT NULL,
         role TEXT DEFAULT 'user',
         status INTEGER DEFAULT 1,
@@ -37,10 +38,12 @@ def init_db():
         reset_day INTEGER DEFAULT 1
     )''')
 
-    # 2. 节点集群表 (存储各远程节点自动回传的参数)
+    # 2. 节点集群表 (存储各节点公钥与通信密钥)
     c.execute('''CREATE TABLE IF NOT EXISTS nodes (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         node_id TEXT UNIQUE NOT NULL,
+        node_key TEXT NOT NULL,
+        pending_key TEXT DEFAULT '',
         name TEXT NOT NULL,
         ip TEXT NOT NULL,
         port INTEGER NOT NULL,
@@ -62,7 +65,7 @@ def init_db():
         is_monthly INTEGER DEFAULT 0
     )''')
 
-    # 4. 验证码与系统配置表
+    # 4. 验证码、系统设置、通知去重表
     c.execute('''CREATE TABLE IF NOT EXISTS verify_codes (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         email TEXT NOT NULL,
@@ -82,13 +85,24 @@ def init_db():
         sent_date TEXT NOT NULL
     )''')
 
+    def try_add_column(sql):
+        try:
+            c.execute(sql)
+            conn.commit()
+        except Exception:
+            pass
+
+    try_add_column("ALTER TABLE nodes ADD COLUMN node_key TEXT DEFAULT ''")
+    try_add_column("ALTER TABLE nodes ADD COLUMN pending_key TEXT DEFAULT ''")
+    try_add_column("ALTER TABLE users ADD COLUMN used_mb REAL DEFAULT 0")
+
     # 默认管理员引导
     c.execute("SELECT id FROM users WHERE role='admin'")
     if not c.fetchone():
         admin_user = os.getenv("ADMIN_USERNAME") or "admin"
         admin_pwd = os.getenv("ADMIN_PASSWORD") or secrets.token_urlsafe(12)
         ten_years = (datetime.datetime.now() + datetime.timedelta(days=3650)).strftime("%Y-%m-%d %H:%M:%S")
-        c.execute("INSERT INTO users (username, password_hash, uuid, email, traffic_limit_mb, expire_date, role, status, is_verified) VALUES (?, ?, ?, ?, 1048576, ?, 'admin', 1, 1)",
+        c.execute("INSERT INTO users (username, password_hash, uuid, email, traffic_limit_mb, used_mb, expire_date, role, status, is_verified) VALUES (?, ?, ?, ?, 1048576, 0, ?, 'admin', 1, 1)",
                   (admin_user, hash_pwd(admin_pwd), str(uuid.uuid4()), f"{admin_user}@system.local", ten_years))
         conn.commit()
 

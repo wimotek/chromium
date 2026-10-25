@@ -1,5 +1,6 @@
 <template>
   <div class="dark-theme">
+    <!-- 顶部科技导航 -->
     <header class="cyber-header">
       <div class="header-content">
         <div class="brand">
@@ -17,14 +18,19 @@
     <main class="main-body">
       <!-- 1. 登录 / 注册 / 找回密码 模块 -->
       <div v-if="!currentUser.username" class="auth-center">
+        <!-- 登录页系统公告展示栏 -->
         <div v-if="systemNotice" class="cyber-notice-card">
-          <div class="notice-header"><span class="notice-icon">📢</span><strong>系统公告 NOTICE</strong></div>
+          <div class="notice-header">
+            <span class="notice-icon">📢</span>
+            <strong>系统公告 NOTICE</strong>
+          </div>
           <div class="notice-body">{{ systemNotice }}</div>
         </div>
 
         <div class="cyber-card auth-box">
           <h2 class="card-title">{{ authCardTitle }}</h2>
 
+          <!-- A. 登录 -->
           <template v-if="authMode === 'login'">
             <div class="form-item">
               <label>ACCOUNT / 用户名 或 注册邮箱</label>
@@ -43,6 +49,7 @@
             </div>
           </template>
 
+          <!-- B. 注册 -->
           <template v-else-if="authMode === 'register'">
             <div class="form-item">
               <label>USER IDENTIFIER / 设置用户名</label>
@@ -73,6 +80,7 @@
             </div>
           </template>
 
+          <!-- C. 找回密码 -->
           <template v-else-if="authMode === 'forgot'">
             <div class="form-item">
               <label>REGISTERED EMAIL / 绑定的注册邮箱</label>
@@ -143,22 +151,19 @@
           </div>
         </div>
 
-        <!-- 核心重构：多节点列表与通用订阅入口 -->
+        <!-- 多节点选择与通用订阅 -->
         <div class="cyber-card col-span-2">
           <div class="card-header">
             <h3>🌐 全球加速节点列表与通用订阅 (共 {{ currentUser.nodes ? currentUser.nodes.length : 0 }} 个节点)</h3>
-            <div style="display: flex; gap: 8px;">
-              <button class="btn-cyber-primary" style="font-size: 12px; padding: 6px 14px;" @click="copyText(currentUser.sub_url)">
-                🔗 一键复制全节点订阅链接
-              </button>
-            </div>
+            <button class="btn-cyber-primary" style="font-size: 12px; padding: 6px 14px; width: auto;" @click="copyText(currentUser.sub_url)">
+              🔗 一键复制全节点通用订阅链接
+            </button>
           </div>
 
           <p class="card-desc">
             支持直接将订阅链接导入 <b>v2rayN / Clash-Meta / Sing-box / Shadowrocket</b>，客户端内可批量更新并自动延迟测速：
           </p>
 
-          <!-- 节点卡片流式网格 -->
           <div class="node-grid">
             <div v-for="node in currentUser.nodes" :key="node.id" class="node-card">
               <div class="node-header">
@@ -169,14 +174,14 @@
                 <span>地址: {{ node.ip }}:{{ node.port }}</span>
               </div>
               <div class="btn-group" style="margin-top: 12px; gap: 6px;">
-                <button class="btn-sm btn-action" @click="copyText(node.link)">📋 复制</button>
+                <button class="btn-sm btn-action" @click="copyText(node.link)">📋 复制节点</button>
                 <button class="btn-sm btn-edit" @click="openQrModal(node.link, node.name)">📱 扫码</button>
                 <button class="btn-sm btn-cyber-download" @click="downloadWindowsClient(node.id, node.name)">🖥️ 下载客户端</button>
               </div>
             </div>
 
             <div v-if="!currentUser.nodes || currentUser.nodes.length === 0" class="empty-node-tip">
-              暂无在线节点，请等待管理员启动并接入 xray_core 远程节点。
+              暂无在线节点，请等待管理员启动接入远程海外节点。
             </div>
           </div>
         </div>
@@ -248,7 +253,7 @@
             <span class="tab-icon">🌐</span>
             <div class="tab-text">
               <div class="tab-title">远程节点 (xray_core) 集群</div>
-              <div class="tab-sub">多节点公钥监管、在线状态、别名修改与接入</div>
+              <div class="tab-sub">自动生成密钥、公钥回传、一键重置与别名维护</div>
             </div>
             <span class="count-tag">{{ adminNodes.length }} 个节点</span>
           </button>
@@ -338,7 +343,8 @@
             <table class="cyber-table">
               <thead>
                 <tr>
-                  <th>节点名称 (可点击修改)</th>
+                  <th>节点名称</th>
+                  <th>通信密钥 (Node Key)</th>
                   <th>IP / 端口</th>
                   <th>REALITY 公钥 (自动回传)</th>
                   <th>ShortId</th>
@@ -349,41 +355,45 @@
               <tbody>
                 <tr v-for="n in adminNodes" :key="n.id">
                   <td>
-                    <input v-model="n.name" class="cyber-input" style="width: 180px; padding: 4px 8px;" />
+                    <input v-model="n.name" class="cyber-input" style="width: 150px; padding: 4px 8px;" />
                   </td>
-                  <td>{{ n.ip }}:{{ n.port }}</td>
-                  <td class="font-mono text-green" style="font-size: 11px;">{{ n.pbk }}</td>
-                  <td class="font-mono text-cyan">{{ n.sid }}</td>
                   <td>
+                    <span class="font-mono" style="font-size: 11px; color: #f59e0b;">{{ n.node_key }}</span>
+                    <div v-if="n.pending_key" style="font-size: 10px; color: #38bdf8;">(重置待生效: {{ n.pending_key.substring(0, 8) }}...)</div>
+                  </td>
+                  <td style="white-space: nowrap;">{{ n.ip }}:{{ n.port }}</td>
+                  <td class="font-mono text-green" style="font-size: 11px; max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" :title="n.pbk">{{ n.pbk }}</td>
+                  <td class="font-mono text-cyan">{{ n.sid }}</td>
+                  <td style="white-space: nowrap;">
                     <span class="badge badge-ready">🟢 在线 ({{ n.last_heartbeat }})</span>
                   </td>
                   <td>
                     <div class="action-btn-row">
-                      <button class="btn-sm btn-edit" @click="saveNodeName(n)">保存名称</button>
-                      <button class="btn-sm btn-del" @click="deleteNode(n.node_id)">移除节点</button>
+                      <button class="btn-sm btn-action" @click="saveNodeName(n)">保存名称</button>
+                      <button class="btn-sm btn-reset" @click="resetNodeKey(n)">🔑 重置密钥</button>
+                      <button class="btn-sm btn-del" @click="deleteNode(n.node_id)">移除</button>
                     </div>
                   </td>
                 </tr>
                 <tr v-if="adminNodes.length === 0">
-                  <td colspan="6" style="text-align: center; color: #64748b; padding: 20px;">
-                    暂无远程节点接入，请在任意海外服务器执行下方命令拉起 xray_core 节点。
+                  <td colspan="7" style="text-align: center; color: #64748b; padding: 25px;">
+                    暂无远程节点接入，只需在任意海外 VPS 运行下方单变量命令拉起即可！
                   </td>
                 </tr>
               </tbody>
             </table>
           </div>
 
-          <!-- 远程节点接入命令 -->
           <div class="panel-card" style="margin-top: 25px;">
-            <h4 style="margin: 0 0 10px 0; color: #38bdf8;">🖥️ 远程海外 VPS 一键接入指令</h4>
-            <p class="card-desc">在任意香港、日本或美国 VPS 执行，节点秒级上线，自动向本面板回传真实公钥与参数：</p>
+            <h4 style="margin: 0 0 10px 0; color: #38bdf8;">🖥️ 海外 VPS 极简单变量接入指令 (NODE_KEY 无需填写)</h4>
+            <p class="card-desc">在任意香港、日本或美国 VPS 执行即可，节点启动时<b>自动生成专属密钥与公钥</b>并回传登记到本面板：</p>
             <div class="node-field">
               <div class="code-display text-cyan">
-                docker run -d --name xray-node --network host --restart always -e PANEL_URL="http://{{ publicMasterHost }}:3000" -e NODE_KEY="{{ settingsForm.node_key }}" -v $(pwd)/data:/data wimotek/xray:core
+                docker run -d --name xray-node --network host --restart always -e PANEL_URL="http://{{ publicMasterHost }}:3000" -v $(pwd)/data:/data wimotek/xray:core
               </div>
             </div>
-            <button class="btn-sm btn-action" @click="copyText(`docker run -d --name xray-node --network host --restart always -e PANEL_URL='http://${publicMasterHost}:3000' -e NODE_KEY='${settingsForm.node_key}' -v $(pwd)/data:/data wimotek/xray:core`)">
-              📋 复制接入命令
+            <button class="btn-sm btn-action" @click="copyText(`docker run -d --name xray-node --network host --restart always -e PANEL_URL='http://${publicMasterHost}:3000' -v $(pwd)/data:/data wimotek/xray:core`)">
+              📋 复制极简单变量运行命令
             </button>
           </div>
         </div>
@@ -450,9 +460,7 @@
               <table class="cyber-table">
                 <thead>
                   <tr>
-                    <th style="width: 40px; text-align: center;">
-                      <input type="checkbox" :checked="isAllSelected" @change="toggleSelectAll" title="全选未售卡密" />
-                    </th>
+                    <th style="width: 40px; text-align: center;"><input type="checkbox" :checked="isAllSelected" @change="toggleSelectAll" title="全选未售卡密" /></th>
                     <th>卡密编号</th>
                     <th>套餐配额</th>
                     <th>套餐属性</th>
@@ -466,13 +474,13 @@
                   <tr v-for="c in adminCards" :key="c.code">
                     <td style="text-align: center;"><input type="checkbox" :value="c.code" v-model="selectedCards" /></td>
                     <td class="font-mono text-cyan">{{ c.code }}</td>
-                    <td>{{ c.traffic_gb === 0 ? '♾️ 不限' : c.traffic_gb + ' GB' }} / {{ c.days >= 3650 ? '永久' : c.days + ' 天' }}</td>
+                    <td style="white-space: nowrap;">{{ c.traffic_gb === 0 ? '♾️ 不限' : c.traffic_gb + ' GB' }} / {{ c.days >= 3650 ? '永久' : c.days + ' 天' }}</td>
                     <td>
                       <span v-if="c.is_monthly === 1" class="badge badge-monthly">每月重置</span>
                       <span v-else class="text-muted" style="font-size: 11px;">普通固定</span>
                     </td>
                     <td><span class="badge" :class="c.is_used ? 'badge-used' : 'badge-ready'">{{ c.is_used ? '已核销' : '待售/有效' }}</span></td>
-                    <td class="text-muted">{{ c.created_at || '早期' }}</td>
+                    <td class="text-muted" style="white-space: nowrap;">{{ c.created_at || '早期' }}</td>
                     <td>{{ c.used_by || '-' }}</td>
                     <td><button class="btn-sm btn-action" @click="copyText(c.code)">复制</button></td>
                   </tr>
@@ -564,7 +572,7 @@
                   <div class="inner-divider-title">🔑 修改管理员自身登录密码</div>
                   <div class="form-item" style="margin-bottom: 8px;"><input v-model="pwdForm.old_pwd" type="password" class="cyber-input" placeholder="当前原密码" /></div>
                   <div class="form-item" style="margin-bottom: 8px;"><input v-model="pwdForm.new_pwd" type="password" class="cyber-input" placeholder="新密码" /></div>
-                  <div class="form-item" style="margin-bottom: 12px;"><input v-model="pwdForm.confirm_pwd" type="password" class="cyber-input" placeholder="确认新密码" /></div>
+                  <div class="form-item" style="margin-bottom: 12px;"><input v-model="pwdForm.confirm_pwd" type="password" class="cyber-input" placeholder="再次确认新密码" /></div>
                   <button class="btn-cyber-primary" style="width: auto; padding: 7px 20px; font-size: 12px;" @click="submitChangePassword">确认变更密码</button>
                 </div>
               </div>
@@ -748,7 +756,6 @@ const settingsForm = reactive({
   task_last_run: '尚未执行',
   faka_api_enable: true,
   faka_api_token: 'faka_secret_token_8899',
-  node_key: 'xray_cluster_secret_key_2026',
   system_notice: '',
   reg_traffic_mb: 1024,
   reg_expire_days: 1
@@ -848,6 +855,7 @@ const generateRandomToken = () => {
   ElMessage.success('已随机生成新出卡 Token')
 }
 
+// 导出底层
 const executeExport = async (payload, successTip) => {
   try {
     const adminUser = currentUser.username || authForm.username
@@ -868,16 +876,19 @@ const executeExport = async (payload, successTip) => {
   }
 }
 
+// 唯一保留：勾选导出
 const exportSelectedCards = () => {
   if (selectedCards.value.length === 0) return ElMessage.warning('请先在表格左侧勾选要导出的卡密')
   executeExport({ selected_codes: selectedCards.value }, '已复制选中的卡密')
 }
 
+// 唯一保留：日期范围导出
 const exportByDateRange = () => {
   if (!exportFilter.startDate && !exportFilter.endDate) return ElMessage.warning('请先选择日期范围')
   executeExport({ start_date: exportFilter.startDate, end_date: exportFilter.endDate }, '已导出指定日期范围内的未售卡密')
 }
 
+// 唯一保留：全部未售导出
 const exportAllUnusedCards = () => executeExport({}, '已复制全部未售卡密')
 
 const startCountdown = () => {
@@ -1156,6 +1167,26 @@ const saveNodeName = async (node) => {
   }
 }
 
+const resetNodeKey = async (node) => {
+  if (!confirm(`确定要重置节点 [${node.name}] 的通信密钥 (Node Key) 吗？\n重置后节点将在 60 秒内通过心跳自动同步新密钥。`)) return
+  try {
+    const adminUser = currentUser.username || authForm.username
+    const res = await axios.post('/api/admin/nodes/reset_key', {
+      admin_user: adminUser,
+      admin_pwd: authForm.password,
+      node_id: node.node_id
+    })
+    if (res.data.code === 200) {
+      ElMessage.success(res.data.msg)
+      openNodesTab()
+    } else {
+      ElMessage.error(res.data.msg)
+    }
+  } catch (_) {
+    ElMessage.error('重置密钥失败')
+  }
+}
+
 const deleteNode = async (nodeId) => {
   if (!confirm('确定要从集群中移除该节点吗？')) return
   try {
@@ -1196,7 +1227,6 @@ const openSettingsTab = async () => {
       settingsForm.task_last_run = d.task_last_run || '尚未执行'
       settingsForm.faka_api_enable = d.faka_api_enable === 'true'
       settingsForm.faka_api_token = d.faka_api_token || 'faka_secret_token_8899'
-      settingsForm.node_key = d.node_key || 'xray_cluster_secret_key_2026'
       settingsForm.system_notice = d.system_notice || ''
       settingsForm.reg_traffic_mb = Number(d.reg_traffic_mb) || 1024
       settingsForm.reg_expire_days = Number(d.reg_expire_days) || 1
@@ -1412,7 +1442,7 @@ const logout = () => {
 .dashboard-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
 .col-span-2 { grid-column: span 2; }
 
-/* 多节点卡片网格 */
+/* 节点卡片流式网格 */
 .node-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));

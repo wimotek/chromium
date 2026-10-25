@@ -36,8 +36,7 @@ services:
       - PORT=443                                # 监听端口,确定此端口未被占用!!!
       - DEST=www.apple.com:443                  # REALITY 伪装目标地址与端口
       - SERVER_NAMES=www.microsoft.com
-      - PANEL_URL="http://xx.xx.xxxx:3000"      # 设置panel_url和node_key在web中激活此节点, 单机用户请不要设置这两个变量.
-      - NODE_KEY="xray_cluster_secret_key_2026"    
+      - PANEL_URL="http://xx.xx.xxxx:3000"      # 设置panel_url激活此节点, 单机用户无须设置.
     volumes:
       - ./data:/data
     logging:
