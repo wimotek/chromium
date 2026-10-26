@@ -1040,27 +1040,50 @@ def admin_cert_info():
     if not check_admin(data.get('admin_user'), data.get('admin_pwd')): return jsonify({"code": 403, "msg": "无权限"})
     return jsonify({"code": 200, "data": get_cert_info()})
 
-@app.route('/api/admin/cert/custom', methods=['POST'])
-def admin_cert_custom():
-    data = request.json or {}
-    if not check_admin(data.get('admin_user'), data.get('admin_pwd')): return jsonify({"code": 403, "msg": "无权限"})
-    cert_pem = data.get("cert_pem", "")
-    key_pem = data.get("key_pem", "")
-
-    ok, msg = save_custom_certificate(cert_pem, key_pem)
-    if ok: return jsonify({"code": 200, "msg": msg})
-    return jsonify({"code": 500, "msg": msg})
-
+# 证书申请接口：增加自动平滑重载进程
 @app.route('/api/admin/cert/acme', methods=['POST'])
 def admin_cert_acme():
     data = request.json or {}
-    if not check_admin(data.get('admin_user'), data.get('admin_pwd')): return jsonify({"code": 403, "msg": "无权限"})
+    if not check_admin(data.get('admin_user'), data.get('admin_pwd')): 
+        return jsonify({"code": 403, "msg": "无权限"})
 
     domain = data.get("domain", "").strip()
     email = data.get("email", "").strip()
 
     ok, msg = issue_acme_certificate(domain, email)
-    if ok: return jsonify({"code": 200, "msg": msg})
+    if ok:
+        # 证书写入磁盘成功，2 秒后自动退出 Python 进程触发 Docker 自动拉起，内存秒更最新证书！
+        def auto_reload():
+            time.sleep(2)
+            os._exit(0)
+        threading.Thread(target=auto_reload, daemon=True).start()
+
+        return jsonify({
+            "code": 200, 
+            "msg": f"{msg}\n【提示】面板正在自动平滑重载载入新证书，请等待 3 秒后刷新页面！"
+        })
+    return jsonify({"code": 500, "msg": msg})
+
+# 自定义证书上传接口：同样增加自动平滑重载
+@app.route('/api/admin/cert/custom', methods=['POST'])
+def admin_cert_custom():
+    data = request.json or {}
+    if not check_admin(data.get('admin_user'), data.get('admin_pwd')): 
+        return jsonify({"code": 403, "msg": "无权限"})
+    cert_pem = data.get("cert_pem", "")
+    key_pem = data.get("key_pem", "")
+
+    ok, msg = save_custom_certificate(cert_pem, key_pem)
+    if ok:
+        def auto_reload():
+            time.sleep(2)
+            os._exit(0)
+        threading.Thread(target=auto_reload, daemon=True).start()
+
+        return jsonify({
+            "code": 200, 
+            "msg": f"{msg}\n【提示】面板正在自动平滑重载载入新证书，请等待 3 秒后刷新页面！"
+        })
     return jsonify({"code": 500, "msg": msg})
 
 @app.route('/api/admin/cert/self_signed', methods=['POST'])

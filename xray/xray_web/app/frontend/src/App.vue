@@ -17,7 +17,6 @@
     <main class="main-body">
       <!-- 1. 登录 / 注册 / 找回密码 模块 -->
       <div v-if="!currentUser.username" class="auth-center">
-        <!-- 登录页系统公告展示栏 -->
         <div v-if="systemNotice" class="cyber-notice-card">
           <div class="notice-header"><span class="notice-icon">📢</span><strong>系统公告 NOTICE</strong></div>
           <div class="notice-body">{{ systemNotice }}</div>
@@ -26,7 +25,7 @@
         <div class="cyber-card auth-box">
           <h2 class="card-title">{{ authCardTitle }}</h2>
 
-          <!-- A. 登录表单 -->
+          <!-- A. 登录 -->
           <template v-if="authMode === 'login'">
             <div class="form-item">
               <label>ACCOUNT / 用户名 或 注册邮箱</label>
@@ -36,7 +35,6 @@
               <label>ACCESS KEY / 登录密码</label>
               <input v-model="authForm.password" type="password" class="cyber-input" placeholder="请输入密码" />
             </div>
-            <!-- 防机器人算术验证码 -->
             <div class="form-item">
               <label>CAPTCHA / 算术验证 (点击图片可刷新)</label>
               <div class="captcha-group">
@@ -53,7 +51,7 @@
             </div>
           </template>
 
-          <!-- B. 注册表单 -->
+          <!-- B. 注册 -->
           <template v-else-if="authMode === 'register'">
             <div class="form-item">
               <label>USER IDENTIFIER / 设置用户名</label>
@@ -63,7 +61,6 @@
               <label>EMAIL / 接收激活码邮箱</label>
               <input v-model="authForm.email" type="email" class="cyber-input" placeholder="name@example.com" />
             </div>
-            <!-- 算术验证码：防刷发信额度 -->
             <div class="form-item">
               <label>CAPTCHA / 算术验证 (防止脚本刷发信)</label>
               <div class="captcha-group">
@@ -92,7 +89,7 @@
             </div>
           </template>
 
-          <!-- C. 找回密码表单 -->
+          <!-- C. 找回密码 -->
           <template v-else-if="authMode === 'forgot'">
             <div class="form-item">
               <label>REGISTERED EMAIL / 绑定的注册邮箱</label>
@@ -173,7 +170,7 @@
           </div>
         </div>
 
-        <!-- 节点列表与通用聚合订阅 (头部自适应，不折行不挤压) -->
+        <!-- 节点列表与通用聚合订阅 -->
         <div class="cyber-card col-span-2">
           <div class="card-header header-nowrap-row">
             <h3 class="header-title-text">🌐 全球加速节点列表与通用订阅 (共 {{ currentUser.nodes ? currentUser.nodes.length : 0 }} 个节点)</h3>
@@ -299,7 +296,7 @@
           </button>
         </div>
 
-        <!-- 主选项卡 1: 用户管理 (包含专属凭证与二维码查看) -->
+        <!-- 主选项卡 1: 用户管理 -->
         <div v-if="activeTab === 'users'" class="cyber-card tab-content-card">
           <div class="card-header">
             <h3>👥 接入用户治理列表</h3>
@@ -389,13 +386,11 @@
                     {{ n.pbk ? n.pbk.substring(0, 10) + '...' : '等待回传' }}
                     <button class="btn-link-action" style="margin-left: 4px;" @click="copyText(n.pbk)">复制</button>
                   </td>
-                  <!-- 单行不折行展示心跳状态 -->
                   <td class="status-cell-nowrap">
                     <span class="badge badge-ready">🟢 在线</span>
                     <div class="time-sub-text">{{ n.last_heartbeat }}</div>
                   </td>
                   <td>
-                    <!-- 操作列精简：仅保留配置与吊销删除 -->
                     <div class="action-btn-row">
                       <button class="btn-sm btn-edit" @click="openNodeConfig(n)">✏️ 配置</button>
                       <button class="btn-sm btn-del" @click="revokeDeleteNode(n.node_id)">🗑️ 吊销删除</button>
@@ -411,7 +406,7 @@
             </table>
           </div>
 
-          <!-- 远程海外 VPS 接入指令 (已彻底去除多余双引号) -->
+          <!-- 远程海外 VPS 接入指令 (纯净无引号) -->
           <div class="panel-card" style="margin-top: 25px;">
             <h4 style="margin: 0 0 10px 0; color: #38bdf8;">🖥️ 远程海外 VPS 一键接入指令 (HTTPS 模式)</h4>
             <p class="card-desc">节点秒级上线，自动推导并向本面板回传真实公钥与网络参数：</p>
@@ -548,7 +543,7 @@
           </div>
         </div>
 
-        <!-- 主选项卡 4: 系统设置 -->
+        <!-- 主选项卡 4: 系统设置 (规范使用 fullchain.pem 和 privkey.pem) -->
         <div v-else-if="activeTab === 'settings'" class="cyber-card tab-content-card">
           <div class="card-header" style="margin-bottom: 22px;">
             <h3>⚙️ 系统发信、定时巡检、HTTPS 证书与全局设置</h3>
@@ -564,7 +559,7 @@
                     <span class="panel-icon">🔐</span>
                     <div>
                       <strong class="panel-title">HTTPS 安全证书与 ACME 管理</strong>
-                      <div class="panel-sub">管理 /data/certs 证书与 Let's Encrypt 自动签发</div>
+                      <div class="panel-sub">管理 fullchain.pem / privkey.pem 与 Let's Encrypt 自动签发</div>
                     </div>
                   </div>
                   <button class="btn-sm btn-action" @click="loadCertInfo">🔄 检查状态</button>
@@ -609,9 +604,10 @@
 
                 <div class="inner-divider">
                   <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
-                    <div class="inner-divider-title" style="margin: 0;">📋 手动粘贴第三方证书 (可选)</div>
+                    <div class="inner-divider-title" style="margin: 0;">📋 手动粘贴第三方证书 (如宝塔证书)</div>
                     <button class="btn-link-action" @click="showCustomCertModal = true">打开粘贴窗口</button>
                   </div>
+                  <div class="input-hint">若已有证书，可直接映射或粘贴保存到 <code>/data/certs/fullchain.pem</code> 与 <code>privkey.pem</code>。</div>
                 </div>
               </div>
 
@@ -743,7 +739,7 @@
       </div>
     </div>
 
-    <!-- 弹窗 2：管理员查看与复制指定用户的全节点订阅与单节点二维码 -->
+    <!-- 弹窗 2：管理员查看指定用户的全节点订阅与单节点二维码 -->
     <div v-if="showUserCredModal" class="modal-backdrop" @click="showUserCredModal = false">
       <div class="cyber-modal" style="max-width: 580px; text-align: left;" @click.stop>
         <h3>📱 用户 [{{ targetCredUser.username }}] 的节点凭据与订阅</h3>
@@ -779,7 +775,7 @@
       </div>
     </div>
 
-    <!-- 弹窗 3：管理员在线配置节点全部参数 (在弹窗内直接提供随机生成密钥按钮) -->
+    <!-- 弹窗 3：管理员在线配置节点全部参数 -->
     <div v-if="showNodeConfigModal" class="modal-backdrop" @click="showNodeConfigModal = false">
       <div class="cyber-modal" style="max-width: 500px; text-align: left;" @click.stop>
         <h3>✏️ 调整节点配置 (双向自动同步)</h3>
@@ -887,17 +883,17 @@
       </div>
     </div>
 
-    <!-- 弹窗 6：手动粘贴上传证书 PEM 弹窗 -->
+    <!-- 弹窗 6：手动粘贴上传证书 PEM 弹窗 (规范使用 fullchain.pem 和 privkey.pem) -->
     <div v-if="showCustomCertModal" class="modal-backdrop" @click="showCustomCertModal = false">
       <div class="cyber-modal" style="max-width: 520px; text-align: left;" @click.stop>
         <h3>📋 手动安装第三方 HTTPS 证书</h3>
-        <p class="modal-tip">直接粘贴 PEM 编码的证书与私钥，将覆盖写入 <code>/data/certs/</code> 目录：</p>
+        <p class="modal-tip">直接粘贴 PEM 编码的证书与私钥，将保存写入 <code>/data/certs/fullchain.pem</code> 与 <code>privkey.pem</code>：</p>
         <div class="form-item">
-          <label>公钥证书 (cert.pem / fullchain.pem)</label>
+          <label>公钥证书链 (fullchain.pem)</label>
           <textarea v-model="customCertPem" rows="6" class="cyber-input cyber-textarea" placeholder="-----BEGIN CERTIFICATE-----..."></textarea>
         </div>
         <div class="form-item">
-          <label>私钥 (key.pem / privkey.pem)</label>
+          <label>私钥文件 (privkey.pem)</label>
           <textarea v-model="customKeyPem" rows="6" class="cyber-input cyber-textarea" placeholder="-----BEGIN RSA PRIVATE KEY-----..."></textarea>
         </div>
         <div class="btn-group" style="justify-content: flex-end; margin-top: 20px;">
@@ -1129,7 +1125,7 @@ const generateRandomToken = () => {
   ElMessage.success('已随机生成新出卡 Token')
 }
 
-// 统一导出底层 (全局唯一声明)
+// 统一导出底层 (全局仅此一处定义)
 const executeExport = async (payload, successTip) => {
   try {
     const adminUser = currentUser.username || authForm.username
@@ -1458,7 +1454,7 @@ const openNodeConfig = (node) => {
   showNodeConfigModal.value = true
 }
 
-// 在配置弹窗内随机生成新密钥
+// 弹窗内一键随机生成新密钥
 const generateNewNodeKey = () => {
   const chars = '0123456789abcdef'
   let key = ''
@@ -1488,7 +1484,7 @@ const saveNodeFullConfig = async () => {
   }
 }
 
-// 吊销删除：增加明确的远程 VPS 恢复重连说明
+// 吊销删除：附带明确恢复指令说明
 const revokeDeleteNode = async (nodeId) => {
   const tip =
     `⚠️ 确定要彻底吊销并删除该节点吗？\n\n` +
@@ -1701,7 +1697,6 @@ const copyText = async (text) => {
   document.body.removeChild(ta)
 }
 
-// 登录提交
 const handleAuth = async () => {
   if (!authForm.username || !authForm.password) return ElMessage.warning('请填写账号与密码')
   if (authMode.value === 'login' && !loginCaptchaAns.value) return ElMessage.warning('请输入算术验证码计算结果')
@@ -1746,7 +1741,6 @@ const handleAuth = async () => {
   }
 }
 
-// 多卡密批量充值提交
 const handleRecharge = async () => {
   if (!rechargeCode.value || !rechargeCode.value.trim()) return ElMessage.warning('请输入至少一张卡密')
   loading.value = true
