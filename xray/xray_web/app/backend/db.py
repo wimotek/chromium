@@ -66,7 +66,7 @@ def init_db():
         is_monthly INTEGER DEFAULT 0
     )''')
 
-    # 4. 验证码、系统设置、通知去重表
+    # 4. 邮箱验证码表
     c.execute('''CREATE TABLE IF NOT EXISTS verify_codes (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         email TEXT NOT NULL,
@@ -74,6 +74,14 @@ def init_db():
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )''')
 
+    # 5. 防机器人验证码表 (核心新增)
+    c.execute('''CREATE TABLE IF NOT EXISTS captchas (
+        id TEXT PRIMARY KEY,
+        answer TEXT NOT NULL,
+        expire_at REAL NOT NULL
+    )''')
+
+    # 6. 系统设置与通知去重表
     c.execute('''CREATE TABLE IF NOT EXISTS system_settings (
         key TEXT PRIMARY KEY,
         value TEXT
@@ -98,6 +106,7 @@ def init_db():
     try_add_column("ALTER TABLE nodes ADD COLUMN dest TEXT DEFAULT 'www.microsoft.com:443'")
     try_add_column("ALTER TABLE users ADD COLUMN used_mb REAL DEFAULT 0")
 
+    # 默认管理员种子
     c.execute("SELECT id FROM users WHERE role='admin'")
     if not c.fetchone():
         admin_user = os.getenv("ADMIN_USERNAME") or "admin"

@@ -1,5 +1,6 @@
 import os
 import io
+import re
 import uuid
 import base64
 import random
@@ -14,6 +15,7 @@ from config import Config
 from db import init_db, get_db, hash_pwd, get_setting, set_setting
 from notify import send_smtp_email, send_serverchan_msg, notify_user
 from client_pack import generate_windows_package
+from captcha import generate_math_captcha, verify_captcha
 from cert_manager import (
     ensure_certificates,
     get_cert_info,
@@ -34,13 +36,19 @@ def build_node_link(uuid_str: str, node: dict, remark: str) -> str:
         f"&type=tcp&flow=xtls-rprx-vision&sni={node['sni']}&sid={node['sid']}#{remark}"
     )
 
-# ==================== ACME Webroot 挑战路由 ====================
 @app.route('/.well-known/acme-challenge/<path:filename>')
 def acme_challenge_token(filename):
-    """供 Let's Encrypt CA 服务器访问以验证域名所有权"""
     return send_from_directory(CHALLENGE_DIR, filename)
 
-# ==================== 定时巡检、每月重置与证书自动续签 ====================
+# ==================== 防机器人验证码接口 ====================
+
+@app.route('/api/auth/captcha', methods=['GET'])
+def get_captcha():
+    """获取新的动态算术验证码"""
+    data = generate_math_captcha()
+    return jsonify({"code": 200, "data": data})
+
+# ==================== 定时巡检、每月重置与自动续签 ====================
 
 def run_scheduled_check(force=False) -> tuple[int, int, str]:
     enable = get_setting("task_notify_enable", "true").lower() == "true"
@@ -62,7 +70,6 @@ def run_scheduled_check(force=False) -> tuple[int, int, str]:
     for u in users:
         uname = u["username"]
 
-        # 1. 每月固定套餐重置
         if u.get("is_monthly") == 1:
             reset_day = u.get("reset_day", 1) or 1
             if current_day == reset_day or force:
@@ -72,13 +79,12 @@ def run_scheduled_check(force=False) -> tuple[int, int, str]:
                     c.execute("INSERT INTO notify_logs (username, warn_type, sent_date) VALUES (?, 'monthly_reset', ?)", (uname, today_str))
                     conn.commit()
                     title = "【流量已重置】您的每月固定流量套餐已刷新"
-                    content = f"您好 {uname}，今天是您的每月固定套餐重置日（每月 {reset_day} 号），已用流量已清零恢复满格！"
+                    content = f"您好 {uname}，今天是您的每月固定套餐重置日（每月 {reset_day} 号），已用流量已恢复满格！"
                     notify_user(u, title, f"<h3>{title}</h3><p>{content}</p>", content)
 
         used_mb = u.get("used_mb", 0)
         limit_mb = u.get("traffic_limit_mb", 1024)
 
-        # 2. 流量不足告警
         if limit_mb > 0:
             used_percent = round((used_mb / limit_mb) * 100, 1)
             if used_percent >= traffic_threshold:
@@ -92,7 +98,6 @@ def run_scheduled_check(force=False) -> tuple[int, int, str]:
                         c.execute("INSERT INTO notify_logs (username, warn_type, sent_date) VALUES (?, 'traffic', ?)", (uname, today_str))
                         conn.commit()
 
-        # 3. 到期预警
         exp_str = u.get("expire_date", "").strip()
         if exp_str and not exp_str.startswith("2099"):
             try:
@@ -121,8 +126,6 @@ def scheduled_worker_loop():
         try:
             interval_hours = int(get_setting("task_interval_hours", "12") or 12)
             run_scheduled_check(force=False)
-
-            # 核心新增：每轮自动检测 HTTPS 证书是否快到期（<=20天自动触发续签）
             auto_renew_acme_job()
         except Exception as e:
             print(f"[Worker Error] {e}", flush=True)
@@ -258,7 +261,6 @@ def node_heartbeat():
     c.execute("SELECT * FROM nodes WHERE node_id=?", (node_id,))
     node = c.fetchone()
 
-    # 首次接入：自动采用节点上报的 key 并绑定注册
     if not node:
         auto_name = f"节点-{node_ip}"
         c.execute("INSERT INTO nodes (node_id, node_key, pending_key, name, ip, port, dest, sni, pbk, sid, status, last_heartbeat) VALUES (?, ?, '', ?, ?, ?, 'www.microsoft.com:443', ?, ?, ?, 1, ?)",
@@ -342,7 +344,7 @@ def node_report_traffic():
     conn.close()
     return jsonify({"code": 200, "msg": "流量同步成功"})
 
-# ==================== 用户端操作 ====================
+# ==================== 用户端操作与防机器人防护 ====================
 
 @app.route('/api/user/refresh_info', methods=['POST'])
 def user_refresh_info():
@@ -385,11 +387,19 @@ def user_refresh_info():
         }
     })
 
+# 登录接口：集成防机器人算术验证码校验
 @app.route('/api/login', methods=['POST'])
 def login():
     data = request.json or {}
     account = data.get('username', '').strip()
     p = data.get('password', '').strip()
+    captcha_id = data.get('captcha_id', '').strip()
+    captcha_ans = data.get('captcha_ans', '').strip()
+
+    # 1. 防机器人验证码校验
+    ok, c_msg = verify_captcha(captcha_id, captcha_ans)
+    if not ok:
+        return jsonify({"code": 400, "msg": c_msg})
 
     conn = get_db()
     c = conn.cursor()
@@ -448,10 +458,18 @@ def login():
         }
     })
 
+# 注册发送验证码：防邮件轰炸机刷发信额度
 @app.route('/api/auth/send_register_code', methods=['POST'])
 def send_register_code():
     data = request.json or {}
     email = data.get('email', '').strip().lower()
+    captcha_id = data.get('captcha_id', '').strip()
+    captcha_ans = data.get('captcha_ans', '').strip()
+
+    ok, c_msg = verify_captcha(captcha_id, captcha_ans)
+    if not ok:
+        return jsonify({"code": 400, "msg": c_msg})
+
     if not email or '@' not in email:
         return jsonify({"code": 400, "msg": "请输入合法的电子邮箱"})
 
@@ -524,6 +542,13 @@ def register():
 def send_reset_code():
     data = request.json or {}
     email = data.get('email', '').strip().lower()
+    captcha_id = data.get('captcha_id', '').strip()
+    captcha_ans = data.get('captcha_ans', '').strip()
+
+    ok, c_msg = verify_captcha(captcha_id, captcha_ans)
+    if not ok:
+        return jsonify({"code": 400, "msg": c_msg})
+
     conn = get_db()
     c = conn.cursor()
     c.execute("SELECT id, username FROM users WHERE email=?", (email,))
@@ -650,44 +675,148 @@ def download_windows_client():
     except Exception as e:
         return jsonify({"code": 500, "msg": f"客户端构建失败: {str(e)}"}), 500
 
+# ==================== 核心重构：多张卡密一键批量核销与套餐智能叠加 ====================
+
 @app.route('/api/recharge', methods=['POST'])
 def recharge():
     data = request.json or {}
     u = data.get('username')
-    code = data.get('card_code', '').strip()
+    raw_card_input = data.get('card_code', '').strip()
+
+    if not raw_card_input:
+        return jsonify({"code": 400, "msg": "请输入卡密兑换码"})
+
+    # 1. 智能分词提取所有卡密（支持多行粘贴、空格、逗号分隔，并自动去重）
+    raw_tokens = re.split(r'[\r\n,;\s]+', raw_card_input)
+    codes = list(dict.fromkeys([c.strip().upper() for c in raw_tokens if c.strip()]))
+
+    if not codes:
+        return jsonify({"code": 400, "msg": "未识别到有效的卡密格式"})
+
+    if len(codes) > 20:
+        return jsonify({"code": 400, "msg": "单次最多支持批量核销 20 张卡密"})
+
     conn = get_db()
     c = conn.cursor()
-    c.execute("SELECT * FROM cards WHERE code=?", (code,))
-    card = c.fetchone()
-    if not card or card['is_used']:
-        conn.close()
-        return jsonify({"code": 400, "msg": "卡密无效或已被使用"})
-
-    now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    c.execute("UPDATE cards SET is_used=1, used_by=?, created_at=? WHERE code=?", (u, now, code))
     c.execute("SELECT * FROM users WHERE username=?", (u,))
     user = c.fetchone()
+    if not user:
+        conn.close()
+        return jsonify({"code": 404, "msg": "用户不存在"})
 
+    # 2. 查询所有提交的卡密记录
+    placeholders = ','.join(['?'] * len(codes))
+    c.execute(f"SELECT * FROM cards WHERE code IN ({placeholders})", codes)
+    found_cards = [dict(r) for r in c.fetchall()]
+
+    found_map = {fc['code']: fc for fc in found_cards}
+    valid_cards = []
+    used_cards = []
+    invalid_codes = []
+
+    for code in codes:
+        if code not in found_map:
+            invalid_codes.append(code)
+        elif found_map[code]['is_used'] == 1:
+            used_cards.append(code)
+        else:
+            valid_cards.append(found_map[code])
+
+    if not valid_cards:
+        conn.close()
+        err_msg = "所提交的卡密全部无效"
+        if used_cards:
+            err_msg = f"卡密已被使用 (共 {len(used_cards)} 张)"
+        return jsonify({"code": 400, "msg": err_msg})
+
+    # 3. 智能多卡复合累加计算
+    total_add_gb = 0
+    total_add_days = 0
+    has_unlimited_traffic = False
+    has_lifetime_expiry = False
+    has_monthly_card = False
+
+    for card in valid_cards:
+        if card['traffic_gb'] == 0:
+            has_unlimited_traffic = True
+        else:
+            total_add_gb += card['traffic_gb']
+
+        if card['days'] >= 3650:
+            has_lifetime_expiry = True
+        else:
+            total_add_days += card['days']
+
+        if card.get('is_monthly') == 1:
+            has_monthly_card = True
+
+    # 4. 流量配额结算
     current_limit = user['traffic_limit_mb']
-    new_limit = 0 if card['traffic_gb'] == 0 else (current_limit + card['traffic_gb'] * 1024)
+    if has_unlimited_traffic or current_limit == 0:
+        new_limit = 0  # 设为不限流量
+    else:
+        new_limit = current_limit + total_add_gb * 1024
 
+    # 5. 有效期顺延结算 (若已过期从当前时间起算，未过期从原到期日起顺延)
     c_exp_str = user['expire_date']
-    if card['days'] >= 3650 or c_exp_str.startswith("2099"):
+    if has_lifetime_expiry or c_exp_str.startswith("2099"):
         n_exp = "2099-12-31 23:59:59"
     else:
-        c_exp = datetime.datetime.strptime(c_exp_str, "%Y-%m-%d %H:%M:%S")
-        n_exp = (max(datetime.datetime.now(), c_exp) + datetime.timedelta(days=card['days'])).strftime("%Y-%m-%d %H:%M:%S")
+        try:
+            c_exp = datetime.datetime.strptime(c_exp_str, "%Y-%m-%d %H:%M:%S")
+        except Exception:
+            c_exp = datetime.datetime.now()
+        base_time = max(datetime.datetime.now(), c_exp)
+        n_exp = (base_time + datetime.timedelta(days=total_add_days)).strftime("%Y-%m-%d %H:%M:%S")
 
-    card_is_monthly = card['is_monthly'] if 'is_monthly' in card.keys() else 0
-    if card_is_monthly == 1:
-        reset_day = datetime.date.today().day
-        c.execute("UPDATE users SET traffic_limit_mb=?, expire_date=?, is_monthly=1, reset_day=? WHERE username=?", (new_limit, n_exp, reset_day, u))
-    else:
-        c.execute("UPDATE users SET traffic_limit_mb=?, expire_date=? WHERE username=?", (new_limit, n_exp, u))
+    # 6. 每月固定套餐属性继承判断
+    new_is_monthly = user['is_monthly'] or 0
+    new_reset_day = user['reset_day'] or 1
+    if has_monthly_card:
+        new_is_monthly = 1
+        new_reset_day = datetime.date.today().day
+
+    # 7. 原子事务写入：批量核销所有有效卡密，更新用户配额
+    now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    valid_codes_list = [vc['code'] for vc in valid_cards]
+    v_placeholders = ','.join(['?'] * len(valid_codes_list))
+    
+    c.execute(f"UPDATE cards SET is_used=1, used_by=?, created_at=? WHERE code IN ({v_placeholders})",
+              [u, now_str] + valid_codes_list)
+
+    c.execute("""
+        UPDATE users 
+        SET traffic_limit_mb=?, expire_date=?, is_monthly=?, reset_day=? 
+        WHERE username=?
+    """, (new_limit, n_exp, new_is_monthly, new_reset_day, u))
 
     conn.commit()
     conn.close()
-    return jsonify({"code": 200, "msg": "充值成功！套餐配额已更新"})
+
+    # 8. 组装细致的反馈提示
+    res_msg = f"成功核销 {len(valid_cards)} 张卡密！"
+    if has_unlimited_traffic or new_limit == 0:
+        res_msg += " 流量已设为不限制；"
+    else:
+        res_msg += f" 累计增加 {total_add_gb}GB 流量；"
+
+    if has_lifetime_expiry or n_exp.startswith("2099"):
+        res_msg += " 有效期已设为永久有效。"
+    else:
+        res_msg += f" 有效期顺延至 {n_exp}。"
+
+    if used_cards or invalid_codes:
+        res_msg += f" (已自动跳过 {len(used_cards) + len(invalid_codes)} 张已被使用或无效的卡密)"
+
+    title = "【充值成功】您的套餐配额已更新"
+    notify_user(dict(user), title, f"<p>{res_msg}</p>", res_msg)
+
+    return jsonify({
+        "code": 200,
+        "msg": res_msg,
+        "valid_count": len(valid_cards),
+        "skipped_count": len(used_cards) + len(invalid_codes)
+    })
 
 # ==================== 管理员节点调度与配置修改 ====================
 

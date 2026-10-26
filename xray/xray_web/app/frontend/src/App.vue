@@ -17,6 +17,7 @@
     <main class="main-body">
       <!-- 1. 登录 / 注册 / 找回密码 模块 -->
       <div v-if="!currentUser.username" class="auth-center">
+        <!-- 登录页系统公告展示栏 -->
         <div v-if="systemNotice" class="cyber-notice-card">
           <div class="notice-header"><span class="notice-icon">📢</span><strong>系统公告 NOTICE</strong></div>
           <div class="notice-body">{{ systemNotice }}</div>
@@ -25,6 +26,7 @@
         <div class="cyber-card auth-box">
           <h2 class="card-title">{{ authCardTitle }}</h2>
 
+          <!-- A. 登录表单 (带防机器人算术验证码) -->
           <template v-if="authMode === 'login'">
             <div class="form-item">
               <label>ACCOUNT / 用户名 或 注册邮箱</label>
@@ -34,15 +36,24 @@
               <label>ACCESS KEY / 登录密码</label>
               <input v-model="authForm.password" type="password" class="cyber-input" placeholder="请输入密码" />
             </div>
+            <!-- 防机器人算术验证码 -->
+            <div class="form-item">
+              <label>CAPTCHA / 算术验证 (点击图片可刷新)</label>
+              <div class="captcha-group">
+                <input v-model="loginCaptchaAns" type="text" class="cyber-input captcha-input" placeholder="计算结果" @keyup.enter="handleAuth" />
+                <div class="captcha-svg-box" @click="refreshCaptcha('login')" v-html="loginCaptcha.svg" title="点击刷新验证码"></div>
+              </div>
+            </div>
             <button class="btn-cyber-primary" :disabled="loading" @click="handleAuth">
               {{ loading ? 'AUTHENTICATING...' : '登录系统' }}
             </button>
             <div v-if="!isPureAdmin" class="auth-nav-links">
-              <a href="javascript:;" @click="authMode = 'register'">没有账号？邮箱注册</a>
-              <a href="javascript:;" class="text-warning" @click="authMode = 'forgot'">忘记密码？</a>
+              <a href="javascript:;" @click="switchAuthMode('register')">没有账号？邮箱注册</a>
+              <a href="javascript:;" class="text-warning" @click="switchAuthMode('forgot')">忘记密码？</a>
             </div>
           </template>
 
+          <!-- B. 注册表单 (发信前强制校验验证码，防邮件轰炸) -->
           <template v-else-if="authMode === 'register'">
             <div class="form-item">
               <label>USER IDENTIFIER / 设置用户名</label>
@@ -51,6 +62,14 @@
             <div class="form-item">
               <label>EMAIL / 接收激活码邮箱</label>
               <input v-model="authForm.email" type="email" class="cyber-input" placeholder="name@example.com" />
+            </div>
+            <!-- 防刷邮件发信算术验证码 -->
+            <div class="form-item">
+              <label>CAPTCHA / 算术验证 (防止脚本刷发信)</label>
+              <div class="captcha-group">
+                <input v-model="registerCaptchaAns" type="text" class="cyber-input captcha-input" placeholder="计算结果" />
+                <div class="captcha-svg-box" @click="refreshCaptcha('register')" v-html="registerCaptcha.svg" title="点击刷新验证码"></div>
+              </div>
             </div>
             <div class="form-item">
               <label>VERIFY CODE / 邮箱激活码</label>
@@ -69,14 +88,22 @@
               {{ loading ? 'AUTHENTICATING...' : '验证并激活账号' }}
             </button>
             <div class="auth-nav-links">
-              <a href="javascript:;" @click="authMode = 'login'">已有账号？返回登录</a>
+              <a href="javascript:;" @click="switchAuthMode('login')">已有账号？返回登录</a>
             </div>
           </template>
 
+          <!-- C. 找回密码表单 -->
           <template v-else-if="authMode === 'forgot'">
             <div class="form-item">
               <label>REGISTERED EMAIL / 绑定的注册邮箱</label>
               <input v-model="forgotForm.email" type="email" class="cyber-input" placeholder="输入绑定的邮箱" />
+            </div>
+            <div class="form-item">
+              <label>CAPTCHA / 算术验证 (防止重置轰炸)</label>
+              <div class="captcha-group">
+                <input v-model="forgotCaptchaAns" type="text" class="cyber-input captcha-input" placeholder="计算结果" />
+                <div class="captcha-svg-box" @click="refreshCaptcha('forgot')" v-html="forgotCaptcha.svg" title="点击刷新验证码"></div>
+              </div>
             </div>
             <div class="form-item">
               <label>RESET CODE / 邮箱重置码</label>
@@ -95,7 +122,7 @@
               {{ loading ? 'PROCESSING...' : '确认重置密码' }}
             </button>
             <div class="auth-nav-links">
-              <a href="javascript:;" @click="authMode = 'login'">想起密码？返回登录</a>
+              <a href="javascript:;" @click="switchAuthMode('login')">想起密码？返回登录</a>
             </div>
           </template>
         </div>
@@ -132,18 +159,21 @@
           </div>
         </div>
 
+        <!-- 完善支持多张卡密一键批量充值 -->
         <div class="cyber-card">
           <div class="card-header">
-            <h3>🎟️ 卡密充值续费</h3>
+            <h3>🎟️ 卡密充值续费 (支持多卡批量充值)</h3>
           </div>
-          <p class="card-desc">输入发卡平台兑换码，即时扩展流量与天数：</p>
+          <p class="card-desc">支持单张或多张卡密（每行一张或空格分隔），一键自动批量累加核销：</p>
           <div class="redeem-box">
-            <input v-model="rechargeCode" type="text" class="cyber-input" placeholder="KM-XXXX-XXXX" />
-            <button class="btn-cyber-success" :disabled="loading" @click="handleRecharge">立即激活</button>
+            <textarea v-model="rechargeCode" class="cyber-input cyber-textarea redeem-textarea" placeholder="KM-XXXX-XXXX&#10;KM-YYYY-YYYY (支持同时粘贴多张卡密)"></textarea>
+            <button class="btn-cyber-success" :disabled="loading" style="height: auto; align-self: stretch;" @click="handleRecharge">
+              {{ loading ? '核销中...' : '立即批量充值' }}
+            </button>
           </div>
         </div>
 
-        <!-- 节点列表与通用聚合订阅 (修复头部挤压变形) -->
+        <!-- 节点列表与通用聚合订阅 (头部自适应，不折行不挤压) -->
         <div class="cyber-card col-span-2">
           <div class="card-header header-nowrap-row">
             <h3 class="header-title-text">🌐 全球加速节点列表与通用订阅 (共 {{ currentUser.nodes ? currentUser.nodes.length : 0 }} 个节点)</h3>
@@ -269,7 +299,7 @@
           </button>
         </div>
 
-        <!-- 主选项卡 1: 用户管理 (恢复专属凭证与二维码列) -->
+        <!-- 主选项卡 1: 用户管理 (包含专属凭证与二维码查看) -->
         <div v-if="activeTab === 'users'" class="cyber-card tab-content-card">
           <div class="card-header">
             <h3>👥 接入用户治理列表</h3>
@@ -326,7 +356,7 @@
           </div>
         </div>
 
-        <!-- 主选项卡 2: 远程节点集群管理 (解决换行、展示 node_key 与全量在线配置) -->
+        <!-- 主选项卡 2: 远程节点集群管理 -->
         <div v-else-if="activeTab === 'nodes'" class="cyber-card tab-content-card">
           <div class="card-header">
             <h3>🌐 已接入的远程 xray_core 节点集群</h3>
@@ -359,7 +389,6 @@
                     {{ n.pbk ? n.pbk.substring(0, 10) + '...' : '等待回传' }}
                     <button class="btn-link-action" style="margin-left: 4px;" @click="copyText(n.pbk)">复制</button>
                   </td>
-                  <!-- 核心修复：强制单行不折行 -->
                   <td class="status-cell-nowrap">
                     <span class="badge badge-ready">🟢 在线</span>
                     <div class="time-sub-text">{{ n.last_heartbeat }}</div>
@@ -712,7 +741,7 @@
       </div>
     </div>
 
-    <!-- 核心新增弹窗：管理员查看与复制指定用户的全节点订阅与单节点二维码 -->
+    <!-- 弹窗 2：管理员查看与复制指定用户的全节点订阅与单节点二维码 -->
     <div v-if="showUserCredModal" class="modal-backdrop" @click="showUserCredModal = false">
       <div class="cyber-modal" style="max-width: 580px; text-align: left;" @click.stop>
         <h3>📱 用户 [{{ targetCredUser.username }}] 的节点凭据与订阅</h3>
@@ -748,7 +777,7 @@
       </div>
     </div>
 
-    <!-- 核心新增弹窗：管理员在线配置节点全部参数 (自动双向同步) -->
+    <!-- 弹窗 3：管理员在线配置节点全部参数 (双向自动同步) -->
     <div v-if="showNodeConfigModal" class="modal-backdrop" @click="showNodeConfigModal = false">
       <div class="cyber-modal" style="max-width: 500px; text-align: left;" @click.stop>
         <h3>✏️ 调整节点配置 (双向自动同步)</h3>
@@ -804,7 +833,7 @@
       </div>
     </div>
 
-    <!-- 弹窗 2：管理员修改用户配额 -->
+    <!-- 弹窗 4：管理员修改用户配额 -->
     <div v-if="showEditModal" class="modal-backdrop" @click="showEditModal = false">
       <div class="cyber-modal" style="max-width: 440px; text-align: left;" @click.stop>
         <h3>✏️ 调整用户 [{{ editForm.username }}] 属性</h3>
@@ -836,7 +865,7 @@
       </div>
     </div>
 
-    <!-- 弹窗 3：管理员重置用户密码 -->
+    <!-- 弹窗 5：管理员重置用户密码 -->
     <div v-if="showResetPwdModal" class="modal-backdrop" @click="showResetPwdModal = false">
       <div class="cyber-modal" style="max-width: 380px; text-align: left;" @click.stop>
         <h3>🔑 重置用户 [{{ resetTargetUser }}] 密码</h3>
@@ -851,7 +880,7 @@
       </div>
     </div>
 
-    <!-- 弹窗 4：手动粘贴上传证书 PEM 弹窗 -->
+    <!-- 弹窗 6：手动粘贴上传证书 PEM 弹窗 -->
     <div v-if="showCustomCertModal" class="modal-backdrop" @click="showCustomCertModal = false">
       <div class="cyber-modal" style="max-width: 520px; text-align: left;" @click.stop>
         <h3>📋 手动安装第三方 HTTPS 证书</h3>
@@ -889,15 +918,21 @@ const countdown = ref(0)
 const sendingCode = ref(false)
 const systemNotice = ref('')
 
+// 算术验证码状态 (防机器人)
+const loginCaptcha = reactive({ id: '', svg: '' })
+const loginCaptchaAns = ref('')
+const registerCaptcha = reactive({ id: '', svg: '' })
+const registerCaptchaAns = ref('')
+const forgotCaptcha = reactive({ id: '', svg: '' })
+const forgotCaptchaAns = ref('')
+
 const showQrModal = ref(false)
 const targetModalUser = ref('')
 const targetModalLink = ref('')
 
-// 管理员查看用户完整凭证弹窗
 const showUserCredModal = ref(false)
 const targetCredUser = ref({})
 
-// 节点配置弹窗
 const showNodeConfigModal = ref(false)
 const nodeEditForm = reactive({ node_id: '', name: '', ip: '', port: 443, dest: '', sni: '', sid: '', node_key: '', status: true })
 
@@ -968,7 +1003,6 @@ onMounted(async () => {
         notifyForm.notify_type = parsed.user.notify_type || 'email'
         notifyForm.serverchan_key = parsed.user.serverchan_key || ''
 
-        // 后台静默刷新最新节点列表与流量数据
         if (currentUser.role === 'user') {
           refreshUserInfo()
         } else if (currentUser.role === 'admin') {
@@ -982,12 +1016,42 @@ onMounted(async () => {
     }
   }
 
+  // 初始加载验证码
+  refreshCaptcha('login')
+
   try {
     const res = await axios.get('/api/system/info')
     if (res.data.data.mode === 'admin') isPureAdmin.value = true
     if (res.data.data.system_notice) systemNotice.value = res.data.data.system_notice
   } catch (_) {}
 })
+
+// 动态刷新算术验证码
+const refreshCaptcha = async (type) => {
+  try {
+    const res = await axios.get('/api/auth/captcha')
+    if (res.data.code === 200) {
+      if (type === 'login') {
+        loginCaptcha.id = res.data.data.captcha_id
+        loginCaptcha.svg = res.data.data.svg
+        loginCaptchaAns.value = ''
+      } else if (type === 'register') {
+        registerCaptcha.id = res.data.data.captcha_id
+        registerCaptcha.svg = res.data.data.svg
+        registerCaptchaAns.value = ''
+      } else if (type === 'forgot') {
+        forgotCaptcha.id = res.data.data.captcha_id
+        forgotCaptcha.svg = res.data.data.svg
+        forgotCaptchaAns.value = ''
+      }
+    }
+  } catch (_) {}
+}
+
+const switchAuthMode = (mode) => {
+  authMode.value = mode
+  refreshCaptcha(mode)
+}
 
 const refreshUserInfo = async () => {
   try {
@@ -1060,7 +1124,7 @@ const generateRandomToken = () => {
   ElMessage.success('已随机生成新出卡 Token')
 }
 
-// 统一导出底层 (全局唯一声明)
+// 统一导出底层 (全局仅此一处定义)
 const executeExport = async (payload, successTip) => {
   try {
     const adminUser = currentUser.username || authForm.username
@@ -1081,16 +1145,19 @@ const executeExport = async (payload, successTip) => {
   }
 }
 
+// 唯一保留：勾选导出
 const exportSelectedCards = () => {
-  if (selectedCards.value.length === 0) return ElMessage.warning('请先勾选要导出的卡密')
+  if (selectedCards.value.length === 0) return ElMessage.warning('请先在表格左侧勾选要导出的卡密')
   executeExport({ selected_codes: selectedCards.value }, '已复制选中的卡密')
 }
 
+// 唯一保留：日期范围导出
 const exportByDateRange = () => {
   if (!exportFilter.startDate && !exportFilter.endDate) return ElMessage.warning('请先选择日期范围')
   executeExport({ start_date: exportFilter.startDate, end_date: exportFilter.endDate }, '已导出指定日期范围内的未售卡密')
 }
 
+// 唯一保留：全部未售导出
 const exportAllUnusedCards = () => executeExport({}, '已复制全部未售卡密')
 
 const startCountdown = () => {
@@ -1103,17 +1170,25 @@ const startCountdown = () => {
 
 const sendRegisterCode = async () => {
   if (!authForm.email || !authForm.email.includes('@')) return ElMessage.warning('请输入合法电子邮箱')
+  if (!registerCaptchaAns.value) return ElMessage.warning('请先输入算术验证码计算结果')
+
   sendingCode.value = true
   try {
-    const res = await axios.post('/api/auth/send_register_code', { email: authForm.email })
+    const res = await axios.post('/api/auth/send_register_code', {
+      email: authForm.email,
+      captcha_id: registerCaptcha.id,
+      captcha_ans: registerCaptchaAns.value
+    })
     if (res.data.code === 200) {
       ElMessage.success(res.data.msg)
       startCountdown()
     } else {
       ElMessage.error(res.data.msg)
+      refreshCaptcha('register')
     }
   } catch (_) {
     ElMessage.error('验证码发送失败')
+    refreshCaptcha('register')
   } finally {
     sendingCode.value = false
   }
@@ -1121,17 +1196,25 @@ const sendRegisterCode = async () => {
 
 const sendForgotCode = async () => {
   if (!forgotForm.email || !forgotForm.email.includes('@')) return ElMessage.warning('请输入绑定的注册邮箱')
+  if (!forgotCaptchaAns.value) return ElMessage.warning('请先输入算术验证码计算结果')
+
   sendingCode.value = true
   try {
-    const res = await axios.post('/api/auth/send_reset_code', { email: forgotForm.email })
+    const res = await axios.post('/api/auth/send_reset_code', {
+      email: forgotForm.email,
+      captcha_id: forgotCaptcha.id,
+      captcha_ans: forgotCaptchaAns.value
+    })
     if (res.data.code === 200) {
       ElMessage.success(res.data.msg)
       startCountdown()
     } else {
       ElMessage.error(res.data.msg)
+      refreshCaptcha('forgot')
     }
   } catch (_) {
     ElMessage.error('请求失败')
+    refreshCaptcha('forgot')
   } finally {
     sendingCode.value = false
   }
@@ -1139,12 +1222,14 @@ const sendForgotCode = async () => {
 
 const submitForgotPassword = async () => {
   if (!forgotForm.email || !forgotForm.code || !forgotForm.new_password) return ElMessage.warning('请填写完整重置信息')
+  if (forgotForm.new_password.length < 6) return ElMessage.warning('新密码长度不能少于 6 位')
+
   loading.value = true
   try {
     const res = await axios.post('/api/auth/reset_password', forgotForm)
     if (res.data.code === 200) {
       ElMessage.success(res.data.msg)
-      authMode.value = 'login'
+      switchAuthMode('login')
       authForm.username = forgotForm.email
       authForm.password = ''
     } else {
@@ -1252,7 +1337,7 @@ const handleStatusToggle = async (targetUser, newStatus) => {
 }
 
 const handleDeleteUser = async (targetUser) => {
-  if (!confirm(`⚠️ 警告：确定要彻底删除用户 [${targetUser}] 吗？`)) return
+  if (!confirm(`⚠️ 警告：确定要彻底删除用户 [${targetUser}] 吗？数据无法恢复！`)) return
   try {
     const adminUser = currentUser.username || authForm.username
     const res = await axios.post('/api/admin/users/delete', {
@@ -1401,6 +1486,8 @@ const resetNodeKey = async (nodeId) => {
     if (res.data.code === 200) {
       ElMessage.success(res.data.msg)
       openNodesTab()
+    } else {
+      ElMessage.error(res.data.msg)
     }
   } catch (_) {
     ElMessage.error('重置密钥失败')
@@ -1419,6 +1506,8 @@ const revokeDeleteNode = async (nodeId) => {
     if (res.data.code === 200) {
       ElMessage.success(res.data.msg)
       openNodesTab()
+    } else {
+      ElMessage.error(res.data.msg)
     }
   } catch (_) {
     ElMessage.error('吊销删除失败')
@@ -1611,16 +1700,23 @@ const copyText = async (text) => {
   document.body.removeChild(ta)
 }
 
+// 核心：登录提交时携带算术验证码答案
 const handleAuth = async () => {
   if (!authForm.username || !authForm.password) return ElMessage.warning('请填写账号与密码')
+  if (authMode.value === 'login' && !loginCaptchaAns.value) return ElMessage.warning('请输入算术验证码计算结果')
+
   loading.value = true
   const api = authMode.value === 'register' ? '/api/register' : '/api/login'
   try {
-    const res = await axios.post(api, authForm)
+    const res = await axios.post(api, {
+      ...authForm,
+      captcha_id: loginCaptcha.id,
+      captcha_ans: loginCaptchaAns.value
+    })
     if (res.data.code === 200) {
       if (authMode.value === 'register') {
         ElMessage.success(res.data.msg)
-        authMode.value = 'login'
+        switchAuthMode('login')
       } else {
         ElMessage.success('登录成功')
         Object.assign(currentUser, res.data.data)
@@ -1640,17 +1736,24 @@ const handleAuth = async () => {
       }
     } else {
       ElMessage.error(res.data.msg)
+      if (authMode.value === 'login') refreshCaptcha('login')
     }
+  } catch (_) {
+    if (authMode.value === 'login') refreshCaptcha('login')
   } finally {
     loading.value = false
   }
 }
 
+// 核心：多卡密批量充值处理
 const handleRecharge = async () => {
-  if (!rechargeCode.value) return ElMessage.warning('请输入卡密')
+  if (!rechargeCode.value || !rechargeCode.value.trim()) return ElMessage.warning('请输入至少一张卡密')
   loading.value = true
   try {
-    const res = await axios.post('/api/recharge', { username: currentUser.username, card_code: rechargeCode.value })
+    const res = await axios.post('/api/recharge', {
+      username: currentUser.username,
+      card_code: rechargeCode.value
+    })
     if (res.data.code === 200) {
       ElMessage.success(res.data.msg)
       rechargeCode.value = ''
@@ -1749,6 +1852,46 @@ const logout = () => {
   white-space: nowrap !important;
   flex-shrink: 0 !important;
   padding: 7px 16px !important;
+}
+
+/* 算术验证码容器样式 */
+.captcha-group {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  max-width: 500px;
+}
+.captcha-input {
+  width: 140px !important;
+  min-width: 120px !important;
+  font-family: monospace;
+  font-weight: 700;
+  text-align: center;
+}
+.captcha-svg-box {
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #0b1120;
+  border: 1px solid #334155;
+  border-radius: 6px;
+  padding: 2px;
+  transition: all 0.2s;
+  user-select: none;
+}
+.captcha-svg-box:hover {
+  border-color: #38bdf8;
+  box-shadow: 0 0 10px rgba(56, 189, 248, 0.25);
+}
+
+/* 多卡密充值大文本框 */
+.redeem-textarea {
+  height: 68px;
+  min-height: 50px;
+  resize: vertical;
+  font-family: monospace;
+  line-height: 1.4;
 }
 
 /* 多节点卡片网格 */
