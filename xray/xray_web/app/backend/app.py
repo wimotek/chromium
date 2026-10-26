@@ -40,8 +40,6 @@ def build_node_link(uuid_str: str, node: dict, remark: str) -> str:
 def acme_challenge_token(filename):
     return send_from_directory(CHALLENGE_DIR, filename)
 
-# ==================== 防机器人算术验证码接口 ====================
-
 @app.route('/api/auth/captcha', methods=['GET'])
 def get_captcha():
     data = generate_math_captcha()
@@ -178,8 +176,10 @@ def get_subscription():
 
     links = []
     for n in nodes:
-        remark = f"{n['name']}"
-        links.append(build_node_link(user['uuid'], n, remark))
+        # 仅分发有效 43 位公钥的节点，过滤任何非法数据
+        if len(n.get("pbk", "")) == 43:
+            remark = f"{n['name']}"
+            links.append(build_node_link(user['uuid'], n, remark))
 
     sub_text = "\n".join(links)
     b64_sub = base64.b64encode(sub_text.encode('utf-8')).decode('utf-8')
@@ -238,7 +238,7 @@ def open_faka_generate():
 
     return code, 200, {"Content-Type": "text/plain; charset=utf-8"}
 
-# ==================== 远程节点集群心跳与参数双向同步 ====================
+# ==================== 远程节点集群心跳 (实时纠偏公钥) ====================
 
 @app.route('/api/node/heartbeat', methods=['POST'])
 def node_heartbeat():
@@ -255,23 +255,23 @@ def node_heartbeat():
     if not node_id:
         return jsonify({"code": 400, "msg": "缺少 node_id"}), 400
 
-    # 核心拦截：公钥如果不是 43 位的标准格式，拒绝错误数据污染数据库
+    # 严防怪兽公钥：如果长度不是 43 位，说明节点端脚本未更新，明确拒绝并提示
     if len(pbk) != 43:
-        return jsonify({"code": 400, "msg": f"节点公钥格式非法 (当前长度: {len(pbk)}，应为 43 位)"}), 400
+        return jsonify({"code": 400, "msg": f"公钥格式错误 (当前长度: {len(pbk)}，应为 43 位)"}), 400
 
     conn = get_db()
     c = conn.cursor()
     c.execute("SELECT * FROM nodes WHERE node_id=?", (node_id,))
     node = c.fetchone()
 
-    # 首次接入：自动采用节点上报的 key 并绑定注册
+    # 首次接入：自动采用节点上报的真实公钥与参数
     if not node:
         auto_name = f"节点-{node_ip}"
         c.execute("INSERT INTO nodes (node_id, node_key, pending_key, name, ip, port, dest, sni, pbk, sid, status, last_heartbeat) VALUES (?, ?, '', ?, ?, ?, 'www.microsoft.com:443', ?, ?, ?, 1, ?)",
                   (node_id, node_key, auto_name, node_ip, node_port, sni, pbk, sid, now_str))
         conn.commit()
         conn.close()
-        return jsonify({"code": 200, "msg": "节点首次接入成功并已自动绑定密钥！"})
+        return jsonify({"code": 200, "msg": "节点首次接入成功，公钥已自动登记！"})
 
     current_key = node["node_key"]
     pending_key = node["pending_key"]
@@ -284,7 +284,7 @@ def node_heartbeat():
         return jsonify({"code": 200, "msg": "心跳成功，已为您同步下发新密钥", "new_node_key": pending_key})
 
     if node_key == current_key:
-        # 正常心跳：更新心跳时间与正确的公钥
+        # 核心纠偏：每次心跳自动将最新的真实 43 位公钥更新进数据库，冲掉旧的错误公钥！
         c.execute("UPDATE nodes SET ip=?, port=?, sni=?, pbk=?, sid=?, status=1, last_heartbeat=? WHERE node_id=?",
                   (node_ip, node_port, sni, pbk, sid, now_str, node_id))
         conn.commit()
@@ -294,7 +294,6 @@ def node_heartbeat():
     conn.close()
     return jsonify({"code": 403, "msg": "Node Key 验证失败"}), 403
 
-# 双向同步接口：下发合法用户名单与后台调整的网络参数 (对齐 ShortId 与端口)
 @app.route('/api/node/sync', methods=['GET'])
 def node_sync_users():
     node_id = request.args.get('node_id', '').strip()
@@ -350,7 +349,7 @@ def node_report_traffic():
     conn.close()
     return jsonify({"code": 200, "msg": "流量同步成功"})
 
-# ==================== 用户端操作 ====================
+# ==================== 用户端与节点交互 ====================
 
 @app.route('/api/user/refresh_info', methods=['POST'])
 def user_refresh_info():
@@ -373,14 +372,15 @@ def user_refresh_info():
     sub_url = f"{host_prefix}/api/sub?token={user['uuid']}"
 
     for n in node_rows:
-        link = build_node_link(user['uuid'], n, f"{n['name']}")
-        nodes_data.append({
-            "id": n["id"],
-            "name": n["name"],
-            "ip": n["ip"],
-            "port": n["port"],
-            "link": link
-        })
+        if len(n.get("pbk", "")) == 43:
+            link = build_node_link(user['uuid'], n, f"{n['name']}")
+            nodes_data.append({
+                "id": n["id"],
+                "name": n["name"],
+                "ip": n["ip"],
+                "port": n["port"],
+                "link": link
+            })
 
     return jsonify({
         "code": 200,
@@ -435,14 +435,15 @@ def login():
     sub_url = f"{host_prefix}/api/sub?token={user['uuid']}"
 
     for n in node_rows:
-        link = build_node_link(user['uuid'], n, f"{n['name']}")
-        nodes_data.append({
-            "id": n["id"],
-            "name": n["name"],
-            "ip": n["ip"],
-            "port": n["port"],
-            "link": link
-        })
+        if len(n.get("pbk", "")) == 43:
+            link = build_node_link(user['uuid'], n, f"{n['name']}")
+            nodes_data.append({
+                "id": n["id"],
+                "name": n["name"],
+                "ip": n["ip"],
+                "port": n["port"],
+                "link": link
+            })
 
     return jsonify({
         "code": 200,
@@ -678,7 +679,6 @@ def download_windows_client():
     except Exception as e:
         return jsonify({"code": 500, "msg": f"客户端构建失败: {str(e)}"}), 500
 
-# 多卡密批量原子核销接口
 @app.route('/api/recharge', methods=['POST'])
 def recharge():
     data = request.json or {}
@@ -799,7 +799,7 @@ def recharge():
         "skipped_count": len(used_cards) + len(invalid_codes)
     })
 
-# ==================== 管理员节点调度与配置修改 ====================
+# ==================== 管理员节点调度、重置与强制重新上报 ====================
 
 @app.route('/api/admin/nodes/list', methods=['POST'])
 def admin_list_nodes():
@@ -840,6 +840,22 @@ def admin_save_node_config():
 
     return jsonify({"code": 200, "msg": "节点配置已更新！用户订阅已即时生效，远程节点将在下次回传时自动热重载。"})
 
+# 核心新增：管理员一键强制清空错误缓存，让节点立即重新上报真实公钥与ShortId
+@app.route('/api/admin/nodes/force_resync', methods=['POST'])
+def admin_nodes_force_resync():
+    data = request.json or {}
+    if not check_admin(data.get('admin_user'), data.get('admin_pwd')): return jsonify({"code": 403, "msg": "无权限"})
+
+    node_id = data.get('node_id')
+    conn = get_db()
+    c = conn.cursor()
+    # 清空可能存在的脏公钥和脏ShortId，等待节点心跳重新报送
+    c.execute("UPDATE nodes SET pbk='', sid='', last_heartbeat='等待重新上报' WHERE node_id=?", (node_id,))
+    conn.commit()
+    conn.close()
+
+    return jsonify({"code": 200, "msg": "节点主控缓存已成功重置！节点将在下次心跳（最快几秒内）重新上报正确的公钥与ShortId。"})
+
 @app.route('/api/admin/nodes/revoke_delete', methods=['POST'])
 def admin_revoke_delete_node():
     data = request.json or {}
@@ -853,6 +869,26 @@ def admin_revoke_delete_node():
     conn.close()
 
     return jsonify({"code": 200, "msg": "节点已被彻底从集群中吊销并移除！"})
+
+@app.route('/api/admin/nodes/reset_key', methods=['POST'])
+def admin_reset_node_key():
+    data = request.json or {}
+    if not check_admin(data.get('admin_user'), data.get('admin_pwd')): return jsonify({"code": 403, "msg": "无权限"})
+
+    node_id = data.get('node_id')
+    new_key = secrets.token_hex(16)
+
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("UPDATE nodes SET pending_key=? WHERE node_id=?", (new_key, node_id))
+    conn.commit()
+    conn.close()
+
+    return jsonify({
+        "code": 200,
+        "msg": "重置密钥指令已就绪！节点将在 60 秒内心跳自动同步新密钥并持久化保存。",
+        "new_key": new_key
+    })
 
 @app.route('/api/admin/cards/generate', methods=['POST'])
 def admin_generate():
@@ -925,10 +961,11 @@ def admin_data():
         d['sub_url'] = f"{host_prefix}/api/sub?token={d['uuid']}"
         d['node_links'] = []
         for n in active_nodes:
-            d['node_links'].append({
-                "name": n['name'],
-                "link": build_node_link(d['uuid'], n, f"{n['name']}")
-            })
+            if len(n.get("pbk", "")) == 43:
+                d['node_links'].append({
+                    "name": n['name'],
+                    "link": build_node_link(d['uuid'], n, f"{n['name']}")
+                })
         users.append(d)
 
     return jsonify({"code": 200, "cards": cards, "users": users})

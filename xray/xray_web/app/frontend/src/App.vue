@@ -17,6 +17,7 @@
     <main class="main-body">
       <!-- 1. 登录 / 注册 / 找回密码 模块 -->
       <div v-if="!currentUser.username" class="auth-center">
+        <!-- 登录页系统公告展示栏 -->
         <div v-if="systemNotice" class="cyber-notice-card">
           <div class="notice-header"><span class="notice-icon">📢</span><strong>系统公告 NOTICE</strong></div>
           <div class="notice-body">{{ systemNotice }}</div>
@@ -25,7 +26,7 @@
         <div class="cyber-card auth-box">
           <h2 class="card-title">{{ authCardTitle }}</h2>
 
-          <!-- A. 登录 -->
+          <!-- A. 登录表单 -->
           <template v-if="authMode === 'login'">
             <div class="form-item">
               <label>ACCOUNT / 用户名 或 注册邮箱</label>
@@ -35,6 +36,7 @@
               <label>ACCESS KEY / 登录密码</label>
               <input v-model="authForm.password" type="password" class="cyber-input" placeholder="请输入密码" />
             </div>
+            <!-- 防机器人算术验证码 -->
             <div class="form-item">
               <label>CAPTCHA / 算术验证 (点击图片可刷新)</label>
               <div class="captcha-group">
@@ -51,7 +53,7 @@
             </div>
           </template>
 
-          <!-- B. 注册 -->
+          <!-- B. 注册表单 -->
           <template v-else-if="authMode === 'register'">
             <div class="form-item">
               <label>USER IDENTIFIER / 设置用户名</label>
@@ -61,6 +63,7 @@
               <label>EMAIL / 接收激活码邮箱</label>
               <input v-model="authForm.email" type="email" class="cyber-input" placeholder="name@example.com" />
             </div>
+            <!-- 防刷邮件发信算术验证码 -->
             <div class="form-item">
               <label>CAPTCHA / 算术验证 (防止脚本刷发信)</label>
               <div class="captcha-group">
@@ -89,7 +92,7 @@
             </div>
           </template>
 
-          <!-- C. 找回密码 -->
+          <!-- C. 找回密码表单 -->
           <template v-else-if="authMode === 'forgot'">
             <div class="form-item">
               <label>REGISTERED EMAIL / 绑定的注册邮箱</label>
@@ -170,7 +173,7 @@
           </div>
         </div>
 
-        <!-- 节点列表与通用聚合订阅 -->
+        <!-- 节点列表与通用聚合订阅 (头部自适应，不折行不挤压) -->
         <div class="cyber-card col-span-2">
           <div class="card-header header-nowrap-row">
             <h3 class="header-title-text">🌐 全球加速节点列表与通用订阅 (共 {{ currentUser.nodes ? currentUser.nodes.length : 0 }} 个节点)</h3>
@@ -296,7 +299,7 @@
           </button>
         </div>
 
-        <!-- 主选项卡 1: 用户管理 -->
+        <!-- 主选项卡 1: 用户管理 (包含专属凭证与二维码查看) -->
         <div v-if="activeTab === 'users'" class="cyber-card tab-content-card">
           <div class="card-header">
             <h3>👥 接入用户治理列表</h3>
@@ -386,13 +389,16 @@
                     {{ n.pbk ? n.pbk.substring(0, 10) + '...' : '等待回传' }}
                     <button class="btn-link-action" style="margin-left: 4px;" @click="copyText(n.pbk)">复制</button>
                   </td>
+                  <!-- 单行不折行展示心跳状态 -->
                   <td class="status-cell-nowrap">
                     <span class="badge badge-ready">🟢 在线</span>
                     <div class="time-sub-text">{{ n.last_heartbeat }}</div>
                   </td>
                   <td>
+                    <!-- 操作列精简：仅保留配置、重置上报与吊销删除 -->
                     <div class="action-btn-row">
                       <button class="btn-sm btn-edit" @click="openNodeConfig(n)">✏️ 配置</button>
+                      <button class="btn-sm btn-action" @click="forceResyncNode(n.node_id)">🔄 重置上报</button>
                       <button class="btn-sm btn-del" @click="revokeDeleteNode(n.node_id)">🗑️ 吊销删除</button>
                     </div>
                   </td>
@@ -1484,6 +1490,26 @@ const saveNodeFullConfig = async () => {
   }
 }
 
+// 核心功能：强制节点重置上报
+const forceResyncNode = async (nodeId) => {
+  try {
+    const adminUser = currentUser.username || authForm.username
+    const res = await axios.post('/api/admin/nodes/force_resync', {
+      admin_user: adminUser,
+      admin_pwd: authForm.password,
+      node_id: nodeId
+    })
+    if (res.data.code === 200) {
+      ElMessage.success(res.data.msg)
+      openNodesTab()
+    } else {
+      ElMessage.error(res.data.msg)
+    }
+  } catch (_) {
+    ElMessage.error('重置上报失败')
+  }
+}
+
 // 吊销删除：附带明确恢复指令说明
 const revokeDeleteNode = async (nodeId) => {
   const tip =
@@ -1697,6 +1723,7 @@ const copyText = async (text) => {
   document.body.removeChild(ta)
 }
 
+// 登录提交
 const handleAuth = async () => {
   if (!authForm.username || !authForm.password) return ElMessage.warning('请填写账号与密码')
   if (authMode.value === 'login' && !loginCaptchaAns.value) return ElMessage.warning('请输入算术验证码计算结果')
@@ -1741,6 +1768,7 @@ const handleAuth = async () => {
   }
 }
 
+// 多卡密批量充值提交
 const handleRecharge = async () => {
   if (!rechargeCode.value || !rechargeCode.value.trim()) return ElMessage.warning('请输入至少一张卡密')
   loading.value = true

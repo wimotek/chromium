@@ -34,7 +34,7 @@ update_xray() {
 
 [ "${AUTO_UPDATE}" = "true" ] && update_xray
 
-# 2. 基础变量清洗与准备
+# 2. 基础变量清洗
 [ -n "$PANEL_URL" ] && PANEL_URL=$(echo "$PANEL_URL" | tr -d '"'\'' ' | sed 's|/*$||')
 [ -n "$NODE_KEY" ] && NODE_KEY=$(echo "$NODE_KEY" | tr -d '"'\'' ')
 
@@ -46,22 +46,33 @@ FIRST_SERVER_NAME=$(echo "$SERVER_NAMES" | cut -d',' -f1)
 [ -z "$SERVER_IP" ] && SERVER_IP=$(curl -s4 --max-time 3 https://api.ipify.org || echo "127.0.0.1")
 SERVER_NAMES_JSON=$(echo "$SERVER_NAMES" | awk -F',' '{printf "["; for(i=1; i<=NF; i++) {printf "\"%s\"", $i; if(i<NF) printf ","} printf "]"}')
 
-# 3. 密钥持久化与 43 位公钥精准提取 (修复 Xray 26 输出 3 行被错误拼接的 Bug)
+# ================= 3. 核心修复：私钥与 43 位标准公钥精准反推与自愈 =================
 if [ -f "$PRIVATE_KEY_FILE" ] && [ -s "$PRIVATE_KEY_FILE" ]; then
     PRIVATE_KEY=$(cat "$PRIVATE_KEY_FILE" | tr -d ' \r\n')
 fi
 
+# 私钥长度必须严格为 43 位
 if [ -z "$PRIVATE_KEY" ] || [ $(echo -n "$PRIVATE_KEY" | wc -c) -ne 43 ]; then
     KEY_PAIR=$(/usr/bin/xray x25519)
-    PRIVATE_KEY=$(echo "$KEY_PAIR" | grep -iE 'private ?key' | sed 's/.*: *//' | tr -d ' \r\n')
+    PRIVATE_KEY=$(echo "$KEY_PAIR" | grep -iE 'private ?key' | head -n 1 | awk '{print $NF}' | tr -d ' \r\n')
     echo "$PRIVATE_KEY" > "$PRIVATE_KEY_FILE"
 fi
 
-PUB_OUT=$(/usr/bin/xray x25519 -i "$PRIVATE_KEY" 2>/dev/null || true)
-PUBLIC_KEY=$(echo "$PUB_OUT" | grep -iE 'public ?key|password' | sed 's/.*: *//' | tr -d ' \r\n')
-echo "$PUBLIC_KEY" > "$PUBLIC_KEY_FILE"
+if [ -f "$PUBLIC_KEY_FILE" ] && [ -s "$PUBLIC_KEY_FILE" ]; then
+    PUBLIC_KEY=$(cat "$PUBLIC_KEY_FILE" | tr -d ' \r\n')
+fi
 
-# 4. ShortId 固化与 UUID 准备
+# 核心自愈：若公钥为空或被污染为 134 位，强制重新反推标准的 43 位公钥
+if [ -z "$PUBLIC_KEY" ] || [ $(echo -n "$PUBLIC_KEY" | wc -c) -ne 43 ]; then
+    echo "==> [Key Heal] 检测到公钥异常 (当前长度: $(echo -n "$PUBLIC_KEY" | wc -c))，正在重新反推修复..."
+    PUB_OUT=$(/usr/bin/xray x25519 -i "$PRIVATE_KEY" 2>/dev/null || true)
+    # 精准只取包含 Password 或 Public key 的第一行，杜绝把 Hash32 粘合进去
+    PUBLIC_KEY=$(echo "$PUB_OUT" | grep -iE 'public ?key|password' | head -n 1 | awk '{print $NF}' | tr -d ' \r\n')
+    echo "$PUBLIC_KEY" > "$PUBLIC_KEY_FILE"
+    echo "==> [Key Heal] 已成功纠正为真实 43 位公钥: $PUBLIC_KEY"
+fi
+
+# 4. ShortId 持久化
 if [ -f "$SHORT_ID_FILE" ] && [ -s "$SHORT_ID_FILE" ]; then
     SHORT_ID=$(cat "$SHORT_ID_FILE" | tr -d ' \r\n')
 else
@@ -71,7 +82,7 @@ fi
 
 UUID="${UUID:-$(/usr/bin/xray uuid)}"
 
-# 5. 初始本地 config.json 生成
+# 初始本地 config.json 生成
 if [ ! -s "$CONFIG_FILE" ]; then
     [ ! -f "$TEMPLATE_FILE" ] && exit 1
     TMP_CONFIG="/tmp/config.init.tmp.json"
@@ -93,11 +104,11 @@ if [ ! -s "$CONFIG_FILE" ]; then
     [ -s "$TMP_CONFIG" ] && mv "$TMP_CONFIG" "$CONFIG_FILE"
 fi
 
-# ================= 6. 核心分流：集群节点模式 vs 独立单机模式 =================
+# ================= 5. 分流：集群节点模式 vs 独立单机模式 =================
 
 if [ -n "$PANEL_URL" ]; then
-    # ---------------- 场景 A：集群节点模式 (受 xray_web 远程管控) ----------------
-    # 避免残留历史单机说明文件造成误导
+    # ---------------- 场景 A：集群节点模式 (受控端) ----------------
+    # 彻底清理可能残留的历史单机说明文件，杜绝混乱
     [ -f "$CLIENT_INFO_FILE" ] && rm -f "$CLIENT_INFO_FILE"
 
     if [ -f "$NODE_ID_FILE" ] && [ -s "$NODE_ID_FILE" ]; then
@@ -114,28 +125,33 @@ if [ -n "$PANEL_URL" ]; then
     else
         NODE_KEY=$(openssl rand -hex 16)
         echo "$NODE_KEY" > "$NODE_KEY_FILE"
-        echo "==> [Node Key] 首次接入自动生成通信凭证: $NODE_KEY"
+        echo "==> [Node Key] 自动生成通信凭证: $NODE_KEY"
     fi
 
     remote_agent_loop() {
         echo "==> [Cluster Node] 守护进程启动 (主控: $PANEL_URL | 节点ID: $NODE_ID)..."
 
         while true; do
-            # 1. 自动上报真实 43 位公钥、真实 ShortId、端口、SNI
+            # 1. 向主控上报真实有效的 43 位公钥与真实 ShortId
             HB_RESP=$(curl -k -s -X POST "${PANEL_URL}/api/node/heartbeat" \
                  -H "Content-Type: application/json" \
                  --connect-timeout 8 \
                  --max-time 15 \
                  -d "{\"node_id\": \"$NODE_ID\", \"node_key\": \"$NODE_KEY\", \"ip\": \"$SERVER_IP\", \"port\": $PORT, \"sni\": \"$DEST\", \"pbk\": \"$PUBLIC_KEY\", \"sid\": \"$SHORT_ID\"}" 2>&1 || true)
 
-            # 检查是否有重置密钥下发
+            if echo "$HB_RESP" | grep -q '"code":200'; then
+                echo "==> [Heartbeat] 心跳正常，公钥及 ShortId 同步完成！"
+            else
+                echo "==> [Heartbeat 警告] 主控响应: $HB_RESP"
+            fi
+
             NEW_KEY=$(echo "$HB_RESP" | jq -r '.new_node_key // empty' 2>/dev/null || true)
             if [ -n "$NEW_KEY" ]; then
                 NODE_KEY="$NEW_KEY"
                 echo "$NODE_KEY" > "$NODE_KEY_FILE"
             fi
 
-            # 2. 从主控双向拉取用户与网络参数 (动态对齐 ShortId 与端口)
+            # 2. 从主控拉取全站用户名单与节点配置 (双向同步 ShortId、端口与伪装目标)
             USER_RESP=$(curl -k -s --connect-timeout 8 --max-time 15 "${PANEL_URL}/api/node/sync?node_id=${NODE_ID}&token=${NODE_KEY}" 2>&1 || true)
             if echo "$USER_RESP" | grep -q '"code":200'; then
                 REMOTE_USERS=$(echo "$USER_RESP" | jq '.users')
@@ -144,6 +160,7 @@ if [ -n "$PANEL_URL" ]; then
                 REMOTE_SNI=$(echo "$USER_RESP" | jq -r '.node_config.sni // empty')
                 REMOTE_SID=$(echo "$USER_RESP" | jq -r '.node_config.sid // empty')
 
+                # 若主控调整了 ShortId，动态对齐固化到本地文件
                 if [ -n "$REMOTE_SID" ] && [ "$REMOTE_SID" != "$SHORT_ID" ]; then
                     SHORT_ID="$REMOTE_SID"
                     echo "$SHORT_ID" > "$SHORT_ID_FILE"
@@ -168,7 +185,8 @@ if [ -n "$PANEL_URL" ]; then
                     if ! cmp -s "$TMP_SYNC" "$CONFIG_FILE"; then
                         mv "$TMP_SYNC" "$CONFIG_FILE"
                         killall -HUP xray 2>/dev/null || pkill -HUP xray 2>/dev/null || true
-                        echo "==> [Cluster Node] 收到主控配置/用户名单更新，已自动热重载 Xray 核心！"
+                        CLIENT_COUNT=$(echo "$REMOTE_USERS" | jq 'length')
+                        echo "==> [Cluster Node] 成功从主控热同步 $CLIENT_COUNT 位用户！已重载生效。"
                     else
                         rm -f "$TMP_SYNC"
                     fi
@@ -193,7 +211,7 @@ if [ -n "$PANEL_URL" ]; then
     remote_agent_loop &
 
 else
-    # ---------------- 场景 B：独立单机模式 (恢复原生逻辑，输出完整配置) ----------------
+    # ---------------- 场景 B：独立单机模式 (恢复原生逻辑) ----------------
     VLESS_URL="vless://${UUID}@${SERVER_IP}:${PORT}?security=reality&encryption=none&pbk=${PUBLIC_KEY}&headerType=none&fp=chrome&type=tcp&flow=xtls-rprx-vision&sni=${FIRST_SERVER_NAME}&sid=${SHORT_ID}#Xray-Reality"
 
     cat <<EOF > "$CLIENT_INFO_FILE"
