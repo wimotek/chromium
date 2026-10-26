@@ -40,11 +40,10 @@ def build_node_link(uuid_str: str, node: dict, remark: str) -> str:
 def acme_challenge_token(filename):
     return send_from_directory(CHALLENGE_DIR, filename)
 
-# ==================== 防机器人验证码接口 ====================
+# ==================== 防机器人算术验证码接口 ====================
 
 @app.route('/api/auth/captcha', methods=['GET'])
 def get_captcha():
-    """获取新的动态算术验证码"""
     data = generate_math_captcha()
     return jsonify({"code": 200, "data": data})
 
@@ -239,7 +238,7 @@ def open_faka_generate():
 
     return code, 200, {"Content-Type": "text/plain; charset=utf-8"}
 
-# ==================== 远程节点协同通信接口 ====================
+# ==================== 远程节点集群心跳与参数双向同步 ====================
 
 @app.route('/api/node/heartbeat', methods=['POST'])
 def node_heartbeat():
@@ -256,11 +255,16 @@ def node_heartbeat():
     if not node_id:
         return jsonify({"code": 400, "msg": "缺少 node_id"}), 400
 
+    # 核心拦截：公钥如果不是 43 位的标准格式，拒绝错误数据污染数据库
+    if len(pbk) != 43:
+        return jsonify({"code": 400, "msg": f"节点公钥格式非法 (当前长度: {len(pbk)}，应为 43 位)"}), 400
+
     conn = get_db()
     c = conn.cursor()
     c.execute("SELECT * FROM nodes WHERE node_id=?", (node_id,))
     node = c.fetchone()
 
+    # 首次接入：自动采用节点上报的 key 并绑定注册
     if not node:
         auto_name = f"节点-{node_ip}"
         c.execute("INSERT INTO nodes (node_id, node_key, pending_key, name, ip, port, dest, sni, pbk, sid, status, last_heartbeat) VALUES (?, ?, '', ?, ?, ?, 'www.microsoft.com:443', ?, ?, ?, 1, ?)",
@@ -280,6 +284,7 @@ def node_heartbeat():
         return jsonify({"code": 200, "msg": "心跳成功，已为您同步下发新密钥", "new_node_key": pending_key})
 
     if node_key == current_key:
+        # 正常心跳：更新心跳时间与正确的公钥
         c.execute("UPDATE nodes SET ip=?, port=?, sni=?, pbk=?, sid=?, status=1, last_heartbeat=? WHERE node_id=?",
                   (node_ip, node_port, sni, pbk, sid, now_str, node_id))
         conn.commit()
@@ -287,8 +292,9 @@ def node_heartbeat():
         return jsonify({"code": 200, "msg": "心跳正常"})
 
     conn.close()
-    return jsonify({"code": 403, "msg": "Node Key 验证失败，请核对节点本地 /data/node_key.txt"}), 403
+    return jsonify({"code": 403, "msg": "Node Key 验证失败"}), 403
 
+# 双向同步接口：下发合法用户名单与后台调整的网络参数 (对齐 ShortId 与端口)
 @app.route('/api/node/sync', methods=['GET'])
 def node_sync_users():
     node_id = request.args.get('node_id', '').strip()
@@ -344,7 +350,7 @@ def node_report_traffic():
     conn.close()
     return jsonify({"code": 200, "msg": "流量同步成功"})
 
-# ==================== 用户端操作与防机器人防护 ====================
+# ==================== 用户端操作 ====================
 
 @app.route('/api/user/refresh_info', methods=['POST'])
 def user_refresh_info():
@@ -387,7 +393,6 @@ def user_refresh_info():
         }
     })
 
-# 登录接口：集成防机器人算术验证码校验
 @app.route('/api/login', methods=['POST'])
 def login():
     data = request.json or {}
@@ -396,7 +401,6 @@ def login():
     captcha_id = data.get('captcha_id', '').strip()
     captcha_ans = data.get('captcha_ans', '').strip()
 
-    # 1. 防机器人验证码校验
     ok, c_msg = verify_captcha(captcha_id, captcha_ans)
     if not ok:
         return jsonify({"code": 400, "msg": c_msg})
@@ -458,7 +462,6 @@ def login():
         }
     })
 
-# 注册发送验证码：防邮件轰炸机刷发信额度
 @app.route('/api/auth/send_register_code', methods=['POST'])
 def send_register_code():
     data = request.json or {}
@@ -675,8 +678,7 @@ def download_windows_client():
     except Exception as e:
         return jsonify({"code": 500, "msg": f"客户端构建失败: {str(e)}"}), 500
 
-# ==================== 核心重构：多张卡密一键批量核销与套餐智能叠加 ====================
-
+# 多卡密批量原子核销接口
 @app.route('/api/recharge', methods=['POST'])
 def recharge():
     data = request.json or {}
@@ -686,7 +688,6 @@ def recharge():
     if not raw_card_input:
         return jsonify({"code": 400, "msg": "请输入卡密兑换码"})
 
-    # 1. 智能分词提取所有卡密（支持多行粘贴、空格、逗号分隔，并自动去重）
     raw_tokens = re.split(r'[\r\n,;\s]+', raw_card_input)
     codes = list(dict.fromkeys([c.strip().upper() for c in raw_tokens if c.strip()]))
 
@@ -704,15 +705,12 @@ def recharge():
         conn.close()
         return jsonify({"code": 404, "msg": "用户不存在"})
 
-    # 2. 查询所有提交的卡密记录
     placeholders = ','.join(['?'] * len(codes))
     c.execute(f"SELECT * FROM cards WHERE code IN ({placeholders})", codes)
     found_cards = [dict(r) for r in c.fetchall()]
 
     found_map = {fc['code']: fc for fc in found_cards}
-    valid_cards = []
-    used_cards = []
-    invalid_codes = []
+    valid_cards, used_cards, invalid_codes = [], [], []
 
     for code in codes:
         if code not in found_map:
@@ -729,9 +727,7 @@ def recharge():
             err_msg = f"卡密已被使用 (共 {len(used_cards)} 张)"
         return jsonify({"code": 400, "msg": err_msg})
 
-    # 3. 智能多卡复合累加计算
-    total_add_gb = 0
-    total_add_days = 0
+    total_add_gb, total_add_days = 0, 0
     has_unlimited_traffic = False
     has_lifetime_expiry = False
     has_monthly_card = False
@@ -750,14 +746,9 @@ def recharge():
         if card.get('is_monthly') == 1:
             has_monthly_card = True
 
-    # 4. 流量配额结算
     current_limit = user['traffic_limit_mb']
-    if has_unlimited_traffic or current_limit == 0:
-        new_limit = 0  # 设为不限流量
-    else:
-        new_limit = current_limit + total_add_gb * 1024
+    new_limit = 0 if (has_unlimited_traffic or current_limit == 0) else (current_limit + total_add_gb * 1024)
 
-    # 5. 有效期顺延结算 (若已过期从当前时间起算，未过期从原到期日起顺延)
     c_exp_str = user['expire_date']
     if has_lifetime_expiry or c_exp_str.startswith("2099"):
         n_exp = "2099-12-31 23:59:59"
@@ -769,14 +760,12 @@ def recharge():
         base_time = max(datetime.datetime.now(), c_exp)
         n_exp = (base_time + datetime.timedelta(days=total_add_days)).strftime("%Y-%m-%d %H:%M:%S")
 
-    # 6. 每月固定套餐属性继承判断
     new_is_monthly = user['is_monthly'] or 0
     new_reset_day = user['reset_day'] or 1
     if has_monthly_card:
         new_is_monthly = 1
         new_reset_day = datetime.date.today().day
 
-    # 7. 原子事务写入：批量核销所有有效卡密，更新用户配额
     now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     valid_codes_list = [vc['code'] for vc in valid_cards]
     v_placeholders = ','.join(['?'] * len(valid_codes_list))
@@ -793,20 +782,12 @@ def recharge():
     conn.commit()
     conn.close()
 
-    # 8. 组装细致的反馈提示
     res_msg = f"成功核销 {len(valid_cards)} 张卡密！"
-    if has_unlimited_traffic or new_limit == 0:
-        res_msg += " 流量已设为不限制；"
-    else:
-        res_msg += f" 累计增加 {total_add_gb}GB 流量；"
-
-    if has_lifetime_expiry or n_exp.startswith("2099"):
-        res_msg += " 有效期已设为永久有效。"
-    else:
-        res_msg += f" 有效期顺延至 {n_exp}。"
+    res_msg += " 流量已设为不限制；" if (has_unlimited_traffic or new_limit == 0) else f" 累计增加 {total_add_gb}GB 流量；"
+    res_msg += " 有效期已设为永久有效。" if (has_lifetime_expiry or n_exp.startswith("2099")) else f" 有效期顺延至 {n_exp}。"
 
     if used_cards or invalid_codes:
-        res_msg += f" (已自动跳过 {len(used_cards) + len(invalid_codes)} 张已被使用或无效的卡密)"
+        res_msg += f" (跳过了 {len(used_cards) + len(invalid_codes)} 张已被使用或无效的卡密)"
 
     title = "【充值成功】您的套餐配额已更新"
     notify_user(dict(user), title, f"<p>{res_msg}</p>", res_msg)
@@ -872,26 +853,6 @@ def admin_revoke_delete_node():
     conn.close()
 
     return jsonify({"code": 200, "msg": "节点已被彻底从集群中吊销并移除！"})
-
-@app.route('/api/admin/nodes/reset_key', methods=['POST'])
-def admin_reset_node_key():
-    data = request.json or {}
-    if not check_admin(data.get('admin_user'), data.get('admin_pwd')): return jsonify({"code": 403, "msg": "无权限"})
-
-    node_id = data.get('node_id')
-    new_key = secrets.token_hex(16)
-
-    conn = get_db()
-    c = conn.cursor()
-    c.execute("UPDATE nodes SET pending_key=? WHERE node_id=?", (new_key, node_id))
-    conn.commit()
-    conn.close()
-
-    return jsonify({
-        "code": 200,
-        "msg": "重置密钥指令已就绪！节点将在 60 秒内心跳自动同步新密钥并持久化保存。",
-        "new_key": new_key
-    })
 
 @app.route('/api/admin/cards/generate', methods=['POST'])
 def admin_generate():
@@ -1040,36 +1001,10 @@ def admin_cert_info():
     if not check_admin(data.get('admin_user'), data.get('admin_pwd')): return jsonify({"code": 403, "msg": "无权限"})
     return jsonify({"code": 200, "data": get_cert_info()})
 
-# 证书申请接口：增加自动平滑重载进程
-@app.route('/api/admin/cert/acme', methods=['POST'])
-def admin_cert_acme():
-    data = request.json or {}
-    if not check_admin(data.get('admin_user'), data.get('admin_pwd')): 
-        return jsonify({"code": 403, "msg": "无权限"})
-
-    domain = data.get("domain", "").strip()
-    email = data.get("email", "").strip()
-
-    ok, msg = issue_acme_certificate(domain, email)
-    if ok:
-        # 证书写入磁盘成功，2 秒后自动退出 Python 进程触发 Docker 自动拉起，内存秒更最新证书！
-        def auto_reload():
-            time.sleep(2)
-            os._exit(0)
-        threading.Thread(target=auto_reload, daemon=True).start()
-
-        return jsonify({
-            "code": 200, 
-            "msg": f"{msg}\n【提示】面板正在自动平滑重载载入新证书，请等待 3 秒后刷新页面！"
-        })
-    return jsonify({"code": 500, "msg": msg})
-
-# 自定义证书上传接口：同样增加自动平滑重载
 @app.route('/api/admin/cert/custom', methods=['POST'])
 def admin_cert_custom():
     data = request.json or {}
-    if not check_admin(data.get('admin_user'), data.get('admin_pwd')): 
-        return jsonify({"code": 403, "msg": "无权限"})
+    if not check_admin(data.get('admin_user'), data.get('admin_pwd')): return jsonify({"code": 403, "msg": "无权限"})
     cert_pem = data.get("cert_pem", "")
     key_pem = data.get("key_pem", "")
 
@@ -1079,11 +1014,24 @@ def admin_cert_custom():
             time.sleep(2)
             os._exit(0)
         threading.Thread(target=auto_reload, daemon=True).start()
+        return jsonify({"code": 200, "msg": f"{msg}\n【提示】面板将在 2 秒内平滑重载生效，请稍后刷新页面！"})
+    return jsonify({"code": 500, "msg": msg})
 
-        return jsonify({
-            "code": 200, 
-            "msg": f"{msg}\n【提示】面板正在自动平滑重载载入新证书，请等待 3 秒后刷新页面！"
-        })
+@app.route('/api/admin/cert/acme', methods=['POST'])
+def admin_cert_acme():
+    data = request.json or {}
+    if not check_admin(data.get('admin_user'), data.get('admin_pwd')): return jsonify({"code": 403, "msg": "无权限"})
+
+    domain = data.get("domain", "").strip()
+    email = data.get("email", "").strip()
+
+    ok, msg = issue_acme_certificate(domain, email)
+    if ok:
+        def auto_reload():
+            time.sleep(2)
+            os._exit(0)
+        threading.Thread(target=auto_reload, daemon=True).start()
+        return jsonify({"code": 200, "msg": f"{msg}\n【提示】面板将在 2 秒内平滑重载生效，请稍后刷新页面！"})
     return jsonify({"code": 500, "msg": msg})
 
 @app.route('/api/admin/cert/self_signed', methods=['POST'])
@@ -1091,7 +1039,7 @@ def admin_cert_self_signed():
     data = request.json or {}
     if not check_admin(data.get('admin_user'), data.get('admin_pwd')): return jsonify({"code": 403, "msg": "无权限"})
     generate_self_signed_cert()
-    return jsonify({"code": 200, "msg": "已重新生成 10 年期自签证书"})
+    return jsonify({"code": 200, "msg": "已重新生成自签证书"})
 
 @app.route('/api/admin/settings', methods=['GET', 'POST'])
 def handle_settings():
