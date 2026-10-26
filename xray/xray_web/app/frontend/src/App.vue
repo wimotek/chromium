@@ -1354,4 +1354,1011 @@ const handleDeleteUser = async (targetUser) => {
       ElMessage.success(res.data.msg)
       loadAdminData()
     } else {
-      ElMessage.error(re
+      ElMessage.error(res.data.msg)
+    }
+  } catch (_) {
+    ElMessage.error('删除失败')
+  }
+}
+
+const saveNotifySettings = async () => {
+  try {
+    const res = await axios.post('/api/user/notify_settings', {
+      username: currentUser.username,
+      notify_type: notifyForm.notify_type,
+      serverchan_key: notifyForm.serverchan_key
+    })
+    if (res.data.code === 200) {
+      ElMessage.success(res.data.msg)
+      const session = JSON.parse(localStorage.getItem('xray_auth_session') || '{}')
+      if (session.user) {
+        session.user.notify_type = notifyForm.notify_type
+        session.user.serverchan_key = notifyForm.serverchan_key
+        localStorage.setItem('xray_auth_session', JSON.stringify(session))
+      }
+    } else {
+      ElMessage.error(res.data.msg)
+    }
+  } catch (_) {
+    ElMessage.error('保存失败')
+  }
+}
+
+const testUserNotify = async () => {
+  try {
+    const res = await axios.post('/api/user/test_notify', { username: currentUser.username })
+    if (res.data.code === 200) {
+      ElMessage.success(res.data.msg)
+    } else {
+      ElMessage.error(res.data.msg)
+    }
+  } catch (_) {
+    ElMessage.error('测试发送失败')
+  }
+}
+
+const submitChangePassword = async () => {
+  if (!pwdForm.old_pwd || !pwdForm.new_pwd) return ElMessage.warning('请输入密码')
+  if (pwdForm.new_pwd !== pwdForm.confirm_pwd) return ElMessage.warning('两次密码不一致')
+  try {
+    const res = await axios.post('/api/user/change_password', {
+      username: currentUser.username,
+      old_password: pwdForm.old_pwd,
+      new_password: pwdForm.new_pwd
+    })
+    if (res.data.code === 200) {
+      ElMessage.success(res.data.msg)
+      localStorage.removeItem('xray_auth_session')
+      setTimeout(() => location.reload(), 1500)
+    } else {
+      ElMessage.error(res.data.msg)
+    }
+  } catch (_) {
+    ElMessage.error('改密失败')
+  }
+}
+
+const downloadWindowsClient = (nodeId = '', nodeName = '') => {
+  if (!currentUser.username) return ElMessage.warning('用户未就绪')
+  ElMessage.info(`正在为您打包 ${nodeName || '默认节点'} 的客户端...`)
+
+  const downloadUrl = `/api/user/download_client?username=${encodeURIComponent(currentUser.username)}&node_id=${nodeId}`
+  const a = document.createElement('a')
+  a.href = downloadUrl
+  a.download = `Xray_Windows_${currentUser.username}.zip`
+  document.body.appendChild(a)
+  a.click()
+  document.body.removeChild(a)
+}
+
+const openNodesTab = async () => {
+  activeTab.value = 'nodes'
+  try {
+    const adminUser = currentUser.username || authForm.username
+    const res = await axios.post('/api/admin/nodes/list', {
+      admin_user: adminUser,
+      admin_pwd: authForm.password
+    })
+    if (res.data.code === 200) {
+      adminNodes.value = res.data.data
+    }
+  } catch (_) {}
+}
+
+const openNodeConfig = (node) => {
+  nodeEditForm.node_id = node.node_id
+  nodeEditForm.name = node.name
+  nodeEditForm.ip = node.ip
+  nodeEditForm.port = node.port
+  nodeEditForm.dest = node.dest || 'www.microsoft.com:443'
+  nodeEditForm.sni = node.sni || 'www.microsoft.com'
+  nodeEditForm.sid = node.sid
+  nodeEditForm.node_key = node.node_key
+  nodeEditForm.status = node.status === 1
+  showNodeConfigModal.value = true
+}
+
+// 在配置弹窗内随机生成新密钥
+const generateNewNodeKey = () => {
+  const chars = '0123456789abcdef'
+  let key = ''
+  for (let i = 0; i < 32; i++) key += chars.charAt(Math.floor(Math.random() * chars.length))
+  nodeEditForm.node_key = key
+  ElMessage.success('已随机生成新密钥，点击【保存并同步】后生效')
+}
+
+const saveNodeFullConfig = async () => {
+  try {
+    const adminUser = currentUser.username || authForm.username
+    const res = await axios.post('/api/admin/nodes/save_config', {
+      admin_user: adminUser,
+      admin_pwd: authForm.password,
+      ...nodeEditForm,
+      status: nodeEditForm.status ? 1 : 0
+    })
+    if (res.data.code === 200) {
+      ElMessage.success(res.data.msg)
+      showNodeConfigModal.value = false
+      openNodesTab()
+    } else {
+      ElMessage.error(res.data.msg)
+    }
+  } catch (_) {
+    ElMessage.error('保存节点配置失败')
+  }
+}
+
+// 吊销删除：增加明确的远程 VPS 恢复重连说明
+const revokeDeleteNode = async (nodeId) => {
+  const tip =
+    `⚠️ 确定要彻底吊销并删除该节点吗？\n\n` +
+    `【生效后果】主控将彻底注销该节点并拒绝其后续心跳，该节点不会再自动冒出。\n\n` +
+    `【远程 VPS 重新接入方法】\n` +
+    `若日后需要让该 VPS 重新接入，只需在远程机执行：\n` +
+    `rm -f data/node_id.txt data/node_key.txt && docker restart xray-node\n\n` +
+    `是否确认吊销？`
+
+  if (!confirm(tip)) return
+  try {
+    const adminUser = currentUser.username || authForm.username
+    const res = await axios.post('/api/admin/nodes/revoke_delete', {
+      admin_user: adminUser,
+      admin_pwd: authForm.password,
+      node_id: nodeId
+    })
+    if (res.data.code === 200) {
+      ElMessage.success('节点已成功吊销并移除！')
+      openNodesTab()
+    }
+  } catch (_) {
+    ElMessage.error('吊销删除失败')
+  }
+}
+
+const loadCertInfo = async () => {
+  try {
+    const adminUser = currentUser.username || authForm.username
+    const res = await axios.post('/api/admin/cert/info', {
+      admin_user: adminUser,
+      admin_pwd: authForm.password
+    })
+    if (res.data.code === 200) {
+      certInfo.value = res.data.data
+    }
+  } catch (_) {}
+}
+
+const handleApplyAcme = async () => {
+  if (!settingsForm.acme_domain) return ElMessage.warning('请填写解析到本机的域名')
+  issuingAcme.value = true
+  ElMessage.info('正在请求 Let\'s Encrypt 执行 HTTP 验证，过程可能需要 15~30 秒...')
+  try {
+    const adminUser = currentUser.username || authForm.username
+    const res = await axios.post('/api/admin/cert/acme', {
+      admin_user: adminUser,
+      admin_pwd: authForm.password,
+      domain: settingsForm.acme_domain,
+      email: settingsForm.acme_email
+    })
+    if (res.data.code === 200) {
+      ElMessage.success(res.data.msg)
+      loadCertInfo()
+    } else {
+      ElMessage.error(res.data.msg)
+    }
+  } catch (_) {
+    ElMessage.error('证书申请请求失败')
+  } finally {
+    issuingAcme.value = false
+  }
+}
+
+const handleSaveCustomCert = async () => {
+  if (!customCertPem.value || !customKeyPem.value) return ElMessage.warning('请粘贴完整的证书和私钥 PEM 内容')
+  try {
+    const adminUser = currentUser.username || authForm.username
+    const res = await axios.post('/api/admin/cert/custom', {
+      admin_user: adminUser,
+      admin_pwd: authForm.password,
+      cert_pem: customCertPem.value,
+      key_pem: customKeyPem.value
+    })
+    if (res.data.code === 200) {
+      ElMessage.success(res.data.msg)
+      showCustomCertModal.value = false
+      customCertPem.value = ''
+      customKeyPem.value = ''
+      loadCertInfo()
+    } else {
+      ElMessage.error(res.data.msg)
+    }
+  } catch (_) {
+    ElMessage.error('证书上传验证失败')
+  }
+}
+
+const openSettingsTab = async () => {
+  activeTab.value = 'settings'
+  try {
+    const adminUser = currentUser.username || authForm.username
+    const res = await axios.get(`/api/admin/settings?admin_user=${encodeURIComponent(adminUser)}&admin_pwd=${encodeURIComponent(authForm.password)}`)
+    if (res.data.code === 200) {
+      const d = res.data.data
+      settingsForm.smtp_host = d.smtp_host || ''
+      settingsForm.smtp_port = d.smtp_port || '465'
+      settingsForm.smtp_user = d.smtp_user || ''
+      settingsForm.smtp_pass = ''
+      settingsForm.has_smtp_pass = d.has_smtp_pass || false
+      settingsForm.is_smtp_configured = d.is_smtp_configured || false
+      settingsForm.smtp_sender = d.smtp_sender || ''
+      settingsForm.smtp_ssl = d.smtp_ssl === 'true'
+      settingsForm.task_notify_enable = d.task_notify_enable === 'true'
+      settingsForm.task_interval_hours = Number(d.task_interval_hours) || 12
+      settingsForm.task_traffic_threshold = Number(d.task_traffic_threshold) || 80
+      settingsForm.task_expire_days = Number(d.task_expire_days) || 3
+      settingsForm.task_last_run = d.task_last_run || '尚未执行'
+      settingsForm.faka_api_enable = d.faka_api_enable === 'true'
+      settingsForm.faka_api_token = d.faka_api_token || 'faka_secret_token_8899'
+      settingsForm.acme_enable = d.acme_enable === 'true'
+      settingsForm.acme_domain = d.acme_domain || ''
+      settingsForm.acme_email = d.acme_email || ''
+      settingsForm.system_notice = d.system_notice || ''
+      settingsForm.reg_traffic_mb = Number(d.reg_traffic_mb) || 1024
+      settingsForm.reg_expire_days = Number(d.reg_expire_days) || 1
+    }
+    loadCertInfo()
+  } catch (_) {}
+}
+
+const saveAllSettings = async () => {
+  try {
+    const adminUser = currentUser.username || authForm.username
+    const res = await axios.post('/api/admin/settings', {
+      admin_user: adminUser,
+      admin_pwd: authForm.password,
+      ...settingsForm,
+      smtp_ssl: settingsForm.smtp_ssl ? 'true' : 'false',
+      task_notify_enable: settingsForm.task_notify_enable ? 'true' : 'false',
+      faka_api_enable: settingsForm.faka_api_enable ? 'true' : 'false',
+      acme_enable: settingsForm.acme_enable ? 'true' : 'false'
+    })
+    if (res.data.code === 200) {
+      ElMessage.success(res.data.msg)
+      openSettingsTab()
+      systemNotice.value = settingsForm.system_notice
+    } else {
+      ElMessage.error(res.data.msg)
+    }
+  } catch (_) {
+    ElMessage.error('保存设置失败')
+  }
+}
+
+const sendTestEmail = async () => {
+  if (!testEmailTo.value) return ElMessage.warning('请输入测试收件邮箱')
+  testingEmail.value = true
+  try {
+    const adminUser = currentUser.username || authForm.username
+    const res = await axios.post('/api/admin/test_email', {
+      admin_user: adminUser,
+      admin_pwd: authForm.password,
+      test_to: testEmailTo.value
+    })
+    if (res.data.code === 200) {
+      ElMessage.success(res.data.msg)
+    } else {
+      ElMessage.error(res.data.msg)
+    }
+  } catch (_) {
+    ElMessage.error('发信异常')
+  } finally {
+    testingEmail.value = false
+  }
+}
+
+const triggerManualTask = async () => {
+  triggeringTask.value = true
+  try {
+    const adminUser = currentUser.username || authForm.username
+    const res = await axios.post('/api/admin/tasks/trigger', {
+      admin_user: adminUser,
+      admin_pwd: authForm.password
+    })
+    if (res.data.code === 200) {
+      ElMessage.success(res.data.msg)
+      openSettingsTab()
+    } else {
+      ElMessage.error(res.data.msg)
+    }
+  } catch (_) {
+    ElMessage.error('触发扫描任务失败')
+  } finally {
+    triggeringTask.value = false
+  }
+}
+
+const copyText = async (text) => {
+  if (!text) return ElMessage.warning('内容为空')
+  if (navigator.clipboard && window.isSecureContext) {
+    try {
+      await navigator.clipboard.writeText(text)
+      ElMessage.success('已复制到剪贴板！')
+      return
+    } catch (_) {}
+  }
+  const ta = document.createElement('textarea')
+  ta.value = text
+  ta.style.position = 'fixed'
+  ta.style.opacity = '0'
+  document.body.appendChild(ta)
+  ta.select()
+  try {
+    document.execCommand('copy')
+    ElMessage.success('已复制到剪贴板！')
+  } catch (_) {
+    ElMessage.error('复制失败，请手动选择复制')
+  }
+  document.body.removeChild(ta)
+}
+
+// 登录提交
+const handleAuth = async () => {
+  if (!authForm.username || !authForm.password) return ElMessage.warning('请填写账号与密码')
+  if (authMode.value === 'login' && !loginCaptchaAns.value) return ElMessage.warning('请输入算术验证码计算结果')
+
+  loading.value = true
+  const api = authMode.value === 'register' ? '/api/register' : '/api/login'
+  try {
+    const res = await axios.post(api, {
+      ...authForm,
+      captcha_id: loginCaptcha.id,
+      captcha_ans: loginCaptchaAns.value
+    })
+    if (res.data.code === 200) {
+      if (authMode.value === 'register') {
+        ElMessage.success(res.data.msg)
+        switchAuthMode('login')
+      } else {
+        ElMessage.success('登录成功')
+        Object.assign(currentUser, res.data.data)
+        notifyForm.notify_type = res.data.data.notify_type || 'email'
+        notifyForm.serverchan_key = res.data.data.serverchan_key || ''
+
+        localStorage.setItem('xray_auth_session', JSON.stringify({
+          user: res.data.data,
+          password: authForm.password
+        }))
+
+        if (currentUser.role === 'admin') {
+          loadAdminData()
+          openNodesTab()
+          loadCertInfo()
+        }
+      }
+    } else {
+      ElMessage.error(res.data.msg)
+      if (authMode.value === 'login') refreshCaptcha('login')
+    }
+  } catch (_) {
+    if (authMode.value === 'login') refreshCaptcha('login')
+  } finally {
+    loading.value = false
+  }
+}
+
+// 多卡密批量充值提交
+const handleRecharge = async () => {
+  if (!rechargeCode.value || !rechargeCode.value.trim()) return ElMessage.warning('请输入至少一张卡密')
+  loading.value = true
+  try {
+    const res = await axios.post('/api/recharge', {
+      username: currentUser.username,
+      card_code: rechargeCode.value
+    })
+    if (res.data.code === 200) {
+      ElMessage.success(res.data.msg)
+      rechargeCode.value = ''
+      refreshUserInfo()
+    } else {
+      ElMessage.error(res.data.msg)
+    }
+  } finally {
+    loading.value = false
+  }
+}
+
+const loadAdminData = async () => {
+  const adminUser = currentUser.username || authForm.username
+  const res = await axios.post('/api/admin/data', { admin_user: adminUser, admin_pwd: authForm.password })
+  if (res.data.code === 200) {
+    adminCards.value = res.data.cards
+    adminUsers.value = res.data.users
+    selectedCards.value = []
+  }
+}
+
+const generateCards = async () => {
+  loading.value = true
+  try {
+    const adminUser = currentUser.username || authForm.username
+    const res = await axios.post('/api/admin/cards/generate', { admin_user: adminUser, admin_pwd: authForm.password, ...cardGenForm })
+    if (res.data.code === 200) {
+      ElMessage.success('卡密批量生成成功')
+      loadAdminData()
+    } else {
+      ElMessage.error(res.data.msg)
+    }
+  } finally {
+    loading.value = false
+  }
+}
+
+const logout = () => {
+  localStorage.removeItem('xray_auth_session')
+  location.reload()
+}
+</script>
+
+<style scoped>
+.dark-theme {
+  min-height: 100vh;
+  background-color: #080c14;
+  color: #e2e8f0;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, monospace;
+}
+.cyber-header {
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(13, 19, 33, 0.85);
+  backdrop-filter: blur(10px);
+  padding: 14px 24px;
+}
+.header-content {
+  width: 100%;
+  max-width: 98%;
+  margin: 0 auto;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+.brand-title { font-size: 18px; font-weight: 800; letter-spacing: 1.5px; }
+.highlight { color: #38bdf8; text-shadow: 0 0 10px rgba(56, 189, 248, 0.5); }
+.user-status { display: flex; align-items: center; gap: 12px; }
+
+.main-body {
+  width: 100%;
+  max-width: 98%;
+  margin: 20px auto;
+  padding: 0 12px;
+  box-sizing: border-box;
+}
+.dashboard-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+.col-span-2 { grid-column: span 2; }
+
+/* 头部自适应与强制不换行对齐 */
+.header-nowrap-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: nowrap !important;
+  gap: 16px;
+}
+.header-title-text {
+  margin: 0;
+  font-size: 16px;
+  color: #f1f5f9;
+  white-space: nowrap;
+}
+.btn-header-action {
+  width: auto !important;
+  white-space: nowrap !important;
+  flex-shrink: 0 !important;
+  padding: 7px 16px !important;
+}
+
+/* 算术验证码容器 */
+.captcha-group {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  max-width: 500px;
+}
+.captcha-input {
+  width: 140px !important;
+  min-width: 120px !important;
+  font-family: monospace;
+  font-weight: 700;
+  text-align: center;
+}
+.captcha-svg-box {
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #0b1120;
+  border: 1px solid #334155;
+  border-radius: 6px;
+  padding: 2px;
+  transition: all 0.2s;
+  user-select: none;
+}
+.captcha-svg-box:hover {
+  border-color: #38bdf8;
+  box-shadow: 0 0 10px rgba(56, 189, 248, 0.25);
+}
+
+/* 多卡密充值多行文本框 */
+.redeem-textarea {
+  height: 68px;
+  min-height: 50px;
+  resize: vertical;
+  font-family: monospace;
+  line-height: 1.4;
+}
+
+/* 多节点卡片网格 */
+.node-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 16px;
+  margin-top: 15px;
+}
+.node-card {
+  background: #0b1120;
+  border: 1px solid #1e293b;
+  border-radius: 8px;
+  padding: 16px;
+  transition: all 0.2s;
+}
+.node-card:hover {
+  border-color: #38bdf8;
+  box-shadow: 0 0 15px rgba(56, 189, 248, 0.15);
+}
+.node-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+}
+.node-title {
+  font-weight: 700;
+  font-size: 14px;
+  color: #f1f5f9;
+}
+.node-detail {
+  font-size: 12px;
+  color: #64748b;
+  font-family: monospace;
+}
+.empty-node-tip {
+  grid-column: 1 / -1;
+  text-align: center;
+  padding: 30px;
+  color: #64748b;
+  font-size: 13px;
+}
+
+.cyber-notice-card {
+  max-width: 420px;
+  margin: 0 auto 16px auto;
+  background: rgba(56, 189, 248, 0.08);
+  border: 1px solid rgba(56, 189, 248, 0.3);
+  border-radius: 8px;
+  padding: 12px 16px;
+  box-shadow: 0 0 15px rgba(56, 189, 248, 0.15);
+}
+.notice-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: #38bdf8;
+  margin-bottom: 6px;
+}
+.notice-body {
+  font-size: 12px;
+  color: #cbd5e1;
+  line-height: 1.6;
+  white-space: pre-wrap;
+}
+
+.admin-wrapper { width: 100%; }
+.card-tabs-nav {
+  display: flex;
+  gap: 16px;
+  margin-bottom: 20px;
+}
+.tab-card-btn {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  background: #0f172a;
+  border: 1px solid #1e293b;
+  border-radius: 12px;
+  padding: 16px 20px;
+  cursor: pointer;
+  text-align: left;
+  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  color: #94a3b8;
+  position: relative;
+  min-width: 0;
+}
+.tab-card-btn:hover {
+  background: #131d36;
+  border-color: #38bdf8;
+  transform: translateY(-2px);
+}
+.tab-card-btn.active {
+  background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%);
+  border-color: #38bdf8;
+  box-shadow: 0 0 20px rgba(56, 189, 248, 0.2);
+  color: #f8fafc;
+}
+.tab-icon { font-size: 24px; flex-shrink: 0; }
+.tab-text { flex: 1; min-width: 0; }
+.tab-title { font-size: 14px; font-weight: 700; color: #f8fafc; margin-bottom: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tab-sub { font-size: 11px; color: #64748b; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+.count-tag {
+  margin-left: auto;
+  font-size: 11px;
+  background: rgba(56, 189, 248, 0.1);
+  color: #38bdf8;
+  padding: 3px 10px;
+  border-radius: 20px;
+  border: 1px solid rgba(56, 189, 248, 0.3);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.sub-tab-nav {
+  display: flex;
+  gap: 12px;
+  margin-bottom: 20px;
+  border-bottom: 1px solid #1e293b;
+  padding-bottom: 12px;
+  flex-wrap: wrap;
+}
+.sub-tab-btn {
+  background: #0b1120;
+  border: 1px solid #1e293b;
+  color: #94a3b8;
+  padding: 8px 18px;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 600;
+  transition: all 0.2s;
+}
+.sub-tab-btn:hover {
+  color: #38bdf8;
+  border-color: #38bdf8;
+}
+.sub-tab-btn.active {
+  background: rgba(56, 189, 248, 0.15);
+  color: #38bdf8;
+  border-color: #38bdf8;
+  box-shadow: 0 0 12px rgba(56, 189, 248, 0.25);
+}
+
+.cyber-card {
+  background: #0f172a;
+  border: 1px solid rgba(56, 189, 248, 0.2);
+  border-radius: 12px;
+  padding: 24px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+}
+.tab-content-card { animation: fadeIn 0.3s ease-in-out; }
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.card-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; }
+.card-header h3 { margin: 0; font-size: 16px; color: #f1f5f9; }
+
+.settings-2col-layout {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 20px;
+  align-items: start;
+}
+.column-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+@media (max-width: 1024px) {
+  .settings-2col-layout {
+    grid-template-columns: 1fr;
+    gap: 16px;
+  }
+}
+
+.panel-card {
+  background: #0b1120;
+  border: 1px solid #1e293b;
+  border-radius: 10px;
+  padding: 20px;
+}
+.panel-card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 16px;
+  border-bottom: 1px solid #1e293b;
+  padding-bottom: 10px;
+}
+.panel-title-wrap {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.panel-icon { font-size: 22px; flex-shrink: 0; }
+.panel-title { font-size: 14px; color: #f1f5f9; font-weight: 700; }
+.panel-sub { font-size: 11px; color: #64748b; margin-top: 2px; }
+
+.inner-divider {
+  border-top: 1px dashed #1e293b;
+  margin-top: 16px;
+  padding-top: 14px;
+}
+.inner-divider-title {
+  font-size: 13px;
+  font-weight: 700;
+  color: #f1f5f9;
+  margin-bottom: 10px;
+}
+.input-with-addon {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.addon-text {
+  color: #94a3b8;
+  font-size: 13px;
+  white-space: nowrap;
+}
+.form-row-2 {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  max-width: 520px;
+}
+
+.smtp-status-box {
+  padding: 10px 14px;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  margin-bottom: 16px;
+}
+.smtp-ready {
+  background: rgba(16, 185, 129, 0.15);
+  border: 1px solid rgba(16, 185, 129, 0.4);
+  color: #34d399;
+}
+.smtp-empty {
+  background: rgba(148, 163, 184, 0.1);
+  border: 1px solid rgba(148, 163, 184, 0.3);
+  color: #94a3b8;
+}
+
+.export-toolbar {
+  background: #0a0f1d;
+  border: 1px solid #1e293b;
+  border-radius: 8px;
+  padding: 12px 16px;
+  margin-bottom: 14px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+.date-filter-group {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+}
+.filter-label { color: #94a3b8; font-weight: 600; white-space: nowrap; }
+.date-input { width: 140px; padding: 6px 10px; font-size: 12px; }
+.export-actions-group { display: flex; gap: 8px; align-items: center; }
+.btn-export-select {
+  background: #3b82f6;
+  color: white;
+  font-weight: 600;
+}
+.btn-export-select:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+  background: #475569;
+}
+
+.traffic-meter { margin: 15px 0; }
+.meter-info { display: flex; justify-content: space-between; margin-bottom: 8px; }
+.data-val { font-size: 22px; font-weight: 700; color: #38bdf8; }
+.data-unit { font-size: 12px; color: #64748b; margin-left: 4px; }
+.progress-track { background: #1e293b; height: 10px; border-radius: 5px; overflow: hidden; margin: 10px 0; }
+.progress-glow { background: linear-gradient(90deg, #38bdf8, #818cf8); height: 100%; box-shadow: 0 0 12px #38bdf8; }
+.expiry-notice { font-size: 13px; color: #94a3b8; display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
+.highlight-date { color: #f59e0b; }
+
+.monthly-tag {
+  background: rgba(56, 189, 248, 0.15);
+  color: #38bdf8;
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 4px;
+  border: 1px solid rgba(56, 189, 248, 0.4);
+}
+
+/* 核心优化：输入框 70% 黄金宽度 + 260px~500px 最小/最大宽度保底 */
+.cyber-input {
+  width: 70%;
+  min-width: 260px;
+  max-width: 500px;
+  background: #1e293b;
+  border: 1px solid #334155;
+  color: #f8fafc;
+  padding: 10px 14px;
+  border-radius: 6px;
+  outline: none;
+  box-sizing: border-box;
+  transition: border-color 0.2s, box-shadow 0.2s;
+}
+.cyber-input:focus { border-color: #38bdf8; box-shadow: 0 0 8px rgba(56, 189, 248, 0.3); }
+
+.cyber-textarea {
+  resize: vertical;
+  min-height: 70px;
+  font-family: inherit;
+}
+
+.auth-box .cyber-input,
+.modal-input {
+  width: 100% !important;
+  min-width: 0 !important;
+  max-width: 100% !important;
+}
+
+.code-send-group {
+  display: flex;
+  gap: 8px;
+  max-width: 500px;
+}
+.code-send-group .cyber-input {
+  flex: 1;
+  width: auto;
+  min-width: 140px;
+}
+.btn-cyber-code {
+  background: #1e293b; border: 1px solid #38bdf8; color: #38bdf8; border-radius: 6px; padding: 0 14px;
+  white-space: nowrap; cursor: pointer; font-size: 12px;
+}
+.btn-cyber-code:disabled { opacity: 0.5; cursor: not-allowed; border-color: #475569; color: #94a3b8; }
+
+.btn-cyber-primary {
+  background: linear-gradient(135deg, #0284c7, #2563eb);
+  color: white; border: none; padding: 10px 20px; border-radius: 6px; font-weight: 700; cursor: pointer; width: 100%;
+}
+.redeem-box {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  max-width: 500px;
+}
+.redeem-box .cyber-input {
+  flex: 1;
+  width: auto;
+  min-width: 180px;
+}
+.btn-cyber-success {
+  background: #059669; color: white; border: none; padding: 10px 18px; border-radius: 6px; cursor: pointer;
+  white-space: nowrap; flex-shrink: 0; font-weight: 600;
+}
+.btn-cyber-action { background: #334155; color: white; border: none; padding: 10px 20px; border-radius: 6px; cursor: pointer; white-space: nowrap; }
+.btn-cyber-refresh { background: transparent; border: 1px solid #38bdf8; color: #38bdf8; padding: 5px 12px; border-radius: 6px; cursor: pointer; font-size: 12px; }
+
+.btn-cyber-download {
+  background: linear-gradient(135deg, #10b981, #059669);
+  color: white;
+  border: none;
+  padding: 6px 14px;
+  border-radius: 4px;
+  font-weight: 700;
+  cursor: pointer;
+  white-space: nowrap;
+  font-size: 11px;
+}
+
+.node-field { margin-bottom: 14px; }
+.node-field label { display: block; font-size: 12px; color: #94a3b8; margin-bottom: 6px; }
+.code-display {
+  background: #020617; border: 1px dashed rgba(255, 255, 255, 0.15); padding: 12px; border-radius: 6px;
+  font-size: 13px; word-break: break-all; font-family: monospace;
+}
+.text-green { color: #34d399; font-weight: bold; }
+.text-cyan { color: #38bdf8; }
+.btn-group { display: flex; gap: 12px; margin-top: 16px; flex-wrap: wrap; }
+
+.radio-group { display: flex; flex-direction: column; gap: 10px; margin-top: 6px; }
+.radio-label { font-size: 13px; color: #cbd5e1; cursor: pointer; display: flex; align-items: center; gap: 8px; }
+.input-hint { font-size: 11px; color: #94a3b8; margin-top: 6px; line-height: 1.5; display: block; }
+.cyber-link { color: #38bdf8; text-decoration: underline; }
+
+.modal-backdrop { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.8); display: flex; justify-content: center; align-items: center; z-index: 1000; }
+.cyber-modal { background: #0f172a; border: 1px solid #38bdf8; border-radius: 12px; padding: 24px; max-width: 360px; box-shadow: 0 0 30px rgba(56, 189, 248, 0.25); }
+.qr-box { background: white; padding: 12px; border-radius: 8px; display: inline-block; margin: 10px 0; }
+.modal-tip { font-size: 12px; color: #94a3b8; margin: 4px 0 10px 0; }
+
+.table-container { overflow-x: auto; margin-top: 10px; }
+.cyber-table { width: 100%; border-collapse: collapse; font-size: 13px; text-align: left; }
+.cyber-table th, .cyber-table td { padding: 12px 10px; border-bottom: 1px solid #1e293b; }
+.cyber-table th { color: #64748b; font-weight: 600; white-space: nowrap; }
+.table-progress { background: #1e293b; height: 4px; border-radius: 2px; overflow: hidden; margin-top: 4px; width: 100px; }
+.table-glow { background: #38bdf8; height: 100%; }
+
+.status-cell-nowrap {
+  white-space: nowrap !important;
+}
+.time-sub-text {
+  font-size: 10px;
+  color: #64748b;
+  margin-top: 3px;
+  font-family: monospace;
+}
+
+.badge { padding: 2px 8px; border-radius: 4px; font-size: 11px; white-space: nowrap; }
+.badge-ready { background: rgba(16, 185, 129, 0.2); color: #34d399; }
+.badge-used { background: rgba(239, 68, 68, 0.2); color: #f87171; }
+.badge-monthly { background: rgba(56, 189, 248, 0.2); color: #38bdf8; border: 1px solid rgba(56, 189, 248, 0.4); }
+.role-badge { padding: 3px 8px; border-radius: 4px; font-size: 11px; font-weight: 700; white-space: nowrap; }
+.role-badge.admin { background: #dc2626; color: white; }
+.role-badge.user { background: #2563eb; color: white; }
+.btn-logout { background: transparent; border: 1px solid #475569; color: #94a3b8; padding: 4px 10px; border-radius: 4px; cursor: pointer; white-space: nowrap; }
+
+.action-btn-row { display: flex; gap: 6px; align-items: center; white-space: nowrap; }
+.btn-sm { padding: 4px 8px; font-size: 11px; border-radius: 4px; border: none; cursor: pointer; white-space: nowrap; }
+.btn-action { background: #0284c7; color: white; }
+.btn-reset { background: #d97706; color: white; font-weight: 600; }
+.btn-edit { background: #4f46e5; color: white; }
+.btn-unban { background: #059669; color: white; font-weight: 600; }
+.btn-demote { background: #475569; color: #fff; }
+.btn-del { background: #b91c1c; color: white; }
+.btn-del:disabled, .btn-demote:disabled { opacity: 0.3; cursor: not-allowed; }
+
+.btn-link-action {
+  background: transparent;
+  border: none;
+  color: #38bdf8;
+  font-size: 11px;
+  cursor: pointer;
+  text-decoration: underline;
+  padding: 0;
+  white-space: nowrap;
+}
+.btn-link-action:hover { color: #7dd3fc; }
+
+.auth-box { max-width: 420px; margin: 0 auto 40px auto; }
+.form-item { margin-bottom: 16px; }
+.form-item label { display: block; font-size: 12px; color: #94a3b8; margin-bottom: 6px; }
+.auth-nav-links { display: flex; justify-content: space-between; margin-top: 16px; font-size: 13px; }
+.auth-nav-links a { color: #38bdf8; text-decoration: none; }
+.auth-nav-links a.text-warning { color: #f59e0b; }
+.auth-nav-links a:hover { text-decoration: underline; }
+.gen-form { display: grid; grid-template-columns: 1fr 1fr 1fr 1.2fr; gap: 10px; align-items: flex-end; }
+
+@media (max-width: 640px) {
+  .cyber-input {
+    width: 100% !important;
+    min-width: 0 !important;
+    max-width: 100% !important;
+  }
+  .header-nowrap-row { flex-wrap: wrap !important; }
+  .form-row-2 { grid-template-columns: 1fr; }
+  .gen-form { grid-template-columns: 1fr; }
+  .node-grid { grid-template-columns: 1fr; }
+}
+</style>
