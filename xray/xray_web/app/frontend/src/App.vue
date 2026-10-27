@@ -128,7 +128,7 @@
         </div>
       </div>
 
-      <!-- 2. 普通用户端：多节点集群中心 -->
+      <!-- 2. 普通用户端：多节点集群中心 (1物理节点=1卡片，极简清晰) -->
       <div v-else-if="currentUser.role === 'user'" class="dashboard-grid">
         <div class="cyber-card">
           <div class="card-header">
@@ -173,7 +173,7 @@
           </div>
         </div>
 
-        <!-- 节点列表与通用聚合订阅 (支持多 SNI 下拉切换联动与用户自主重置 UUID) -->
+        <!-- 节点列表与通用聚合订阅 (精简设计：每个物理节点1条，支持下拉自选) -->
         <div class="cyber-card col-span-2">
           <div class="card-header header-nowrap-row">
             <h3 class="header-title-text">🌐 全球加速节点列表与通用订阅 (共 {{ currentUser.nodes ? currentUser.nodes.length : 0 }} 个节点)</h3>
@@ -188,7 +188,7 @@
           </div>
 
           <p class="card-desc">
-            每个节点支持配置多个备选伪装 SNI。系统默认随机分配以分散特征，您亦可在卡片中下拉自选：
+            每个物理节点精炼输出 1 条线路。系统默认随机挑选伪装 SNI 分散审查，您亦可在下方下拉自选：
           </p>
 
           <div class="node-grid">
@@ -316,7 +316,7 @@
           </button>
         </div>
 
-        <!-- 主选项卡 1: 用户管理 (支持管理员查看凭证与重置用户 UUID) -->
+        <!-- 主选项卡 1: 用户管理 -->
         <div v-if="activeTab === 'users'" class="cyber-card tab-content-card">
           <div class="card-header">
             <h3>👥 接入用户治理列表</h3>
@@ -409,13 +409,11 @@
                     {{ n.pbk ? n.pbk.substring(0, 10) + '...' : '等待回传' }}
                     <button class="btn-link-action" style="margin-left: 4px;" @click="copyText(n.pbk)">复制</button>
                   </td>
-                  <!-- 单行不折行展示心跳状态 -->
                   <td class="status-cell-nowrap">
                     <span class="badge badge-ready">🟢 在线</span>
                     <div class="time-sub-text">{{ n.last_heartbeat }}</div>
                   </td>
                   <td>
-                    <!-- 操作列精简：仅保留配置、重置上报与吊销删除 -->
                     <div class="action-btn-row">
                       <button class="btn-sm btn-edit" @click="openNodeConfig(n)">✏️ 配置</button>
                       <button class="btn-sm btn-action" @click="forceResyncNode(n.node_id)">🔄 重置上报</button>
@@ -432,7 +430,6 @@
             </table>
           </div>
 
-          <!-- 远程海外 VPS 接入指令 (纯净无引号) -->
           <div class="panel-card" style="margin-top: 25px;">
             <h4 style="margin: 0 0 10px 0; color: #38bdf8;">🖥️ 远程海外 VPS 一键接入指令 (HTTPS 模式)</h4>
             <p class="card-desc">节点秒级上线，自动推导并向本面板回传真实公钥与网络参数：</p>
@@ -447,7 +444,7 @@
           </div>
         </div>
 
-        <!-- 主选项卡 3: 卡密管理 (默认最近1月筛选、3 项清理功能、展示使用时间) -->
+        <!-- 主选项卡 3: 卡密管理 -->
         <div v-else-if="activeTab === 'cards'" class="cyber-card tab-content-card">
           <div class="sub-tab-nav">
             <button class="sub-tab-btn" :class="{ active: cardSubTab === 'inventory' }" @click="cardSubTab = 'inventory'">
@@ -504,7 +501,6 @@
                 </button>
               </div>
 
-              <!-- 3 项卡密批量清理与删除操作组 -->
               <div class="delete-actions-group">
                 <button class="btn-sm btn-cyber-danger" @click="handleDeleteCardsByDate">
                   🗑️ 清理范围未售
@@ -543,7 +539,7 @@
                       <span v-else class="text-muted" style="font-size: 11px;">普通固定</span>
                     </td>
                     <td><span class="badge" :class="c.is_used ? 'badge-used' : 'badge-ready'">{{ c.is_used ? '已核销' : '待售/有效' }}</span></td>
-                    <td class="text-muted" style="white-space: nowrap;">{{ c.created_at || '早期' }}</td>
+                    <td class="text-muted">{{ c.created_at || '早期' }}</td>
                     <td style="white-space: nowrap; font-size: 11px; color: #38bdf8;">{{ c.used_at || '-' }}</td>
                     <td>{{ c.used_by || '-' }}</td>
                     <td><button class="btn-sm btn-action" @click="copyText(c.code)">复制</button></td>
@@ -780,7 +776,7 @@
       </div>
     </div>
 
-    <!-- 弹窗 2：管理员查看指定用户的全节点订阅与展开的所有 SNI 子线路 -->
+    <!-- 弹窗 2：管理员查看指定用户的全节点订阅 (1物理节点=1条精炼卡片，可自选SNI) -->
     <div v-if="showUserCredModal" class="modal-backdrop" @click="showUserCredModal = false">
       <div class="cyber-modal" style="max-width: 580px; text-align: left;" @click.stop>
         <h3>📱 用户 [{{ targetCredUser.username }}] 的节点凭据与订阅</h3>
@@ -795,9 +791,9 @@
         </div>
 
         <div class="inner-divider">
-          <div class="inner-divider-title">🌐 各集群节点直连线路清单 (共 {{ targetCredUser.node_links ? targetCredUser.node_links.length : 0 }} 条)</div>
+          <div class="inner-divider-title">🌐 各集群节点直连线路清单 (共 {{ targetCredUser.node_links ? targetCredUser.node_links.length : 0 }} 个物理节点)</div>
           <div style="max-height: 240px; overflow-y: auto;">
-            <div v-for="nl in targetCredUser.node_links" :key="nl.name" style="background: #0b1120; border: 1px solid #1e293b; border-radius: 6px; padding: 10px; margin-bottom: 8px;">
+            <div v-for="nl in targetCredUser.node_links" :key="nl.node_id" style="background: #0b1120; border: 1px solid #1e293b; border-radius: 6px; padding: 10px; margin-bottom: 8px;">
               <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
                 <b style="font-size: 13px; color: #f1f5f9;">{{ nl.name }}</b>
                 <div style="display: flex; gap: 6px;">
@@ -805,6 +801,15 @@
                   <button class="btn-sm btn-edit" @click="openQrModal(nl.link, nl.name)">二维码</button>
                 </div>
               </div>
+
+              <!-- 管理员在弹窗内也可下拉切换测试特定 SNI -->
+              <div v-if="nl.server_names && nl.server_names.length > 1" class="sni-select-wrap" style="margin-bottom: 6px;">
+                <label style="color: #94a3b8; font-size: 11px;">伪装SNI:</label>
+                <select v-model="nl.selected_sni" class="cyber-select" @change="onAdminChangeUserNodeSni(nl)">
+                  <option v-for="s in nl.server_names" :key="s" :value="s">{{ s }}</option>
+                </select>
+              </div>
+
               <div style="font-size: 11px; color: #64748b; font-family: monospace; word-break: break-all;">{{ nl.link }}</div>
             </div>
           </div>
@@ -926,7 +931,7 @@
       </div>
     </div>
 
-    <!-- 弹窗 6：手动粘贴上传证书 PEM 弹窗 (规范使用 fullchain.pem 和 privkey.pem) -->
+    <!-- 弹窗 6：手动粘贴上传证书 PEM 弹窗 -->
     <div v-if="showCustomCertModal" class="modal-backdrop" @click="showCustomCertModal = false">
       <div class="cyber-modal" style="max-width: 520px; text-align: left;" @click.stop>
         <h3>📋 手动安装第三方 HTTPS 证书</h3>
@@ -1126,6 +1131,13 @@ const onUserChangeNodeSni = (node) => {
   if (!node.link || !node.selected_sni) return
   node.link = node.link.replace(/sni=[^&]+/, `sni=${node.selected_sni}`)
   ElMessage.success(`已切换该节点的伪装 SNI 为: ${node.selected_sni}`)
+}
+
+// 管理员在凭据弹窗内下拉切换 SNI 时的即时重构
+const onAdminChangeUserNodeSni = (nl) => {
+  if (!nl.link || !nl.selected_sni) return
+  nl.link = nl.link.replace(/sni=[^&]+/, `sni=${nl.selected_sni}`)
+  ElMessage.success(`已切换线路伪装 SNI 为: ${nl.selected_sni}`)
 }
 
 // 用户自主重置节点凭证 (UUID)
@@ -1329,19 +1341,19 @@ const executeExport = async (payload, successTip) => {
   }
 }
 
-// 唯一保留：勾选导出
+// 唯一声明：勾选导出
 const exportSelectedCards = () => {
   if (selectedCards.value.length === 0) return ElMessage.warning('请先勾选要导出的卡密')
   executeExport({ selected_codes: selectedCards.value }, '已复制选中的卡密')
 }
 
-// 唯一保留：日期范围导出
+// 唯一声明：日期范围导出
 const exportByDateRange = () => {
   if (!exportFilter.startDate && !exportFilter.endDate) return ElMessage.warning('请先选择日期范围')
   executeExport({ start_date: exportFilter.startDate, end_date: exportFilter.endDate }, '已导出指定日期范围内的未售卡密')
 }
 
-// 唯一保留：全部未售导出
+// 唯一声明：全部未售导出
 const exportAllUnusedCards = () => executeExport({}, '已复制全部未售卡密')
 
 const startCountdown = () => {
@@ -1650,6 +1662,7 @@ const generateNewNodeKey = () => {
   ElMessage.success('已随机生成新密钥，点击【保存并同步】后生效')
 }
 
+// 核心修复点：保存节点配置后，同时重新加载节点列表和全量用户数据，确保所有订阅地址即刻更新，无须手动按 F5！
 const saveNodeFullConfig = async () => {
   try {
     const adminUser = currentUser.username || authForm.username
@@ -1662,7 +1675,9 @@ const saveNodeFullConfig = async () => {
     if (res.data.code === 200) {
       ElMessage.success(res.data.msg)
       showNodeConfigModal.value = false
-      openNodesTab()
+      // 级联无感刷新前后台全量数据
+      await openNodesTab()
+      await loadAdminData()
     } else {
       ElMessage.error(res.data.msg)
     }
@@ -1683,6 +1698,7 @@ const forceResyncNode = async (nodeId) => {
     if (res.data.code === 200) {
       ElMessage.success(res.data.msg)
       openNodesTab()
+      loadAdminData()
     } else {
       ElMessage.error(res.data.msg)
     }
@@ -1712,6 +1728,7 @@ const revokeDeleteNode = async (nodeId) => {
     if (res.data.code === 200) {
       ElMessage.success('节点已成功吊销并移除！')
       openNodesTab()
+      loadAdminData()
     }
   } catch (_) {
     ElMessage.error('吊销删除失败')
@@ -2365,7 +2382,6 @@ const logout = () => {
   color: #94a3b8;
 }
 
-/* 工具栏分区分组布局 */
 .export-toolbar {
   background: #0a0f1d;
   border: 1px solid #1e293b;

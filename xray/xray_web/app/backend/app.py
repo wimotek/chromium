@@ -29,6 +29,7 @@ from cert_manager import (
 app = Flask(__name__, static_folder='../frontend/dist', static_url_path='/')
 init_db()
 
+# 辅助函数：提取节点配置的所有有效 SNI 域名候选列表 (去端口、去重复)
 def get_node_snis(node: dict) -> list[str]:
     raw = node.get("server_names") or node.get("sni") or "www.microsoft.com"
     snis = []
@@ -38,13 +39,15 @@ def get_node_snis(node: dict) -> list[str]:
             snis.append(clean)
     return snis if snis else ["www.microsoft.com"]
 
+# 辅助函数：构建标准的 VLESS REALITY 单连接 (默认从候选列表中随机选 1 个)
 def build_node_link(uuid_str: str, node: dict, remark: str, chosen_sni: str = None) -> str:
     snis = get_node_snis(node)
     sni = chosen_sni if (chosen_sni and chosen_sni in snis) else random.choice(snis)
+    clean_sni = sni.split(":")[0]
     return (
         f"vless://{uuid_str}@{node['ip']}:{node['port']}"
         f"?security=reality&encryption=none&pbk={node['pbk']}&headerType=none&fp=chrome"
-        f"&type=tcp&flow=xtls-rprx-vision&sni={sni}&sid={node['sid']}#{remark}"
+        f"&type=tcp&flow=xtls-rprx-vision&sni={clean_sni}&sid={node['sid']}#{remark}"
     )
 
 @app.route('/.well-known/acme-challenge/<path:filename>')
@@ -142,7 +145,7 @@ def scheduled_worker_loop():
 
 threading.Thread(target=scheduled_worker_loop, daemon=True).start()
 
-# ==================== 前台聚合订阅 (支持多物理节点 + 多 SNI 裂变全量展开) ====================
+# ==================== 前台聚合订阅 (精简回归：1物理节点=1条连接，默认随机选择) ====================
 
 @app.route('/')
 def index():
@@ -168,10 +171,11 @@ def get_qrcode_svg():
     buf.seek(0)
     return send_file(buf, mimetype='image/svg+xml')
 
-# 核心下发：遍历所有 status=1 的有效节点，并全量展开 SNI 线路
+# 核心优化：每个物理节点严格输出 1 条精炼链接，默认从列表中随机选 1 个域名（亦支持 ?sni= 选定）
 @app.route('/api/sub', methods=['GET'])
 def get_subscription():
     token = request.args.get('token', '').strip()
+    forced_sni = request.args.get('sni', '').strip() or None
     if not token: abort(400)
 
     conn = get_db()
@@ -190,14 +194,10 @@ def get_subscription():
     for n in nodes:
         if len(n.get("pbk", "")) == 43:
             snis = get_node_snis(n)
-            # 如果配置了多个 SNI 域名，全量展开为多条线路供客户端测速选优
-            if len(snis) > 1:
-                for sni_item in snis:
-                    remark = f"{n['name']} ({sni_item})"
-                    links.append(build_node_link(user['uuid'], n, remark, chosen_sni=sni_item))
-            else:
-                remark = f"{n['name']}"
-                links.append(build_node_link(user['uuid'], n, remark, chosen_sni=snis[0]))
+            # 关键优化：1个节点只生成1条精炼线路，默认随机从列表挑选；若指定则优先使用指定的域名
+            chosen_sni = forced_sni if (forced_sni and forced_sni in snis) else random.choice(snis)
+            remark = f"{n['name']}"
+            links.append(build_node_link(user['uuid'], n, remark, chosen_sni=chosen_sni))
 
     sub_text = "\n".join(links)
     b64_sub = base64.b64encode(sub_text.encode('utf-8')).decode('utf-8')
@@ -256,7 +256,7 @@ def open_faka_generate():
 
     return code, 200, {"Content-Type": "text/plain; charset=utf-8"}
 
-# ==================== 远程节点集群心跳 (确立主控为唯一配置权威源) ====================
+# ==================== 远程节点集群心跳 (以主控后台配置为唯一权威) ====================
 
 @app.route('/api/node/heartbeat', methods=['POST'])
 def node_heartbeat():
@@ -285,7 +285,7 @@ def node_heartbeat():
     server_names_str = ",".join(snis)
     primary_sni = snis[0] if snis else "www.microsoft.com"
 
-    # 43 位公钥智能抢救与切片
+    # 43 位公钥智能抢救截断
     pbk = raw_pbk
     if len(pbk) != 43:
         matches = re.findall(r'[A-Za-z0-9_\-]{43}', pbk)
@@ -302,7 +302,7 @@ def node_heartbeat():
     c.execute("SELECT * FROM nodes WHERE node_id=?", (node_id,))
     node = c.fetchone()
 
-    # 首次接入：绑定注册为新节点
+    # 首次接入：绑定注册
     if not node:
         auto_name = f"节点-{node_ip}"
         c.execute("""
@@ -327,7 +327,7 @@ def node_heartbeat():
         conn.close()
         return jsonify({"code": 200, "msg": "心跳成功，已为您同步下发新密钥", "new_node_key": pending_key})
 
-    # 核心设计：正常心跳只更新 IP、公钥与时间戳，绝对不覆盖管理员在后台配置的 dest、sni、port！
+    # 关键防反向覆盖：心跳只更新 IP、公钥与时间戳，绝对不反向覆盖后台配置的 dest/sni/server_names！
     if node_key == current_key:
         c.execute("""
             UPDATE nodes 
@@ -341,7 +341,7 @@ def node_heartbeat():
     conn.close()
     return jsonify({"code": 403, "msg": "Node Key 验证失败"}), 403
 
-# 双向同步：下发主控后台设置的配置，节点根据此配置热更本地文件
+# 双向同步接口：将主控后台配置的 server_names 数组下发给节点热更
 @app.route('/api/node/sync', methods=['GET'])
 def node_sync_users():
     node_id = request.args.get('node_id', '').strip()
@@ -1106,6 +1106,7 @@ def admin_delete_cards():
     conn.close()
     return jsonify({"code": 200, "msg": f"卡密清理完成！共成功删除 {deleted_count} 张卡密。"})
 
+# 核心：管理端用户数据实时聚合下发 (1个物理节点严格对应1条精炼直连链接，默认使用随机挑选的 SNI)
 @app.route('/api/admin/data', methods=['POST'])
 def admin_data():
     data = request.json or {}
@@ -1132,18 +1133,21 @@ def admin_data():
         for n in active_nodes:
             if len(n.get("pbk", "")) == 43:
                 snis = get_node_snis(n)
-                # 后台弹窗全量展开每个节点的所有可用 SNI 线路
-                if len(snis) > 1:
-                    for s in snis:
-                        d['node_links'].append({
-                            "name": f"{n['name']} ({s})",
-                            "link": build_node_link(d['uuid'], n, f"{n['name']}", chosen_sni=s)
-                        })
-                else:
-                    d['node_links'].append({
-                        "name": n['name'],
-                        "link": build_node_link(d['uuid'], n, f"{n['name']}", chosen_sni=snis[0])
-                    })
+                # 每个物理节点1条，默认使用随机分配的SNI，保持清爽！
+                chosen_sni = random.choice(snis)
+                d['node_links'].append({
+                    "id": n['id'],
+                    "node_id": n['node_id'],
+                    "name": n['name'],
+                    "ip": n['ip'],
+                    "port": n['port'],
+                    "pbk": n['pbk'],
+                    "sid": n['sid'],
+                    "sni": chosen_sni,
+                    "server_names": snis,
+                    "selected_sni": chosen_sni,
+                    "link": build_node_link(d['uuid'], n, f"{n['name']}", chosen_sni=chosen_sni)
+                })
         users.append(d)
 
     return jsonify({"code": 200, "cards": cards, "users": users})

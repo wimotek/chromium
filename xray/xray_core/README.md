@@ -69,7 +69,7 @@ docker run -d \
   -e AUTO_UPDATE=true \
   -e PORT=443 \
   -e DEST=www.apple.com:443 \
-  -e SERVER_NAMES=www.microsoft.com \
+  -e SERVER_NAMES=www.apple.com,apple.com \
   ghcr.io/wimotek/xray:latest
 ```
 * 选项 2：端口映射模式（跨平台 / 非 Host 环境）
