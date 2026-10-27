@@ -1,231 +1,278 @@
 <template>
   <div class="cyber-card tab-content-card">
-    <div class="card-header" style="margin-bottom: 22px;">
+    <!-- 顶部操作条 -->
+    <div class="card-header" style="margin-bottom: 16px;">
       <h3>⚙️ 系统发信、定时巡检、HTTPS 证书与全局设置</h3>
       <button class="btn-cyber-success" @click="saveAllSettings">💾 保存全部配置</button>
     </div>
 
-    <div class="settings-2col-layout">
-      <!-- 左列 -->
-      <div class="column-stack">
-        <!-- 子卡片 1：全新【用户通知与群发推送中枢】 -->
-        <div class="panel-card">
-          <div class="panel-card-header">
-            <div class="panel-title-wrap">
-              <span class="panel-icon">📢</span>
-              <div>
-                <strong class="panel-title">用户通知与消息群发中枢</strong>
-                <div class="panel-sub">按用户个人偏好自动路由投递 (邮件 / 微信服务号)</div>
+    <!-- 核心：2 个子卡片选项卡导航 -->
+    <div class="sub-tab-nav">
+      <button
+        class="sub-tab-btn"
+        :class="{ active: settingsSubTab === 'notify' }"
+        @click="settingsSubTab = 'notify'"
+      >
+        📧 发信服务与通知推送中枢
+      </button>
+      <button
+        class="sub-tab-btn"
+        :class="{ active: settingsSubTab === 'system' }"
+        @click="settingsSubTab = 'system'"
+      >
+        🔐 HTTPS 证书与基础运维
+      </button>
+    </div>
+
+    <!-- ==================== 子卡 1：发信服务与通知推送中枢 (双列布局) ==================== -->
+    <div v-if="settingsSubTab === 'notify'" class="sub-tab-pane">
+      <div class="settings-2col-layout">
+        <!-- 左列：用户群发中枢 + 管理员告警与改密 -->
+        <div class="column-stack">
+          <!-- 面板 A：用户消息群发与定向通知中枢 -->
+          <div class="panel-card">
+            <div class="panel-card-header">
+              <div class="panel-title-wrap">
+                <span class="panel-icon">📢</span>
+                <div>
+                  <strong class="panel-title">用户通知与消息群发中枢</strong>
+                  <div class="panel-sub">按用户个人偏好自动路由投递 (邮件 / 微信服务号)</div>
+                </div>
               </div>
             </div>
+
+            <div class="form-item">
+              <label>推送范围选择：</label>
+              <div class="radio-group" style="flex-direction: row; gap: 20px;">
+                <label class="radio-label">
+                  <input type="radio" value="all" v-model="notifyPushForm.target" /> 👥 广播给全站有效用户
+                </label>
+                <label class="radio-label">
+                  <input type="radio" value="single" v-model="notifyPushForm.target" /> 👤 定向发送给指定用户
+                </label>
+              </div>
+            </div>
+
+            <div class="form-item" v-if="notifyPushForm.target === 'single'">
+              <label>目标接收用户名：</label>
+              <input v-model="notifyPushForm.target_user" type="text" class="cyber-input modal-input" placeholder="输入要接收通知的用户名" />
+            </div>
+
+            <div class="form-item">
+              <label>通知标题 (Title)：</label>
+              <input v-model="notifyPushForm.title" type="text" class="cyber-input modal-input" placeholder="例如: 节点紧急维护通知 / 优惠活动" />
+            </div>
+
+            <div class="form-item">
+              <label>通知正文内容 (Content)：</label>
+              <textarea v-model="notifyPushForm.content" rows="4" class="cyber-input cyber-textarea modal-input" placeholder="输入通知详细内容，支持多行换行..."></textarea>
+              <span class="input-hint">系统将根据目标用户的设置（绑定邮箱 或 Server酱微信），自动精准路由投递。</span>
+            </div>
+
+            <button class="btn-cyber-primary" :disabled="sendingPush" style="width: 100%; padding: 10px;" @click="sendUserPushNotification">
+              {{ sendingPush ? '正在派发通知任务...' : '🚀 立即投递通知' }}
+            </button>
           </div>
 
-          <div class="form-item">
-            <label>推送范围选择：</label>
-            <div class="radio-group" style="flex-direction: row; gap: 20px;">
-              <label class="radio-label">
-                <input type="radio" value="all" v-model="notifyPushForm.target" /> 👥 广播给全站有效用户
-              </label>
-              <label class="radio-label">
-                <input type="radio" value="single" v-model="notifyPushForm.target" /> 👤 定向发送给指定用户
-              </label>
+          <!-- 面板 B：管理员自身通知与改密 -->
+          <div class="panel-card">
+            <div class="panel-card-header">
+              <div class="panel-title-wrap">
+                <span class="panel-icon">👤</span>
+                <div>
+                  <strong class="panel-title">管理员自身通知通道与改密</strong>
+                  <div class="panel-sub">管理员接收系统告警通道</div>
+                </div>
+              </div>
+            </div>
+            <div class="form-item">
+              <label>告警通道选择</label>
+              <div class="radio-group">
+                <label class="radio-label"><input type="radio" value="email" v-model="notifyForm.notify_type" /> 📧 电子邮箱接收</label>
+                <label class="radio-label"><input type="radio" value="serverchan" v-model="notifyForm.notify_type" /> 📲 Server酱 (微信推送)</label>
+              </div>
+            </div>
+            <div class="form-item" v-if="notifyForm.notify_type === 'serverchan'">
+              <label>Server酱 SendKey：</label>
+              <input v-model="notifyForm.serverchan_key" type="text" class="cyber-input font-mono modal-input" placeholder="SCTxxxxxxxxxx" />
+            </div>
+            <div class="btn-group" style="margin-top: 14px;">
+              <button class="btn-cyber-success" style="padding: 6px 14px; font-size: 12px;" @click="saveNotifySettings">保存通知偏好</button>
+              <button class="btn-cyber-action" style="padding: 6px 14px; font-size: 12px;" @click="testUserNotify">测试通知</button>
+            </div>
+            <div class="inner-divider">
+              <div class="inner-divider-title">🔑 修改管理员自身登录密码</div>
+              <div class="form-item" style="margin-bottom: 8px;"><input v-model="pwdForm.old_pwd" type="password" class="cyber-input modal-input" placeholder="当前原密码" /></div>
+              <div class="form-item" style="margin-bottom: 8px;"><input v-model="pwdForm.new_pwd" type="password" class="cyber-input modal-input" placeholder="新密码" /></div>
+              <div class="form-item" style="margin-bottom: 12px;"><input v-model="pwdForm.confirm_pwd" type="password" class="cyber-input modal-input" placeholder="确认新密码" /></div>
+              <button class="btn-cyber-primary" style="width: auto; padding: 7px 20px; font-size: 12px;" @click="submitChangePassword">确认变更密码</button>
             </div>
           </div>
-
-          <div class="form-item" v-if="notifyPushForm.target === 'single'">
-            <label>目标接收用户名：</label>
-            <input v-model="notifyPushForm.target_user" type="text" class="cyber-input modal-input" placeholder="输入要接收通知的用户名" />
-          </div>
-
-          <div class="form-item">
-            <label>通知标题 (Title)：</label>
-            <input v-model="notifyPushForm.title" type="text" class="cyber-input modal-input" placeholder="例如: 节点紧急维护通知 / 优惠活动" />
-          </div>
-
-          <div class="form-item">
-            <label>通知正文内容 (Content)：</label>
-            <textarea v-model="notifyPushForm.content" rows="4" class="cyber-input cyber-textarea modal-input" placeholder="输入通知详细内容，支持多行文本..."></textarea>
-            <span class="input-hint">系统将根据目标用户的设置（绑定邮箱 或 Server酱微信），自动精准路由投递。</span>
-          </div>
-
-          <button class="btn-cyber-primary" :disabled="sendingPush" style="width: 100%; padding: 10px;" @click="sendUserPushNotification">
-            {{ sendingPush ? '正在派发通知任务...' : '🚀 立即投递通知' }}
-          </button>
         </div>
 
-        <!-- 子卡片 2：系统公告与新用户默认配额 -->
-        <div class="panel-card">
-          <div class="panel-card-header">
-            <div class="panel-title-wrap">
-              <span class="panel-icon">📢</span>
-              <div>
-                <strong class="panel-title">系统公告与新用户默认配额</strong>
-                <div class="panel-sub">登录页通知横幅与新注册赠送流量</div>
+        <!-- 右列：SMTP 发信配置 + 定时巡检与重置 -->
+        <div class="column-stack">
+          <!-- 面板 C：SMTP 发信服务器参数配置 -->
+          <div class="panel-card">
+            <div class="panel-card-header">
+              <div class="panel-title-wrap">
+                <span class="panel-icon">📧</span>
+                <div>
+                  <strong class="panel-title">SMTP 发信服务器参数配置</strong>
+                  <div class="panel-sub">用于发送验证码与到期告警邮件</div>
+                </div>
+              </div>
+            </div>
+            <div class="smtp-status-box" :class="settingsForm.is_smtp_configured ? 'smtp-ready' : 'smtp-empty'">
+              <span>{{ settingsForm.is_smtp_configured ? '🟢 SMTP 状态：就绪 (发信正常)' : '⚪ SMTP 状态：未完整配置' }}</span>
+            </div>
+            <div class="form-item"><label>SMTP 服务器地址</label><input v-model="settingsForm.smtp_host" type="text" class="cyber-input modal-input" placeholder="smtp.qq.com" /></div>
+            <div class="form-row-2">
+              <div class="form-item"><label>端口</label><input v-model="settingsForm.smtp_port" type="text" class="cyber-input modal-input" placeholder="465" /></div>
+              <div class="form-item"><label>发件人显示名称</label><input v-model="settingsForm.smtp_sender" type="text" class="cyber-input modal-input" placeholder="Xray 节点中心" /></div>
+            </div>
+            <div class="form-item"><label>发信邮箱账号</label><input v-model="settingsForm.smtp_user" type="text" class="cyber-input modal-input" placeholder="service@example.com" /></div>
+            <div class="form-item"><label>邮箱授权码 / 密码</label><input v-model="settingsForm.smtp_pass" type="password" class="cyber-input modal-input" :placeholder="settingsForm.has_smtp_pass ? '●●●●●● (留空保持原密码)' : '输入授权码'" /></div>
+            <div class="form-item"><label class="radio-label"><input type="checkbox" v-model="settingsForm.smtp_ssl" /> 启用 SSL 安全加密</label></div>
+            <div class="inner-divider">
+              <div style="display: flex; gap: 8px;">
+                <input v-model="testEmailTo" type="email" class="cyber-input" placeholder="接收测试邮箱 (test@example.com)" />
+                <button class="btn-cyber-action" :disabled="testingEmail" style="padding: 6px 14px; font-size: 12px; white-space: nowrap;" @click="sendTestEmail">{{ testingEmail ? '...' : '发信连通性测试' }}</button>
               </div>
             </div>
           </div>
-          <div class="form-item">
-            <label>登录页系统公告内容 (留空不显示)：</label>
-            <textarea v-model="settingsForm.system_notice" rows="3" class="cyber-input cyber-textarea modal-input" placeholder="例如：全节点已完成维护，极速晚高峰..."></textarea>
-          </div>
-          <div class="form-row-2" style="margin-top: 15px;">
-            <div class="form-item">
-              <label>新注册默认流量 (MB)</label>
-              <input v-model.number="settingsForm.reg_traffic_mb" type="number" class="cyber-input modal-input" placeholder="1024" />
-            </div>
-            <div class="form-item">
-              <label>新注册有效天数 (天)</label>
-              <input v-model.number="settingsForm.reg_expire_days" type="number" class="cyber-input modal-input" placeholder="1" />
-            </div>
-          </div>
-        </div>
 
-        <!-- 子卡片 3：管理员自身通知与改密 -->
-        <div class="panel-card">
-          <div class="panel-card-header">
-            <div class="panel-title-wrap">
-              <span class="panel-icon">👤</span>
-              <div>
-                <strong class="panel-title">管理员通知通道与改密</strong>
-                <div class="panel-sub">管理员自身接收告警通道</div>
+          <!-- 面板 D：定时巡检与每月流量重置 -->
+          <div class="panel-card">
+            <div class="panel-card-header">
+              <div class="panel-title-wrap">
+                <span class="panel-icon">⏰</span>
+                <div>
+                  <strong class="panel-title">定时巡检、预警与每月流量重置</strong>
+                  <div class="panel-sub">后台自动轮询配额并执行每月重置</div>
+                </div>
               </div>
+              <label class="radio-label" style="margin: 0;">
+                <input type="checkbox" v-model="settingsForm.task_notify_enable" />
+                <span :style="{ color: settingsForm.task_notify_enable ? '#10b981' : '#ef4444' }">{{ settingsForm.task_notify_enable ? '🟢 巡检中' : '🔴 暂停' }}</span>
+              </label>
             </div>
-          </div>
-          <div class="form-item">
-            <label>告警通道选择</label>
-            <div class="radio-group">
-              <label class="radio-label"><input type="radio" value="email" v-model="notifyForm.notify_type" /> 📧 电子邮箱接收</label>
-              <label class="radio-label"><input type="radio" value="serverchan" v-model="notifyForm.notify_type" /> 📲 Server酱 (微信推送)</label>
+            <div class="form-item">
+              <label>轮询检测周期 (小时)</label>
+              <div class="input-with-addon"><input v-model.number="settingsForm.task_interval_hours" type="number" class="cyber-input modal-input" /><span class="addon-text">小时 / 次</span></div>
             </div>
-          </div>
-          <div class="form-item" v-if="notifyForm.notify_type === 'serverchan'">
-            <label>Server酱 SendKey：</label>
-            <input v-model="notifyForm.serverchan_key" type="text" class="cyber-input font-mono modal-input" placeholder="SCTxxxxxxxxxx" />
-          </div>
-          <div class="btn-group" style="margin-top: 14px;">
-            <button class="btn-cyber-success" style="padding: 6px 14px; font-size: 12px;" @click="saveNotifySettings">保存通知偏好</button>
-            <button class="btn-cyber-action" style="padding: 6px 14px; font-size: 12px;" @click="testUserNotify">测试通知</button>
-          </div>
-          <div class="inner-divider">
-            <div class="inner-divider-title">🔑 修改管理员自身登录密码</div>
-            <div class="form-item" style="margin-bottom: 8px;"><input v-model="pwdForm.old_pwd" type="password" class="cyber-input modal-input" placeholder="当前原密码" /></div>
-            <div class="form-item" style="margin-bottom: 8px;"><input v-model="pwdForm.new_pwd" type="password" class="cyber-input modal-input" placeholder="新密码" /></div>
-            <div class="form-item" style="margin-bottom: 12px;"><input v-model="pwdForm.confirm_pwd" type="password" class="cyber-input modal-input" placeholder="确认新密码" /></div>
-            <button class="btn-cyber-primary" style="width: auto; padding: 7px 20px; font-size: 12px;" @click="submitChangePassword">确认变更密码</button>
+            <div class="form-item">
+              <label>流量不足告警阈值 (%)</label>
+              <div class="input-with-addon"><input v-model.number="settingsForm.task_traffic_threshold" type="number" class="cyber-input modal-input" /><span class="addon-text">%</span></div>
+            </div>
+            <div class="form-item">
+              <label>套餐到期告警阈值 (天)</label>
+              <div class="input-with-addon"><input v-model.number="settingsForm.task_expire_days" type="number" class="cyber-input modal-input" /><span class="addon-text">天</span></div>
+            </div>
+            <div class="inner-divider">
+              <div style="font-size: 12px; color: #94a3b8; margin-bottom: 10px;">最近扫描完成时间：<b class="text-cyan">{{ settingsForm.task_last_run }}</b></div>
+              <button class="btn-cyber-primary" :disabled="triggeringTask" style="width: auto; padding: 7px 18px; font-size: 12px;" @click="triggerManualTask">
+                {{ triggeringTask ? '扫描中...' : '⚡ 立即执行一次巡检与重置' }}
+              </button>
+            </div>
           </div>
         </div>
       </div>
+    </div>
 
-      <!-- 右列 -->
-      <div class="column-stack">
-        <!-- 子卡片 4：HTTPS 证书与 ACME 管理 -->
-        <div class="panel-card">
-          <div class="panel-card-header">
-            <div class="panel-title-wrap">
-              <span class="panel-icon">🔐</span>
-              <div>
-                <strong class="panel-title">HTTPS 安全证书与 ACME 管理</strong>
-                <div class="panel-sub">管理 fullchain.pem / privkey.pem 与 Let's Encrypt 自动签发</div>
+    <!-- ==================== 子卡 2：HTTPS 证书与基础运维 (双列布局) ==================== -->
+    <div v-else-if="settingsSubTab === 'system'" class="sub-tab-pane">
+      <div class="settings-2col-layout">
+        <!-- 左列：系统公告与新注册配额 -->
+        <div class="column-stack">
+          <div class="panel-card">
+            <div class="panel-card-header">
+              <div class="panel-title-wrap">
+                <span class="panel-icon">📢</span>
+                <div>
+                  <strong class="panel-title">系统公告与新用户默认配额</strong>
+                  <div class="panel-sub">登录页横幅公告与新用户体验套餐</div>
+                </div>
               </div>
             </div>
-            <button class="btn-sm btn-action" @click="loadCertInfo">🔄 检查状态</button>
-          </div>
-
-          <div class="smtp-status-box" :class="certInfo.is_self_signed ? 'smtp-empty' : 'smtp-ready'" style="margin-bottom: 14px;">
-            <div v-if="certInfo.is_self_signed">
-              ⚠️ <b>当前正在使用自签名证书 (10年期)</b>
-              <div style="font-size: 11px; margin-top: 2px;">浏览器首次访问会显示不安全提示；可开启下方 ACME 签发免费受信任证书。</div>
-            </div>
-            <div v-else-if="certInfo.status === 'valid'">
-              🟢 <b>当前证书工作正常 (受信任证书)</b>
-              <div style="font-size: 11px; margin-top: 2px;">签发机构: {{ certInfo.issuer }} | 剩余天数: {{ certInfo.days_left }} 天</div>
-            </div>
-            <div v-else>
-              ⚪ 证书状态未知，开机将自动生成自签名证书兜底。
-            </div>
-          </div>
-
-          <div class="form-item">
-            <label class="radio-label" style="font-weight: 600;">
-              <input type="checkbox" v-model="settingsForm.acme_enable" @change="saveAllSettings" />
-              <span :style="{ color: settingsForm.acme_enable ? '#10b981' : '#94a3b8' }">
-                {{ settingsForm.acme_enable ? '🟢 ACME 自动签发功能：已开启' : '⚪ ACME 自动签发功能：已停用 (默认关闭)' }}
-              </span>
-            </label>
-          </div>
-
-          <div v-if="settingsForm.acme_enable" style="background: rgba(56, 189, 248, 0.05); border: 1px dashed rgba(56, 189, 248, 0.3); border-radius: 8px; padding: 14px; margin-bottom: 14px;">
             <div class="form-item">
-              <label>解析到本机的域名 (Domain)：</label>
-              <input v-model="settingsForm.acme_domain" type="text" class="cyber-input modal-input" placeholder="例如: panel.example.com" />
+              <label>登录页系统公告内容 (留空不显示)：</label>
+              <textarea v-model="settingsForm.system_notice" rows="4" class="cyber-input cyber-textarea modal-input" placeholder="例如：欢迎加入！全节点已完成升级，高速晚高峰不卡顿..."></textarea>
+              <span class="input-hint">保存后，前台用户打开登录卡片顶部将即时看到此公告。</span>
             </div>
-            <div class="form-item">
-              <label>Let's Encrypt 登记邮箱 (Email)：</label>
-              <input v-model="settingsForm.acme_email" type="email" class="cyber-input modal-input" placeholder="admin@example.com" />
+            <div class="form-row-2" style="margin-top: 15px;">
+              <div class="form-item">
+                <label>新注册默认赠送流量 (MB)</label>
+                <input v-model.number="settingsForm.reg_traffic_mb" type="number" class="cyber-input modal-input" placeholder="1024" />
+                <span class="input-hint">填 0 为不赠送</span>
+              </div>
+              <div class="form-item">
+                <label>新注册默认有效天数 (天)</label>
+                <input v-model.number="settingsForm.reg_expire_days" type="number" class="cyber-input modal-input" placeholder="1" />
+                <span class="input-hint">填 36500 为永久</span>
+              </div>
             </div>
-            <button class="btn-cyber-primary" :disabled="issuingAcme" style="width: auto; padding: 8px 18px; font-size: 12px;" @click="handleApplyAcme">
-              {{ issuingAcme ? '正在申请证书，请稍候...' : '⚡ 一键向 Let\'s Encrypt 申请/续签证书' }}
-            </button>
-          </div>
-
-          <div class="inner-divider">
-            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
-              <div class="inner-divider-title" style="margin: 0;">📋 手动粘贴第三方证书 (如宝塔证书)</div>
-              <button class="btn-link-action" @click="showCustomCertModal = true">打开粘贴窗口</button>
-            </div>
-            <div class="input-hint">若已有证书，可直接映射或粘贴保存到 <code>/data/certs/fullchain.pem</code> 与 <code>privkey.pem</code>。</div>
           </div>
         </div>
 
-        <!-- 子卡片 5：定时巡检与每月流量重置 -->
-        <div class="panel-card">
-          <div class="panel-card-header">
-            <div class="panel-title-wrap"><span class="panel-icon">⏰</span><strong class="panel-title">定时巡检与每月流量重置</strong></div>
-            <label class="radio-label" style="margin: 0;">
-              <input type="checkbox" v-model="settingsForm.task_notify_enable" />
-              <span :style="{ color: settingsForm.task_notify_enable ? '#10b981' : '#ef4444' }">{{ settingsForm.task_notify_enable ? '🟢 运行中' : '🔴 暂停' }}</span>
-            </label>
-          </div>
-          <div class="form-item">
-            <label>检测周期 (小时)</label>
-            <div class="input-with-addon"><input v-model.number="settingsForm.task_interval_hours" type="number" class="cyber-input" /><span class="addon-text">小时 / 次</span></div>
-          </div>
-          <div class="form-item">
-            <label>流量不足告警阈值 (%)</label>
-            <div class="input-with-addon"><input v-model.number="settingsForm.task_traffic_threshold" type="number" class="cyber-input" /><span class="addon-text">%</span></div>
-          </div>
-          <div class="form-item">
-            <label>套餐到期告警阈值 (天)</label>
-            <div class="input-with-addon"><input v-model.number="settingsForm.task_expire_days" type="number" class="cyber-input" /><span class="addon-text">天</span></div>
-          </div>
-          <div class="inner-divider">
-            <div style="font-size: 12px; color: #94a3b8; margin-bottom: 10px;">最近扫描时间：<b class="text-cyan">{{ settingsForm.task_last_run }}</b></div>
-            <button class="btn-cyber-primary" :disabled="triggeringTask" style="width: auto; padding: 7px 18px; font-size: 12px;" @click="triggerManualTask">
-              {{ triggeringTask ? '扫描中...' : '⚡ 立即执行一次巡检' }}
-            </button>
-          </div>
-        </div>
+        <!-- 右列：HTTPS 安全证书与 ACME 自动签发 -->
+        <div class="column-stack">
+          <div class="panel-card">
+            <div class="panel-card-header">
+              <div class="panel-title-wrap">
+                <span class="panel-icon">🔐</span>
+                <div>
+                  <strong class="panel-title">HTTPS 安全证书与 ACME 管理</strong>
+                  <div class="panel-sub">管理 fullchain.pem / privkey.pem 与 Let's Encrypt 自动签发</div>
+                </div>
+              </div>
+              <button class="btn-sm btn-action" @click="loadCertInfo">🔄 检查状态</button>
+            </div>
 
-        <!-- 子卡片 6：SMTP 发信服务器参数配置 -->
-        <div class="panel-card">
-          <div class="panel-card-header">
-            <div class="panel-title-wrap"><span class="panel-icon">📧</span><strong class="panel-title">SMTP 发信服务器参数配置</strong></div>
-          </div>
-          <div class="smtp-status-box" :class="settingsForm.is_smtp_configured ? 'smtp-ready' : 'smtp-empty'">
-            <span>{{ settingsForm.is_smtp_configured ? '🟢 SMTP 状态：就绪' : '⚪ SMTP 状态：未配置' }}</span>
-          </div>
-          <div class="form-item"><label>SMTP 服务器</label><input v-model="settingsForm.smtp_host" type="text" class="cyber-input modal-input" placeholder="smtp.qq.com" /></div>
-          <div class="form-row-2">
-            <div class="form-item"><label>端口</label><input v-model="settingsForm.smtp_port" type="text" class="cyber-input modal-input" placeholder="465" /></div>
-            <div class="form-item"><label>发件人</label><input v-model="settingsForm.smtp_sender" type="text" class="cyber-input modal-input" placeholder="Xray 节点中心" /></div>
-          </div>
-          <div class="form-item"><label>发信账号</label><input v-model="settingsForm.smtp_user" type="text" class="cyber-input modal-input" placeholder="service@example.com" /></div>
-          <div class="form-item"><label>授权码 / 密码</label><input v-model="settingsForm.smtp_pass" type="password" class="cyber-input modal-input" :placeholder="settingsForm.has_smtp_pass ? '●●●●●● (留空保持原密码)' : '输入授权码'" /></div>
-          <div class="form-item"><label class="radio-label"><input type="checkbox" v-model="settingsForm.smtp_ssl" /> 启用 SSL 加密</label></div>
-          <div class="inner-divider">
-            <div style="display: flex; gap: 8px;">
-              <input v-model="testEmailTo" type="email" class="cyber-input" placeholder="test@example.com" />
-              <button class="btn-cyber-action" :disabled="testingEmail" style="padding: 6px 14px; font-size: 12px; white-space: nowrap;" @click="sendTestEmail">{{ testingEmail ? '...' : '发信测试' }}</button>
+            <!-- 证书状态横幅 -->
+            <div class="smtp-status-box" :class="certInfo.is_self_signed ? 'smtp-empty' : 'smtp-ready'" style="margin-bottom: 14px;">
+              <div v-if="certInfo.is_self_signed">
+                ⚠️ <b>当前正在使用自签名证书 (10年期)</b>
+                <div style="font-size: 11px; margin-top: 2px;">浏览器首次访问会显示不安全提示；可开启下方 ACME 签发免费受信任证书。</div>
+              </div>
+              <div v-else-if="certInfo.status === 'valid'">
+                🟢 <b>当前证书工作正常 (受信任证书)</b>
+                <div style="font-size: 11px; margin-top: 2px;">签发机构: {{ certInfo.issuer }} | 剩余天数: {{ certInfo.days_left }} 天</div>
+              </div>
+              <div v-else>
+                ⚪ 证书状态未知，开机将自动生成自签名证书兜底。
+              </div>
+            </div>
+
+            <div class="form-item">
+              <label class="radio-label" style="font-weight: 600;">
+                <input type="checkbox" v-model="settingsForm.acme_enable" @change="saveAllSettings" />
+                <span :style="{ color: settingsForm.acme_enable ? '#10b981' : '#94a3b8' }">
+                  {{ settingsForm.acme_enable ? '🟢 ACME 自动签发功能：已开启' : '⚪ ACME 自动签发功能：已停用 (默认关闭)' }}
+                </span>
+              </label>
+            </div>
+
+            <div v-if="settingsForm.acme_enable" style="background: rgba(56, 189, 248, 0.05); border: 1px dashed rgba(56, 189, 248, 0.3); border-radius: 8px; padding: 14px; margin-bottom: 14px;">
+              <div class="form-item">
+                <label>解析到本机的域名 (Domain)：</label>
+                <input v-model="settingsForm.acme_domain" type="text" class="cyber-input modal-input" placeholder="例如: panel.example.com" />
+              </div>
+              <div class="form-item">
+                <label>Let's Encrypt 登记邮箱 (Email)：</label>
+                <input v-model="settingsForm.acme_email" type="email" class="cyber-input modal-input" placeholder="admin@example.com" />
+              </div>
+              <button class="btn-cyber-primary" :disabled="issuingAcme" style="width: auto; padding: 8px 18px; font-size: 12px;" @click="handleApplyAcme">
+                {{ issuingAcme ? '正在申请证书，请稍候...' : '⚡ 一键向 Let\'s Encrypt 申请/续签证书' }}
+              </button>
+            </div>
+
+            <div class="inner-divider">
+              <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+                <div class="inner-divider-title" style="margin: 0;">📋 手动粘贴第三方证书 (如宝塔证书)</div>
+                <button class="btn-link-action" @click="showCustomCertModal = true">打开粘贴窗口</button>
+              </div>
+              <div class="input-hint">若已有证书，可直接映射或粘贴保存到 <code>/data/certs/fullchain.pem</code> 与 <code>privkey.pem</code>。</div>
             </div>
           </div>
         </div>
@@ -266,6 +313,9 @@ const props = defineProps({
 
 const emit = defineEmits(['copy', 'reload-all'])
 
+// 核心：子卡片导航状态，默认进入发信与通知中枢
+const settingsSubTab = ref('notify')
+
 const settingsForm = reactive({
   smtp_host: '',
   smtp_port: '465',
@@ -291,7 +341,7 @@ const settingsForm = reactive({
 const notifyForm = reactive({ notify_type: 'email', serverchan_key: '' })
 const pwdForm = reactive({ old_pwd: '', new_pwd: '', confirm_pwd: '' })
 
-// 核心新增：用户通知群发与定向推送表单
+// 消息群发与定向通知表单
 const notifyPushForm = reactive({
   target: 'all', // 'all' 广播 | 'single' 定向
   target_user: '',
@@ -342,7 +392,7 @@ onMounted(async () => {
   } catch (_) {}
 })
 
-// 核心功能：向全站用户广播或向特定用户推送通知
+// 向全站用户广播或向特定用户推送通知
 const sendUserPushNotification = async () => {
   if (!notifyPushForm.title || !notifyPushForm.content) {
     return ElMessage.warning('请输入通知标题与正文内容')
@@ -421,6 +471,8 @@ const testUserNotify = async () => {
     const res = await axios.post('/api/user/test_notify', { username: props.currentUser.username })
     if (res.data.code === 200) {
       ElMessage.success(res.data.msg)
+    } else {
+      ElMessage.error(res.data.msg)
     }
   } catch (_) {
     ElMessage.error('测试发送失败')
@@ -513,6 +565,8 @@ const sendTestEmail = async () => {
     })
     if (res.data.code === 200) {
       ElMessage.success(res.data.msg)
+    } else {
+      ElMessage.error(res.data.msg)
     }
   } catch (_) {
     ElMessage.error('发信异常')
