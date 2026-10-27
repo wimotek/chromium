@@ -43,7 +43,10 @@ def ensure_base_windows_client() -> str:
         raise RuntimeError("无法连接 GitHub 下载基础客户端包，请手动放置 Xray-windows-64.zip 至 ./data/cache")
     return CLIENT_CACHE_FILE
 
-def build_windows_client_config(user_uuid: str, node: dict) -> str:
+def build_windows_client_config(user_uuid: str, node: dict, chosen_sni: str = None) -> str:
+    # 优先采用用户在前端选定的特定 SNI，没有则取节点的默认域名
+    sni = chosen_sni.split(":")[0] if chosen_sni else (node.get("sni", "www.microsoft.com").split(":")[0])
+
     config = {
         "log": { "loglevel": "warning" },
         "inbounds": [
@@ -71,7 +74,7 @@ def build_windows_client_config(user_uuid: str, node: dict) -> str:
                     "network": "tcp", "security": "reality",
                     "realitySettings": {
                         "show": False, "fingerprint": "chrome",
-                        "serverName": node["sni"],
+                        "serverName": sni,
                         "publicKey": node["pbk"],
                         "shortId": node["sid"],
                         "spiderX": ""
@@ -93,11 +96,12 @@ def build_windows_client_config(user_uuid: str, node: dict) -> str:
     }
     return json.dumps(config, indent=2, ensure_ascii=False)
 
-def generate_windows_package(user: dict, node: dict) -> io.BytesIO:
+def generate_windows_package(user: dict, node: dict, chosen_sni: str = None) -> io.BytesIO:
     base_zip_path = ensure_base_windows_client()
     user_uuid = user.get("uuid", "")
     username = user.get("username", "user")
     node_name = node.get("name", "默认节点")
+    actual_sni = chosen_sni or node.get("sni", "")
 
     start_bat = (
         "@echo off\r\n"
@@ -105,6 +109,7 @@ def generate_windows_package(user: dict, node: dict) -> io.BytesIO:
         f"title Xray Windows Client - [{node_name}]\r\n"
         "echo ======================================================\r\n"
         f"echo        正在启动 Xray 客户端 [用户: {username} | 节点: {node_name}]\r\n"
+        f"echo        伪装域名 (SNI): {actual_sni}\r\n"
         "echo ======================================================\r\n"
         "reg add \"HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings\" /v ProxyEnable /t REG_DWORD /d 1 /f >nul\r\n"
         "reg add \"HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings\" /v ProxyServer /d \"127.0.0.1:10809\" /f >nul\r\n"
@@ -131,7 +136,8 @@ def generate_windows_package(user: dict, node: dict) -> io.BytesIO:
     readme_txt = (
         "======================================================\r\n"
         f"      Xray REALITY Windows 专属客户端使用说明\r\n"
-        f"      授权账号: {username} | 当前预设节点: {node_name}\r\n"
+        f"      授权账号: {username} | 预设节点: {node_name}\r\n"
+        f"      伪装SNI: {actual_sni}\r\n"
         "======================================================\r\n\r\n"
         "1. 将本压缩包解压到任意文件夹；\r\n"
         "2. 双击运行 [一键启动代理(自动配置系统代理).bat]；\r\n"
@@ -140,7 +146,7 @@ def generate_windows_package(user: dict, node: dict) -> io.BytesIO:
         "退出方法：直接关闭黑框窗口，或运行 [一键停止代理(关闭系统代理).bat] 即可。\r\n"
     )
 
-    client_config_json = build_windows_client_config(user_uuid, node)
+    client_config_json = build_windows_client_config(user_uuid, node, chosen_sni)
     mem_zip = io.BytesIO()
     with zipfile.ZipFile(base_zip_path, 'r') as src_zf, zipfile.ZipFile(mem_zip, 'w', compression=zipfile.ZIP_DEFLATED) as dst_zf:
         for item in src_zf.infolist():

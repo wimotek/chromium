@@ -29,11 +29,24 @@ from cert_manager import (
 app = Flask(__name__, static_folder='../frontend/dist', static_url_path='/')
 init_db()
 
-def build_node_link(uuid_str: str, node: dict, remark: str) -> str:
+# 核心辅助函数：提取节点配置的所有有效 SNI 域名列表 (去端口、去重复)
+def get_node_snis(node: dict) -> list[str]:
+    raw = node.get("server_names") or node.get("sni") or "www.microsoft.com"
+    snis = []
+    for part in re.split(r'[,;\s]+', str(raw)):
+        clean = part.strip().split(":")[0]
+        if clean and clean not in snis:
+            snis.append(clean)
+    return snis if snis else ["www.microsoft.com"]
+
+# 构造节点链接：默认随机挑选一个 SNI 组装，打散特征对抗审查
+def build_node_link(uuid_str: str, node: dict, remark: str, chosen_sni: str = None) -> str:
+    snis = get_node_snis(node)
+    sni = chosen_sni if (chosen_sni and chosen_sni in snis) else random.choice(snis)
     return (
         f"vless://{uuid_str}@{node['ip']}:{node['port']}"
         f"?security=reality&encryption=none&pbk={node['pbk']}&headerType=none&fp=chrome"
-        f"&type=tcp&flow=xtls-rprx-vision&sni={node['sni']}&sid={node['sid']}#{remark}"
+        f"&type=tcp&flow=xtls-rprx-vision&sni={sni}&sid={node['sid']}#{remark}"
     )
 
 @app.route('/.well-known/acme-challenge/<path:filename>')
@@ -131,7 +144,7 @@ def scheduled_worker_loop():
 
 threading.Thread(target=scheduled_worker_loop, daemon=True).start()
 
-# ==================== 前台订阅与二维码 ====================
+# ==================== 前台聚合订阅 (每个节点默认随机分配 SNI) ====================
 
 @app.route('/')
 def index():
@@ -178,6 +191,7 @@ def get_subscription():
     for n in nodes:
         if len(n.get("pbk", "")) == 43:
             remark = f"{n['name']}"
+            # 订阅下发：默认随机挑选合法 SNI
             links.append(build_node_link(user['uuid'], n, remark))
 
     sub_text = "\n".join(links)
@@ -187,7 +201,7 @@ def get_subscription():
         "Subscription-Userinfo": f"upload=0; download={int(user['used_mb']*1024*1024)}; total={int(user['traffic_limit_mb']*1024*1024)}; expire={user['expire_date']}"
     }
 
-# ==================== 方案 C：第三方发卡系统开放 API ====================
+# ==================== 第三方发卡 API 实时出卡 ====================
 
 @app.route('/api/open/faka_generate', methods=['GET', 'POST'])
 def open_faka_generate():
@@ -237,7 +251,7 @@ def open_faka_generate():
 
     return code, 200, {"Content-Type": "text/plain; charset=utf-8"}
 
-# ==================== 远程节点集群心跳 ====================
+# ==================== 远程节点集群心跳与双向同步 ====================
 
 @app.route('/api/node/heartbeat', methods=['POST'])
 def node_heartbeat():
@@ -248,12 +262,26 @@ def node_heartbeat():
     node_port = int(data.get("port", 443))
     raw_pbk = data.get("pbk", "").strip()
     sid = data.get("sid", "").strip()
-    sni = data.get("sni", "www.microsoft.com").strip()
+    raw_dest = data.get("dest", "www.microsoft.com:443").strip()
+    raw_sni = data.get("sni", "www.microsoft.com").strip()
+    raw_server_names = data.get("server_names", "").strip()
     now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     if not node_id:
         return jsonify({"code": 400, "msg": "缺少 node_id"}), 400
 
+    dest = raw_dest if ":" in raw_dest else f"{raw_dest}:443"
+
+    # 清洗多域名列表
+    snis = []
+    for part in re.split(r'[,;\s]+', raw_server_names or raw_sni):
+        clean = part.strip().split(":")[0]
+        if clean and clean not in snis:
+            snis.append(clean)
+    server_names_str = ",".join(snis)
+    primary_sni = snis[0] if snis else "www.microsoft.com"
+
+    # 43 位公钥智能抢救
     pbk = raw_pbk
     if len(pbk) != 43:
         matches = re.findall(r'[A-Za-z0-9_\-]{43}', pbk)
@@ -263,34 +291,45 @@ def node_heartbeat():
             pbk = matches[0]
 
     if len(pbk) != 43:
-        return jsonify({"code": 400, "msg": f"公钥格式无法解析 (原长度: {len(raw_pbk)})"}), 400
+        return jsonify({"code": 400, "msg": f"公钥格式错误 (原长度: {len(raw_pbk)})"}), 400
 
     conn = get_db()
     c = conn.cursor()
     c.execute("SELECT * FROM nodes WHERE node_id=?", (node_id,))
     node = c.fetchone()
 
+    # 首次接入：绑定注册
     if not node:
         auto_name = f"节点-{node_ip}"
-        c.execute("INSERT INTO nodes (node_id, node_key, pending_key, name, ip, port, dest, sni, pbk, sid, status, last_heartbeat) VALUES (?, ?, '', ?, ?, ?, 'www.microsoft.com:443', ?, ?, ?, 1, ?)",
-                  (node_id, node_key, auto_name, node_ip, node_port, sni, pbk, sid, now_str))
+        c.execute("""
+            INSERT INTO nodes 
+            (node_id, node_key, pending_key, name, ip, port, dest, sni, server_names, pbk, sid, status, last_heartbeat) 
+            VALUES (?, ?, '', ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
+        """, (node_id, node_key, auto_name, node_ip, node_port, dest, primary_sni, server_names_str, pbk, sid, now_str))
         conn.commit()
         conn.close()
-        return jsonify({"code": 200, "msg": "节点首次接入成功，公钥与ShortId已自动登记！"})
+        return jsonify({"code": 200, "msg": "节点首次接入成功！"})
 
     current_key = node["node_key"]
     pending_key = node["pending_key"]
 
     if pending_key and node_key == current_key:
-        c.execute("UPDATE nodes SET node_key=?, pending_key='', ip=?, port=?, sni=?, pbk=?, sid=?, status=1, last_heartbeat=? WHERE node_id=?",
-                  (pending_key, node_ip, node_port, sni, pbk, sid, now_str, node_id))
+        c.execute("""
+            UPDATE nodes 
+            SET node_key=?, pending_key='', ip=?, port=?, dest=?, sni=?, server_names=?, pbk=?, sid=?, status=1, last_heartbeat=? 
+            WHERE node_id=?
+        """, (pending_key, node_ip, node_port, dest, primary_sni, server_names_str, pbk, sid, now_str, node_id))
         conn.commit()
         conn.close()
         return jsonify({"code": 200, "msg": "心跳成功，已为您同步下发新密钥", "new_node_key": pending_key})
 
     if node_key == current_key:
-        c.execute("UPDATE nodes SET ip=?, port=?, sni=?, pbk=?, sid=?, status=1, last_heartbeat=? WHERE node_id=?",
-                  (node_ip, node_port, sni, pbk, sid, now_str, node_id))
+        # 心跳正常：更新公钥、ShortId 与最新上报的 server_names
+        c.execute("""
+            UPDATE nodes 
+            SET ip=?, port=?, dest=?, sni=?, server_names=?, pbk=?, sid=?, status=1, last_heartbeat=? 
+            WHERE node_id=?
+        """, (node_ip, node_port, dest, primary_sni, server_names_str, pbk, sid, now_str, node_id))
         conn.commit()
         conn.close()
         return jsonify({"code": 200, "msg": "心跳正常"})
@@ -298,6 +337,7 @@ def node_heartbeat():
     conn.close()
     return jsonify({"code": 403, "msg": "Node Key 验证失败"}), 403
 
+# 双向同步接口：将主控配置的 server_names 数组下发给节点热更
 @app.route('/api/node/sync', methods=['GET'])
 def node_sync_users():
     node_id = request.args.get('node_id', '').strip()
@@ -311,14 +351,18 @@ def node_sync_users():
         conn.close()
         return jsonify({"code": 403, "msg": "鉴权失败"}), 403
 
-    c.execute("SELECT username, uuid FROM users WHERE status=1 AND is_verified=1")
-    users = [{"id": u["uuid"], "flow": "xtls-rprx-vision", "email": u["username"]} for u in c.fetchall()]
+    c.execute("SELECT username, email, uuid FROM users WHERE status=1 AND is_verified=1")
+    users = [{"id": u["uuid"], "flow": "xtls-rprx-vision", "email": u["email"]} for u in c.fetchall()]
     conn.close()
+
+    snis = get_node_snis(dict(node))
+    clean_dest = node["dest"] if (node["dest"] and ":" in node["dest"]) else f"{node['dest']}:443"
 
     node_config = {
         "port": node["port"],
-        "dest": node["dest"] or "www.microsoft.com:443",
-        "sni": node["sni"],
+        "dest": clean_dest,
+        "sni": snis[0],
+        "server_names": snis,  # 下发合规的域名数组
         "sid": node["sid"]
     }
 
@@ -343,17 +387,17 @@ def node_report_traffic():
         return jsonify({"code": 403, "msg": "鉴权失败"}), 403
 
     for item in data.get("traffic", []):
-        uname = item.get("username")
+        account = item.get("email") or item.get("username")
         inc_bytes = int(item.get("bytes", 0))
-        if uname and inc_bytes > 0:
+        if account and inc_bytes > 0:
             inc_mb = round(inc_bytes / (1024 * 1024), 2)
-            c.execute("UPDATE users SET used_mb = used_mb + ? WHERE username=?", (inc_mb, uname))
+            c.execute("UPDATE users SET used_mb = used_mb + ? WHERE (email=? OR username=?)", (inc_mb, account, account))
 
     conn.commit()
     conn.close()
     return jsonify({"code": 200, "msg": "流量同步成功"})
 
-# ==================== 用户端与重置 UUID 接口 ====================
+# ==================== 用户端与节点交互 ====================
 
 @app.route('/api/user/refresh_info', methods=['POST'])
 def user_refresh_info():
@@ -377,12 +421,18 @@ def user_refresh_info():
 
     for n in node_rows:
         if len(n.get("pbk", "")) == 43:
-            link = build_node_link(user['uuid'], n, f"{n['name']}")
+            snis = get_node_snis(n)
+            random_sni = random.choice(snis)
+            link = build_node_link(user['uuid'], n, f"{n['name']}", chosen_sni=random_sni)
             nodes_data.append({
                 "id": n["id"],
                 "name": n["name"],
                 "ip": n["ip"],
                 "port": n["port"],
+                "pbk": n["pbk"],
+                "sid": n["sid"],
+                "server_names": snis,
+                "selected_sni": random_sni,
                 "link": link
             })
 
@@ -393,50 +443,6 @@ def user_refresh_info():
             "used_mb": user['used_mb'],
             "limit_mb": user['traffic_limit_mb'],
             "expire_date": user['expire_date'],
-            "sub_url": sub_url,
-            "nodes": nodes_data
-        }
-    })
-
-# 用户自主重置节点凭证 (UUID)
-@app.route('/api/user/reset_uuid', methods=['POST'])
-def user_reset_uuid():
-    data = request.json or {}
-    username = data.get('username')
-    if not username:
-        return jsonify({"code": 400, "msg": "参数缺失"}), 400
-
-    new_uuid = str(uuid.uuid4())
-    conn = get_db()
-    c = conn.cursor()
-    c.execute("UPDATE users SET uuid=? WHERE username=?", (new_uuid, username))
-    conn.commit()
-    c.execute("SELECT * FROM users WHERE username=?", (username,))
-    user = c.fetchone()
-
-    c.execute("SELECT * FROM nodes WHERE status=1 ORDER BY id ASC")
-    node_rows = [dict(n) for n in c.fetchall()]
-    conn.close()
-
-    host_prefix = request.host_url.rstrip('/')
-    sub_url = f"{host_prefix}/api/sub?token={new_uuid}"
-    nodes_data = []
-    for n in node_rows:
-        if len(n.get("pbk", "")) == 43:
-            link = build_node_link(new_uuid, n, f"{n['name']}")
-            nodes_data.append({
-                "id": n["id"],
-                "name": n["name"],
-                "ip": n["ip"],
-                "port": n["port"],
-                "link": link
-            })
-
-    return jsonify({
-        "code": 200,
-        "msg": "节点凭证 (UUID) 已重置！旧链接已立即失效，请重新导入订阅。",
-        "data": {
-            "uuid": new_uuid,
             "sub_url": sub_url,
             "nodes": nodes_data
         }
@@ -485,12 +491,18 @@ def login():
 
     for n in node_rows:
         if len(n.get("pbk", "")) == 43:
-            link = build_node_link(user['uuid'], n, f"{n['name']}")
+            snis = get_node_snis(n)
+            random_sni = random.choice(snis)
+            link = build_node_link(user['uuid'], n, f"{n['name']}", chosen_sni=random_sni)
             nodes_data.append({
                 "id": n["id"],
                 "name": n["name"],
                 "ip": n["ip"],
                 "port": n["port"],
+                "pbk": n["pbk"],
+                "sid": n["sid"],
+                "server_names": snis,
+                "selected_sni": random_sni,
                 "link": link
             })
 
@@ -513,6 +525,56 @@ def login():
         }
     })
 
+# 用户自主重置节点凭据 (UUID)
+@app.route('/api/user/reset_uuid', methods=['POST'])
+def user_reset_uuid():
+    data = request.json or {}
+    username = data.get('username')
+    if not username:
+        return jsonify({"code": 400, "msg": "参数缺失"}), 400
+
+    new_uuid = str(uuid.uuid4())
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("UPDATE users SET uuid=? WHERE username=?", (new_uuid, username))
+    conn.commit()
+    c.execute("SELECT * FROM users WHERE username=?", (username,))
+    user = c.fetchone()
+
+    c.execute("SELECT * FROM nodes WHERE status=1 ORDER BY id ASC")
+    node_rows = [dict(n) for n in c.fetchall()]
+    conn.close()
+
+    host_prefix = request.host_url.rstrip('/')
+    sub_url = f"{host_prefix}/api/sub?token={new_uuid}"
+    nodes_data = []
+    for n in node_rows:
+        if len(n.get("pbk", "")) == 43:
+            snis = get_node_snis(n)
+            random_sni = random.choice(snis)
+            link = build_node_link(new_uuid, n, f"{n['name']}", chosen_sni=random_sni)
+            nodes_data.append({
+                "id": n["id"],
+                "name": n["name"],
+                "ip": n["ip"],
+                "port": n["port"],
+                "pbk": n["pbk"],
+                "sid": n["sid"],
+                "server_names": snis,
+                "selected_sni": random_sni,
+                "link": link
+            })
+
+    return jsonify({
+        "code": 200,
+        "msg": "节点凭据 (UUID) 已重置！旧链接已立即失效，请重新导入订阅。",
+        "data": {
+            "uuid": new_uuid,
+            "sub_url": sub_url,
+            "nodes": nodes_data
+        }
+    })
+
 @app.route('/api/auth/send_register_code', methods=['POST'])
 def send_register_code():
     data = request.json or {}
@@ -521,11 +583,8 @@ def send_register_code():
     captcha_ans = data.get('captcha_ans', '').strip()
 
     ok, c_msg = verify_captcha(captcha_id, captcha_ans)
-    if not ok:
-        return jsonify({"code": 400, "msg": c_msg})
-
-    if not email or '@' not in email:
-        return jsonify({"code": 400, "msg": "请输入合法的电子邮箱"})
+    if not ok: return jsonify({"code": 400, "msg": c_msg})
+    if not email or '@' not in email: return jsonify({"code": 400, "msg": "请输入合法的电子邮箱"})
 
     conn = get_db()
     c = conn.cursor()
@@ -600,8 +659,7 @@ def send_reset_code():
     captcha_ans = data.get('captcha_ans', '').strip()
 
     ok, c_msg = verify_captcha(captcha_id, captcha_ans)
-    if not ok:
-        return jsonify({"code": 400, "msg": c_msg})
+    if not ok: return jsonify({"code": 400, "msg": c_msg})
 
     conn = get_db()
     c = conn.cursor()
@@ -698,10 +756,12 @@ def user_test_notify():
     if ok: return jsonify({"code": 200, "msg": "测试消息发送成功"})
     return jsonify({"code": 500, "msg": msg})
 
+# 支持按用户选定的 SNI 定制下载客户端
 @app.route('/api/user/download_client', methods=['GET'])
 def download_windows_client():
     account = request.args.get('username', '').strip()
     node_id = request.args.get('node_id', '')
+    chosen_sni = request.args.get('sni', '').strip() or None
     if not account: abort(400)
 
     conn = get_db()
@@ -723,13 +783,13 @@ def download_windows_client():
         return jsonify({"code": 404, "msg": "暂无可用节点"}), 404
 
     try:
-        mem_file = generate_windows_package(dict(user), dict(node))
+        mem_file = generate_windows_package(dict(user), dict(node), chosen_sni=chosen_sni)
         filename = f"Xray_Windows_{user['username']}_{node['name']}.zip"
         return send_file(mem_file, as_attachment=True, download_name=filename, mimetype='application/zip')
     except Exception as e:
         return jsonify({"code": 500, "msg": f"客户端构建失败: {str(e)}"}), 500
 
-# 多卡密批量原子核销（精准记录每张卡的使用时间 used_at）
+# 多卡密批量原子核销
 @app.route('/api/recharge', methods=['POST'])
 def recharge():
     data = request.json or {}
@@ -820,8 +880,7 @@ def recharge():
     now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     valid_codes_list = [vc['code'] for vc in valid_cards]
     v_placeholders = ','.join(['?'] * len(valid_codes_list))
-
-    # 写入使用时间 used_at，保留生成时间 created_at 不变
+    
     c.execute(f"UPDATE cards SET is_used=1, used_by=?, used_at=? WHERE code IN ({v_placeholders})",
               [u, now_str] + valid_codes_list)
 
@@ -874,23 +933,35 @@ def admin_save_node_config():
     name = data.get('name', '').strip()
     ip = data.get('ip', '').strip()
     port = int(data.get('port', 443))
-    dest = data.get('dest', 'www.microsoft.com:443').strip()
-    sni = data.get('sni', 'www.microsoft.com').strip()
+    raw_dest = data.get('dest', 'www.microsoft.com:443').strip()
+    raw_server_names = data.get('server_names', '').strip()
+    raw_sni = data.get('sni', 'www.microsoft.com').strip()
     sid = data.get('sid', '').strip()
     node_key = data.get('node_key', '').strip()
     status = int(data.get('status', 1))
+
+    dest = raw_dest if ":" in raw_dest else f"{raw_dest}:443"
+
+    # 清洗多域名列表
+    snis = []
+    for part in re.split(r'[,;\s]+', raw_server_names or raw_sni):
+        clean = part.strip().split(":")[0]
+        if clean and clean not in snis:
+            snis.append(clean)
+    server_names_str = ",".join(snis)
+    primary_sni = snis[0] if snis else "www.microsoft.com"
 
     conn = get_db()
     c = conn.cursor()
     c.execute("""
         UPDATE nodes 
-        SET name=?, ip=?, port=?, dest=?, sni=?, sid=?, node_key=?, status=?
+        SET name=?, ip=?, port=?, dest=?, sni=?, server_names=?, sid=?, node_key=?, status=?
         WHERE node_id=?
-    """, (name, ip, port, dest, sni, sid, node_key, status, node_id))
+    """, (name, ip, port, dest, primary_sni, server_names_str, sid, node_key, status, node_id))
     conn.commit()
     conn.close()
 
-    return jsonify({"code": 200, "msg": "节点配置已更新！用户订阅已即时生效，远程节点将在下次回传时自动热重载。"})
+    return jsonify({"code": 200, "msg": "节点配置已更新！多域名列表已同步，远程节点下次回传时自动热重载。"})
 
 @app.route('/api/admin/nodes/force_resync', methods=['POST'])
 def admin_nodes_force_resync():
@@ -920,7 +991,25 @@ def admin_revoke_delete_node():
 
     return jsonify({"code": 200, "msg": "节点已被彻底从集群中吊销并移除！"})
 
-# ==================== 管理员卡密生成、导出与删除 ====================
+@app.route('/api/admin/nodes/reset_key', methods=['POST'])
+def admin_reset_node_key():
+    data = request.json or {}
+    if not check_admin(data.get('admin_user'), data.get('admin_pwd')): return jsonify({"code": 403, "msg": "无权限"})
+
+    node_id = data.get('node_id')
+    new_key = secrets.token_hex(16)
+
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("UPDATE nodes SET pending_key=? WHERE node_id=?", (new_key, node_id))
+    conn.commit()
+    conn.close()
+
+    return jsonify({
+        "code": 200,
+        "msg": "重置密钥指令已就绪！节点将在 60 秒内心跳自动同步新密钥并持久化保存。",
+        "new_key": new_key
+    })
 
 @app.route('/api/admin/cards/generate', methods=['POST'])
 def admin_generate():
@@ -969,13 +1058,12 @@ def export_unused_cards():
     conn.close()
     return jsonify({"code": 200, "count": len(cards), "text": "\n".join(cards)})
 
-# 多维度卡密清理与删除接口
 @app.route('/api/admin/cards/delete', methods=['POST'])
 def admin_delete_cards():
     data = request.json or {}
     if not check_admin(data.get('admin_user'), data.get('admin_pwd')): return jsonify({"code": 403, "msg": "无权限"})
 
-    mode = data.get('mode', '').strip()  # 'selected' | 'date' | 'invalid'
+    mode = data.get('mode', '').strip()
     conn = get_db()
     c = conn.cursor()
     deleted_count = 0
@@ -994,7 +1082,7 @@ def admin_delete_cards():
         end_date = data.get('end_date', '').strip()
         if not start_date and not end_date:
             conn.close()
-            return jsonify({"code": 400, "msg": "请选择需要清理的日期范围"})
+            return jsonify({"code": 400, "msg": "请选择需要删除的日期范围"})
         query_parts, params = [], []
         if start_date:
             query_parts.append("substr(created_at, 1, 10) >= ?")
@@ -1002,13 +1090,11 @@ def admin_delete_cards():
         if end_date:
             query_parts.append("substr(created_at, 1, 10) <= ?")
             params.append(end_date)
-        # 默认只删除该日期范围内未使用的卡密，保护历史充值流水
         query_parts.append("is_used=0")
         c.execute(f"DELETE FROM cards WHERE {' AND '.join(query_parts)}", params)
         deleted_count = c.rowcount
 
     elif mode == 'invalid':
-        # 彻底清理所有已被充值核销的卡密记录
         c.execute("DELETE FROM cards WHERE is_used=1")
         deleted_count = c.rowcount
 
@@ -1020,8 +1106,6 @@ def admin_delete_cards():
     conn.close()
     return jsonify({"code": 200, "msg": f"卡密清理完成！共成功删除 {deleted_count} 张卡密。"})
 
-# ==================== 管理员用户管理与重置 UUID ====================
-
 @app.route('/api/admin/data', methods=['POST'])
 def admin_data():
     data = request.json or {}
@@ -1029,7 +1113,6 @@ def admin_data():
 
     conn = get_db()
     c = conn.cursor()
-    # 包含 used_at 字段
     c.execute("SELECT code, traffic_gb, days, is_used, used_by, created_at, used_at, is_monthly FROM cards ORDER BY rowid DESC LIMIT 200")
     cards = [dict(r) for r in c.fetchall()]
 
@@ -1048,15 +1131,15 @@ def admin_data():
         d['node_links'] = []
         for n in active_nodes:
             if len(n.get("pbk", "")) == 43:
+                snis = get_node_snis(n)
                 d['node_links'].append({
                     "name": n['name'],
-                    "link": build_node_link(d['uuid'], n, f"{n['name']}")
+                    "link": build_node_link(d['uuid'], n, f"{n['name']}", chosen_sni=snis[0])
                 })
         users.append(d)
 
     return jsonify({"code": 200, "cards": cards, "users": users})
 
-# 管理员重置指定用户的凭据 (UUID)
 @app.route('/api/admin/users/reset_uuid', methods=['POST'])
 def admin_reset_user_uuid():
     data = request.json or {}

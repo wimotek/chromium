@@ -20,9 +20,9 @@
         "security": "reality",
         "realitySettings": {
           "show": false,
-          "dest": "www.microsoft.com:443",
+          "dest": "itunes.apple.com:443",
           "xver": 0,
-          "serverNames": ["www.microsoft.com"],
+          "serverNames": ["itunes.apple.com","swdist.apple.com","apps.apple.com","music.apple.com"],
           "privateKey": "CHANGE_PRIVATE_KEY",
           "shortIds": ["CHANGE_SHORT_ID"]
         }

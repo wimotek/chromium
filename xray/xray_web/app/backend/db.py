@@ -38,7 +38,7 @@ def init_db():
         reset_day INTEGER DEFAULT 1
     )''')
 
-    # 2. 节点集群表
+    # 2. 节点集群表 (新增 server_names 字段保存多域名列表)
     c.execute('''CREATE TABLE IF NOT EXISTS nodes (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         node_id TEXT UNIQUE NOT NULL,
@@ -49,13 +49,14 @@ def init_db():
         port INTEGER NOT NULL,
         dest TEXT DEFAULT 'www.microsoft.com:443',
         sni TEXT NOT NULL,
+        server_names TEXT DEFAULT '',
         pbk TEXT NOT NULL,
         sid TEXT NOT NULL,
         status INTEGER DEFAULT 1,
         last_heartbeat TEXT NOT NULL
     )''')
 
-    # 3. 卡密表 (新增 used_at 使用时间字段)
+    # 3. 卡密表
     c.execute('''CREATE TABLE IF NOT EXISTS cards (
         code TEXT PRIMARY KEY,
         traffic_gb INTEGER NOT NULL,
@@ -67,7 +68,7 @@ def init_db():
         is_monthly INTEGER DEFAULT 0
     )''')
 
-    # 4. 验证码、防机器人临时表、系统设置与通知日志表
+    # 4. 验证码、防刷临时表、系统设置与通知日志表
     c.execute('''CREATE TABLE IF NOT EXISTS verify_codes (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         email TEXT NOT NULL,
@@ -103,10 +104,10 @@ def init_db():
     try_add_column("ALTER TABLE nodes ADD COLUMN node_key TEXT DEFAULT ''")
     try_add_column("ALTER TABLE nodes ADD COLUMN pending_key TEXT DEFAULT ''")
     try_add_column("ALTER TABLE nodes ADD COLUMN dest TEXT DEFAULT 'www.microsoft.com:443'")
+    try_add_column("ALTER TABLE nodes ADD COLUMN server_names TEXT DEFAULT ''")
     try_add_column("ALTER TABLE users ADD COLUMN used_mb REAL DEFAULT 0")
     try_add_column("ALTER TABLE cards ADD COLUMN used_at TEXT DEFAULT ''")
 
-    # 默认管理员初始化
     c.execute("SELECT id FROM users WHERE role='admin'")
     if not c.fetchone():
         admin_user = os.getenv("ADMIN_USERNAME") or "admin"

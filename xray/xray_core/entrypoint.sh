@@ -41,20 +41,33 @@ update_xray() {
 PORT="${PORT:-443}"
 DEST="${DEST:-www.microsoft.com:443}"
 SERVER_NAMES="${SERVER_NAMES:-www.microsoft.com,microsoft.com}"
-FIRST_SERVER_NAME=$(echo "$SERVER_NAMES" | cut -d',' -f1)
+
+# 提取主域名与纯净数组 (绝不含端口)
+FIRST_SERVER_NAME=$(echo "$SERVER_NAMES" | cut -d',' -f1 | cut -d':' -f1 | tr -d ' ')
 
 [ -z "$SERVER_IP" ] && SERVER_IP=$(curl -s4 --max-time 3 https://api.ipify.org || echo "127.0.0.1")
-SERVER_NAMES_JSON=$(echo "$SERVER_NAMES" | awk -F',' '{printf "["; for(i=1; i<=NF; i++) {printf "\"%s\"", $i; if(i<NF) printf ","} printf "]"}')
 
-# ================= 3. 核心修复：私钥与 43 位标准公钥精准反推与自愈 =================
+SERVER_NAMES_JSON=$(echo "$SERVER_NAMES" | awk -F',' '{
+    printf "["
+    for(i=1; i<=NF; i++) {
+        split($i, arr, ":")
+        gsub(/^[ \t]+|[ \t]+$/, "", arr[1])
+        if (arr[1] != "") {
+            printf "\"%s\"", arr[1]
+            if(i<NF) printf ","
+        }
+    }
+    printf "]"
+}')
+
+# 3. 密钥持久化与 43 位公钥自愈提取
 if [ -f "$PRIVATE_KEY_FILE" ] && [ -s "$PRIVATE_KEY_FILE" ]; then
     PRIVATE_KEY=$(cat "$PRIVATE_KEY_FILE" | tr -d ' \r\n')
 fi
 
-# 私钥长度必须严格为 43 位
-if [ -z "$PRIVATE_KEY" ] || [ $(echo -n "$PRIVATE_KEY" | wc -c) -ne 43 ]; then
+if [ -z "$PRIVATE_KEY" ] || [ $(printf "%s" "$PRIVATE_KEY" | wc -c) -ne 43 ]; then
     KEY_PAIR=$(/usr/bin/xray x25519)
-    PRIVATE_KEY=$(echo "$KEY_PAIR" | grep -iE 'private ?key' | head -n 1 | awk '{print $NF}' | tr -d ' \r\n')
+    PRIVATE_KEY=$(echo "$KEY_PAIR" | grep -iE 'private ?key' | head -n 1 | awk '{print $NF}' | tr -d ' \r\n' | cut -c 1-43)
     echo "$PRIVATE_KEY" > "$PRIVATE_KEY_FILE"
 fi
 
@@ -62,17 +75,13 @@ if [ -f "$PUBLIC_KEY_FILE" ] && [ -s "$PUBLIC_KEY_FILE" ]; then
     PUBLIC_KEY=$(cat "$PUBLIC_KEY_FILE" | tr -d ' \r\n')
 fi
 
-# 核心自愈：若公钥为空或被污染为 134 位，强制重新反推标准的 43 位公钥
-if [ -z "$PUBLIC_KEY" ] || [ $(echo -n "$PUBLIC_KEY" | wc -c) -ne 43 ]; then
-    echo "==> [Key Heal] 检测到公钥异常 (当前长度: $(echo -n "$PUBLIC_KEY" | wc -c))，正在重新反推修复..."
+if [ -z "$PUBLIC_KEY" ] || [ $(printf "%s" "$PUBLIC_KEY" | wc -c) -ne 43 ]; then
     PUB_OUT=$(/usr/bin/xray x25519 -i "$PRIVATE_KEY" 2>/dev/null || true)
-    # 精准只取包含 Password 或 Public key 的第一行，杜绝把 Hash32 粘合进去
-    PUBLIC_KEY=$(echo "$PUB_OUT" | grep -iE 'public ?key|password' | head -n 1 | awk '{print $NF}' | tr -d ' \r\n')
+    PUBLIC_KEY=$(echo "$PUB_OUT" | grep -iE 'public ?key|password' | head -n 1 | awk '{print $NF}' | tr -d ' \r\n' | cut -c 1-43)
     echo "$PUBLIC_KEY" > "$PUBLIC_KEY_FILE"
-    echo "==> [Key Heal] 已成功纠正为真实 43 位公钥: $PUBLIC_KEY"
 fi
 
-# 4. ShortId 持久化
+# 4. ShortId 固化与 UUID
 if [ -f "$SHORT_ID_FILE" ] && [ -s "$SHORT_ID_FILE" ]; then
     SHORT_ID=$(cat "$SHORT_ID_FILE" | tr -d ' \r\n')
 else
@@ -82,7 +91,7 @@ fi
 
 UUID="${UUID:-$(/usr/bin/xray uuid)}"
 
-# 初始本地 config.json 生成
+# 5. 初始本地 config.json 生成 (写入完整的 serverNames 列表)
 if [ ! -s "$CONFIG_FILE" ]; then
     [ ! -f "$TEMPLATE_FILE" ] && exit 1
     TMP_CONFIG="/tmp/config.init.tmp.json"
@@ -96,6 +105,7 @@ if [ ! -s "$CONFIG_FILE" ]; then
         '
         .inbounds[0].port = ($port | tonumber) |
         .inbounds[0].settings.clients[0].id = $uuid |
+        .inbounds[0].settings.clients[0].email = "admin@local.host" |
         .inbounds[0].streamSettings.realitySettings.dest = $dest |
         .inbounds[0].streamSettings.realitySettings.serverNames = $servernames |
         .inbounds[0].streamSettings.realitySettings.privateKey = $privkey |
@@ -104,11 +114,8 @@ if [ ! -s "$CONFIG_FILE" ]; then
     [ -s "$TMP_CONFIG" ] && mv "$TMP_CONFIG" "$CONFIG_FILE"
 fi
 
-# ================= 5. 分流：集群节点模式 vs 独立单机模式 =================
-
+# 6. 集群节点模式 vs 单机模式
 if [ -n "$PANEL_URL" ]; then
-    # ---------------- 场景 A：集群节点模式 (受控端) ----------------
-    # 彻底清理可能残留的历史单机说明文件，杜绝混乱
     [ -f "$CLIENT_INFO_FILE" ] && rm -f "$CLIENT_INFO_FILE"
 
     if [ -f "$NODE_ID_FILE" ] && [ -s "$NODE_ID_FILE" ]; then
@@ -125,25 +132,22 @@ if [ -n "$PANEL_URL" ]; then
     else
         NODE_KEY=$(openssl rand -hex 16)
         echo "$NODE_KEY" > "$NODE_KEY_FILE"
-        echo "==> [Node Key] 自动生成通信凭证: $NODE_KEY"
     fi
 
     remote_agent_loop() {
         echo "==> [Cluster Node] 守护进程启动 (主控: $PANEL_URL | 节点ID: $NODE_ID)..."
 
         while true; do
-            # 1. 向主控上报真实有效的 43 位公钥与真实 ShortId
+            if [ -f "$PUBLIC_KEY_FILE" ]; then
+                PUBLIC_KEY=$(cat "$PUBLIC_KEY_FILE" | tr -d ' \r\n' | cut -c 1-43)
+            fi
+
+            # 节点上报：携带完整的 SERVER_NAMES 列表供主控同步
             HB_RESP=$(curl -k -s -X POST "${PANEL_URL}/api/node/heartbeat" \
                  -H "Content-Type: application/json" \
                  --connect-timeout 8 \
                  --max-time 15 \
-                 -d "{\"node_id\": \"$NODE_ID\", \"node_key\": \"$NODE_KEY\", \"ip\": \"$SERVER_IP\", \"port\": $PORT, \"sni\": \"$DEST\", \"pbk\": \"$PUBLIC_KEY\", \"sid\": \"$SHORT_ID\"}" 2>&1 || true)
-
-            if echo "$HB_RESP" | grep -q '"code":200'; then
-                echo "==> [Heartbeat] 心跳正常，公钥及 ShortId 同步完成！"
-            else
-                echo "==> [Heartbeat 警告] 主控响应: $HB_RESP"
-            fi
+                 -d "{\"node_id\": \"$NODE_ID\", \"node_key\": \"$NODE_KEY\", \"ip\": \"$SERVER_IP\", \"port\": $PORT, \"dest\": \"$DEST\", \"sni\": \"$FIRST_SERVER_NAME\", \"server_names\": \"$SERVER_NAMES\", \"pbk\": \"$PUBLIC_KEY\", \"sid\": \"$SHORT_ID\"}" 2>&1 || true)
 
             NEW_KEY=$(echo "$HB_RESP" | jq -r '.new_node_key // empty' 2>/dev/null || true)
             if [ -n "$NEW_KEY" ]; then
@@ -151,16 +155,16 @@ if [ -n "$PANEL_URL" ]; then
                 echo "$NODE_KEY" > "$NODE_KEY_FILE"
             fi
 
-            # 2. 从主控拉取全站用户名单与节点配置 (双向同步 ShortId、端口与伪装目标)
+            # 从主控拉取用户名单与网络参数 (支持接收 server_names 数组进行热更)
             USER_RESP=$(curl -k -s --connect-timeout 8 --max-time 15 "${PANEL_URL}/api/node/sync?node_id=${NODE_ID}&token=${NODE_KEY}" 2>&1 || true)
             if echo "$USER_RESP" | grep -q '"code":200'; then
                 REMOTE_USERS=$(echo "$USER_RESP" | jq '.users')
                 REMOTE_PORT=$(echo "$USER_RESP" | jq -r '.node_config.port // empty')
                 REMOTE_DEST=$(echo "$USER_RESP" | jq -r '.node_config.dest // empty')
-                REMOTE_SNI=$(echo "$USER_RESP" | jq -r '.node_config.sni // empty')
                 REMOTE_SID=$(echo "$USER_RESP" | jq -r '.node_config.sid // empty')
+                # 接收主控下发的 JSON 域名列表数组
+                REMOTE_SNI_ARRAY=$(echo "$USER_RESP" | jq '.node_config.server_names // empty')
 
-                # 若主控调整了 ShortId，动态对齐固化到本地文件
                 if [ -n "$REMOTE_SID" ] && [ "$REMOTE_SID" != "$SHORT_ID" ]; then
                     SHORT_ID="$REMOTE_SID"
                     echo "$SHORT_ID" > "$SHORT_ID_FILE"
@@ -170,13 +174,13 @@ if [ -n "$PANEL_URL" ]; then
                 jq --argjson new_clients "$REMOTE_USERS" \
                    --arg port "$REMOTE_PORT" \
                    --arg dest "$REMOTE_DEST" \
-                   --arg sni "$REMOTE_SNI" \
+                   --argjson snis "$REMOTE_SNI_ARRAY" \
                    --arg sid "$SHORT_ID" \
                    '
                    .inbounds[0].settings.clients = $new_clients |
                    (if $port != "" then .inbounds[0].port = ($port | tonumber) else . end) |
                    (if $dest != "" then .inbounds[0].streamSettings.realitySettings.dest = $dest else . end) |
-                   (if $sni != "" then .inbounds[0].streamSettings.realitySettings.serverNames = [$sni] else . end) |
+                   (if ($snis | length) > 0 then .inbounds[0].streamSettings.realitySettings.serverNames = $snis else . end) |
                    (if $sid != "" then .inbounds[0].streamSettings.realitySettings.shortIds = [$sid] else . end)
                    ' \
                    "$CONFIG_FILE" > "$TMP_SYNC"
@@ -186,17 +190,17 @@ if [ -n "$PANEL_URL" ]; then
                         mv "$TMP_SYNC" "$CONFIG_FILE"
                         killall -HUP xray 2>/dev/null || pkill -HUP xray 2>/dev/null || true
                         CLIENT_COUNT=$(echo "$REMOTE_USERS" | jq 'length')
-                        echo "==> [Cluster Node] 成功从主控热同步 $CLIENT_COUNT 位用户！已重载生效。"
+                        echo "==> [Cluster Node] 成功热更 Xray 核心 (用户数: $CLIENT_COUNT, 伪装域名数: $(echo "$REMOTE_SNI_ARRAY" | jq 'length'))"
                     else
                         rm -f "$TMP_SYNC"
                     fi
                 fi
             fi
 
-            # 3. 统计增量流量回传主控
+            # 统计增量流量回传主控扣费
             TRAFFIC_RAW=$(/usr/bin/xray api statsquery --server=127.0.0.1:10085 -pattern "user>>>" -reset=true 2>/dev/null || true)
             if [ -n "$TRAFFIC_RAW" ] && echo "$TRAFFIC_RAW" | grep -q "stat"; then
-                TRAFFIC_PAYLOAD=$(echo "$TRAFFIC_RAW" | jq '[.stat[]? | {username: (.name | split(">>>")[1]), bytes: (.value | tonumber)}]')
+                TRAFFIC_PAYLOAD=$(echo "$TRAFFIC_RAW" | jq '[.stat[]? | {email: (.name | split(">>>")[1]), bytes: (.value | tonumber)}]')
                 curl -k -s -X POST "${PANEL_URL}/api/node/traffic" \
                      -H "Content-Type: application/json" \
                      --connect-timeout 8 \
@@ -211,7 +215,6 @@ if [ -n "$PANEL_URL" ]; then
     remote_agent_loop &
 
 else
-    # ---------------- 场景 B：独立单机模式 (恢复原生逻辑) ----------------
     VLESS_URL="vless://${UUID}@${SERVER_IP}:${PORT}?security=reality&encryption=none&pbk=${PUBLIC_KEY}&headerType=none&fp=chrome&type=tcp&flow=xtls-rprx-vision&sni=${FIRST_SERVER_NAME}&sid=${SHORT_ID}#Xray-Reality"
 
     cat <<EOF > "$CLIENT_INFO_FILE"

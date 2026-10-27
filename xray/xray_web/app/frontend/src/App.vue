@@ -17,7 +17,6 @@
     <main class="main-body">
       <!-- 1. 登录 / 注册 / 找回密码 模块 -->
       <div v-if="!currentUser.username" class="auth-center">
-        <!-- 登录页系统公告展示栏 -->
         <div v-if="systemNotice" class="cyber-notice-card">
           <div class="notice-header"><span class="notice-icon">📢</span><strong>系统公告 NOTICE</strong></div>
           <div class="notice-body">{{ systemNotice }}</div>
@@ -26,7 +25,7 @@
         <div class="cyber-card auth-box">
           <h2 class="card-title">{{ authCardTitle }}</h2>
 
-          <!-- A. 登录表单 -->
+          <!-- A. 登录 -->
           <template v-if="authMode === 'login'">
             <div class="form-item">
               <label>ACCOUNT / 用户名 或 注册邮箱</label>
@@ -36,7 +35,6 @@
               <label>ACCESS KEY / 登录密码</label>
               <input v-model="authForm.password" type="password" class="cyber-input" placeholder="请输入密码" />
             </div>
-            <!-- 防机器人算术验证码 -->
             <div class="form-item">
               <label>CAPTCHA / 算术验证 (点击图片可刷新)</label>
               <div class="captcha-group">
@@ -53,7 +51,7 @@
             </div>
           </template>
 
-          <!-- B. 注册表单 -->
+          <!-- B. 注册 -->
           <template v-else-if="authMode === 'register'">
             <div class="form-item">
               <label>USER IDENTIFIER / 设置用户名</label>
@@ -63,7 +61,6 @@
               <label>EMAIL / 接收激活码邮箱</label>
               <input v-model="authForm.email" type="email" class="cyber-input" placeholder="name@example.com" />
             </div>
-            <!-- 算术验证码：防刷发信额度 -->
             <div class="form-item">
               <label>CAPTCHA / 算术验证 (防止脚本刷发信)</label>
               <div class="captcha-group">
@@ -92,7 +89,7 @@
             </div>
           </template>
 
-          <!-- C. 找回密码表单 -->
+          <!-- C. 找回密码 -->
           <template v-else-if="authMode === 'forgot'">
             <div class="form-item">
               <label>REGISTERED EMAIL / 绑定的注册邮箱</label>
@@ -173,7 +170,7 @@
           </div>
         </div>
 
-        <!-- 节点列表与通用聚合订阅 (支持重置用户 UUID) -->
+        <!-- 节点列表与通用聚合订阅 (支持多 SNI 下拉切换联动) -->
         <div class="cyber-card col-span-2">
           <div class="card-header header-nowrap-row">
             <h3 class="header-title-text">🌐 全球加速节点列表与通用订阅 (共 {{ currentUser.nodes ? currentUser.nodes.length : 0 }} 个节点)</h3>
@@ -188,7 +185,7 @@
           </div>
 
           <p class="card-desc">
-            支持直接将订阅链接导入 <b>v2rayN / Clash-Meta / Sing-box / Shadowrocket</b>，客户端内可批量更新并自动延迟测速：
+            每个节点支持配置多个备选伪装 SNI。系统默认随机分配以分散特征，您亦可在卡片中下拉自选：
           </p>
 
           <div class="node-grid">
@@ -198,12 +195,24 @@
                 <span class="badge badge-ready">🟢 在线加速</span>
               </div>
               <div class="node-detail">
-                <span>地址: {{ node.ip }}:{{ node.port }}</span>
+                <div>地址: {{ node.ip }}:{{ node.port }}</div>
+
+                <!-- 核心特性：多 SNI 候选列表下拉选择器 -->
+                <div v-if="node.server_names && node.server_names.length > 1" class="sni-select-wrap">
+                  <label style="color: #94a3b8;">伪装SNI:</label>
+                  <select v-model="node.selected_sni" class="cyber-select" @change="onUserChangeNodeSni(node)">
+                    <option v-for="s in node.server_names" :key="s" :value="s">{{ s }}</option>
+                  </select>
+                </div>
+                <div v-else style="font-size: 11px; color: #64748b; margin-top: 4px;">
+                  伪装SNI: {{ node.selected_sni || (node.server_names ? node.server_names[0] : '默认') }}
+                </div>
               </div>
+
               <div class="btn-group" style="margin-top: 12px; gap: 6px;">
                 <button class="btn-sm btn-action" @click="copyText(node.link)">📋 复制</button>
                 <button class="btn-sm btn-edit" @click="openQrModal(node.link, node.name)">📱 扫码</button>
-                <button class="btn-sm btn-cyber-download" @click="downloadWindowsClient(node.id, node.name)">🖥️ 下载客户端</button>
+                <button class="btn-sm btn-cyber-download" @click="downloadWindowsClient(node.id, node.name, node.selected_sni)">🖥️ 下载客户端</button>
               </div>
             </div>
 
@@ -304,7 +313,7 @@
           </button>
         </div>
 
-        <!-- 主选项卡 1: 用户管理 (支持管理员查看凭证与重置用户 UUID) -->
+        <!-- 主选项卡 1: 用户管理 -->
         <div v-if="activeTab === 'users'" class="cyber-card tab-content-card">
           <div class="card-header">
             <h3>👥 接入用户治理列表</h3>
@@ -375,7 +384,7 @@
                 <tr>
                   <th>节点别名</th>
                   <th>连接地址与端口</th>
-                  <th>伪装域名 (SNI)</th>
+                  <th>伪装域名列表 (ServerNames)</th>
                   <th>通信凭证 (NODE_KEY)</th>
                   <th>REALITY 公钥 (PBK)</th>
                   <th style="white-space: nowrap;">心跳在线状态</th>
@@ -386,7 +395,9 @@
                 <tr v-for="n in adminNodes" :key="n.id">
                   <td><b>{{ n.name }}</b></td>
                   <td style="white-space: nowrap; font-family: monospace;">{{ n.ip }}:{{ n.port }}</td>
-                  <td style="white-space: nowrap; font-size: 11px; color: #94a3b8;">{{ n.sni }}</td>
+                  <td style="font-size: 11px; color: #94a3b8; max-width: 220px; word-break: break-all;">
+                    {{ n.server_names || n.sni }}
+                  </td>
                   <td class="font-mono text-cyan" style="font-size: 11px; white-space: nowrap;">
                     {{ n.node_key ? n.node_key.substring(0, 8) + '...' : '未设置' }}
                     <button class="btn-link-action" style="margin-left: 4px;" @click="copyText(n.node_key)">复制</button>
@@ -430,7 +441,7 @@
           </div>
         </div>
 
-        <!-- 主选项卡 3: 卡密管理 (默认最近一个月筛选、增加3项删除功能、新增使用时间列) -->
+        <!-- 主选项卡 3: 卡密管理 -->
         <div v-else-if="activeTab === 'cards'" class="cyber-card tab-content-card">
           <div class="sub-tab-nav">
             <button class="sub-tab-btn" :class="{ active: cardSubTab === 'inventory' }" @click="cardSubTab = 'inventory'">
@@ -469,7 +480,6 @@
               <button class="btn-cyber-refresh" @click="loadAdminData">🔄 刷新列表</button>
             </div>
 
-            <!-- 工具栏：默认最近一个月、多维度导出与3项删除功能 -->
             <div class="export-toolbar">
               <div class="date-filter-group">
                 <span class="filter-label">📅 筛选日期 (默认近1月):</span>
@@ -479,7 +489,6 @@
                 <button class="btn-sm btn-action" @click="exportByDateRange">按范围导出</button>
               </div>
 
-              <!-- 导出组 -->
               <div class="export-actions-group">
                 <button class="btn-sm btn-export-select" :disabled="selectedCards.length === 0" @click="exportSelectedCards">
                   ☑️ 导出已选 ({{ selectedCards.length }})
@@ -489,7 +498,6 @@
                 </button>
               </div>
 
-              <!-- 核心新增：3 项卡密批量清理与删除操作组 -->
               <div class="delete-actions-group">
                 <button class="btn-sm btn-cyber-danger" @click="handleDeleteCardsByDate">
                   🗑️ 清理范围未售
@@ -513,7 +521,6 @@
                     <th>套餐属性</th>
                     <th>核销状态</th>
                     <th>生成时间</th>
-                    <!-- 核心新增：使用时间列 -->
                     <th>使用时间</th>
                     <th>兑换用户</th>
                     <th>单张操作</th>
@@ -530,7 +537,6 @@
                     </td>
                     <td><span class="badge" :class="c.is_used ? 'badge-used' : 'badge-ready'">{{ c.is_used ? '已核销' : '待售/有效' }}</span></td>
                     <td class="text-muted" style="white-space: nowrap;">{{ c.created_at || '早期' }}</td>
-                    <!-- 展示使用时间 -->
                     <td style="white-space: nowrap; font-size: 11px; color: #38bdf8;">{{ c.used_at || '-' }}</td>
                     <td>{{ c.used_by || '-' }}</td>
                     <td><button class="btn-sm btn-action" @click="copyText(c.code)">复制</button></td>
@@ -803,9 +809,9 @@
       </div>
     </div>
 
-    <!-- 弹窗 3：管理员在线配置节点全部参数 -->
+    <!-- 弹窗 3：管理员在线配置节点全部参数 (支持多域名列表) -->
     <div v-if="showNodeConfigModal" class="modal-backdrop" @click="showNodeConfigModal = false">
-      <div class="cyber-modal" style="max-width: 500px; text-align: left;" @click.stop>
+      <div class="cyber-modal" style="max-width: 520px; text-align: left;" @click.stop>
         <h3>✏️ 调整节点配置 (双向自动同步)</h3>
         <p class="modal-tip">修改后，用户订阅与海外节点将在下次轮询时自动同步热更：</p>
 
@@ -827,17 +833,26 @@
 
         <div class="form-item">
           <label>伪装回落目标 (Dest)</label>
-          <input v-model="nodeEditForm.dest" class="cyber-input modal-input" placeholder="www.microsoft.com:443" />
+          <input v-model="nodeEditForm.dest" class="cyber-input modal-input" placeholder="itunes.apple.com:443" />
+        </div>
+
+        <!-- 核心特性：多 SNI 候选域名列表输入框 -->
+        <div class="form-item">
+          <label>伪装域名列表 (ServerNames / 逗号分隔多域名)：</label>
+          <input v-model="nodeEditForm.server_names" class="cyber-input modal-input font-mono" placeholder="itunes.apple.com,swdist.apple.com,apps.apple.com" />
+          <span class="input-hint">可配置多个备选伪装域名（逗号分隔）。前台用户可自由下拉切换，默认随机分配</span>
         </div>
 
         <div class="form-row-2">
           <div class="form-item">
-            <label>伪装域名 (SNI)</label>
-            <input v-model="nodeEditForm.sni" class="cyber-input modal-input" placeholder="www.microsoft.com" />
-          </div>
-          <div class="form-item">
             <label>ShortId (sid)</label>
             <input v-model="nodeEditForm.sid" class="cyber-input modal-input" placeholder="8位16进制" />
+          </div>
+          <div class="form-item">
+            <label>节点状态</label>
+            <label class="radio-label" style="margin-top: 10px;">
+              <input type="checkbox" v-model="nodeEditForm.status" /> 节点对全站公开发布
+            </label>
           </div>
         </div>
 
@@ -848,12 +863,6 @@
             <button class="btn-sm btn-action" style="white-space: nowrap;" @click="generateNewNodeKey">🎲 随机生成</button>
           </div>
           <span class="input-hint">点击保存后新密钥将自动下发给远程节点并热更本地文件</span>
-        </div>
-
-        <div class="form-item">
-          <label class="radio-label">
-            <input type="checkbox" v-model="nodeEditForm.status" /> 节点对全站用户公开启用
-          </label>
         </div>
 
         <div class="btn-group" style="justify-content: flex-end; margin-top: 15px;">
@@ -964,7 +973,7 @@ const showUserCredModal = ref(false)
 const targetCredUser = ref({})
 
 const showNodeConfigModal = ref(false)
-const nodeEditForm = reactive({ node_id: '', name: '', ip: '', port: 443, dest: '', sni: '', sid: '', node_key: '', status: true })
+const nodeEditForm = reactive({ node_id: '', name: '', ip: '', port: 443, dest: '', sni: '', server_names: '', sid: '', node_key: '', status: true })
 
 const showEditModal = ref(false)
 const editForm = reactive({ username: '', limit_mb: 1024, expire_date: '', is_monthly: false, reset_day: 1 })
@@ -986,7 +995,7 @@ const cardGenForm = reactive({ traffic_gb: 50, days: 30, count: 5, is_monthly: f
 const notifyForm = reactive({ notify_type: 'email', serverchan_key: '' })
 const pwdForm = reactive({ old_pwd: '', new_pwd: '', confirm_pwd: '' })
 
-// 卡密筛选日期：默认最近一个月 (30天前至今)
+// 卡密筛选日期：默认最近 30 天
 const getDefaultDateRange = () => {
   const now = new Date()
   const end = now.toISOString().split('T')[0]
@@ -1103,6 +1112,13 @@ const refreshUserInfo = async () => {
       currentUser.nodes = res.data.data.nodes
     }
   } catch (_) {}
+}
+
+// 用户在卡片切换特定 SNI 时，前端实时重构该节点的 VLESS 链接
+const onUserChangeNodeSni = (node) => {
+  if (!node.link || !node.selected_sni) return
+  node.link = node.link.replace(/sni=[^&]+/, `sni=${node.selected_sni}`)
+  ElMessage.success(`已切换该节点的伪装 SNI 为: ${node.selected_sni}`)
 }
 
 // 用户自主重置节点凭证 (UUID)
@@ -1574,11 +1590,14 @@ const submitChangePassword = async () => {
   }
 }
 
-const downloadWindowsClient = (nodeId = '', nodeName = '') => {
+const downloadWindowsClient = (nodeId = '', nodeName = '', sni = '') => {
   if (!currentUser.username) return ElMessage.warning('用户未就绪')
   ElMessage.info(`正在为您打包 ${nodeName || '默认节点'} 的客户端...`)
 
-  const downloadUrl = `/api/user/download_client?username=${encodeURIComponent(currentUser.username)}&node_id=${nodeId}`
+  let downloadUrl = `/api/user/download_client?username=${encodeURIComponent(currentUser.username)}&node_id=${nodeId}`
+  if (sni) {
+    downloadUrl += `&sni=${encodeURIComponent(sni)}`
+  }
   const a = document.createElement('a')
   a.href = downloadUrl
   a.download = `Xray_Windows_${currentUser.username}.zip`
@@ -1608,6 +1627,7 @@ const openNodeConfig = (node) => {
   nodeEditForm.port = node.port
   nodeEditForm.dest = node.dest || 'www.microsoft.com:443'
   nodeEditForm.sni = node.sni || 'www.microsoft.com'
+  nodeEditForm.server_names = node.server_names || node.sni || ''
   nodeEditForm.sid = node.sid
   nodeEditForm.node_key = node.node_key
   nodeEditForm.status = node.status === 1
@@ -1874,7 +1894,6 @@ const copyText = async (text) => {
   document.body.removeChild(ta)
 }
 
-// 登录提交
 const handleAuth = async () => {
   if (!authForm.username || !authForm.password) return ElMessage.warning('请填写账号与密码')
   if (authMode.value === 'login' && !loginCaptchaAns.value) return ElMessage.warning('请输入算术验证码计算结果')
@@ -1919,7 +1938,6 @@ const handleAuth = async () => {
   }
 }
 
-// 多卡密批量充值提交
 const handleRecharge = async () => {
   if (!rechargeCode.value || !rechargeCode.value.trim()) return ElMessage.warning('请输入至少一张卡密')
   loading.value = true
@@ -2007,7 +2025,6 @@ const logout = () => {
 .dashboard-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
 .col-span-2 { grid-column: span 2; }
 
-/* 头部自适应与强制不换行对齐 */
 .header-nowrap-row {
   display: flex;
   justify-content: space-between;
@@ -2028,7 +2045,6 @@ const logout = () => {
   padding: 7px 16px !important;
 }
 
-/* 算术验证码容器 */
 .captcha-group {
   display: flex;
   align-items: center;
@@ -2059,7 +2075,6 @@ const logout = () => {
   box-shadow: 0 0 10px rgba(56, 189, 248, 0.25);
 }
 
-/* 多卡密充值多行文本框 */
 .redeem-textarea {
   height: 68px;
   min-height: 50px;
@@ -2068,7 +2083,6 @@ const logout = () => {
   line-height: 1.4;
 }
 
-/* 多节点卡片网格 */
 .node-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
@@ -2102,6 +2116,30 @@ const logout = () => {
   color: #64748b;
   font-family: monospace;
 }
+
+/* 多 SNI 下拉选择器样式 */
+.sni-select-wrap {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 6px;
+  font-size: 12px;
+}
+.cyber-select {
+  background: #0f172a;
+  border: 1px solid #334155;
+  color: #38bdf8;
+  padding: 3px 6px;
+  border-radius: 4px;
+  font-size: 11px;
+  outline: none;
+  cursor: pointer;
+  max-width: 190px;
+}
+.cyber-select:focus {
+  border-color: #38bdf8;
+}
+
 .empty-node-tip {
   grid-column: 1 / -1;
   text-align: center;
@@ -2317,7 +2355,6 @@ const logout = () => {
   color: #94a3b8;
 }
 
-/* 工具栏分区分组布局 */
 .export-toolbar {
   background: #0a0f1d;
   border: 1px solid #1e293b;
