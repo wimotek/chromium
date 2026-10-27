@@ -29,7 +29,6 @@ from cert_manager import (
 app = Flask(__name__, static_folder='../frontend/dist', static_url_path='/')
 init_db()
 
-# 辅助函数：提取节点配置的所有有效 SNI 域名候选列表 (去端口、去重复)
 def get_node_snis(node: dict) -> list[str]:
     raw = node.get("server_names") or node.get("sni") or "www.microsoft.com"
     snis = []
@@ -39,7 +38,6 @@ def get_node_snis(node: dict) -> list[str]:
             snis.append(clean)
     return snis if snis else ["www.microsoft.com"]
 
-# 辅助函数：构建标准的 VLESS REALITY 单连接 (默认从候选列表中随机选 1 个)
 def build_node_link(uuid_str: str, node: dict, remark: str, chosen_sni: str = None) -> str:
     snis = get_node_snis(node)
     sni = chosen_sni if (chosen_sni and chosen_sni in snis) else random.choice(snis)
@@ -145,7 +143,7 @@ def scheduled_worker_loop():
 
 threading.Thread(target=scheduled_worker_loop, daemon=True).start()
 
-# ==================== 前台聚合订阅 (精简回归：1物理节点=1条连接，默认随机选择) ====================
+# ==================== 前台聚合订阅 ====================
 
 @app.route('/')
 def index():
@@ -171,7 +169,6 @@ def get_qrcode_svg():
     buf.seek(0)
     return send_file(buf, mimetype='image/svg+xml')
 
-# 核心优化：每个物理节点严格输出 1 条精炼链接，默认从列表中随机选 1 个域名（亦支持 ?sni= 选定）
 @app.route('/api/sub', methods=['GET'])
 def get_subscription():
     token = request.args.get('token', '').strip()
@@ -194,7 +191,6 @@ def get_subscription():
     for n in nodes:
         if len(n.get("pbk", "")) == 43:
             snis = get_node_snis(n)
-            # 关键优化：1个节点只生成1条精炼线路，默认随机从列表挑选；若指定则优先使用指定的域名
             chosen_sni = forced_sni if (forced_sni and forced_sni in snis) else random.choice(snis)
             remark = f"{n['name']}"
             links.append(build_node_link(user['uuid'], n, remark, chosen_sni=chosen_sni))
@@ -256,7 +252,7 @@ def open_faka_generate():
 
     return code, 200, {"Content-Type": "text/plain; charset=utf-8"}
 
-# ==================== 远程节点集群心跳 (以主控后台配置为唯一权威) ====================
+# ==================== 远程节点集群心跳 ====================
 
 @app.route('/api/node/heartbeat', methods=['POST'])
 def node_heartbeat():
@@ -285,7 +281,6 @@ def node_heartbeat():
     server_names_str = ",".join(snis)
     primary_sni = snis[0] if snis else "www.microsoft.com"
 
-    # 43 位公钥智能抢救截断
     pbk = raw_pbk
     if len(pbk) != 43:
         matches = re.findall(r'[A-Za-z0-9_\-]{43}', pbk)
@@ -302,7 +297,6 @@ def node_heartbeat():
     c.execute("SELECT * FROM nodes WHERE node_id=?", (node_id,))
     node = c.fetchone()
 
-    # 首次接入：绑定注册
     if not node:
         auto_name = f"节点-{node_ip}"
         c.execute("""
@@ -327,7 +321,6 @@ def node_heartbeat():
         conn.close()
         return jsonify({"code": 200, "msg": "心跳成功，已为您同步下发新密钥", "new_node_key": pending_key})
 
-    # 关键防反向覆盖：心跳只更新 IP、公钥与时间戳，绝对不反向覆盖后台配置的 dest/sni/server_names！
     if node_key == current_key:
         c.execute("""
             UPDATE nodes 
@@ -341,7 +334,6 @@ def node_heartbeat():
     conn.close()
     return jsonify({"code": 403, "msg": "Node Key 验证失败"}), 403
 
-# 双向同步接口：将主控后台配置的 server_names 数组下发给节点热更
 @app.route('/api/node/sync', methods=['GET'])
 def node_sync_users():
     node_id = request.args.get('node_id', '').strip()
@@ -1011,6 +1003,73 @@ def admin_reset_node_key():
         "new_key": new_key
     })
 
+# ==================== 核心新增：管理员给所有用户或指定用户发送通知 ====================
+
+@app.route('/api/admin/notify/send', methods=['POST'])
+def admin_send_notification():
+    data = request.json or {}
+    admin_user = data.get('admin_user')
+    admin_pwd = data.get('admin_pwd')
+    if not check_admin(admin_user, admin_pwd):
+        return jsonify({"code": 403, "msg": "无权限"}), 403
+
+    target = data.get('target', 'all').strip()  # 'all' | 'single'
+    target_user = data.get('target_user', '').strip()
+    title = data.get('title', '').strip()
+    content = data.get('content', '').strip()
+
+    if not title or not content:
+        return jsonify({"code": 400, "msg": "通知标题和内容不能为空"}), 400
+
+    conn = get_db()
+    c = conn.cursor()
+
+    # 场景 1：定向推送给单个用户
+    if target == 'single':
+        if not target_user:
+            conn.close()
+            return jsonify({"code": 400, "msg": "未指定接收用户"}), 400
+
+        c.execute("SELECT * FROM users WHERE username=?", (target_user,))
+        user = c.fetchone()
+        conn.close()
+        if not user:
+            return jsonify({"code": 404, "msg": f"用户 [{target_user}] 不存在"}), 404
+
+        content_html = f"<div style='font-family: sans-serif; padding: 15px;'><h3>{title}</h3><p style='line-height: 1.6; white-space: pre-wrap;'>{content}</p></div>"
+        ok, msg = notify_user(dict(user), title, content_html, content)
+        if ok:
+            return jsonify({"code": 200, "msg": f"已成功向用户 [{target_user}] 投递通知！通道：{user['notify_type']}"})
+        else:
+            return jsonify({"code": 500, "msg": f"投递失败: {msg}"})
+
+    # 场景 2：广播给全站正常活跃用户 (后台异步多线程执行，带 0.5s 延迟防封发信邮箱)
+    else:
+        c.execute("SELECT * FROM users WHERE status=1 AND is_verified=1 AND role='user'")
+        users = [dict(u) for u in c.fetchall()]
+        conn.close()
+
+        if not users:
+            return jsonify({"code": 200, "msg": "全站暂无活跃用户，无需发送"})
+
+        def broadcast_task(user_list, t, c_text):
+            c_html = f"<div style='font-family: sans-serif; padding: 15px;'><h3>{t}</h3><p style='line-height: 1.6; white-space: pre-wrap;'>{c_text}</p></div>"
+            success_cnt = 0
+            for u in user_list:
+                try:
+                    ok, _ = notify_user(u, t, c_html, c_text)
+                    if ok:
+                        success_cnt += 1
+                except Exception:
+                    pass
+                time.sleep(0.5)
+            print(f"==> [Broadcast] 全站广播通知完成: 成功投递 {success_cnt}/{len(user_list)} 位用户", flush=True)
+
+        threading.Thread(target=broadcast_task, args=(users, title, content), daemon=True).start()
+        return jsonify({"code": 200, "msg": f"已启动后台广播队列，正在按用户偏好向全站 {len(users)} 位用户逐一推送通知！"})
+
+# ==================== 管理员卡密生成、导出与删除 ====================
+
 @app.route('/api/admin/cards/generate', methods=['POST'])
 def admin_generate():
     data = request.json or {}
@@ -1106,7 +1165,7 @@ def admin_delete_cards():
     conn.close()
     return jsonify({"code": 200, "msg": f"卡密清理完成！共成功删除 {deleted_count} 张卡密。"})
 
-# 核心：管理端用户数据实时聚合下发 (1个物理节点严格对应1条精炼直连链接，默认使用随机挑选的 SNI)
+# 管理员获取全量用户数据与单节点直连精炼列表
 @app.route('/api/admin/data', methods=['POST'])
 def admin_data():
     data = request.json or {}
@@ -1133,7 +1192,6 @@ def admin_data():
         for n in active_nodes:
             if len(n.get("pbk", "")) == 43:
                 snis = get_node_snis(n)
-                # 每个物理节点1条，默认使用随机分配的SNI，保持清爽！
                 chosen_sni = random.choice(snis)
                 d['node_links'].append({
                     "id": n['id'],
