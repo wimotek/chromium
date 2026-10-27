@@ -39,9 +39,21 @@ update_xray() {
 [ -n "$NODE_KEY" ] && NODE_KEY=$(echo "$NODE_KEY" | tr -d '"'\'' ')
 
 PORT="${PORT:-443}"
-DEST="${DEST:-www.microsoft.com:443}"
-SERVER_NAMES="${SERVER_NAMES:-www.microsoft.com,microsoft.com}"
 
+# 核心改进 1：如果未传入 DEST，优先从模板中提取你自定义的 dest；读不到才兜底为苹果
+if [ -z "$DEST" ] && [ -f "$TEMPLATE_FILE" ]; then
+    DEST=$(jq -r '(.inbounds[] | select(.protocol == "vless")).streamSettings.realitySettings.dest // empty' "$TEMPLATE_FILE" 2>/dev/null || true)
+fi
+DEST="${DEST:-itunes.apple.com:443}"
+
+# 核心改进 2：如果未传入 SERVER_NAMES，优先从模板中读取你写好的 serverNames 列表
+if [ -z "$SERVER_NAMES" ] && [ -f "$TEMPLATE_FILE" ]; then
+    SERVER_NAMES_FROM_TMPL=$(jq -r '(.inbounds[] | select(.protocol == "vless")).streamSettings.realitySettings.serverNames // [] | join(",")' "$TEMPLATE_FILE" 2>/dev/null || true)
+    [ -n "$SERVER_NAMES_FROM_TMPL" ] && SERVER_NAMES="$SERVER_NAMES_FROM_TMPL"
+fi
+SERVER_NAMES="${SERVER_NAMES:-itunes.apple.com,swdist.apple.com}"
+
+# 提取首个纯域名
 FIRST_SERVER_NAME=$(echo "$SERVER_NAMES" | cut -d',' -f1 | cut -d':' -f1 | tr -d ' ')
 
 [ -z "$SERVER_IP" ] && SERVER_IP=$(curl -s4 --max-time 3 https://api.ipify.org || echo "127.0.0.1")
@@ -90,7 +102,7 @@ fi
 
 UUID="${UUID:-$(/usr/bin/xray uuid)}"
 
-# 5. 初始本地 config.json 生成 (精准指定 vless 协议入站)
+# 5. 初始本地 config.json 生成 (严格继承模板中的配置)
 if [ ! -s "$CONFIG_FILE" ]; then
     [ ! -f "$TEMPLATE_FILE" ] && exit 1
     TMP_CONFIG="/tmp/config.init.tmp.json"
@@ -140,12 +152,10 @@ trap 'echo "正在停止服务..."; [ -n "$XRAY_PID" ] && kill -TERM "$XRAY_PID"
 if [ -n "$PANEL_URL" ]; then
     [ -f "$CLIENT_INFO_FILE" ] && rm -f "$CLIENT_INFO_FILE"
 
-    # 核心防冲突：基于本机公网 IP 与端口生成唯一标识，绝不被其他节点覆盖！
     MACHINE_NODE_ID=$(printf "%s_%s" "$SERVER_IP" "$PORT" | tr -c 'a-zA-Z0-9_' '_')
 
     if [ -f "$NODE_ID_FILE" ] && [ -s "$NODE_ID_FILE" ]; then
         SAVED_ID=$(cat "$NODE_ID_FILE" | tr -d ' \r\n')
-        # 如果检测到 node_id 与本机真实 IP 不符（说明是从节点 1 复制了 data 目录），自动重置防打架！
         if [ "$SAVED_ID" != "$MACHINE_NODE_ID" ] && [ "$SERVER_IP" != "127.0.0.1" ]; then
             echo "==> [Node ID 纠偏] 检测到拷贝的历史旧节点标识，自动绑定本机专属 ID: $MACHINE_NODE_ID"
             NODE_ID="$MACHINE_NODE_ID"
@@ -177,7 +187,7 @@ if [ -n "$PANEL_URL" ]; then
                 PUBLIC_KEY=$(cat "$PUBLIC_KEY_FILE" | tr -d ' \r\n' | cut -c 1-43)
             fi
 
-            # 1. 向主控上报健康心跳 (只报送本机实际硬件与网络参数，不强行覆盖主控配置)
+            # 上报健康心跳：上报模板中定义的参数
             HB_RESP=$(curl -k -s -X POST "${PANEL_URL}/api/node/heartbeat" \
                  -H "Content-Type: application/json" \
                  --connect-timeout 8 \
@@ -190,7 +200,7 @@ if [ -n "$PANEL_URL" ]; then
                 echo "$NODE_KEY" > "$NODE_KEY_FILE"
             fi
 
-            # 2. 从主控全量下发用户与网络参数 (以主控后台设定为唯一权威)
+            # 从主控拉取全量配置与用户
             USER_RESP=$(curl -k -s --connect-timeout 8 --max-time 15 "${PANEL_URL}/api/node/sync?node_id=${NODE_ID}&token=${NODE_KEY}" 2>&1 || true)
             if echo "$USER_RESP" | grep -q '"code":200'; then
                 REMOTE_USERS=$(echo "$USER_RESP" | jq '.users // []')
@@ -205,8 +215,6 @@ if [ -n "$PANEL_URL" ]; then
                 fi
 
                 TMP_SYNC="/tmp/config.agent.sync.json"
-
-                # 精准锁定 VLESS 协议入站，不破坏 10085 API
                 jq --argjson new_clients "$REMOTE_USERS" \
                    --arg port "$REMOTE_PORT" \
                    --arg dest "$REMOTE_DEST" \
@@ -227,7 +235,7 @@ if [ -n "$PANEL_URL" ]; then
                     if ! cmp -s "$TMP_SYNC" "$CONFIG_FILE"; then
                         mv "$TMP_SYNC" "$CONFIG_FILE"
                         CLIENT_COUNT=$(echo "$REMOTE_USERS" | jq 'length')
-                        echo "==> [Cluster Node] 成功应用主控最新配置！(已同步 $CLIENT_COUNT 位用户)"
+                        echo "==> [Cluster Node] 成功应用配置更新！(同步用户: $CLIENT_COUNT 位)"
                         restart_xray
                     else
                         rm -f "$TMP_SYNC"
@@ -235,7 +243,7 @@ if [ -n "$PANEL_URL" ]; then
                 fi
             fi
 
-            # 3. 统计增量流量回传主控
+            # 统计增量流量回传主控
             TRAFFIC_RAW=$(/usr/bin/xray api statsquery --server=127.0.0.1:10085 -pattern "user>>>" -reset=true 2>/dev/null || true)
             if [ -n "$TRAFFIC_RAW" ] && echo "$TRAFFIC_RAW" | grep -q "stat"; then
                 TRAFFIC_PAYLOAD=$(echo "$TRAFFIC_RAW" | jq '[.stat[]? | {email: (.name | split(">>>")[1]), bytes: (.value | tonumber)}]')
@@ -255,6 +263,7 @@ if [ -n "$PANEL_URL" ]; then
     wait $XRAY_PID
 
 else
+    # 独立单机模式
     VLESS_URL="vless://${UUID}@${SERVER_IP}:${PORT}?security=reality&encryption=none&pbk=${PUBLIC_KEY}&headerType=none&fp=chrome&type=tcp&flow=xtls-rprx-vision&sni=${FIRST_SERVER_NAME}&sid=${SHORT_ID}#Xray-Reality"
 
     cat <<EOF > "$CLIENT_INFO_FILE"
