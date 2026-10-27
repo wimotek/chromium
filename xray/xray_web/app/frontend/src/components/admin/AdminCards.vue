@@ -12,21 +12,23 @@
     <!-- 子卡 A: 批量制卡与库存 -->
     <div v-if="cardSubTab === 'inventory'" class="sub-tab-pane">
       <div class="card-header"><h3>🛠️ 批量生成卡密</h3></div>
+      
+      <!-- 经典 4 列横向网格制卡表单 -->
       <div class="gen-form">
         <div>
           <label>流量配额 (GB, 0为不限)</label>
-          <input v-model.number="cardGenForm.traffic_gb" type="number" class="cyber-input modal-input" placeholder="0=不限" />
+          <input v-model.number="cardGenForm.traffic_gb" type="number" class="cyber-input" placeholder="0=不限" />
         </div>
         <div>
           <label>有效时限 (天, 36500为永久)</label>
-          <input v-model.number="cardGenForm.days" type="number" class="cyber-input modal-input" placeholder="36500=永久" />
+          <input v-model.number="cardGenForm.days" type="number" class="cyber-input" placeholder="36500=永久" />
         </div>
         <div>
           <label>批量制卡数 (张)</label>
-          <input v-model.number="cardGenForm.count" type="number" class="cyber-input modal-input" />
+          <input v-model.number="cardGenForm.count" type="number" class="cyber-input" />
         </div>
-        <div style="display: flex; flex-direction: column; justify-content: flex-end;">
-          <label class="radio-label" style="margin-bottom: 8px;">
+        <div class="gen-action-col">
+          <label class="radio-label">
             <input type="checkbox" v-model="cardGenForm.is_monthly" /> 设为每月固定重置卡
           </label>
           <button class="btn-cyber-success" :disabled="loading" @click="generateCards">立即批量制卡</button>
@@ -38,7 +40,7 @@
         <button class="btn-cyber-refresh" @click="$emit('reload-all')">🔄 刷新列表</button>
       </div>
 
-      <!-- 工具栏：默认最近30天、多维度导出与3项删除 -->
+      <!-- 工具栏：双层功能排布，美观对称 -->
       <div class="export-toolbar">
         <div class="date-filter-group">
           <span class="filter-label">📅 筛选日期 (默认近1月):</span>
@@ -158,7 +160,6 @@ const cardGenForm = reactive({ traffic_gb: 50, days: 30, count: 5, is_monthly: f
 const fakaEnable = ref(true)
 const fakaToken = ref('faka_secret_token_8899')
 
-// 默认近 30 天日期范围
 const getDefaultDateRange = () => {
   const now = new Date()
   const end = now.toISOString().split('T')[0]
@@ -327,3 +328,12 @@ const handleDeleteInvalidCards = async () => {
   }
 }
 </script>
+
+<style scoped>
+.gen-action-col {
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  gap: 8px;
+}
+</style>

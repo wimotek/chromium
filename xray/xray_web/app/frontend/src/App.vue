@@ -16,7 +16,7 @@
     </header>
 
     <main class="main-body">
-      <!-- 1. 未登录：渲染认证模块组件 -->
+      <!-- 1. 未登录：认证模块 -->
       <AuthView
         v-if="!currentUser.username"
         :systemNotice="systemNotice"
@@ -24,7 +24,7 @@
         @login-success="onLoginSuccess"
       />
 
-      <!-- 2. 普通用户端：渲染用户仪表盘组件 -->
+      <!-- 2. 普通用户端：用户仪表盘 -->
       <UserDashboard
         v-else-if="currentUser.role === 'user'"
         :currentUser="currentUser"
@@ -46,6 +46,7 @@
             <span class="count-tag">{{ adminUsers.length }} 位用户</span>
           </button>
 
+          <!-- 核心修复：点击立即激活 nodes 选项卡 -->
           <button class="tab-card-btn" :class="{ active: activeTab === 'nodes' }" @click="openNodesTab">
             <span class="tab-icon">🌐</span>
             <div class="tab-text">
@@ -74,7 +75,6 @@
           </button>
         </div>
 
-        <!-- 动态挂载各管理模块 (第二批组件) -->
         <component
           :is="currentAdminComponent"
           :adminUsers="adminUsers"
@@ -89,7 +89,7 @@
       </div>
     </main>
 
-    <!-- 全局通用二维码弹窗 -->
+    <!-- 全局二维码弹窗 -->
     <QrModal
       :visible="showQrModal"
       :title="targetModalUser"
@@ -109,7 +109,6 @@ import QrModal from './components/common/QrModal.vue'
 import AuthView from './components/AuthView.vue'
 import UserDashboard from './components/UserDashboard.vue'
 
-// 异步加载管理端组件 (将在第二批交付)
 const AdminUsers = defineAsyncComponent(() => import('./components/admin/AdminUsers.vue'))
 const AdminNodes = defineAsyncComponent(() => import('./components/admin/AdminNodes.vue'))
 const AdminCards = defineAsyncComponent(() => import('./components/admin/AdminCards.vue'))
@@ -171,7 +170,6 @@ const currentAdminComponent = computed(() => {
 const onLoginSuccess = ({ user, password }) => {
   Object.assign(currentUser, user)
   adminPassword.value = password
-
   localStorage.setItem('xray_auth_session', JSON.stringify({ user, password }))
 
   if (currentUser.role === 'admin') {
@@ -196,7 +194,7 @@ const refreshUserInfo = async () => {
 }
 
 const reloadAllAdminData = async () => {
-  await Promise.all([loadAdminData(), openNodesTab()])
+  await Promise.all([loadAdminData(), fetchNodesData()])
 }
 
 const loadAdminData = async () => {
@@ -212,7 +210,7 @@ const loadAdminData = async () => {
   } catch (_) {}
 }
 
-const openNodesTab = async () => {
+const fetchNodesData = async () => {
   try {
     const res = await axios.post('/api/admin/nodes/list', {
       admin_user: currentUser.username,
@@ -222,6 +220,12 @@ const openNodesTab = async () => {
       adminNodes.value = res.data.data
     }
   } catch (_) {}
+}
+
+// 核心修复点：点击时先切 activeTab，再拉取数据
+const openNodesTab = async () => {
+  activeTab.value = 'nodes'
+  await fetchNodesData()
 }
 
 const openSettingsTab = () => {
@@ -265,7 +269,7 @@ const logout = () => {
 </script>
 
 <style>
-/* 全局暗黑科技风样式体系，所有子组件共享继承 */
+/* 全局暗黑科技风样式体系 */
 .dark-theme {
   min-height: 100vh;
   background-color: #080c14;
@@ -349,6 +353,24 @@ const logout = () => {
 .cyber-textarea { resize: vertical; min-height: 70px; font-family: inherit; }
 .auth-box .cyber-input, .modal-input { width: 100% !important; min-width: 0 !important; max-width: 100% !important; }
 
+/* 核心恢复：制卡表单经典的 4 列横排网格样式 */
+.gen-form {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr 1.2fr;
+  gap: 12px;
+  align-items: flex-end;
+  margin-bottom: 24px;
+  background: #0b1120;
+  border: 1px solid #1e293b;
+  padding: 16px 20px;
+  border-radius: 10px;
+}
+.gen-form .cyber-input {
+  width: 100% !important;
+  min-width: 0 !important;
+  max-width: 100% !important;
+}
+
 .btn-cyber-primary {
   background: linear-gradient(135deg, #0284c7, #2563eb);
   color: white; border: none; padding: 10px 20px; border-radius: 6px; font-weight: 700; cursor: pointer;
@@ -358,7 +380,7 @@ const logout = () => {
   white-space: nowrap; font-weight: 600;
 }
 .btn-cyber-action { background: #334155; color: white; border: none; padding: 8px 16px; border-radius: 6px; cursor: pointer; white-space: nowrap; }
-.btn-cyber-danger { background: #dc2626; color: white; border: none; border-radius: 4px; cursor: pointer; font-weight: 600; white-space: nowrap; }
+.btn-cyber-danger { background: #dc2626; color: white; border: none; border-radius: 4px; cursor: pointer; font-weight: 600; white-space: nowrap; padding: 6px 12px; }
 .btn-cyber-refresh { background: transparent; border: 1px solid #38bdf8; color: #38bdf8; padding: 5px 12px; border-radius: 6px; cursor: pointer; font-size: 12px; }
 
 .btn-sm { padding: 4px 8px; font-size: 11px; border-radius: 4px; border: none; cursor: pointer; white-space: nowrap; }
@@ -496,8 +518,21 @@ const logout = () => {
 .cyber-select { background: #0f172a; border: 1px solid #334155; color: #38bdf8; padding: 3px 6px; border-radius: 4px; font-size: 11px; outline: none; cursor: pointer; max-width: 190px; }
 .empty-node-tip { grid-column: 1 / -1; text-align: center; padding: 30px; color: #64748b; font-size: 13px; }
 
-.export-toolbar { background: #0a0f1d; border: 1px solid #1e293b; border-radius: 8px; padding: 12px 16px; margin-bottom: 14px; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px; }
+/* 工具栏分区分组布局 */
+.export-toolbar {
+  background: #0a0f1d;
+  border: 1px solid #1e293b;
+  border-radius: 8px;
+  padding: 12px 16px;
+  margin-bottom: 14px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+}
 .date-filter-group { display: flex; align-items: center; gap: 8px; font-size: 13px; }
+.filter-label { color: #94a3b8; font-weight: 600; white-space: nowrap; }
 .date-input { width: 140px; padding: 6px 10px; font-size: 12px; }
 .export-actions-group, .delete-actions-group { display: flex; gap: 8px; align-items: center; }
 
@@ -505,11 +540,13 @@ const logout = () => {
   .settings-2col-layout { grid-template-columns: 1fr; }
   .dashboard-grid { grid-template-columns: 1fr; }
   .col-span-2 { grid-column: span 1; }
+  .gen-form { grid-template-columns: 1fr 1fr; }
 }
 @media (max-width: 640px) {
   .cyber-input { width: 100% !important; min-width: 0 !important; max-width: 100% !important; }
   .header-nowrap-row { flex-wrap: wrap !important; }
   .form-row-2 { grid-template-columns: 1fr; }
   .card-tabs-nav { flex-direction: column; }
+  .gen-form { grid-template-columns: 1fr; }
 }
 </style>
