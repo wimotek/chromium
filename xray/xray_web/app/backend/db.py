@@ -55,7 +55,7 @@ def init_db():
         last_heartbeat TEXT NOT NULL
     )''')
 
-    # 3. 卡密表
+    # 3. 卡密表 (新增 used_at 使用时间字段)
     c.execute('''CREATE TABLE IF NOT EXISTS cards (
         code TEXT PRIMARY KEY,
         traffic_gb INTEGER NOT NULL,
@@ -63,10 +63,11 @@ def init_db():
         is_used INTEGER DEFAULT 0,
         used_by TEXT,
         created_at TEXT NOT NULL,
+        used_at TEXT DEFAULT '',
         is_monthly INTEGER DEFAULT 0
     )''')
 
-    # 4. 邮箱验证码表
+    # 4. 验证码、防机器人临时表、系统设置与通知日志表
     c.execute('''CREATE TABLE IF NOT EXISTS verify_codes (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         email TEXT NOT NULL,
@@ -74,14 +75,12 @@ def init_db():
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )''')
 
-    # 5. 防机器人验证码表 (核心新增)
     c.execute('''CREATE TABLE IF NOT EXISTS captchas (
         id TEXT PRIMARY KEY,
         answer TEXT NOT NULL,
         expire_at REAL NOT NULL
     )''')
 
-    # 6. 系统设置与通知去重表
     c.execute('''CREATE TABLE IF NOT EXISTS system_settings (
         key TEXT PRIMARY KEY,
         value TEXT
@@ -105,8 +104,9 @@ def init_db():
     try_add_column("ALTER TABLE nodes ADD COLUMN pending_key TEXT DEFAULT ''")
     try_add_column("ALTER TABLE nodes ADD COLUMN dest TEXT DEFAULT 'www.microsoft.com:443'")
     try_add_column("ALTER TABLE users ADD COLUMN used_mb REAL DEFAULT 0")
+    try_add_column("ALTER TABLE cards ADD COLUMN used_at TEXT DEFAULT ''")
 
-    # 默认管理员种子
+    # 默认管理员初始化
     c.execute("SELECT id FROM users WHERE role='admin'")
     if not c.fetchone():
         admin_user = os.getenv("ADMIN_USERNAME") or "admin"

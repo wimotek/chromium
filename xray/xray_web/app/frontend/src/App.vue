@@ -63,7 +63,7 @@
               <label>EMAIL / 接收激活码邮箱</label>
               <input v-model="authForm.email" type="email" class="cyber-input" placeholder="name@example.com" />
             </div>
-            <!-- 防刷邮件发信算术验证码 -->
+            <!-- 算术验证码：防刷发信额度 -->
             <div class="form-item">
               <label>CAPTCHA / 算术验证 (防止脚本刷发信)</label>
               <div class="captcha-group">
@@ -173,13 +173,18 @@
           </div>
         </div>
 
-        <!-- 节点列表与通用聚合订阅 (头部自适应，不折行不挤压) -->
+        <!-- 节点列表与通用聚合订阅 (支持重置用户 UUID) -->
         <div class="cyber-card col-span-2">
           <div class="card-header header-nowrap-row">
             <h3 class="header-title-text">🌐 全球加速节点列表与通用订阅 (共 {{ currentUser.nodes ? currentUser.nodes.length : 0 }} 个节点)</h3>
-            <button class="btn-header-action btn-cyber-primary" @click="copyText(currentUser.sub_url)">
-              🔗 一键复制全节点订阅链接
-            </button>
+            <div style="display: flex; gap: 8px; flex-shrink: 0;">
+              <button class="btn-header-action btn-cyber-primary" @click="copyText(currentUser.sub_url)">
+                🔗 一键复制全节点订阅链接
+              </button>
+              <button class="btn-header-action btn-cyber-danger" @click="handleUserResetUuid">
+                🔄 重置凭据 (UUID)
+              </button>
+            </div>
           </div>
 
           <p class="card-desc">
@@ -266,7 +271,7 @@
             <span class="tab-icon">👥</span>
             <div class="tab-text">
               <div class="tab-title">全站用户生命周期管理</div>
-              <div class="tab-sub">配额/时效治理、凭证封禁、二维码与密码重置</div>
+              <div class="tab-sub">配额/时效治理、凭证封禁、重置UUID与密码</div>
             </div>
             <span class="count-tag">{{ adminUsers.length }} 位用户</span>
           </button>
@@ -284,7 +289,7 @@
             <span class="tab-icon">🎟️</span>
             <div class="tab-text">
               <div class="tab-title">卡密生成与发卡中心</div>
-              <div class="tab-sub">批量制卡、库存导出、对接发卡系统 API</div>
+              <div class="tab-sub">批量制卡、库存导出、范围清理、对接 API</div>
             </div>
             <span class="count-tag">{{ adminCards.length }} 张卡密</span>
           </button>
@@ -299,7 +304,7 @@
           </button>
         </div>
 
-        <!-- 主选项卡 1: 用户管理 (包含专属凭证与二维码查看) -->
+        <!-- 主选项卡 1: 用户管理 (支持管理员查看凭证与重置用户 UUID) -->
         <div v-if="activeTab === 'users'" class="cyber-card tab-content-card">
           <div class="card-header">
             <h3>👥 接入用户治理列表</h3>
@@ -315,7 +320,7 @@
                   <th>到期时间</th>
                   <th>套餐特性</th>
                   <th>专属凭证</th>
-                  <th>治理操作</th>
+                  <th style="width: 280px;">治理操作</th>
                 </tr>
               </thead>
               <tbody>
@@ -343,8 +348,9 @@
                   </td>
                   <td>
                     <div class="action-btn-row">
-                      <button class="btn-sm btn-reset" @click="openResetPwdModal(u.username)">🔑 重置密码</button>
-                      <button class="btn-sm btn-edit" @click="openEditModal(u)">✏️ 改配额</button>
+                      <button class="btn-sm btn-reset" @click="openResetPwdModal(u.username)">🔑 密码</button>
+                      <button class="btn-sm btn-cyber-danger" @click="handleAdminResetUserUuid(u.username)">🔄 重置UUID</button>
+                      <button class="btn-sm btn-edit" @click="openEditModal(u)">✏️ 配额</button>
                       <button v-if="u.status === 1" class="btn-sm btn-demote" :disabled="u.username === currentUser.username" @click="handleStatusToggle(u.username, 0)">🛑 封禁</button>
                       <button v-else class="btn-sm btn-unban" @click="handleStatusToggle(u.username, 1)">🟢 解封</button>
                       <button class="btn-sm btn-del" :disabled="u.username === currentUser.username" @click="handleDeleteUser(u.username)">🗑️</button>
@@ -389,13 +395,11 @@
                     {{ n.pbk ? n.pbk.substring(0, 10) + '...' : '等待回传' }}
                     <button class="btn-link-action" style="margin-left: 4px;" @click="copyText(n.pbk)">复制</button>
                   </td>
-                  <!-- 单行不折行展示心跳状态 -->
                   <td class="status-cell-nowrap">
                     <span class="badge badge-ready">🟢 在线</span>
                     <div class="time-sub-text">{{ n.last_heartbeat }}</div>
                   </td>
                   <td>
-                    <!-- 操作列精简：仅保留配置、重置上报与吊销删除 -->
                     <div class="action-btn-row">
                       <button class="btn-sm btn-edit" @click="openNodeConfig(n)">✏️ 配置</button>
                       <button class="btn-sm btn-action" @click="forceResyncNode(n.node_id)">🔄 重置上报</button>
@@ -412,7 +416,6 @@
             </table>
           </div>
 
-          <!-- 远程海外 VPS 接入指令 (纯净无引号) -->
           <div class="panel-card" style="margin-top: 25px;">
             <h4 style="margin: 0 0 10px 0; color: #38bdf8;">🖥️ 远程海外 VPS 一键接入指令 (HTTPS 模式)</h4>
             <p class="card-desc">节点秒级上线，自动推导并向本面板回传真实公钥与网络参数：</p>
@@ -427,7 +430,7 @@
           </div>
         </div>
 
-        <!-- 主选项卡 3: 卡密管理 -->
+        <!-- 主选项卡 3: 卡密管理 (默认最近一个月筛选、增加3项删除功能、新增使用时间列) -->
         <div v-else-if="activeTab === 'cards'" class="cyber-card tab-content-card">
           <div class="sub-tab-nav">
             <button class="sub-tab-btn" :class="{ active: cardSubTab === 'inventory' }" @click="cardSubTab = 'inventory'">
@@ -466,21 +469,36 @@
               <button class="btn-cyber-refresh" @click="loadAdminData">🔄 刷新列表</button>
             </div>
 
+            <!-- 工具栏：默认最近一个月、多维度导出与3项删除功能 -->
             <div class="export-toolbar">
               <div class="date-filter-group">
-                <span class="filter-label">📅 日期范围:</span>
+                <span class="filter-label">📅 筛选日期 (默认近1月):</span>
                 <input v-model="exportFilter.startDate" type="date" class="cyber-input date-input" />
                 <span style="color: #64748b;">至</span>
                 <input v-model="exportFilter.endDate" type="date" class="cyber-input date-input" />
-                <button class="btn-sm btn-action" @click="exportByDateRange">按日期范围导出</button>
+                <button class="btn-sm btn-action" @click="exportByDateRange">按范围导出</button>
               </div>
 
+              <!-- 导出组 -->
               <div class="export-actions-group">
                 <button class="btn-sm btn-export-select" :disabled="selectedCards.length === 0" @click="exportSelectedCards">
-                  ☑️ 导出勾选卡密 (已选 {{ selectedCards.length }} 张)
+                  ☑️ 导出已选 ({{ selectedCards.length }})
                 </button>
                 <button class="btn-sm btn-cyber-success" @click="exportAllUnusedCards">
-                  📋 导出全部未售卡密
+                  📋 导出全部未售
+                </button>
+              </div>
+
+              <!-- 核心新增：3 项卡密批量清理与删除操作组 -->
+              <div class="delete-actions-group">
+                <button class="btn-sm btn-cyber-danger" @click="handleDeleteCardsByDate">
+                  🗑️ 清理范围未售
+                </button>
+                <button class="btn-sm btn-del" :disabled="selectedCards.length === 0" @click="handleDeleteSelectedCards">
+                  🗑️ 删除已勾选 ({{ selectedCards.length }})
+                </button>
+                <button class="btn-sm btn-reset" @click="handleDeleteInvalidCards">
+                  🧹 清空已核销无效卡
                 </button>
               </div>
             </div>
@@ -494,7 +512,9 @@
                     <th>套餐配额</th>
                     <th>套餐属性</th>
                     <th>核销状态</th>
-                    <th>生成日期</th>
+                    <th>生成时间</th>
+                    <!-- 核心新增：使用时间列 -->
+                    <th>使用时间</th>
                     <th>兑换用户</th>
                     <th>单张操作</th>
                   </tr>
@@ -503,13 +523,15 @@
                   <tr v-for="c in adminCards" :key="c.code">
                     <td style="text-align: center;"><input type="checkbox" :value="c.code" v-model="selectedCards" /></td>
                     <td class="font-mono text-cyan">{{ c.code }}</td>
-                    <td>{{ c.traffic_gb === 0 ? '♾️ 不限' : c.traffic_gb + ' GB' }} / {{ c.days >= 3650 ? '永久' : c.days + ' 天' }}</td>
+                    <td style="white-space: nowrap;">{{ c.traffic_gb === 0 ? '♾️ 不限' : c.traffic_gb + ' GB' }} / {{ c.days >= 3650 ? '永久' : c.days + ' 天' }}</td>
                     <td>
                       <span v-if="c.is_monthly === 1" class="badge badge-monthly">每月重置</span>
                       <span v-else class="text-muted" style="font-size: 11px;">普通固定</span>
                     </td>
                     <td><span class="badge" :class="c.is_used ? 'badge-used' : 'badge-ready'">{{ c.is_used ? '已核销' : '待售/有效' }}</span></td>
-                    <td class="text-muted">{{ c.created_at || '早期' }}</td>
+                    <td class="text-muted" style="white-space: nowrap;">{{ c.created_at || '早期' }}</td>
+                    <!-- 展示使用时间 -->
+                    <td style="white-space: nowrap; font-size: 11px; color: #38bdf8;">{{ c.used_at || '-' }}</td>
                     <td>{{ c.used_by || '-' }}</td>
                     <td><button class="btn-sm btn-action" @click="copyText(c.code)">复制</button></td>
                   </tr>
@@ -549,7 +571,7 @@
           </div>
         </div>
 
-        <!-- 主选项卡 4: 系统设置 (规范使用 fullchain.pem 和 privkey.pem) -->
+        <!-- 主选项卡 4: 系统设置 -->
         <div v-else-if="activeTab === 'settings'" class="cyber-card tab-content-card">
           <div class="card-header" style="margin-bottom: 22px;">
             <h3>⚙️ 系统发信、定时巡检、HTTPS 证书与全局设置</h3>
@@ -819,7 +841,6 @@
           </div>
         </div>
 
-        <!-- 通信密钥行：整合随机生成新密钥按钮 -->
         <div class="form-item">
           <label>节点通信密钥 (NODE_KEY)</label>
           <div style="display: flex; gap: 8px;">
@@ -889,7 +910,7 @@
       </div>
     </div>
 
-    <!-- 弹窗 6：手动粘贴上传证书 PEM 弹窗 (规范使用 fullchain.pem 和 privkey.pem) -->
+    <!-- 弹窗 6：手动粘贴上传证书 PEM 弹窗 -->
     <div v-if="showCustomCertModal" class="modal-backdrop" @click="showCustomCertModal = false">
       <div class="cyber-modal" style="max-width: 520px; text-align: left;" @click.stop>
         <h3>📋 手动安装第三方 HTTPS 证书</h3>
@@ -927,7 +948,7 @@ const countdown = ref(0)
 const sendingCode = ref(false)
 const systemNotice = ref('')
 
-// 算术验证码状态 (防机器人)
+// 算术验证码状态
 const loginCaptcha = reactive({ id: '', svg: '' })
 const loginCaptchaAns = ref('')
 const registerCaptcha = reactive({ id: '', svg: '' })
@@ -958,15 +979,25 @@ const showCustomCertModal = ref(false)
 const customCertPem = ref('')
 const customKeyPem = ref('')
 
-const currentUser = reactive({ username: '', email: '', role: '', used_mb: 0, limit_mb: 0, expire_date: '', is_monthly: 0, reset_day: 1, sub_url: '', nodes: [] })
+const currentUser = reactive({ username: '', email: '', role: '', uuid: '', used_mb: 0, limit_mb: 0, expire_date: '', is_monthly: 0, reset_day: 1, sub_url: '', nodes: [] })
 const authForm = reactive({ username: '', email: '', code: '', password: '' })
 const forgotForm = reactive({ email: '', code: '', new_password: '' })
 const cardGenForm = reactive({ traffic_gb: 50, days: 30, count: 5, is_monthly: false })
 const notifyForm = reactive({ notify_type: 'email', serverchan_key: '' })
 const pwdForm = reactive({ old_pwd: '', new_pwd: '', confirm_pwd: '' })
 
+// 卡密筛选日期：默认最近一个月 (30天前至今)
+const getDefaultDateRange = () => {
+  const now = new Date()
+  const end = now.toISOString().split('T')[0]
+  const past = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000)
+  const start = past.toISOString().split('T')[0]
+  return { start, end }
+}
+const initRange = getDefaultDateRange()
+
 const selectedCards = ref([])
-const exportFilter = reactive({ startDate: '', endDate: '' })
+const exportFilter = reactive({ startDate: initRange.start, endDate: initRange.end })
 
 const settingsForm = reactive({
   smtp_host: '',
@@ -1064,6 +1095,7 @@ const refreshUserInfo = async () => {
   try {
     const res = await axios.post('/api/user/refresh_info', { username: currentUser.username })
     if (res.data.code === 200) {
+      currentUser.uuid = res.data.data.uuid
       currentUser.used_mb = res.data.data.used_mb
       currentUser.limit_mb = res.data.data.limit_mb
       currentUser.expire_date = res.data.data.expire_date
@@ -1071,6 +1103,128 @@ const refreshUserInfo = async () => {
       currentUser.nodes = res.data.data.nodes
     }
   } catch (_) {}
+}
+
+// 用户自主重置节点凭证 (UUID)
+const handleUserResetUuid = async () => {
+  const tip =
+    `⚠️ 确定要重置您的节点连接凭证 (UUID) 吗？\n\n` +
+    `【为什么需要重置？】\n` +
+    `如果您的节点链接或订阅地址不慎泄露、分享给他人或怀疑被盗刷，可通过重置 UUID 让旧凭证彻底失效。\n\n` +
+    `【重置后要做什么？】\n` +
+    `重置后原有的全部节点链接与订阅将【立即失效断网】！您需要在电脑/手机客户端中重新复制最新订阅地址并【更新订阅】。\n\n` +
+    `确认重置吗？`
+
+  if (!confirm(tip)) return
+  try {
+    const res = await axios.post('/api/user/reset_uuid', { username: currentUser.username })
+    if (res.data.code === 200) {
+      ElMessage.success(res.data.msg)
+      currentUser.uuid = res.data.data.uuid
+      currentUser.sub_url = res.data.data.sub_url
+      currentUser.nodes = res.data.data.nodes
+
+      const session = JSON.parse(localStorage.getItem('xray_auth_session') || '{}')
+      if (session.user) {
+        session.user.uuid = res.data.data.uuid
+        session.user.sub_url = res.data.data.sub_url
+        session.user.nodes = res.data.data.nodes
+        localStorage.setItem('xray_auth_session', JSON.stringify(session))
+      }
+    }
+  } catch (_) {
+    ElMessage.error('重置凭证失败')
+  }
+}
+
+// 管理员重置指定用户的凭据 (UUID)
+const handleAdminResetUserUuid = async (targetUser) => {
+  const tip =
+    `⚠️ 确定要为用户 [${targetUser}] 重置节点凭证 (UUID) 吗？\n\n` +
+    `【为什么需要重置？】\n` +
+    `解决用户连接凭证泄露、被蹭网或违规滥用问题。\n\n` +
+    `【重置后生效后果】\n` +
+    `旧凭据将立刻断网失效，系统会自动向该用户发送邮件/微信通知其更新订阅。\n\n` +
+    `确认重置？`
+
+  if (!confirm(tip)) return
+  try {
+    const adminUser = currentUser.username || authForm.username
+    const res = await axios.post('/api/admin/users/reset_uuid', {
+      admin_user: adminUser,
+      admin_pwd: authForm.password,
+      target_user: targetUser
+    })
+    if (res.data.code === 200) {
+      ElMessage.success(res.data.msg)
+      loadAdminData()
+    }
+  } catch (_) {
+    ElMessage.error('重置用户凭证失败')
+  }
+}
+
+// 卡密删除操作 1：删除勾选
+const handleDeleteSelectedCards = async () => {
+  if (selectedCards.value.length === 0) return ElMessage.warning('请先在表格左侧勾选要删除的卡密')
+  if (!confirm(`⚠️ 确定要彻底删除已勾选的 ${selectedCards.value.length} 张卡密吗？`)) return
+  try {
+    const adminUser = currentUser.username || authForm.username
+    const res = await axios.post('/api/admin/cards/delete', {
+      admin_user: adminUser,
+      admin_pwd: authForm.password,
+      mode: 'selected',
+      selected_codes: selectedCards.value
+    })
+    if (res.data.code === 200) {
+      ElMessage.success(res.data.msg)
+      selectedCards.value = []
+      loadAdminData()
+    }
+  } catch (_) {
+    ElMessage.error('删除勾选卡密失败')
+  }
+}
+
+// 卡密删除操作 2：按日期范围删除
+const handleDeleteCardsByDate = async () => {
+  if (!exportFilter.startDate && !exportFilter.endDate) return ElMessage.warning('请选择需要删除的日期范围')
+  if (!confirm(`⚠️ 警告：确定要删除 ${exportFilter.startDate} 至 ${exportFilter.endDate} 范围内所有未使用的卡密吗？已使用卡密将自动保留。`)) return
+  try {
+    const adminUser = currentUser.username || authForm.username
+    const res = await axios.post('/api/admin/cards/delete', {
+      admin_user: adminUser,
+      admin_pwd: authForm.password,
+      mode: 'date',
+      start_date: exportFilter.startDate,
+      end_date: exportFilter.endDate
+    })
+    if (res.data.code === 200) {
+      ElMessage.success(res.data.msg)
+      loadAdminData()
+    }
+  } catch (_) {
+    ElMessage.error('按日期范围删除失败')
+  }
+}
+
+// 卡密删除操作 3：清空已核销卡密
+const handleDeleteInvalidCards = async () => {
+  if (!confirm('⚠️ 警告：确定要清理所有已被使用核销的卡密吗？这将彻底清空已核销卡密的历史流水。')) return
+  try {
+    const adminUser = currentUser.username || authForm.username
+    const res = await axios.post('/api/admin/cards/delete', {
+      admin_user: adminUser,
+      admin_pwd: authForm.password,
+      mode: 'invalid'
+    })
+    if (res.data.code === 200) {
+      ElMessage.success(res.data.msg)
+      loadAdminData()
+    }
+  } catch (_) {
+    ElMessage.error('清空已核销卡密失败')
+  }
 }
 
 const authCardTitle = computed(() => {
@@ -1460,7 +1614,6 @@ const openNodeConfig = (node) => {
   showNodeConfigModal.value = true
 }
 
-// 弹窗内一键随机生成新密钥
 const generateNewNodeKey = () => {
   const chars = '0123456789abcdef'
   let key = ''
@@ -1490,7 +1643,6 @@ const saveNodeFullConfig = async () => {
   }
 }
 
-// 核心功能：强制节点重置上报
 const forceResyncNode = async (nodeId) => {
   try {
     const adminUser = currentUser.username || authForm.username
@@ -1510,7 +1662,6 @@ const forceResyncNode = async (nodeId) => {
   }
 }
 
-// 吊销删除：附带明确恢复指令说明
 const revokeDeleteNode = async (nodeId) => {
   const tip =
     `⚠️ 确定要彻底吊销并删除该节点吗？\n\n` +
@@ -2166,6 +2317,7 @@ const logout = () => {
   color: #94a3b8;
 }
 
+/* 工具栏分区分组布局 */
 .export-toolbar {
   background: #0a0f1d;
   border: 1px solid #1e293b;
@@ -2186,7 +2338,8 @@ const logout = () => {
 }
 .filter-label { color: #94a3b8; font-weight: 600; white-space: nowrap; }
 .date-input { width: 140px; padding: 6px 10px; font-size: 12px; }
-.export-actions-group { display: flex; gap: 8px; align-items: center; }
+.export-actions-group, .delete-actions-group { display: flex; gap: 8px; align-items: center; }
+
 .btn-export-select {
   background: #3b82f6;
   color: white;
@@ -2196,6 +2349,16 @@ const logout = () => {
   opacity: 0.35;
   cursor: not-allowed;
   background: #475569;
+}
+
+.btn-cyber-danger {
+  background: #dc2626;
+  color: white;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  font-weight: 600;
+  white-space: nowrap;
 }
 
 .traffic-meter { margin: 15px 0; }
@@ -2216,7 +2379,6 @@ const logout = () => {
   border: 1px solid rgba(56, 189, 248, 0.4);
 }
 
-/* 核心优化：输入框 70% 黄金宽度 + 260px~500px 最小/最大宽度保底 */
 .cyber-input {
   width: 70%;
   min-width: 260px;

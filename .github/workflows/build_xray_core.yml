@@ -48,7 +48,7 @@ jobs:
 
           RAW_VER=$(curl -sSL -H "Authorization: Bearer ${{ github.token }}" https://api.github.com/repos/XTLS/Xray-core/releases/latest | jq -r .tag_name)
           if [ -z "$RAW_VER" ] || [ "$RAW_VER" = "null" ]; then
-            RAW_VER=$(curl -sSI https://github.com/XTLS/Xray-core/releases/latest | grep -i "^location:" | sed -n 's/.*tag\/\([^\r\n]*\).*/\1/p' | tr -d '\r\n')
+            RAW_VER=$(curl -sSI https://github.com/XTLS/Xray-core/releases/latest | grep -i "^location:" | sed -n 's/.*tag\/\([^\\r\n]*\).*/\1/p' | tr -d '\r\n')
           fi
 
           INPUT_VER="${{ github.event.inputs.xray_version }}"
@@ -93,17 +93,17 @@ jobs:
           HAS_DH="${{ steps.prep.outputs.has_dockerhub }}"
           DH_USER="${{ steps.prep.outputs.dh_user }}"
           
-          # GHCR 纯内核标签
-          TAG_LIST="ghcr.io/${OWNER}/xray:latest"
+          # GHCR 纯内核标签 (增加 :core 和 :core-${VER})
+          TAG_LIST="ghcr.io/${OWNER}/xray:latest,ghcr.io/${OWNER}/xray:core"
           if [ -n "$VER" ] && [ "$VER" != "latest" ]; then
-            TAG_LIST="${TAG_LIST},ghcr.io/${OWNER}/xray:${VER}"
+            TAG_LIST="${TAG_LIST},ghcr.io/${OWNER}/xray:${VER},ghcr.io/${OWNER}/xray:core-${VER}"
           fi
 
-          # Docker Hub 纯内核标签
+          # Docker Hub 纯内核标签 (增加 :core 和 :core-${VER})
           if [ "$HAS_DH" = "true" ]; then
-            TAG_LIST="${TAG_LIST},${DH_USER}/xray:latest"
+            TAG_LIST="${TAG_LIST},${DH_USER}/xray:latest,${DH_USER}/xray:core"
             if [ -n "$VER" ] && [ "$VER" != "latest" ]; then
-              TAG_LIST="${TAG_LIST},${DH_USER}/xray:${VER}"
+              TAG_LIST="${TAG_LIST},${DH_USER}/xray:${VER},${DH_USER}/xray:core-${VER}"
             fi
           fi
 
