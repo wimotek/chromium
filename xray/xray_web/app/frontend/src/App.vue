@@ -17,6 +17,7 @@
     <main class="main-body">
       <!-- 1. 登录 / 注册 / 找回密码 模块 -->
       <div v-if="!currentUser.username" class="auth-center">
+        <!-- 登录页系统公告展示栏 -->
         <div v-if="systemNotice" class="cyber-notice-card">
           <div class="notice-header"><span class="notice-icon">📢</span><strong>系统公告 NOTICE</strong></div>
           <div class="notice-body">{{ systemNotice }}</div>
@@ -25,7 +26,7 @@
         <div class="cyber-card auth-box">
           <h2 class="card-title">{{ authCardTitle }}</h2>
 
-          <!-- A. 登录 -->
+          <!-- A. 登录表单 -->
           <template v-if="authMode === 'login'">
             <div class="form-item">
               <label>ACCOUNT / 用户名 或 注册邮箱</label>
@@ -35,6 +36,7 @@
               <label>ACCESS KEY / 登录密码</label>
               <input v-model="authForm.password" type="password" class="cyber-input" placeholder="请输入密码" />
             </div>
+            <!-- 防机器人算术验证码 -->
             <div class="form-item">
               <label>CAPTCHA / 算术验证 (点击图片可刷新)</label>
               <div class="captcha-group">
@@ -51,7 +53,7 @@
             </div>
           </template>
 
-          <!-- B. 注册 -->
+          <!-- B. 注册表单 -->
           <template v-else-if="authMode === 'register'">
             <div class="form-item">
               <label>USER IDENTIFIER / 设置用户名</label>
@@ -61,6 +63,7 @@
               <label>EMAIL / 接收激活码邮箱</label>
               <input v-model="authForm.email" type="email" class="cyber-input" placeholder="name@example.com" />
             </div>
+            <!-- 防刷发信算术验证码 -->
             <div class="form-item">
               <label>CAPTCHA / 算术验证 (防止脚本刷发信)</label>
               <div class="captcha-group">
@@ -89,7 +92,7 @@
             </div>
           </template>
 
-          <!-- C. 找回密码 -->
+          <!-- C. 找回密码表单 -->
           <template v-else-if="authMode === 'forgot'">
             <div class="form-item">
               <label>REGISTERED EMAIL / 绑定的注册邮箱</label>
@@ -170,7 +173,7 @@
           </div>
         </div>
 
-        <!-- 节点列表与通用聚合订阅 (支持多 SNI 下拉切换联动) -->
+        <!-- 节点列表与通用聚合订阅 (支持多 SNI 下拉切换联动与用户自主重置 UUID) -->
         <div class="cyber-card col-span-2">
           <div class="card-header header-nowrap-row">
             <h3 class="header-title-text">🌐 全球加速节点列表与通用订阅 (共 {{ currentUser.nodes ? currentUser.nodes.length : 0 }} 个节点)</h3>
@@ -313,7 +316,7 @@
           </button>
         </div>
 
-        <!-- 主选项卡 1: 用户管理 -->
+        <!-- 主选项卡 1: 用户管理 (支持管理员查看凭证与重置用户 UUID) -->
         <div v-if="activeTab === 'users'" class="cyber-card tab-content-card">
           <div class="card-header">
             <h3>👥 接入用户治理列表</h3>
@@ -406,11 +409,13 @@
                     {{ n.pbk ? n.pbk.substring(0, 10) + '...' : '等待回传' }}
                     <button class="btn-link-action" style="margin-left: 4px;" @click="copyText(n.pbk)">复制</button>
                   </td>
+                  <!-- 单行不折行展示心跳状态 -->
                   <td class="status-cell-nowrap">
                     <span class="badge badge-ready">🟢 在线</span>
                     <div class="time-sub-text">{{ n.last_heartbeat }}</div>
                   </td>
                   <td>
+                    <!-- 操作列精简：仅保留配置、重置上报与吊销删除 -->
                     <div class="action-btn-row">
                       <button class="btn-sm btn-edit" @click="openNodeConfig(n)">✏️ 配置</button>
                       <button class="btn-sm btn-action" @click="forceResyncNode(n.node_id)">🔄 重置上报</button>
@@ -427,6 +432,7 @@
             </table>
           </div>
 
+          <!-- 远程海外 VPS 接入指令 (纯净无引号) -->
           <div class="panel-card" style="margin-top: 25px;">
             <h4 style="margin: 0 0 10px 0; color: #38bdf8;">🖥️ 远程海外 VPS 一键接入指令 (HTTPS 模式)</h4>
             <p class="card-desc">节点秒级上线，自动推导并向本面板回传真实公钥与网络参数：</p>
@@ -441,7 +447,7 @@
           </div>
         </div>
 
-        <!-- 主选项卡 3: 卡密管理 -->
+        <!-- 主选项卡 3: 卡密管理 (默认最近1月筛选、3 项清理功能、展示使用时间) -->
         <div v-else-if="activeTab === 'cards'" class="cyber-card tab-content-card">
           <div class="sub-tab-nav">
             <button class="sub-tab-btn" :class="{ active: cardSubTab === 'inventory' }" @click="cardSubTab = 'inventory'">
@@ -498,6 +504,7 @@
                 </button>
               </div>
 
+              <!-- 3 项卡密批量清理与删除操作组 -->
               <div class="delete-actions-group">
                 <button class="btn-sm btn-cyber-danger" @click="handleDeleteCardsByDate">
                   🗑️ 清理范围未售
@@ -530,7 +537,7 @@
                   <tr v-for="c in adminCards" :key="c.code">
                     <td style="text-align: center;"><input type="checkbox" :value="c.code" v-model="selectedCards" /></td>
                     <td class="font-mono text-cyan">{{ c.code }}</td>
-                    <td style="white-space: nowrap;">{{ c.traffic_gb === 0 ? '♾️ 不限' : c.traffic_gb + ' GB' }} / {{ c.days >= 3650 ? '永久' : c.days + ' 天' }}</td>
+                    <td>{{ c.traffic_gb === 0 ? '♾️ 不限' : c.traffic_gb + ' GB' }} / {{ c.days >= 3650 ? '永久' : c.days + ' 天' }}</td>
                     <td>
                       <span v-if="c.is_monthly === 1" class="badge badge-monthly">每月重置</span>
                       <span v-else class="text-muted" style="font-size: 11px;">普通固定</span>
@@ -773,13 +780,13 @@
       </div>
     </div>
 
-    <!-- 弹窗 2：管理员查看指定用户的全节点订阅与单节点二维码 -->
+    <!-- 弹窗 2：管理员查看指定用户的全节点订阅与展开的所有 SNI 子线路 -->
     <div v-if="showUserCredModal" class="modal-backdrop" @click="showUserCredModal = false">
       <div class="cyber-modal" style="max-width: 580px; text-align: left;" @click.stop>
         <h3>📱 用户 [{{ targetCredUser.username }}] 的节点凭据与订阅</h3>
         
         <div class="node-field" style="margin-top: 15px;">
-          <label>通用多节点聚合订阅地址 (适用于全客户端批量导入)：</label>
+          <label>通用多节点聚合订阅地址 (全客户端批量导入)：</label>
           <div class="code-display text-cyan" style="word-break: break-all;">{{ targetCredUser.sub_url }}</div>
           <div class="btn-group" style="margin-top: 8px;">
             <button class="btn-sm btn-action" @click="copyText(targetCredUser.sub_url)">📋 复制订阅地址</button>
@@ -788,7 +795,7 @@
         </div>
 
         <div class="inner-divider">
-          <div class="inner-divider-title">🌐 各集群节点直连链接清单 (共 {{ targetCredUser.node_links ? targetCredUser.node_links.length : 0 }} 个)</div>
+          <div class="inner-divider-title">🌐 各集群节点直连线路清单 (共 {{ targetCredUser.node_links ? targetCredUser.node_links.length : 0 }} 条)</div>
           <div style="max-height: 240px; overflow-y: auto;">
             <div v-for="nl in targetCredUser.node_links" :key="nl.name" style="background: #0b1120; border: 1px solid #1e293b; border-radius: 6px; padding: 10px; margin-bottom: 8px;">
               <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
@@ -836,7 +843,7 @@
           <input v-model="nodeEditForm.dest" class="cyber-input modal-input" placeholder="itunes.apple.com:443" />
         </div>
 
-        <!-- 核心特性：多 SNI 候选域名列表输入框 -->
+        <!-- 伪装域名列表 (ServerNames) 核心输入行 -->
         <div class="form-item">
           <label>伪装域名列表 (ServerNames / 逗号分隔多域名)：</label>
           <input v-model="nodeEditForm.server_names" class="cyber-input modal-input font-mono" placeholder="itunes.apple.com,swdist.apple.com,apps.apple.com" />
@@ -919,7 +926,7 @@
       </div>
     </div>
 
-    <!-- 弹窗 6：手动粘贴上传证书 PEM 弹窗 -->
+    <!-- 弹窗 6：手动粘贴上传证书 PEM 弹窗 (规范使用 fullchain.pem 和 privkey.pem) -->
     <div v-if="showCustomCertModal" class="modal-backdrop" @click="showCustomCertModal = false">
       <div class="cyber-modal" style="max-width: 520px; text-align: left;" @click.stop>
         <h3>📋 手动安装第三方 HTTPS 证书</h3>
@@ -1322,19 +1329,19 @@ const executeExport = async (payload, successTip) => {
   }
 }
 
-// 唯一声明：勾选导出
+// 唯一保留：勾选导出
 const exportSelectedCards = () => {
   if (selectedCards.value.length === 0) return ElMessage.warning('请先勾选要导出的卡密')
   executeExport({ selected_codes: selectedCards.value }, '已复制选中的卡密')
 }
 
-// 唯一声明：日期范围导出
+// 唯一保留：日期范围导出
 const exportByDateRange = () => {
   if (!exportFilter.startDate && !exportFilter.endDate) return ElMessage.warning('请先选择日期范围')
   executeExport({ start_date: exportFilter.startDate, end_date: exportFilter.endDate }, '已导出指定日期范围内的未售卡密')
 }
 
-// 唯一声明：全部未售导出
+// 唯一保留：全部未售导出
 const exportAllUnusedCards = () => executeExport({}, '已复制全部未售卡密')
 
 const startCountdown = () => {
@@ -1625,8 +1632,8 @@ const openNodeConfig = (node) => {
   nodeEditForm.name = node.name
   nodeEditForm.ip = node.ip
   nodeEditForm.port = node.port
-  nodeEditForm.dest = node.dest || 'www.microsoft.com:443'
-  nodeEditForm.sni = node.sni || 'www.microsoft.com'
+  nodeEditForm.dest = node.dest || 'itunes.apple.com:443'
+  nodeEditForm.sni = node.sni || 'itunes.apple.com'
   nodeEditForm.server_names = node.server_names || node.sni || ''
   nodeEditForm.sid = node.sid
   nodeEditForm.node_key = node.node_key
@@ -1634,6 +1641,7 @@ const openNodeConfig = (node) => {
   showNodeConfigModal.value = true
 }
 
+// 弹窗内一键随机生成新密钥
 const generateNewNodeKey = () => {
   const chars = '0123456789abcdef'
   let key = ''
@@ -1663,6 +1671,7 @@ const saveNodeFullConfig = async () => {
   }
 }
 
+// 强制节点重置上报
 const forceResyncNode = async (nodeId) => {
   try {
     const adminUser = currentUser.username || authForm.username
@@ -1682,6 +1691,7 @@ const forceResyncNode = async (nodeId) => {
   }
 }
 
+// 吊销删除：附带明确恢复指令说明
 const revokeDeleteNode = async (nodeId) => {
   const tip =
     `⚠️ 确定要彻底吊销并删除该节点吗？\n\n` +
@@ -2355,6 +2365,7 @@ const logout = () => {
   color: #94a3b8;
 }
 
+/* 工具栏分区分组布局 */
 .export-toolbar {
   background: #0a0f1d;
   border: 1px solid #1e293b;
@@ -2416,6 +2427,7 @@ const logout = () => {
   border: 1px solid rgba(56, 189, 248, 0.4);
 }
 
+/* 核心优化：输入框 70% 黄金宽度 + 260px~500px 最小/最大宽度保底 */
 .cyber-input {
   width: 70%;
   min-width: 260px;

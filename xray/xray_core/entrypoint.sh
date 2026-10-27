@@ -42,7 +42,6 @@ PORT="${PORT:-443}"
 DEST="${DEST:-www.microsoft.com:443}"
 SERVER_NAMES="${SERVER_NAMES:-www.microsoft.com,microsoft.com}"
 
-# 提取主域名与纯净数组 (绝不含端口)
 FIRST_SERVER_NAME=$(echo "$SERVER_NAMES" | cut -d',' -f1 | cut -d':' -f1 | tr -d ' ')
 
 [ -z "$SERVER_IP" ] && SERVER_IP=$(curl -s4 --max-time 3 https://api.ipify.org || echo "127.0.0.1")
@@ -60,7 +59,7 @@ SERVER_NAMES_JSON=$(echo "$SERVER_NAMES" | awk -F',' '{
     printf "]"
 }')
 
-# 3. 密钥持久化与 43 位公钥自愈提取
+# 3. 密钥持久化与 43 位公钥精准提取
 if [ -f "$PRIVATE_KEY_FILE" ] && [ -s "$PRIVATE_KEY_FILE" ]; then
     PRIVATE_KEY=$(cat "$PRIVATE_KEY_FILE" | tr -d ' \r\n')
 fi
@@ -91,7 +90,7 @@ fi
 
 UUID="${UUID:-$(/usr/bin/xray uuid)}"
 
-# 5. 初始本地 config.json 生成 (写入完整的 serverNames 列表)
+# 5. 初始本地 config.json 生成 (精准指定 vless 协议入站)
 if [ ! -s "$CONFIG_FILE" ]; then
     [ ! -f "$TEMPLATE_FILE" ] && exit 1
     TMP_CONFIG="/tmp/config.init.tmp.json"
@@ -103,25 +102,60 @@ if [ ! -s "$CONFIG_FILE" ]; then
         --arg shortid "$SHORT_ID" \
         --argjson servernames "$SERVER_NAMES_JSON" \
         '
-        .inbounds[0].port = ($port | tonumber) |
-        .inbounds[0].settings.clients[0].id = $uuid |
-        .inbounds[0].settings.clients[0].email = "admin@local.host" |
-        .inbounds[0].streamSettings.realitySettings.dest = $dest |
-        .inbounds[0].streamSettings.realitySettings.serverNames = $servernames |
-        .inbounds[0].streamSettings.realitySettings.privateKey = $privkey |
-        .inbounds[0].streamSettings.realitySettings.shortIds = [$shortid]
+        (.inbounds[] | select(.protocol == "vless")) |= (
+            .port = ($port | tonumber) |
+            .settings.clients[0].id = $uuid |
+            .settings.clients[0].email = "admin@local.host" |
+            .streamSettings.realitySettings.dest = $dest |
+            .streamSettings.realitySettings.serverNames = $servernames |
+            .streamSettings.realitySettings.privateKey = $privkey |
+            .streamSettings.realitySettings.shortIds = [$shortid]
+        )
         ' > "$TMP_CONFIG"
     [ -s "$TMP_CONFIG" ] && mv "$TMP_CONFIG" "$CONFIG_FILE"
 fi
 
-# 6. 集群节点模式 vs 单机模式
+# ================= 6. Xray 守护进程平滑重启架构 =================
+XRAY_PID=""
+
+start_xray() {
+    /usr/bin/xray run -config "$CONFIG_FILE" &
+    XRAY_PID=$!
+    echo "==> [Xray 守护] Xray-core 已启动 (PID: $XRAY_PID)"
+}
+
+restart_xray() {
+    echo "==> [Xray 守护] 检测到配置变动，正在平滑重启 Xray-core..."
+    if [ -n "$XRAY_PID" ] && kill -0 "$XRAY_PID" 2>/dev/null; then
+        kill -TERM "$XRAY_PID" 2>/dev/null || true
+        wait "$XRAY_PID" 2>/dev/null || true
+    fi
+    start_xray
+}
+
+trap 'echo "正在停止服务..."; [ -n "$XRAY_PID" ] && kill -TERM "$XRAY_PID" 2>/dev/null; exit 0' TERM INT
+
+# ================= 7. 运行模式分流 =================
+
 if [ -n "$PANEL_URL" ]; then
     [ -f "$CLIENT_INFO_FILE" ] && rm -f "$CLIENT_INFO_FILE"
 
+    # 核心防冲突：基于本机公网 IP 与端口生成唯一标识，绝不被其他节点覆盖！
+    MACHINE_NODE_ID=$(printf "%s_%s" "$SERVER_IP" "$PORT" | tr -c 'a-zA-Z0-9_' '_')
+
     if [ -f "$NODE_ID_FILE" ] && [ -s "$NODE_ID_FILE" ]; then
-        NODE_ID=$(cat "$NODE_ID_FILE" | tr -d ' \r\n')
+        SAVED_ID=$(cat "$NODE_ID_FILE" | tr -d ' \r\n')
+        # 如果检测到 node_id 与本机真实 IP 不符（说明是从节点 1 复制了 data 目录），自动重置防打架！
+        if [ "$SAVED_ID" != "$MACHINE_NODE_ID" ] && [ "$SERVER_IP" != "127.0.0.1" ]; then
+            echo "==> [Node ID 纠偏] 检测到拷贝的历史旧节点标识，自动绑定本机专属 ID: $MACHINE_NODE_ID"
+            NODE_ID="$MACHINE_NODE_ID"
+            echo "$NODE_ID" > "$NODE_ID_FILE"
+            rm -f "$NODE_KEY_FILE"
+        else
+            NODE_ID="$SAVED_ID"
+        fi
     else
-        NODE_ID=$(openssl rand -hex 8)
+        NODE_ID="$MACHINE_NODE_ID"
         echo "$NODE_ID" > "$NODE_ID_FILE"
     fi
 
@@ -136,13 +170,14 @@ if [ -n "$PANEL_URL" ]; then
 
     remote_agent_loop() {
         echo "==> [Cluster Node] 守护进程启动 (主控: $PANEL_URL | 节点ID: $NODE_ID)..."
+        sleep 3
 
         while true; do
             if [ -f "$PUBLIC_KEY_FILE" ]; then
                 PUBLIC_KEY=$(cat "$PUBLIC_KEY_FILE" | tr -d ' \r\n' | cut -c 1-43)
             fi
 
-            # 节点上报：携带完整的 SERVER_NAMES 列表供主控同步
+            # 1. 向主控上报健康心跳 (只报送本机实际硬件与网络参数，不强行覆盖主控配置)
             HB_RESP=$(curl -k -s -X POST "${PANEL_URL}/api/node/heartbeat" \
                  -H "Content-Type: application/json" \
                  --connect-timeout 8 \
@@ -155,15 +190,14 @@ if [ -n "$PANEL_URL" ]; then
                 echo "$NODE_KEY" > "$NODE_KEY_FILE"
             fi
 
-            # 从主控拉取用户名单与网络参数 (支持接收 server_names 数组进行热更)
+            # 2. 从主控全量下发用户与网络参数 (以主控后台设定为唯一权威)
             USER_RESP=$(curl -k -s --connect-timeout 8 --max-time 15 "${PANEL_URL}/api/node/sync?node_id=${NODE_ID}&token=${NODE_KEY}" 2>&1 || true)
             if echo "$USER_RESP" | grep -q '"code":200'; then
-                REMOTE_USERS=$(echo "$USER_RESP" | jq '.users')
+                REMOTE_USERS=$(echo "$USER_RESP" | jq '.users // []')
                 REMOTE_PORT=$(echo "$USER_RESP" | jq -r '.node_config.port // empty')
                 REMOTE_DEST=$(echo "$USER_RESP" | jq -r '.node_config.dest // empty')
                 REMOTE_SID=$(echo "$USER_RESP" | jq -r '.node_config.sid // empty')
-                # 接收主控下发的 JSON 域名列表数组
-                REMOTE_SNI_ARRAY=$(echo "$USER_RESP" | jq '.node_config.server_names // empty')
+                REMOTE_SNI_ARRAY=$(echo "$USER_RESP" | jq -c '.node_config.server_names // []')
 
                 if [ -n "$REMOTE_SID" ] && [ "$REMOTE_SID" != "$SHORT_ID" ]; then
                     SHORT_ID="$REMOTE_SID"
@@ -171,33 +205,37 @@ if [ -n "$PANEL_URL" ]; then
                 fi
 
                 TMP_SYNC="/tmp/config.agent.sync.json"
+
+                # 精准锁定 VLESS 协议入站，不破坏 10085 API
                 jq --argjson new_clients "$REMOTE_USERS" \
                    --arg port "$REMOTE_PORT" \
                    --arg dest "$REMOTE_DEST" \
                    --argjson snis "$REMOTE_SNI_ARRAY" \
                    --arg sid "$SHORT_ID" \
                    '
-                   .inbounds[0].settings.clients = $new_clients |
-                   (if $port != "" then .inbounds[0].port = ($port | tonumber) else . end) |
-                   (if $dest != "" then .inbounds[0].streamSettings.realitySettings.dest = $dest else . end) |
-                   (if ($snis | length) > 0 then .inbounds[0].streamSettings.realitySettings.serverNames = $snis else . end) |
-                   (if $sid != "" then .inbounds[0].streamSettings.realitySettings.shortIds = [$sid] else . end)
+                   (.inbounds[] | select(.protocol == "vless")) |= (
+                       .settings.clients = $new_clients |
+                       (if $port != "" then .port = ($port | tonumber) else . end) |
+                       (if $dest != "" then .streamSettings.realitySettings.dest = $dest else . end) |
+                       (if ($snis | length) > 0 then .streamSettings.realitySettings.serverNames = $snis else . end) |
+                       (if $sid != "" then .streamSettings.realitySettings.shortIds = [$sid] else . end)
+                   )
                    ' \
                    "$CONFIG_FILE" > "$TMP_SYNC"
 
                 if [ -s "$TMP_SYNC" ]; then
                     if ! cmp -s "$TMP_SYNC" "$CONFIG_FILE"; then
                         mv "$TMP_SYNC" "$CONFIG_FILE"
-                        killall -HUP xray 2>/dev/null || pkill -HUP xray 2>/dev/null || true
                         CLIENT_COUNT=$(echo "$REMOTE_USERS" | jq 'length')
-                        echo "==> [Cluster Node] 成功热更 Xray 核心 (用户数: $CLIENT_COUNT, 伪装域名数: $(echo "$REMOTE_SNI_ARRAY" | jq 'length'))"
+                        echo "==> [Cluster Node] 成功应用主控最新配置！(已同步 $CLIENT_COUNT 位用户)"
+                        restart_xray
                     else
                         rm -f "$TMP_SYNC"
                     fi
                 fi
             fi
 
-            # 统计增量流量回传主控扣费
+            # 3. 统计增量流量回传主控
             TRAFFIC_RAW=$(/usr/bin/xray api statsquery --server=127.0.0.1:10085 -pattern "user>>>" -reset=true 2>/dev/null || true)
             if [ -n "$TRAFFIC_RAW" ] && echo "$TRAFFIC_RAW" | grep -q "stat"; then
                 TRAFFIC_PAYLOAD=$(echo "$TRAFFIC_RAW" | jq '[.stat[]? | {email: (.name | split(">>>")[1]), bytes: (.value | tonumber)}]')
@@ -212,7 +250,9 @@ if [ -n "$PANEL_URL" ]; then
         done
     }
 
+    start_xray
     remote_agent_loop &
+    wait $XRAY_PID
 
 else
     VLESS_URL="vless://${UUID}@${SERVER_IP}:${PORT}?security=reality&encryption=none&pbk=${PUBLIC_KEY}&headerType=none&fp=chrome&type=tcp&flow=xtls-rprx-vision&sni=${FIRST_SERVER_NAME}&sid=${SHORT_ID}#Xray-Reality"
@@ -237,7 +277,7 @@ EOF
 
     echo "==> [Standalone] 单机模式启动成功！节点连接信息如下："
     cat "$CLIENT_INFO_FILE"
-fi
 
-echo "==> Starting Xray-core daemon using /data/config.json..."
-exec /usr/bin/xray run -config /data/config.json
+    start_xray
+    wait $XRAY_PID
+fi

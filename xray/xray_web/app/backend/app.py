@@ -29,7 +29,6 @@ from cert_manager import (
 app = Flask(__name__, static_folder='../frontend/dist', static_url_path='/')
 init_db()
 
-# 核心辅助函数：提取节点配置的所有有效 SNI 域名列表 (去端口、去重复)
 def get_node_snis(node: dict) -> list[str]:
     raw = node.get("server_names") or node.get("sni") or "www.microsoft.com"
     snis = []
@@ -39,7 +38,6 @@ def get_node_snis(node: dict) -> list[str]:
             snis.append(clean)
     return snis if snis else ["www.microsoft.com"]
 
-# 构造节点链接：默认随机挑选一个 SNI 组装，打散特征对抗审查
 def build_node_link(uuid_str: str, node: dict, remark: str, chosen_sni: str = None) -> str:
     snis = get_node_snis(node)
     sni = chosen_sni if (chosen_sni and chosen_sni in snis) else random.choice(snis)
@@ -144,7 +142,7 @@ def scheduled_worker_loop():
 
 threading.Thread(target=scheduled_worker_loop, daemon=True).start()
 
-# ==================== 前台聚合订阅 (每个节点默认随机分配 SNI) ====================
+# ==================== 前台聚合订阅 (支持多物理节点 + 多 SNI 裂变全量展开) ====================
 
 @app.route('/')
 def index():
@@ -170,6 +168,7 @@ def get_qrcode_svg():
     buf.seek(0)
     return send_file(buf, mimetype='image/svg+xml')
 
+# 核心下发：遍历所有 status=1 的有效节点，并全量展开 SNI 线路
 @app.route('/api/sub', methods=['GET'])
 def get_subscription():
     token = request.args.get('token', '').strip()
@@ -190,9 +189,15 @@ def get_subscription():
     links = []
     for n in nodes:
         if len(n.get("pbk", "")) == 43:
-            remark = f"{n['name']}"
-            # 订阅下发：默认随机挑选合法 SNI
-            links.append(build_node_link(user['uuid'], n, remark))
+            snis = get_node_snis(n)
+            # 如果配置了多个 SNI 域名，全量展开为多条线路供客户端测速选优
+            if len(snis) > 1:
+                for sni_item in snis:
+                    remark = f"{n['name']} ({sni_item})"
+                    links.append(build_node_link(user['uuid'], n, remark, chosen_sni=sni_item))
+            else:
+                remark = f"{n['name']}"
+                links.append(build_node_link(user['uuid'], n, remark, chosen_sni=snis[0]))
 
     sub_text = "\n".join(links)
     b64_sub = base64.b64encode(sub_text.encode('utf-8')).decode('utf-8')
@@ -251,7 +256,7 @@ def open_faka_generate():
 
     return code, 200, {"Content-Type": "text/plain; charset=utf-8"}
 
-# ==================== 远程节点集群心跳与双向同步 ====================
+# ==================== 远程节点集群心跳 (确立主控为唯一配置权威源) ====================
 
 @app.route('/api/node/heartbeat', methods=['POST'])
 def node_heartbeat():
@@ -272,7 +277,6 @@ def node_heartbeat():
 
     dest = raw_dest if ":" in raw_dest else f"{raw_dest}:443"
 
-    # 清洗多域名列表
     snis = []
     for part in re.split(r'[,;\s]+', raw_server_names or raw_sni):
         clean = part.strip().split(":")[0]
@@ -281,7 +285,7 @@ def node_heartbeat():
     server_names_str = ",".join(snis)
     primary_sni = snis[0] if snis else "www.microsoft.com"
 
-    # 43 位公钥智能抢救
+    # 43 位公钥智能抢救与切片
     pbk = raw_pbk
     if len(pbk) != 43:
         matches = re.findall(r'[A-Za-z0-9_\-]{43}', pbk)
@@ -298,7 +302,7 @@ def node_heartbeat():
     c.execute("SELECT * FROM nodes WHERE node_id=?", (node_id,))
     node = c.fetchone()
 
-    # 首次接入：绑定注册
+    # 首次接入：绑定注册为新节点
     if not node:
         auto_name = f"节点-{node_ip}"
         c.execute("""
@@ -316,20 +320,20 @@ def node_heartbeat():
     if pending_key and node_key == current_key:
         c.execute("""
             UPDATE nodes 
-            SET node_key=?, pending_key='', ip=?, port=?, dest=?, sni=?, server_names=?, pbk=?, sid=?, status=1, last_heartbeat=? 
+            SET node_key=?, pending_key='', ip=?, pbk=?, sid=COALESCE(NULLIF(sid, ''), ?), status=1, last_heartbeat=? 
             WHERE node_id=?
-        """, (pending_key, node_ip, node_port, dest, primary_sni, server_names_str, pbk, sid, now_str, node_id))
+        """, (pending_key, node_ip, pbk, sid, now_str, node_id))
         conn.commit()
         conn.close()
         return jsonify({"code": 200, "msg": "心跳成功，已为您同步下发新密钥", "new_node_key": pending_key})
 
+    # 核心设计：正常心跳只更新 IP、公钥与时间戳，绝对不覆盖管理员在后台配置的 dest、sni、port！
     if node_key == current_key:
-        # 心跳正常：更新公钥、ShortId 与最新上报的 server_names
         c.execute("""
             UPDATE nodes 
-            SET ip=?, port=?, dest=?, sni=?, server_names=?, pbk=?, sid=?, status=1, last_heartbeat=? 
+            SET ip=?, pbk=?, sid=COALESCE(NULLIF(sid, ''), ?), status=1, last_heartbeat=? 
             WHERE node_id=?
-        """, (node_ip, node_port, dest, primary_sni, server_names_str, pbk, sid, now_str, node_id))
+        """, (node_ip, pbk, sid, now_str, node_id))
         conn.commit()
         conn.close()
         return jsonify({"code": 200, "msg": "心跳正常"})
@@ -337,7 +341,7 @@ def node_heartbeat():
     conn.close()
     return jsonify({"code": 403, "msg": "Node Key 验证失败"}), 403
 
-# 双向同步接口：将主控配置的 server_names 数组下发给节点热更
+# 双向同步：下发主控后台设置的配置，节点根据此配置热更本地文件
 @app.route('/api/node/sync', methods=['GET'])
 def node_sync_users():
     node_id = request.args.get('node_id', '').strip()
@@ -362,7 +366,7 @@ def node_sync_users():
         "port": node["port"],
         "dest": clean_dest,
         "sni": snis[0],
-        "server_names": snis,  # 下发合规的域名数组
+        "server_names": snis,
         "sid": node["sid"]
     }
 
@@ -525,7 +529,6 @@ def login():
         }
     })
 
-# 用户自主重置节点凭据 (UUID)
 @app.route('/api/user/reset_uuid', methods=['POST'])
 def user_reset_uuid():
     data = request.json or {}
@@ -567,7 +570,7 @@ def user_reset_uuid():
 
     return jsonify({
         "code": 200,
-        "msg": "节点凭据 (UUID) 已重置！旧链接已立即失效，请重新导入订阅。",
+        "msg": "节点凭证 (UUID) 已重置！旧链接已立即失效，请重新导入订阅。",
         "data": {
             "uuid": new_uuid,
             "sub_url": sub_url,
@@ -756,7 +759,6 @@ def user_test_notify():
     if ok: return jsonify({"code": 200, "msg": "测试消息发送成功"})
     return jsonify({"code": 500, "msg": msg})
 
-# 支持按用户选定的 SNI 定制下载客户端
 @app.route('/api/user/download_client', methods=['GET'])
 def download_windows_client():
     account = request.args.get('username', '').strip()
@@ -789,7 +791,6 @@ def download_windows_client():
     except Exception as e:
         return jsonify({"code": 500, "msg": f"客户端构建失败: {str(e)}"}), 500
 
-# 多卡密批量原子核销
 @app.route('/api/recharge', methods=['POST'])
 def recharge():
     data = request.json or {}
@@ -942,7 +943,6 @@ def admin_save_node_config():
 
     dest = raw_dest if ":" in raw_dest else f"{raw_dest}:443"
 
-    # 清洗多域名列表
     snis = []
     for part in re.split(r'[,;\s]+', raw_server_names or raw_sni):
         clean = part.strip().split(":")[0]
@@ -1132,10 +1132,18 @@ def admin_data():
         for n in active_nodes:
             if len(n.get("pbk", "")) == 43:
                 snis = get_node_snis(n)
-                d['node_links'].append({
-                    "name": n['name'],
-                    "link": build_node_link(d['uuid'], n, f"{n['name']}", chosen_sni=snis[0])
-                })
+                # 后台弹窗全量展开每个节点的所有可用 SNI 线路
+                if len(snis) > 1:
+                    for s in snis:
+                        d['node_links'].append({
+                            "name": f"{n['name']} ({s})",
+                            "link": build_node_link(d['uuid'], n, f"{n['name']}", chosen_sni=s)
+                        })
+                else:
+                    d['node_links'].append({
+                        "name": n['name'],
+                        "link": build_node_link(d['uuid'], n, f"{n['name']}", chosen_sni=snis[0])
+                    })
         users.append(d)
 
     return jsonify({"code": 200, "cards": cards, "users": users})
