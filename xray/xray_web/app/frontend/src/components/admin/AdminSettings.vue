@@ -6,7 +6,7 @@
       <button class="btn-cyber-success" @click="saveAllSettings">💾 保存全部配置</button>
     </div>
 
-    <!-- 核心：2 个子卡片选项卡导航 -->
+    <!-- 2 个子卡片选项卡导航 -->
     <div class="sub-tab-nav">
       <button
         class="sub-tab-btn"
@@ -55,21 +55,21 @@
 
             <div class="form-item" v-if="notifyPushForm.target === 'single'">
               <label>目标接收用户名：</label>
-              <input v-model="notifyPushForm.target_user" type="text" class="cyber-input modal-input" placeholder="输入要接收通知的用户名" />
+              <input v-model="notifyPushForm.target_user" type="text" class="cyber-input" placeholder="输入要接收通知的用户名" />
             </div>
 
             <div class="form-item">
               <label>通知标题 (Title)：</label>
-              <input v-model="notifyPushForm.title" type="text" class="cyber-input modal-input" placeholder="例如: 节点紧急维护通知 / 优惠活动" />
+              <input v-model="notifyPushForm.title" type="text" class="cyber-input" placeholder="例如: 节点紧急维护通知 / 优惠活动" />
             </div>
 
             <div class="form-item">
               <label>通知正文内容 (Content)：</label>
-              <textarea v-model="notifyPushForm.content" rows="4" class="cyber-input cyber-textarea modal-input" placeholder="输入通知详细内容，支持多行换行..."></textarea>
+              <textarea v-model="notifyPushForm.content" rows="4" class="cyber-input cyber-textarea" placeholder="输入通知详细内容，支持多行换行..."></textarea>
               <span class="input-hint">系统将根据目标用户的设置（绑定邮箱 或 Server酱微信），自动精准路由投递。</span>
             </div>
 
-            <button class="btn-cyber-primary" :disabled="sendingPush" style="width: 100%; padding: 10px;" @click="sendUserPushNotification">
+            <button class="btn-cyber-primary" :disabled="sendingPush" style="width: auto; padding: 9px 24px;" @click="sendUserPushNotification">
               {{ sendingPush ? '正在派发通知任务...' : '🚀 立即投递通知' }}
             </button>
           </div>
@@ -94,7 +94,7 @@
             </div>
             <div class="form-item" v-if="notifyForm.notify_type === 'serverchan'">
               <label>Server酱 SendKey：</label>
-              <input v-model="notifyForm.serverchan_key" type="text" class="cyber-input font-mono modal-input" placeholder="SCTxxxxxxxxxx" />
+              <input v-model="notifyForm.serverchan_key" type="text" class="cyber-input font-mono" placeholder="SCTxxxxxxxxxx" />
             </div>
             <div class="btn-group" style="margin-top: 14px;">
               <button class="btn-cyber-success" style="padding: 6px 14px; font-size: 12px;" @click="saveNotifySettings">保存通知偏好</button>
@@ -102,9 +102,9 @@
             </div>
             <div class="inner-divider">
               <div class="inner-divider-title">🔑 修改管理员自身登录密码</div>
-              <div class="form-item" style="margin-bottom: 8px;"><input v-model="pwdForm.old_pwd" type="password" class="cyber-input modal-input" placeholder="当前原密码" /></div>
-              <div class="form-item" style="margin-bottom: 8px;"><input v-model="pwdForm.new_pwd" type="password" class="cyber-input modal-input" placeholder="新密码" /></div>
-              <div class="form-item" style="margin-bottom: 12px;"><input v-model="pwdForm.confirm_pwd" type="password" class="cyber-input modal-input" placeholder="确认新密码" /></div>
+              <div class="form-item" style="margin-bottom: 8px;"><input v-model="pwdForm.old_pwd" type="password" class="cyber-input" placeholder="当前原密码" /></div>
+              <div class="form-item" style="margin-bottom: 8px;"><input v-model="pwdForm.new_pwd" type="password" class="cyber-input" placeholder="新密码 (至少6位)" /></div>
+              <div class="form-item" style="margin-bottom: 12px;"><input v-model="pwdForm.confirm_pwd" type="password" class="cyber-input" placeholder="确认新密码" /></div>
               <button class="btn-cyber-primary" style="width: auto; padding: 7px 20px; font-size: 12px;" @click="submitChangePassword">确认变更密码</button>
             </div>
           </div>
@@ -126,18 +126,18 @@
             <div class="smtp-status-box" :class="settingsForm.is_smtp_configured ? 'smtp-ready' : 'smtp-empty'">
               <span>{{ settingsForm.is_smtp_configured ? '🟢 SMTP 状态：就绪 (发信正常)' : '⚪ SMTP 状态：未完整配置' }}</span>
             </div>
-            <div class="form-item"><label>SMTP 服务器地址</label><input v-model="settingsForm.smtp_host" type="text" class="cyber-input modal-input" placeholder="smtp.qq.com" /></div>
+            <div class="form-item"><label>SMTP 服务器地址</label><input v-model="settingsForm.smtp_host" type="text" class="cyber-input" placeholder="smtp.qq.com" /></div>
             <div class="form-row-2">
-              <div class="form-item"><label>端口</label><input v-model="settingsForm.smtp_port" type="text" class="cyber-input modal-input" placeholder="465" /></div>
-              <div class="form-item"><label>发件人显示名称</label><input v-model="settingsForm.smtp_sender" type="text" class="cyber-input modal-input" placeholder="Xray 节点中心" /></div>
+              <div class="form-item"><label>端口</label><input v-model="settingsForm.smtp_port" type="text" class="cyber-input" placeholder="465" /></div>
+              <div class="form-item"><label>发件人显示名称</label><input v-model="settingsForm.smtp_sender" type="text" class="cyber-input" placeholder="Xray 节点中心" /></div>
             </div>
-            <div class="form-item"><label>发信邮箱账号</label><input v-model="settingsForm.smtp_user" type="text" class="cyber-input modal-input" placeholder="service@example.com" /></div>
-            <div class="form-item"><label>邮箱授权码 / 密码</label><input v-model="settingsForm.smtp_pass" type="password" class="cyber-input modal-input" :placeholder="settingsForm.has_smtp_pass ? '●●●●●● (留空保持原密码)' : '输入授权码'" /></div>
+            <div class="form-item"><label>发信邮箱账号</label><input v-model="settingsForm.smtp_user" type="text" class="cyber-input" placeholder="service@example.com" /></div>
+            <div class="form-item"><label>邮箱授权码 / 密码</label><input v-model="settingsForm.smtp_pass" type="password" class="cyber-input" :placeholder="settingsForm.has_smtp_pass ? '●●●●●● (留空保持原密码)' : '输入授权码'" /></div>
             <div class="form-item"><label class="radio-label"><input type="checkbox" v-model="settingsForm.smtp_ssl" /> 启用 SSL 安全加密</label></div>
             <div class="inner-divider">
               <div style="display: flex; gap: 8px;">
                 <input v-model="testEmailTo" type="email" class="cyber-input" placeholder="接收测试邮箱 (test@example.com)" />
-                <button class="btn-cyber-action" :disabled="testingEmail" style="padding: 6px 14px; font-size: 12px; white-space: nowrap;" @click="sendTestEmail">{{ testingEmail ? '...' : '发信连通性测试' }}</button>
+                <button class="btn-cyber-action" :disabled="testingEmail" style="padding: 6px 14px; font-size: 12px; white-space: nowrap;" @click="sendTestEmail">{{ testingEmail ? '...' : '发信测试' }}</button>
               </div>
             </div>
           </div>
@@ -159,15 +159,15 @@
             </div>
             <div class="form-item">
               <label>轮询检测周期 (小时)</label>
-              <div class="input-with-addon"><input v-model.number="settingsForm.task_interval_hours" type="number" class="cyber-input modal-input" /><span class="addon-text">小时 / 次</span></div>
+              <div class="input-with-addon"><input v-model.number="settingsForm.task_interval_hours" type="number" class="cyber-input" /><span class="addon-text">小时 / 次</span></div>
             </div>
             <div class="form-item">
               <label>流量不足告警阈值 (%)</label>
-              <div class="input-with-addon"><input v-model.number="settingsForm.task_traffic_threshold" type="number" class="cyber-input modal-input" /><span class="addon-text">%</span></div>
+              <div class="input-with-addon"><input v-model.number="settingsForm.task_traffic_threshold" type="number" class="cyber-input" /><span class="addon-text">%</span></div>
             </div>
             <div class="form-item">
               <label>套餐到期告警阈值 (天)</label>
-              <div class="input-with-addon"><input v-model.number="settingsForm.task_expire_days" type="number" class="cyber-input modal-input" /><span class="addon-text">天</span></div>
+              <div class="input-with-addon"><input v-model.number="settingsForm.task_expire_days" type="number" class="cyber-input" /><span class="addon-text">天</span></div>
             </div>
             <div class="inner-divider">
               <div style="font-size: 12px; color: #94a3b8; margin-bottom: 10px;">最近扫描完成时间：<b class="text-cyan">{{ settingsForm.task_last_run }}</b></div>
@@ -197,18 +197,18 @@
             </div>
             <div class="form-item">
               <label>登录页系统公告内容 (留空不显示)：</label>
-              <textarea v-model="settingsForm.system_notice" rows="4" class="cyber-input cyber-textarea modal-input" placeholder="例如：欢迎加入！全节点已完成升级，高速晚高峰不卡顿..."></textarea>
+              <textarea v-model="settingsForm.system_notice" rows="4" class="cyber-input cyber-textarea" placeholder="例如：欢迎加入！全节点已完成升级，高速晚高峰不卡顿..."></textarea>
               <span class="input-hint">保存后，前台用户打开登录卡片顶部将即时看到此公告。</span>
             </div>
             <div class="form-row-2" style="margin-top: 15px;">
               <div class="form-item">
                 <label>新注册默认赠送流量 (MB)</label>
-                <input v-model.number="settingsForm.reg_traffic_mb" type="number" class="cyber-input modal-input" placeholder="1024" />
+                <input v-model.number="settingsForm.reg_traffic_mb" type="number" class="cyber-input" placeholder="1024" />
                 <span class="input-hint">填 0 为不赠送</span>
               </div>
               <div class="form-item">
                 <label>新注册默认有效天数 (天)</label>
-                <input v-model.number="settingsForm.reg_expire_days" type="number" class="cyber-input modal-input" placeholder="1" />
+                <input v-model.number="settingsForm.reg_expire_days" type="number" class="cyber-input" placeholder="1" />
                 <span class="input-hint">填 36500 为永久</span>
               </div>
             </div>
@@ -256,11 +256,11 @@
             <div v-if="settingsForm.acme_enable" style="background: rgba(56, 189, 248, 0.05); border: 1px dashed rgba(56, 189, 248, 0.3); border-radius: 8px; padding: 14px; margin-bottom: 14px;">
               <div class="form-item">
                 <label>解析到本机的域名 (Domain)：</label>
-                <input v-model="settingsForm.acme_domain" type="text" class="cyber-input modal-input" placeholder="例如: panel.example.com" />
+                <input v-model="settingsForm.acme_domain" type="text" class="cyber-input" placeholder="例如: panel.example.com" />
               </div>
               <div class="form-item">
                 <label>Let's Encrypt 登记邮箱 (Email)：</label>
-                <input v-model="settingsForm.acme_email" type="email" class="cyber-input modal-input" placeholder="admin@example.com" />
+                <input v-model="settingsForm.acme_email" type="email" class="cyber-input" placeholder="admin@example.com" />
               </div>
               <button class="btn-cyber-primary" :disabled="issuingAcme" style="width: auto; padding: 8px 18px; font-size: 12px;" @click="handleApplyAcme">
                 {{ issuingAcme ? '正在申请证书，请稍候...' : '⚡ 一键向 Let\'s Encrypt 申请/续签证书' }}
@@ -279,7 +279,7 @@
       </div>
     </div>
 
-    <!-- 弹窗：手动粘贴证书 PEM -->
+    <!-- 弹窗：手动粘贴证书 PEM (仅弹窗内保持 100% 满宽) -->
     <div v-if="showCustomCertModal" class="modal-backdrop" @click="showCustomCertModal = false">
       <div class="cyber-modal" style="max-width: 520px; text-align: left;" @click.stop>
         <h3>📋 手动安装第三方 HTTPS 证书</h3>
@@ -313,7 +313,7 @@ const props = defineProps({
 
 const emit = defineEmits(['copy', 'reload-all'])
 
-// 核心：子卡片导航状态，默认进入发信与通知中枢
+// 子卡片导航状态，默认进入发信与通知中枢
 const settingsSubTab = ref('notify')
 
 const settingsForm = reactive({
@@ -536,6 +536,7 @@ const handleApplyAcme = async () => {
 const handleSaveCustomCert = async () => {
   if (!customCertPem.value || !customKeyPem.value) return ElMessage.warning('请粘贴完整的证书和私钥 PEM 内容')
   try {
+    const adminUser = currentUser.username || authForm.username
     const res = await axios.post('/api/admin/cert/custom', {
       admin_user: props.currentUser.username,
       admin_pwd: props.adminPassword,
@@ -593,3 +594,29 @@ const triggerManualTask = async () => {
   }
 }
 </script>
+
+<style scoped>
+/* 针对带有附属文字 (小时/次、%、天) 的输入框组，严格对齐 70% 黄金宽度体系 */
+.input-with-addon {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 70%;
+  min-width: 260px;
+  max-width: 500px;
+}
+.input-with-addon .cyber-input {
+  flex: 1;
+  width: auto !important;
+  min-width: 0 !important;
+  max-width: 100% !important;
+}
+
+@media (max-width: 640px) {
+  .input-with-addon {
+    width: 100% !important;
+    min-width: 0 !important;
+    max-width: 100% !important;
+  }
+}
+</style>
