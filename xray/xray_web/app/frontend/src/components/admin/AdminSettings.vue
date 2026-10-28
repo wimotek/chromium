@@ -103,7 +103,7 @@
               <button class="btn-cyber-action" style="padding: 6px 14px; font-size: 12px;" @click="testUserNotify">测试通知</button>
             </div>
 
-            <!-- 2. 核心新增：更换管理员绑定邮箱 (带新邮箱真实性验证) -->
+            <!-- 2. 更换管理员绑定邮箱 (补全明确的文字标签) -->
             <div class="inner-divider">
               <div class="inner-divider-title">📧 更换管理员绑定邮箱 (新邮箱验证)</div>
               <div style="font-size: 12px; color: #94a3b8; margin: 4px 0 10px 0;">
@@ -118,10 +118,12 @@
                   </button>
                 </div>
               </div>
-              <div class="form-item" style="margin-bottom: 8px;">
+              <div class="form-item">
+                <label>新邮箱 6 位验证码</label>
                 <input v-model="adminEmailForm.code" type="text" class="cyber-input" placeholder="输入新邮箱收到的 6 位验证码" />
               </div>
-              <div class="form-item" style="margin-bottom: 12px;">
+              <div class="form-item">
+                <label>管理员当前登录密码 (身份核验)</label>
                 <input v-model="adminEmailForm.password" type="password" class="cyber-input" placeholder="输入管理员登录密码确认改绑" />
               </div>
               <button class="btn-cyber-primary" :disabled="loadingChangeAdminEmail" style="width: auto; padding: 7px 20px; font-size: 12px;" @click="submitAdminChangeEmail">
@@ -132,9 +134,18 @@
             <!-- 3. 修改管理员自身登录密码 -->
             <div class="inner-divider">
               <div class="inner-divider-title">🔑 修改管理员自身登录密码</div>
-              <div class="form-item" style="margin-bottom: 8px;"><input v-model="pwdForm.old_pwd" type="password" class="cyber-input" placeholder="当前原旧密码" /></div>
-              <div class="form-item" style="margin-bottom: 8px;"><input v-model="pwdForm.new_pwd" type="password" class="cyber-input" placeholder="新密码 (至少6位)" /></div>
-              <div class="form-item" style="margin-bottom: 12px;"><input v-model="pwdForm.confirm_pwd" type="password" class="cyber-input" placeholder="确认新密码" /></div>
+              <div class="form-item">
+                <label>当前原旧密码</label>
+                <input v-model="pwdForm.old_pwd" type="password" class="cyber-input" placeholder="当前原旧密码" />
+              </div>
+              <div class="form-item">
+                <label>设置新密码 (至少6位)</label>
+                <input v-model="pwdForm.new_pwd" type="password" class="cyber-input" placeholder="新密码 (至少6位)" />
+              </div>
+              <div class="form-item">
+                <label>再次确认新密码</label>
+                <input v-model="pwdForm.confirm_pwd" type="password" class="cyber-input" placeholder="确认新密码" />
+              </div>
               <button class="btn-cyber-primary" style="width: auto; padding: 7px 20px; font-size: 12px;" @click="submitChangePassword">确认变更密码</button>
             </div>
           </div>
@@ -309,7 +320,7 @@
       </div>
     </div>
 
-    <!-- 弹窗：手动粘贴证书 PEM (仅弹窗内保持 100% 满宽) -->
+    <!-- 弹窗：手动粘贴证书 PEM -->
     <div v-if="showCustomCertModal" class="modal-backdrop" @click="showCustomCertModal = false">
       <div class="cyber-modal" style="max-width: 520px; text-align: left;" @click.stop>
         <h3>📋 手动安装第三方 HTTPS 证书</h3>
@@ -343,7 +354,6 @@ const props = defineProps({
 
 const emit = defineEmits(['copy', 'reload-all'])
 
-// 子卡片导航状态，默认进入发信与通知中枢
 const settingsSubTab = ref('notify')
 
 const settingsForm = reactive({
@@ -371,7 +381,7 @@ const settingsForm = reactive({
 const notifyForm = reactive({ notify_type: 'email', serverchan_key: '' })
 const pwdForm = reactive({ old_pwd: '', new_pwd: '', confirm_pwd: '' })
 
-// 核心新增：更换管理员绑定邮箱状态
+// 更换管理员绑定邮箱状态
 const adminEmailForm = reactive({
   new_email: '',
   code: '',
@@ -383,7 +393,7 @@ const loadingChangeAdminEmail = ref(false)
 
 // 消息群发与定向通知表单
 const notifyPushForm = reactive({
-  target: 'all', // 'all' 广播 | 'single' 定向
+  target: 'all',
   target_user: '',
   title: '',
   content: ''
@@ -432,7 +442,7 @@ onMounted(async () => {
   } catch (_) {}
 })
 
-// 核心功能：向管理员新邮箱发送验证码
+// 向管理员新邮箱发送验证码
 const sendAdminChangeEmailCode = async () => {
   if (!adminEmailForm.new_email || !adminEmailForm.new_email.includes('@')) {
     return ElMessage.warning('请输入合法的新电子邮箱地址')
@@ -464,7 +474,7 @@ const sendAdminChangeEmailCode = async () => {
   }
 }
 
-// 核心功能：验证码 + 管理员密码双向确认换绑邮箱
+// 验证码 + 管理员密码双向确认换绑邮箱
 const submitAdminChangeEmail = async () => {
   if (!adminEmailForm.new_email || !adminEmailForm.code || !adminEmailForm.password) {
     return ElMessage.warning('请填写新邮箱、验证码以及管理员密码')

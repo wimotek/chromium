@@ -31,12 +31,26 @@
             </td>
             <td class="font-mono text-green" style="font-size: 11px; white-space: nowrap;">
               {{ n.pbk ? n.pbk.substring(0, 10) + '...' : '等待回传' }}
-              <button class="btn-link-action" style="margin-left: 4px;" @click="$emit('copy', n.pbk)">复制</button>
+              <button v-if="n.pbk" class="btn-link-action" style="margin-left: 4px;" @click="$emit('copy', n.pbk)">复制</button>
             </td>
+
+            <!-- 核心优化：动态智能状态灯系统 -->
             <td class="status-cell-nowrap">
-              <span class="badge badge-ready">🟢 在线</span>
+              <span v-if="n.status === 0 || (n.last_heartbeat && n.last_heartbeat.includes('下线'))" class="badge badge-used">
+                🔴 已下线
+              </span>
+              <span v-else-if="!n.pbk || (n.last_heartbeat && n.last_heartbeat.includes('等待'))" class="badge badge-monthly">
+                🟡 等待回传
+              </span>
+              <span v-else-if="isHeartbeatExpired(n.last_heartbeat)" class="badge badge-used">
+                🔴 离线 (心跳超时)
+              </span>
+              <span v-else class="badge badge-ready">
+                🟢 在线
+              </span>
               <div class="time-sub-text">{{ n.last_heartbeat }}</div>
             </td>
+
             <td>
               <div class="action-btn-row">
                 <button class="btn-sm btn-edit" @click="openNodeConfig(n)">✏️ 配置</button>
@@ -149,6 +163,18 @@ const showNodeConfigModal = ref(false)
 const nodeEditForm = reactive({ node_id: '', name: '', ip: '', port: 443, dest: '', sni: '', server_names: '', sid: '', node_key: '', status: true })
 
 const publicMasterHost = computed(() => window.location.hostname)
+
+// 智能判定心跳是否超时 (超过 120 秒未上报)
+const isHeartbeatExpired = (hbStr) => {
+  if (!hbStr || hbStr.includes('等待') || hbStr.includes('下线')) return false
+  try {
+    const hbTime = new Date(hbStr.replace(/-/g, '/')).getTime()
+    const now = new Date().getTime()
+    return (now - hbTime) > 120 * 1000
+  } catch (_) {
+    return false
+  }
+}
 
 const openNodeConfig = (node) => {
   nodeEditForm.node_id = node.node_id

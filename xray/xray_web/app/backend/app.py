@@ -255,7 +255,7 @@ def open_faka_generate():
 
     return code, 200, {"Content-Type": "text/plain; charset=utf-8"}
 
-# ==================== 远程节点集群心跳 ====================
+# ==================== 远程节点集群心跳 (支持新老交替自动下线旧节点与重置上报熔断) ====================
 
 @app.route('/api/node/heartbeat', methods=['POST'])
 def node_heartbeat():
@@ -284,6 +284,7 @@ def node_heartbeat():
     server_names_str = ",".join(snis)
     primary_sni = snis[0] if snis else "www.microsoft.com"
 
+    # 43 位公钥智能提取
     pbk = raw_pbk
     if len(pbk) != 43:
         matches = re.findall(r'[A-Za-z0-9_\-]{43}', pbk)
@@ -300,7 +301,14 @@ def node_heartbeat():
     c.execute("SELECT * FROM nodes WHERE node_id=?", (node_id,))
     node = c.fetchone()
 
+    # 场景 1：全新节点首次接入 (自动识别并将同 IP、同端口的旧实例标记为下线，彻底避免冲突)
     if not node:
+        c.execute("""
+            UPDATE nodes 
+            SET status=0, last_heartbeat='已下线 (被新节点接管)' 
+            WHERE ip=? AND port=? AND node_id!=?
+        """, (node_ip, node_port, node_id))
+
         auto_name = f"节点-{node_ip}"
         c.execute("""
             INSERT INTO nodes 
@@ -309,11 +317,23 @@ def node_heartbeat():
         """, (node_id, node_key, auto_name, node_ip, node_port, dest, primary_sni, server_names_str, pbk, sid, now_str))
         conn.commit()
         conn.close()
-        return jsonify({"code": 200, "msg": "节点首次接入成功！"})
+        return jsonify({"code": 200, "msg": "新节点首次接入成功！同地址旧节点已自动识别下线。"})
 
     current_key = node["node_key"]
     pending_key = node["pending_key"]
 
+    # 场景 2：后台点击了“重置上报”(pending_key='FORCE_RESYNC')，开启重置接纳模式，允许节点换密钥重绑
+    if pending_key == 'FORCE_RESYNC':
+        c.execute("""
+            UPDATE nodes 
+            SET node_key=?, pending_key='', ip=?, pbk=?, sid=COALESCE(NULLIF(?, ''), sid), status=1, last_heartbeat=? 
+            WHERE node_id=?
+        """, (node_key, node_ip, pbk, sid, now_str, node_id))
+        conn.commit()
+        conn.close()
+        return jsonify({"code": 200, "msg": "重置接纳完成，密钥与公钥已重新绑定生效！"})
+
+    # 场景 3：后台下发了新密钥，等待节点回传确认
     if pending_key and node_key == current_key:
         c.execute("""
             UPDATE nodes 
@@ -324,6 +344,7 @@ def node_heartbeat():
         conn.close()
         return jsonify({"code": 200, "msg": "心跳成功，已为您同步下发新密钥", "new_node_key": pending_key})
 
+    # 场景 4：正常周期心跳 (仅更新在线状态、IP、公钥与时间戳，不反向覆盖后台配置)
     if node_key == current_key:
         c.execute("""
             UPDATE nodes 
@@ -337,6 +358,7 @@ def node_heartbeat():
     conn.close()
     return jsonify({"code": 403, "msg": "Node Key 验证失败"}), 403
 
+# 双向同步接口
 @app.route('/api/node/sync', methods=['GET'])
 def node_sync_users():
     node_id = request.args.get('node_id', '').strip()
@@ -346,7 +368,8 @@ def node_sync_users():
     c = conn.cursor()
     c.execute("SELECT * FROM nodes WHERE node_id=?", (node_id,))
     node = c.fetchone()
-    if not node or node["node_key"] != token:
+    # 支持在重置上报模式下免密拉取
+    if not node or (node["node_key"] != token and node["pending_key"] != 'FORCE_RESYNC'):
         conn.close()
         return jsonify({"code": 403, "msg": "鉴权失败"}), 403
 
@@ -449,7 +472,6 @@ def user_refresh_info():
         }
     })
 
-# 核心新增：向拟绑定的【新邮箱】投递真实性验证码
 @app.route('/api/user/send_change_email_code', methods=['POST'])
 def send_change_email_code():
     data = request.json or {}
@@ -495,7 +517,6 @@ def send_change_email_code():
 
     return jsonify({"code": 200, "msg": "验证码已成功投递至新邮箱，请前往查收"})
 
-# 核心新增：验证新邮箱验证码 + 校验当前登录密码完成换绑
 @app.route('/api/user/change_email', methods=['POST'])
 def user_change_email():
     data = request.json or {}
@@ -519,7 +540,7 @@ def user_change_email():
     row = c.fetchone()
     if not row or row["code"] != code:
         conn.close()
-        return jsonify({"code": 400, "msg": "新邮箱验证码错误或已失效"}), 400
+        return jsonify({"code": 400, "msg": "新邮箱验证码错误或已失效"})
 
     c.execute("SELECT id FROM users WHERE email=? AND username!=?", (new_email, username))
     if c.fetchone():
@@ -1047,6 +1068,7 @@ def admin_save_node_config():
 
     return jsonify({"code": 200, "msg": "节点配置已更新！多域名列表已同步，远程节点下次回传时自动热重载。"})
 
+# 核心升级：重置上报熔断保护，防止节点更新密钥后遭遇 403
 @app.route('/api/admin/nodes/force_resync', methods=['POST'])
 def admin_nodes_force_resync():
     data = request.json or {}
@@ -1055,11 +1077,12 @@ def admin_nodes_force_resync():
     node_id = data.get('node_id')
     conn = get_db()
     c = conn.cursor()
-    c.execute("UPDATE nodes SET pbk='', sid='', last_heartbeat='等待重新上报' WHERE node_id=?", (node_id,))
+    # 挂载 FORCE_RESYNC 状态位，清空 pbk 和 sid，允许新节点即使带着新密钥也能直接重绑
+    c.execute("UPDATE nodes SET pbk='', sid='', pending_key='FORCE_RESYNC', last_heartbeat='等待重新上报' WHERE node_id=?", (node_id,))
     conn.commit()
     conn.close()
 
-    return jsonify({"code": 200, "msg": "节点主控缓存已成功重置！节点将在下次心跳（最快几秒内）重新上报正确的公钥与ShortId。"})
+    return jsonify({"code": 200, "msg": "重置指令已就绪！已开启重置接纳模式，节点将在下次回传时自动完成重绑并回传公钥。"})
 
 @app.route('/api/admin/nodes/revoke_delete', methods=['POST'])
 def admin_revoke_delete_node():

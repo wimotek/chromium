@@ -58,9 +58,8 @@ SERVER_NAMES_JSON=$(echo "$SERVER_NAMES" | awk -F',' '{
     printf "]"
 }')
 
-# ================= 3. 核心优化：REALITY 密钥状态判定与公钥文件生成 =================
+# ================= 3. REALITY 密钥状态判定与公钥文件生成 =================
 
-# 写入 public_key.txt (首行存放纯公钥，下方附带友好管理说明)
 write_public_key_file() {
     cat <<EOF > "$PUBLIC_KEY_FILE"
 $1
@@ -79,7 +78,6 @@ $1
 EOF
 }
 
-# 彻底清理历史遗留的 private_key.txt 文件
 [ -f "/data/private_key.txt" ] && rm -f "/data/private_key.txt"
 
 if [ ! -s "$CONFIG_FILE" ]; then
@@ -91,14 +89,13 @@ if [ ! -s "$CONFIG_FILE" ]; then
     write_public_key_file "$PUBLIC_KEY"
 
 elif [ ! -f "$PUBLIC_KEY_FILE" ]; then
-    # 场景 B: 用户删除了 public_key.txt (触发彻底重置密钥对)
+    # 场景 B: 用户删除了 public_key.txt (彻底重置密钥对)
     echo "==> [Key Reset] 检测到 public_key.txt 已被删除，正在生成全新密钥对并更新至 config.json..."
     KEY_PAIR=$(/usr/bin/xray x25519)
     PRIVATE_KEY=$(echo "$KEY_PAIR" | grep -i "Private" | head -n 1 | awk '{print $NF}' | tr -d ' \r\n')
     PUBLIC_KEY=$(echo "$KEY_PAIR" | grep -iE "Public|Password" | head -n 1 | awk '{print $NF}' | tr -d ' \r\n')
     write_public_key_file "$PUBLIC_KEY"
 
-    # 同步把新生成的 privateKey 热更回 config.json
     TMP_RESET="/tmp/config.resetkey.tmp.json"
     jq --arg privkey "$PRIVATE_KEY" '
         (.inbounds[] | select(.protocol == "vless")) |= (
@@ -107,7 +104,7 @@ elif [ ! -f "$PUBLIC_KEY_FILE" ]; then
     ' "$CONFIG_FILE" > "$TMP_RESET" && mv "$TMP_RESET" "$CONFIG_FILE"
 
 elif [ ! -s "$PUBLIC_KEY_FILE" ]; then
-    # 场景 C: public_key.txt 为空文件 (触发从 config.json 的 privateKey 重新推导)
+    # 场景 C: public_key.txt 为空 (从 config.json 重新推导)
     echo "==> [Key Re-derive] 检测到 public_key.txt 为空文件，正在从 config.json 重新计算公钥..."
     PRIVATE_KEY=$(jq -r '(.inbounds[] | select(.protocol == "vless")).streamSettings.realitySettings.privateKey // empty' "$CONFIG_FILE" | tr -d ' \r\n')
 
@@ -115,7 +112,6 @@ elif [ ! -s "$PUBLIC_KEY_FILE" ]; then
         PUBLIC_KEY=$(/usr/bin/xray x25519 -i "$PRIVATE_KEY" 2>/dev/null | grep -iE "Public|Password" | head -n 1 | awk '{print $NF}' | tr -d ' \r\n' || true)
     fi
 
-    # 若私钥损坏无法推导，则保底重新生成全新密钥对
     if [ -z "$PUBLIC_KEY" ] || [ $(printf "%s" "$PUBLIC_KEY" | wc -c) -lt 42 ]; then
         echo "==> [Warning] config.json 中未找到有效私钥，自动生成新密钥对..."
         KEY_PAIR=$(/usr/bin/xray x25519)
@@ -131,11 +127,10 @@ elif [ ! -s "$PUBLIC_KEY_FILE" ]; then
     write_public_key_file "$PUBLIC_KEY"
 
 else
-    # 场景 D: 正常启动，读取已有 public_key.txt
-    PUBLIC_KEY=$(grep -v '^#' "$PUBLIC_KEY_FILE" | grep -oE '[A-Za-z0-9_-]{43}' | head -n 1 || true)
+    # 场景 D: 正常启动 (首行纯公钥提取)
+    PUBLIC_KEY=$(head -n 1 "$PUBLIC_KEY_FILE" | tr -d ' \r\n')
     PRIVATE_KEY=$(jq -r '(.inbounds[] | select(.protocol == "vless")).streamSettings.realitySettings.privateKey // empty' "$CONFIG_FILE" | tr -d ' \r\n')
 
-    # 防御保护：若文件损坏未提取到公钥，自动重新推导
     if [ -z "$PUBLIC_KEY" ] && [ -n "$PRIVATE_KEY" ]; then
         PUBLIC_KEY=$(/usr/bin/xray x25519 -i "$PRIVATE_KEY" 2>/dev/null | grep -iE "Public|Password" | head -n 1 | awk '{print $NF}' | tr -d ' \r\n' || true)
         write_public_key_file "$PUBLIC_KEY"
@@ -157,7 +152,7 @@ fi
 
 UUID="${UUID:-$(/usr/bin/xray uuid)}"
 
-# 5. 初始本地 config.json 生成 (精准指定 vless 协议入站)
+# 5. 初始本地 config.json 生成
 if [ ! -s "$CONFIG_FILE" ]; then
     [ ! -f "$TEMPLATE_FILE" ] && exit 1
     TMP_CONFIG="/tmp/config.init.tmp.json"
@@ -207,21 +202,11 @@ trap 'echo "正在停止服务..."; [ -n "$XRAY_PID" ] && kill -TERM "$XRAY_PID"
 if [ -n "$PANEL_URL" ]; then
     [ -f "$CLIENT_INFO_FILE" ] && rm -f "$CLIENT_INFO_FILE"
 
-    # 基于公网 IP 与端口生成唯一标识，绝不与其它节点冲突
-    MACHINE_NODE_ID=$(printf "%s_%s" "$SERVER_IP" "$PORT" | tr -c 'a-zA-Z0-9_' '_')
-
+    # 核心优化：每次重新配置生成节点时，赋予唯一的节点标识与通信密钥，绝不与旧节点冲突
     if [ -f "$NODE_ID_FILE" ] && [ -s "$NODE_ID_FILE" ]; then
-        SAVED_ID=$(cat "$NODE_ID_FILE" | tr -d ' \r\n')
-        if [ "$SAVED_ID" != "$MACHINE_NODE_ID" ] && [ "$SERVER_IP" != "127.0.0.1" ]; then
-            echo "==> [Node ID 纠偏] 检测到拷贝的历史旧节点标识，自动绑定本机专属 ID: $MACHINE_NODE_ID"
-            NODE_ID="$MACHINE_NODE_ID"
-            echo "$NODE_ID" > "$NODE_ID_FILE"
-            rm -f "$NODE_KEY_FILE"
-        else
-            NODE_ID="$SAVED_ID"
-        fi
+        NODE_ID=$(cat "$NODE_ID_FILE" | tr -d ' \r\n')
     else
-        NODE_ID="$MACHINE_NODE_ID"
+        NODE_ID=$(openssl rand -hex 8)
         echo "$NODE_ID" > "$NODE_ID_FILE"
     fi
 
@@ -239,9 +224,9 @@ if [ -n "$PANEL_URL" ]; then
         sleep 3
 
         while true; do
-            # 动态读取并过滤提取 43 位合法公钥
+            # 首行纯净读取公钥，杜绝正则匹配故障
             if [ -f "$PUBLIC_KEY_FILE" ]; then
-                PUBLIC_KEY=$(grep -v '^#' "$PUBLIC_KEY_FILE" | grep -oE '[A-Za-z0-9_-]{43}' | head -n 1 || true)
+                PUBLIC_KEY=$(head -n 1 "$PUBLIC_KEY_FILE" | tr -d ' \r\n')
             fi
 
             # 1. 向主控上报健康心跳
@@ -257,7 +242,7 @@ if [ -n "$PANEL_URL" ]; then
                 echo "$NODE_KEY" > "$NODE_KEY_FILE"
             fi
 
-            # 2. 从主控全量下发用户与网络参数 (以主控后台设定为唯一权威)
+            # 2. 从主控全量下拉用户与网络参数
             USER_RESP=$(curl -k -s --connect-timeout 8 --max-time 15 "${PANEL_URL}/api/node/sync?node_id=${NODE_ID}&token=${NODE_KEY}" 2>&1 || true)
             if echo "$USER_RESP" | grep -q '"code":200'; then
                 REMOTE_USERS=$(echo "$USER_RESP" | jq '.users // []')
@@ -273,7 +258,6 @@ if [ -n "$PANEL_URL" ]; then
 
                 TMP_SYNC="/tmp/config.agent.sync.json"
 
-                # 精准更新 VLESS 协议入站
                 jq --argjson new_clients "$REMOTE_USERS" \
                    --arg port "$REMOTE_PORT" \
                    --arg dest "$REMOTE_DEST" \
