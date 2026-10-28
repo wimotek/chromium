@@ -228,7 +228,7 @@ def open_faka_generate():
     try:
         traffic_gb = int(gb_param or 100)
         days = int(days_param or 30)
-        is_monthly = 1 if str(is_monthly_param) in ["1", "true"] else 0
+        is_monthly = 1 if str(is_monthly_param).lower() in ["1", "true"] else 0
     except ValueError:
         traffic_gb, days, is_monthly = 100, 30, 0
 
@@ -237,7 +237,11 @@ def open_faka_generate():
 
     conn = get_db()
     c = conn.cursor()
-    c.execute("INSERT INTO cards VALUES (?, ?, ?, 0, NULL, ?, '', ?)", (code, traffic_gb, days, now, is_monthly))
+    # 强制具名插入
+    c.execute("""
+        INSERT INTO cards (code, traffic_gb, days, is_used, used_by, created_at, used_at, is_monthly)
+        VALUES (?, ?, ?, 0, NULL, ?, '', ?)
+    """, (code, traffic_gb, days, now, is_monthly))
     conn.commit()
     conn.close()
 
@@ -847,7 +851,7 @@ def recharge():
         else:
             total_add_days += card['days']
 
-        if card.get('is_monthly') == 1:
+        if str(card.get('is_monthly')).lower() in ['1', 'true']:
             has_monthly_card = True
 
     current_limit = user['traffic_limit_mb']
@@ -1003,7 +1007,7 @@ def admin_reset_node_key():
         "new_key": new_key
     })
 
-# ==================== 核心新增：管理员给所有用户或指定用户发送通知 ====================
+# ==================== 管理员给所有用户或指定用户发送通知 ====================
 
 @app.route('/api/admin/notify/send', methods=['POST'])
 def admin_send_notification():
@@ -1024,7 +1028,6 @@ def admin_send_notification():
     conn = get_db()
     c = conn.cursor()
 
-    # 场景 1：定向推送给单个用户
     if target == 'single':
         if not target_user:
             conn.close()
@@ -1043,7 +1046,6 @@ def admin_send_notification():
         else:
             return jsonify({"code": 500, "msg": f"投递失败: {msg}"})
 
-    # 场景 2：广播给全站正常活跃用户 (后台异步多线程执行，带 0.5s 延迟防封发信邮箱)
     else:
         c.execute("SELECT * FROM users WHERE status=1 AND is_verified=1 AND role='user'")
         users = [dict(u) for u in c.fetchall()]
@@ -1068,7 +1070,7 @@ def admin_send_notification():
         threading.Thread(target=broadcast_task, args=(users, title, content), daemon=True).start()
         return jsonify({"code": 200, "msg": f"已启动后台广播队列，正在按用户偏好向全站 {len(users)} 位用户逐一推送通知！"})
 
-# ==================== 管理员卡密生成、导出与删除 ====================
+# ==================== 管理员卡密生成 (强制显式具名插入) ====================
 
 @app.route('/api/admin/cards/generate', methods=['POST'])
 def admin_generate():
@@ -1081,11 +1083,15 @@ def admin_generate():
     created = []
     t_gb = int(data.get('traffic_gb', 50))
     days = int(data.get('days', 30))
-    is_monthly = 1 if data.get('is_monthly') else 0
+    is_monthly = 1 if str(data.get('is_monthly')).lower() in ['1', 'true'] else 0
 
     for _ in range(int(data.get('count', 5))):
         code = "KM-" + str(uuid.uuid4()).replace("-", "")[:12].upper()
-        c.execute("INSERT INTO cards VALUES (?, ?, ?, 0, NULL, ?, '', ?)", (code, t_gb, days, now, is_monthly))
+        # 强制显式具名列，彻底杜绝 SQLite 物理列错位
+        c.execute("""
+            INSERT INTO cards (code, traffic_gb, days, is_used, used_by, created_at, used_at, is_monthly)
+            VALUES (?, ?, ?, 0, NULL, ?, '', ?)
+        """, (code, t_gb, days, now, is_monthly))
         created.append(code)
     conn.commit()
     conn.close()
@@ -1165,7 +1171,6 @@ def admin_delete_cards():
     conn.close()
     return jsonify({"code": 200, "msg": f"卡密清理完成！共成功删除 {deleted_count} 张卡密。"})
 
-# 管理员获取全量用户数据与单节点直连精炼列表
 @app.route('/api/admin/data', methods=['POST'])
 def admin_data():
     data = request.json or {}
@@ -1268,7 +1273,7 @@ def edit_user_quota():
     target_user = data.get('target_user')
     limit_mb = int(data.get('limit_mb', 0))
     expire_date = data.get('expire_date', '').strip()
-    is_monthly = 1 if data.get('is_monthly') else 0
+    is_monthly = 1 if str(data.get('is_monthly')).lower() in ['1', 'true'] else 0
     reset_day = int(data.get('reset_day', 1) or 1)
 
     conn = get_db()

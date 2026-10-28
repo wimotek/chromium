@@ -59,7 +59,7 @@
         <button class="btn-cyber-refresh" @click="$emit('reload-all')">🔄 刷新列表</button>
       </div>
 
-      <!-- 工具栏：双层功能排布，美观对称 -->
+      <!-- 工具栏 -->
       <div class="export-toolbar">
         <div class="date-filter-group">
           <span class="filter-label">📅 筛选日期 (默认近1月):</span>
@@ -111,9 +111,9 @@
               <td style="text-align: center;"><input type="checkbox" :value="c.code" v-model="selectedCards" /></td>
               <td class="font-mono text-cyan">{{ c.code }}</td>
               
-              <!-- 核心优化：配额列清晰区分 每月流量 与 一次性固定流量 -->
+              <!-- 核心优化：使用 isMonthlyCard 兼容判断 -->
               <td>
-                <div v-if="c.is_monthly === 1">
+                <div v-if="isMonthlyCard(c)">
                   <b class="text-green" style="font-size: 14px;">
                     {{ c.traffic_gb === 0 ? '不限流量' : c.traffic_gb + ' GB / 每月' }}
                   </b>
@@ -127,9 +127,9 @@
                 </div>
               </td>
 
-              <!-- 核心优化：属性列清晰展现年卡/季卡/月卡并标注总天数 -->
+              <!-- 属性与时限列 -->
               <td>
-                <div v-if="c.is_monthly === 1">
+                <div v-if="isMonthlyCard(c)">
                   <span class="badge badge-monthly" style="font-weight: 700;">
                     🔄 {{ getMonthlyCardBadge(c.days) }}
                   </span>
@@ -209,7 +209,17 @@ const cardGenForm = reactive({ traffic_gb: 50, days: 365, count: 5, is_monthly: 
 const fakaEnable = ref(true)
 const fakaToken = ref('faka_secret_token_8899')
 
-// 默认近 30 天日期范围
+// 核心修复函数：兼容布尔、数字和字符类型
+const isMonthlyCard = (c) => {
+  if (!c) return false
+  return (
+    c.is_monthly === 1 ||
+    c.is_monthly === '1' ||
+    c.is_monthly === true ||
+    String(c.is_monthly).toLowerCase() === 'true'
+  )
+}
+
 const getDefaultDateRange = () => {
   const now = new Date()
   const end = now.toISOString().split('T')[0]
@@ -232,7 +242,6 @@ onMounted(async () => {
   } catch (_) {}
 })
 
-// 快捷填表模板
 const applyPreset = (type) => {
   if (type === 'monthly_year') {
     cardGenForm.traffic_gb = 50
@@ -257,7 +266,6 @@ const applyPreset = (type) => {
   }
 }
 
-// 动态卡密特性预览提示
 const cardPreviewText = computed(() => {
   const t = cardGenForm.traffic_gb === 0 ? '不限流量' : `${cardGenForm.traffic_gb} GB`
   const d = cardGenForm.days >= 3650 ? '永久' : `${cardGenForm.days} 天`
@@ -271,7 +279,6 @@ const cardPreviewText = computed(() => {
   }
 })
 
-// 智能判断月度卡属性标签
 const getMonthlyCardBadge = (days) => {
   if (days >= 360 && days <= 370) return '周期年卡 (12期)'
   if (days >= 85 && days <= 95) return '周期季卡 (3期)'
