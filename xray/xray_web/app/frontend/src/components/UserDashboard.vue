@@ -30,7 +30,7 @@
       </div>
     </div>
 
-    <!-- 2. 多卡密一键批量充值卡片 -->
+    <!-- 2. 多卡密批量充值 -->
     <div class="cyber-card">
       <div class="card-header">
         <h3>🎟️ 卡密充值续费 (支持多卡批量充值)</h3>
@@ -44,7 +44,7 @@
       </div>
     </div>
 
-    <!-- 3. 节点列表与通用聚合订阅 (1节点1卡片，支持多 SNI 下拉切换联动与用户自主重置 UUID) -->
+    <!-- 3. 节点列表与通用聚合订阅 -->
     <div class="cyber-card col-span-2">
       <div class="card-header header-nowrap-row">
         <h3 class="header-title-text">🌐 全球加速节点列表与通用订阅 (共 {{ currentUser.nodes ? currentUser.nodes.length : 0 }} 个节点)</h3>
@@ -96,52 +96,92 @@
       </div>
     </div>
 
-    <!-- 4. 用户通知偏好与安全设置 -->
+    <!-- 4. 用户安全中心与偏好设置 (双列对称布局) -->
     <div class="cyber-card col-span-2">
       <div class="card-header">
-        <h3>🔔 告警通知偏好与安全中心</h3>
+        <h3>🔔 账号安全中心与通知偏好</h3>
       </div>
       <div class="settings-2col-layout">
-        <div class="panel-card">
-          <h4>1. 到期与流量微信/邮件通知设置</h4>
-          <div class="form-item">
-            <label>首选通知通道 (默认邮件)</label>
-            <div class="radio-group">
-              <label class="radio-label">
-                <input type="radio" value="email" v-model="notifyForm.notify_type" /> 📧 电子邮箱通知 ({{ currentUser.email || '未绑定' }})
-              </label>
-              <label class="radio-label">
-                <input type="radio" value="serverchan" v-model="notifyForm.notify_type" /> 📲 Server酱 (微信推送)
-              </label>
+        <!-- 左列：通知通道设置 + 更换绑定邮箱 -->
+        <div class="column-stack">
+          <!-- 面板 1：通知通道设置 -->
+          <div class="panel-card">
+            <h4>1. 到期与流量预警通道选择</h4>
+            <div class="form-item" style="margin-top: 10px;">
+              <div class="radio-group">
+                <label class="radio-label">
+                  <input type="radio" value="email" v-model="notifyForm.notify_type" /> 📧 电子邮箱接收 ({{ currentUser.email || '未绑定' }})
+                </label>
+                <label class="radio-label">
+                  <input type="radio" value="serverchan" v-model="notifyForm.notify_type" /> 📲 Server酱 (微信服务号直推)
+                </label>
+              </div>
+            </div>
+
+            <div class="form-item" v-if="notifyForm.notify_type === 'serverchan'">
+              <label>Server酱 SendKey：</label>
+              <input v-model="notifyForm.serverchan_key" type="text" class="cyber-input font-mono" placeholder="SCTxxxxxxxxxx" />
+            </div>
+
+            <div class="btn-group" style="margin-top: 14px;">
+              <button class="btn-cyber-success" style="padding: 6px 14px; font-size: 12px;" @click="saveNotifySettings">保存通知设置</button>
+              <button class="btn-cyber-action" style="padding: 6px 14px; font-size: 12px;" @click="testUserNotify">发送测试通知</button>
             </div>
           </div>
 
-          <div class="form-item" v-if="notifyForm.notify_type === 'serverchan'">
-            <label>Server酱 SendKey：</label>
-            <input v-model="notifyForm.serverchan_key" type="text" class="cyber-input font-mono" placeholder="SCTxxxxxxxxxx" />
-          </div>
+          <!-- 面板 2：核心新增 更换绑定电子邮箱 (带新邮箱真实性验证) -->
+          <div class="panel-card">
+            <h4>2. 更换绑定电子邮箱 (新邮箱验证)</h4>
+            <div style="font-size: 12px; color: #94a3b8; margin: 8px 0 12px 0;">
+              当前绑定邮箱：<b class="text-cyan">{{ currentUser.email || '尚未绑定' }}</b>
+            </div>
 
-          <div class="btn-group" style="margin-top: 15px;">
-            <button class="btn-cyber-success" @click="saveNotifySettings">保存通知设置</button>
-            <button class="btn-cyber-action" @click="testUserNotify">发送测试通知</button>
+            <div class="form-item">
+              <label>拟绑定的新电子邮箱</label>
+              <div class="code-send-group" style="max-width: 500px;">
+                <input v-model="emailForm.new_email" type="email" class="cyber-input" placeholder="输入新的接收邮箱" />
+                <button class="btn-cyber-code" :disabled="emailCountdown > 0 || sendingEmailCode" @click="sendChangeEmailCode">
+                  {{ emailCountdown > 0 ? `${emailCountdown}s 后重试` : (sendingEmailCode ? '发送中...' : '发送新邮箱验证码') }}
+                </button>
+              </div>
+            </div>
+
+            <div class="form-item">
+              <label>新邮箱接收到的 6 位验证码</label>
+              <input v-model="emailForm.code" type="text" class="cyber-input" placeholder="输入新邮箱收到的验证码" />
+            </div>
+
+            <div class="form-item">
+              <label>当前账号登录密码 (身份确认)</label>
+              <input v-model="emailForm.password" type="password" class="cyber-input" placeholder="输入当前登录密码确认改绑" />
+            </div>
+
+            <button class="btn-cyber-primary" :disabled="loadingChangeEmail" style="width: auto; padding: 7px 22px; font-size: 12px;" @click="submitChangeEmail">
+              {{ loadingChangeEmail ? '正在验证改绑...' : '确认更换绑定邮箱' }}
+            </button>
           </div>
         </div>
 
-        <div class="panel-card">
-          <h4>2. 修改账户登录密码</h4>
-          <div class="form-item">
-            <label>当前原密码</label>
-            <input v-model="pwdForm.old_pwd" type="password" class="cyber-input" placeholder="输入当前原密码" />
+        <!-- 右列：修改账户登录密码 -->
+        <div class="column-stack">
+          <div class="panel-card">
+            <h4>3. 修改账户登录密码</h4>
+            <div class="form-item" style="margin-top: 10px;">
+              <label>当前原旧密码</label>
+              <input v-model="pwdForm.old_pwd" type="password" class="cyber-input" placeholder="输入当前原旧密码" />
+            </div>
+            <div class="form-item">
+              <label>设置新密码 (至少 6 位)</label>
+              <input v-model="pwdForm.new_pwd" type="password" class="cyber-input" placeholder="输入新密码" />
+            </div>
+            <div class="form-item">
+              <label>再次确认新密码</label>
+              <input v-model="pwdForm.confirm_pwd" type="password" class="cyber-input" placeholder="再次输入新密码" />
+            </div>
+            <button class="btn-cyber-primary" style="width: auto; padding: 7px 22px; font-size: 12px; margin-top: 6px;" @click="submitChangePassword">
+              确认变更登录密码
+            </button>
           </div>
-          <div class="form-item">
-            <label>新密码 (至少6位)</label>
-            <input v-model="pwdForm.new_pwd" type="password" class="cyber-input" placeholder="输入新密码" />
-          </div>
-          <div class="form-item">
-            <label>确认新密码</label>
-            <input v-model="pwdForm.confirm_pwd" type="password" class="cyber-input" placeholder="再次输入新密码" />
-          </div>
-          <button class="btn-cyber-primary" style="margin-top: 5px;" @click="submitChangePassword">确认变更密码</button>
         </div>
       </div>
     </div>
@@ -168,6 +208,16 @@ const notifyForm = reactive({
 })
 
 const pwdForm = reactive({ old_pwd: '', new_pwd: '', confirm_pwd: '' })
+
+// 更换绑定邮箱状态
+const emailForm = reactive({
+  new_email: '',
+  code: '',
+  password: ''
+})
+const emailCountdown = ref(0)
+const sendingEmailCode = ref(false)
+const loadingChangeEmail = ref(false)
 
 const trafficPercent = computed(() => {
   if (!props.currentUser.limit_mb) return 100
@@ -198,6 +248,68 @@ const handleUserResetUuid = async () => {
     }
   } catch (_) {
     ElMessage.error('重置凭证失败')
+  }
+}
+
+// 核心功能 1：向拟绑定的新邮箱投递验证码 (验证真实性)
+const sendChangeEmailCode = async () => {
+  if (!emailForm.new_email || !emailForm.new_email.includes('@')) {
+    return ElMessage.warning('请输入合法的新电子邮箱地址')
+  }
+  if (emailForm.new_email.trim().toLowerCase() === (props.currentUser.email || '').toLowerCase()) {
+    return ElMessage.warning('新邮箱不能与当前已绑定的旧邮箱相同')
+  }
+
+  sendingEmailCode.value = true
+  try {
+    const res = await axios.post('/api/user/send_change_email_code', {
+      username: props.currentUser.username,
+      new_email: emailForm.new_email
+    })
+    if (res.data.code === 200) {
+      ElMessage.success(res.data.msg)
+      emailCountdown.value = 60
+      const timer = setInterval(() => {
+        emailCountdown.value--
+        if (emailCountdown.value <= 0) clearInterval(timer)
+      }, 1000)
+    } else {
+      ElMessage.error(res.data.msg)
+    }
+  } catch (_) {
+    ElMessage.error('发送验证码请求失败')
+  } finally {
+    sendingEmailCode.value = false
+  }
+}
+
+// 核心功能 2：校验验证码与密码，执行换绑
+const submitChangeEmail = async () => {
+  if (!emailForm.new_email || !emailForm.code || !emailForm.password) {
+    return ElMessage.warning('请填写新邮箱、验证码以及登录密码')
+  }
+
+  loadingChangeEmail.value = true
+  try {
+    const res = await axios.post('/api/user/change_email', {
+      username: props.currentUser.username,
+      new_email: emailForm.new_email,
+      code: emailForm.code,
+      password: emailForm.password
+    })
+    if (res.data.code === 200) {
+      ElMessage.success(res.data.msg)
+      emailForm.new_email = ''
+      emailForm.code = ''
+      emailForm.password = ''
+      emit('refresh-user')
+    } else {
+      ElMessage.error(res.data.msg)
+    }
+  } catch (_) {
+    ElMessage.error('修改绑定邮箱失败')
+  } finally {
+    loadingChangeEmail.value = false
   }
 }
 
@@ -260,8 +372,6 @@ const testUserNotify = async () => {
     const res = await axios.post('/api/user/test_notify', { username: props.currentUser.username })
     if (res.data.code === 200) {
       ElMessage.success(res.data.msg)
-    } else {
-      ElMessage.error(res.data.msg)
     }
   } catch (_) {
     ElMessage.error('测试发送失败')

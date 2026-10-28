@@ -27,7 +27,7 @@
     <!-- ==================== 子卡 1：发信服务与通知推送中枢 (双列布局) ==================== -->
     <div v-if="settingsSubTab === 'notify'" class="sub-tab-pane">
       <div class="settings-2col-layout">
-        <!-- 左列：用户群发中枢 + 管理员告警与改密 -->
+        <!-- 左列：用户群发中枢 + 管理员告警、换绑邮箱与改密 -->
         <div class="column-stack">
           <!-- 面板 A：用户消息群发与定向通知中枢 -->
           <div class="panel-card">
@@ -74,17 +74,19 @@
             </button>
           </div>
 
-          <!-- 面板 B：管理员自身通知与改密 -->
+          <!-- 面板 B：管理员自身通知通道、换绑邮箱与改密 -->
           <div class="panel-card">
             <div class="panel-card-header">
               <div class="panel-title-wrap">
                 <span class="panel-icon">👤</span>
                 <div>
-                  <strong class="panel-title">管理员自身通知通道与改密</strong>
-                  <div class="panel-sub">管理员接收系统告警通道</div>
+                  <strong class="panel-title">管理员自身通知通道、换绑与改密</strong>
+                  <div class="panel-sub">管理员接收系统告警通道与安全认证</div>
                 </div>
               </div>
             </div>
+
+            <!-- 1. 告警通道 -->
             <div class="form-item">
               <label>告警通道选择</label>
               <div class="radio-group">
@@ -100,9 +102,37 @@
               <button class="btn-cyber-success" style="padding: 6px 14px; font-size: 12px;" @click="saveNotifySettings">保存通知偏好</button>
               <button class="btn-cyber-action" style="padding: 6px 14px; font-size: 12px;" @click="testUserNotify">测试通知</button>
             </div>
+
+            <!-- 2. 核心新增：更换管理员绑定邮箱 (带新邮箱真实性验证) -->
+            <div class="inner-divider">
+              <div class="inner-divider-title">📧 更换管理员绑定邮箱 (新邮箱验证)</div>
+              <div style="font-size: 12px; color: #94a3b8; margin: 4px 0 10px 0;">
+                当前绑定邮箱：<b class="text-cyan">{{ currentUser.email || '尚未绑定' }}</b>
+              </div>
+              <div class="form-item">
+                <label>拟绑定的新电子邮箱</label>
+                <div class="code-send-group" style="max-width: 500px;">
+                  <input v-model="adminEmailForm.new_email" type="email" class="cyber-input" placeholder="输入管理员新邮箱" />
+                  <button class="btn-cyber-code" :disabled="adminEmailCountdown > 0 || sendingAdminEmailCode" @click="sendAdminChangeEmailCode">
+                    {{ adminEmailCountdown > 0 ? `${adminEmailCountdown}s 后重试` : (sendingAdminEmailCode ? '发送中...' : '发送验证码') }}
+                  </button>
+                </div>
+              </div>
+              <div class="form-item" style="margin-bottom: 8px;">
+                <input v-model="adminEmailForm.code" type="text" class="cyber-input" placeholder="输入新邮箱收到的 6 位验证码" />
+              </div>
+              <div class="form-item" style="margin-bottom: 12px;">
+                <input v-model="adminEmailForm.password" type="password" class="cyber-input" placeholder="输入管理员登录密码确认改绑" />
+              </div>
+              <button class="btn-cyber-primary" :disabled="loadingChangeAdminEmail" style="width: auto; padding: 7px 20px; font-size: 12px;" @click="submitAdminChangeEmail">
+                {{ loadingChangeAdminEmail ? '正在验证改绑...' : '确认更换绑定邮箱' }}
+              </button>
+            </div>
+
+            <!-- 3. 修改管理员自身登录密码 -->
             <div class="inner-divider">
               <div class="inner-divider-title">🔑 修改管理员自身登录密码</div>
-              <div class="form-item" style="margin-bottom: 8px;"><input v-model="pwdForm.old_pwd" type="password" class="cyber-input" placeholder="当前原密码" /></div>
+              <div class="form-item" style="margin-bottom: 8px;"><input v-model="pwdForm.old_pwd" type="password" class="cyber-input" placeholder="当前原旧密码" /></div>
               <div class="form-item" style="margin-bottom: 8px;"><input v-model="pwdForm.new_pwd" type="password" class="cyber-input" placeholder="新密码 (至少6位)" /></div>
               <div class="form-item" style="margin-bottom: 12px;"><input v-model="pwdForm.confirm_pwd" type="password" class="cyber-input" placeholder="确认新密码" /></div>
               <button class="btn-cyber-primary" style="width: auto; padding: 7px 20px; font-size: 12px;" @click="submitChangePassword">确认变更密码</button>
@@ -341,6 +371,16 @@ const settingsForm = reactive({
 const notifyForm = reactive({ notify_type: 'email', serverchan_key: '' })
 const pwdForm = reactive({ old_pwd: '', new_pwd: '', confirm_pwd: '' })
 
+// 核心新增：更换管理员绑定邮箱状态
+const adminEmailForm = reactive({
+  new_email: '',
+  code: '',
+  password: ''
+})
+const adminEmailCountdown = ref(0)
+const sendingAdminEmailCode = ref(false)
+const loadingChangeAdminEmail = ref(false)
+
 // 消息群发与定向通知表单
 const notifyPushForm = reactive({
   target: 'all', // 'all' 广播 | 'single' 定向
@@ -391,6 +431,68 @@ onMounted(async () => {
     loadCertInfo()
   } catch (_) {}
 })
+
+// 核心功能：向管理员新邮箱发送验证码
+const sendAdminChangeEmailCode = async () => {
+  if (!adminEmailForm.new_email || !adminEmailForm.new_email.includes('@')) {
+    return ElMessage.warning('请输入合法的新电子邮箱地址')
+  }
+  if (adminEmailForm.new_email.trim().toLowerCase() === (props.currentUser.email || '').toLowerCase()) {
+    return ElMessage.warning('新邮箱不能与当前绑定的旧邮箱相同')
+  }
+
+  sendingAdminEmailCode.value = true
+  try {
+    const res = await axios.post('/api/user/send_change_email_code', {
+      username: props.currentUser.username,
+      new_email: adminEmailForm.new_email
+    })
+    if (res.data.code === 200) {
+      ElMessage.success(res.data.msg)
+      adminEmailCountdown.value = 60
+      const timer = setInterval(() => {
+        adminEmailCountdown.value--
+        if (adminEmailCountdown.value <= 0) clearInterval(timer)
+      }, 1000)
+    } else {
+      ElMessage.error(res.data.msg)
+    }
+  } catch (_) {
+    ElMessage.error('发送验证码请求失败')
+  } finally {
+    sendingAdminEmailCode.value = false
+  }
+}
+
+// 核心功能：验证码 + 管理员密码双向确认换绑邮箱
+const submitAdminChangeEmail = async () => {
+  if (!adminEmailForm.new_email || !adminEmailForm.code || !adminEmailForm.password) {
+    return ElMessage.warning('请填写新邮箱、验证码以及管理员密码')
+  }
+
+  loadingChangeAdminEmail.value = true
+  try {
+    const res = await axios.post('/api/user/change_email', {
+      username: props.currentUser.username,
+      new_email: adminEmailForm.new_email,
+      code: adminEmailForm.code,
+      password: adminEmailForm.password
+    })
+    if (res.data.code === 200) {
+      ElMessage.success(res.data.msg)
+      adminEmailForm.new_email = ''
+      adminEmailForm.code = ''
+      adminEmailForm.password = ''
+      emit('reload-all')
+    } else {
+      ElMessage.error(res.data.msg)
+    }
+  } catch (_) {
+    ElMessage.error('换绑邮箱失败')
+  } finally {
+    loadingChangeAdminEmail.value = false
+  }
+}
 
 // 向全站用户广播或向特定用户推送通知
 const sendUserPushNotification = async () => {
@@ -471,8 +573,6 @@ const testUserNotify = async () => {
     const res = await axios.post('/api/user/test_notify', { username: props.currentUser.username })
     if (res.data.code === 200) {
       ElMessage.success(res.data.msg)
-    } else {
-      ElMessage.error(res.data.msg)
     }
   } catch (_) {
     ElMessage.error('测试发送失败')
@@ -566,8 +666,6 @@ const sendTestEmail = async () => {
     })
     if (res.data.code === 200) {
       ElMessage.success(res.data.msg)
-    } else {
-      ElMessage.error(res.data.msg)
     }
   } catch (_) {
     ElMessage.error('发信异常')
@@ -596,7 +694,6 @@ const triggerManualTask = async () => {
 </script>
 
 <style scoped>
-/* 针对带有附属文字 (小时/次、%、天) 的输入框组，严格对齐 70% 黄金宽度体系 */
 .input-with-addon {
   display: flex;
   align-items: center;

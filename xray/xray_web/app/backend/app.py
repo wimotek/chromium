@@ -237,7 +237,6 @@ def open_faka_generate():
 
     conn = get_db()
     c = conn.cursor()
-    # 强制具名插入
     c.execute("""
         INSERT INTO cards (code, traffic_gb, days, is_used, used_by, created_at, used_at, is_monthly)
         VALUES (?, ?, ?, 0, NULL, ?, '', ?)
@@ -397,7 +396,7 @@ def node_report_traffic():
     conn.close()
     return jsonify({"code": 200, "msg": "流量同步成功"})
 
-# ==================== 用户端与节点交互 ====================
+# ==================== 用户端与邮箱安全改绑 ====================
 
 @app.route('/api/user/refresh_info', methods=['POST'])
 def user_refresh_info():
@@ -439,6 +438,8 @@ def user_refresh_info():
     return jsonify({
         "code": 200,
         "data": {
+            "username": user['username'],
+            "email": user['email'],
             "uuid": user['uuid'],
             "used_mb": user['used_mb'],
             "limit_mb": user['traffic_limit_mb'],
@@ -447,6 +448,93 @@ def user_refresh_info():
             "nodes": nodes_data
         }
     })
+
+# 核心新增：向拟绑定的【新邮箱】投递真实性验证码
+@app.route('/api/user/send_change_email_code', methods=['POST'])
+def send_change_email_code():
+    data = request.json or {}
+    username = data.get('username', '').strip()
+    new_email = data.get('new_email', '').strip().lower()
+
+    if not username or not new_email or '@' not in new_email:
+        return jsonify({"code": 400, "msg": "请输入合法有效的新电子邮箱"}), 400
+
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("SELECT id, email FROM users WHERE username=?", (username,))
+    user = c.fetchone()
+    if not user:
+        conn.close()
+        return jsonify({"code": 404, "msg": "用户账号不存在"}), 404
+
+    if user['email'] == new_email:
+        conn.close()
+        return jsonify({"code": 400, "msg": "新邮箱不能与当前绑定的旧邮箱相同"}), 400
+
+    c.execute("SELECT id FROM users WHERE email=? AND username!=?", (new_email, username))
+    if c.fetchone():
+        conn.close()
+        return jsonify({"code": 400, "msg": "该新邮箱已被其他账号绑定使用"}), 400
+
+    code = f"{random.randint(100000, 999999)}"
+    c.execute("INSERT INTO verify_codes (email, code) VALUES (?, ?)", (new_email, code))
+    conn.commit()
+    conn.close()
+
+    content = f"""
+    <div style="font-family: sans-serif; background: #0f172a; color: #f8fafc; padding: 25px; border-radius: 8px;">
+        <h2 style="color: #38bdf8;">📧 Xray Reality 更换绑定邮箱验证</h2>
+        <p>您好 <b>{username}</b>！您正在申请将账号绑定邮箱更换为本邮箱地址。</p>
+        <p>您的安全验证码为：<b style="font-size: 24px; color: #10b981; letter-spacing: 2px;">{code}</b></p>
+        <p style="color: #94a3b8; font-size: 12px;">验证码 10 分钟内有效。如非本人操作，请立即检查账号安全。</p>
+    </div>
+    """
+    ok, msg = send_smtp_email(new_email, "【Xray】更换绑定邮箱验证码", content)
+    if not ok:
+        return jsonify({"code": 500, "msg": f"验证码投递失败: {msg}"}), 500
+
+    return jsonify({"code": 200, "msg": "验证码已成功投递至新邮箱，请前往查收"})
+
+# 核心新增：验证新邮箱验证码 + 校验当前登录密码完成换绑
+@app.route('/api/user/change_email', methods=['POST'])
+def user_change_email():
+    data = request.json or {}
+    username = data.get('username', '').strip()
+    new_email = data.get('new_email', '').strip().lower()
+    code = data.get('code', '').strip()
+    password = data.get('password', '').strip()
+
+    if not username or not new_email or not code or not password:
+        return jsonify({"code": 400, "msg": "所有项均为必填项"}), 400
+
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("SELECT * FROM users WHERE username=? AND password_hash=?", (username, hash_pwd(password)))
+    user = c.fetchone()
+    if not user:
+        conn.close()
+        return jsonify({"code": 401, "msg": "当前账号登录密码验证失败"}), 401
+
+    c.execute("SELECT code FROM verify_codes WHERE email=? ORDER BY id DESC LIMIT 1", (new_email,))
+    row = c.fetchone()
+    if not row or row["code"] != code:
+        conn.close()
+        return jsonify({"code": 400, "msg": "新邮箱验证码错误或已失效"}), 400
+
+    c.execute("SELECT id FROM users WHERE email=? AND username!=?", (new_email, username))
+    if c.fetchone():
+        conn.close()
+        return jsonify({"code": 400, "msg": "该新邮箱已被其他账号占用"}), 400
+
+    c.execute("UPDATE users SET email=? WHERE username=?", (new_email, username))
+    c.execute("DELETE FROM verify_codes WHERE email=?", (new_email,))
+    conn.commit()
+    conn.close()
+
+    notice_content = f"您好 {username}，您的账号绑定邮箱已于 {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 成功更换为 {new_email}。"
+    notify_user(dict(user), "【安全通知】账号绑定邮箱已成功修改", f"<p>{notice_content}</p>", notice_content)
+
+    return jsonify({"code": 200, "msg": "绑定邮箱修改成功！", "new_email": new_email})
 
 @app.route('/api/login', methods=['POST'])
 def login():
@@ -1017,7 +1105,7 @@ def admin_send_notification():
     if not check_admin(admin_user, admin_pwd):
         return jsonify({"code": 403, "msg": "无权限"}), 403
 
-    target = data.get('target', 'all').strip()  # 'all' | 'single'
+    target = data.get('target', 'all').strip()
     target_user = data.get('target_user', '').strip()
     title = data.get('title', '').strip()
     content = data.get('content', '').strip()
@@ -1070,7 +1158,7 @@ def admin_send_notification():
         threading.Thread(target=broadcast_task, args=(users, title, content), daemon=True).start()
         return jsonify({"code": 200, "msg": f"已启动后台广播队列，正在按用户偏好向全站 {len(users)} 位用户逐一推送通知！"})
 
-# ==================== 管理员卡密生成 (强制显式具名插入) ====================
+# ==================== 管理员卡密生成 ====================
 
 @app.route('/api/admin/cards/generate', methods=['POST'])
 def admin_generate():
@@ -1087,7 +1175,6 @@ def admin_generate():
 
     for _ in range(int(data.get('count', 5))):
         code = "KM-" + str(uuid.uuid4()).replace("-", "")[:12].upper()
-        # 强制显式具名列，彻底杜绝 SQLite 物理列错位
         c.execute("""
             INSERT INTO cards (code, traffic_gb, days, is_used, used_by, created_at, used_at, is_monthly)
             VALUES (?, ?, ?, 0, NULL, ?, '', ?)
