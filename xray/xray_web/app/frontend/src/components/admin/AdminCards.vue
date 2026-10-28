@@ -11,16 +11,30 @@
 
     <!-- 子卡 A: 批量制卡与库存 -->
     <div v-if="cardSubTab === 'inventory'" class="sub-tab-pane">
-      <div class="card-header"><h3>🛠️ 批量生成卡密</h3></div>
+      <div class="card-header">
+        <h3>🛠️ 批量生成卡密</h3>
+        <!-- 一键快捷预设胶囊按钮组 -->
+        <div class="preset-chip-group">
+          <span style="font-size: 11px; color: #64748b; margin-right: 4px;">快捷填表:</span>
+          <button class="chip-btn" @click="applyPreset('monthly_year')">📅 年卡 (每月50G)</button>
+          <button class="chip-btn" @click="applyPreset('monthly_month')">⚡ 月卡 (每月100G)</button>
+          <button class="chip-btn" @click="applyPreset('fixed_year')">📦 普通年卡 (固定1000G)</button>
+          <button class="chip-btn" @click="applyPreset('unlimited')">👑 永久不限流量</button>
+        </div>
+      </div>
       
-      <!-- 经典 4 列横向网格制卡表单 -->
+      <!-- 4 列横向网格制卡表单 -->
       <div class="gen-form">
         <div>
-          <label>流量配额 (GB, 0为不限)</label>
+          <label>
+            {{ cardGenForm.is_monthly ? '每月刷新配额 (GB/月)' : '总流量配额 (GB, 0为不限)' }}
+          </label>
           <input v-model.number="cardGenForm.traffic_gb" type="number" class="cyber-input" placeholder="0=不限" />
         </div>
         <div>
-          <label>有效时限 (天, 36500为永久)</label>
+          <label>
+            {{ cardGenForm.is_monthly ? '总服务时长 (天, 年卡填365)' : '有效时限 (天, 36500为永久)' }}
+          </label>
           <input v-model.number="cardGenForm.days" type="number" class="cyber-input" placeholder="36500=永久" />
         </div>
         <div>
@@ -29,13 +43,18 @@
         </div>
         <div class="gen-action-col">
           <label class="radio-label">
-            <input type="checkbox" v-model="cardGenForm.is_monthly" /> 设为每月固定重置卡
+            <input type="checkbox" v-model="cardGenForm.is_monthly" /> 开启每月固定重置套餐
           </label>
           <button class="btn-cyber-success" :disabled="loading" @click="generateCards">立即批量制卡</button>
         </div>
       </div>
 
-      <div class="card-header" style="margin-top: 30px;">
+      <!-- 实时卡密特性提示条 -->
+      <div class="preview-tip-bar" :class="{ 'highlight-monthly': cardGenForm.is_monthly }">
+        {{ cardPreviewText }}
+      </div>
+
+      <div class="card-header" style="margin-top: 26px;">
         <h3>📦 历史卡密库存与核销流水 (最新200条)</h3>
         <button class="btn-cyber-refresh" @click="$emit('reload-all')">🔄 刷新列表</button>
       </div>
@@ -78,8 +97,8 @@
             <tr>
               <th style="width: 40px; text-align: center;"><input type="checkbox" :checked="isAllSelected" @change="toggleSelectAll" title="全选" /></th>
               <th>卡密编号</th>
-              <th>套餐配额</th>
-              <th>套餐属性</th>
+              <th>套餐配额规格</th>
+              <th>套餐属性与时限</th>
               <th>核销状态</th>
               <th>生成时间</th>
               <th>使用时间</th>
@@ -91,11 +110,41 @@
             <tr v-for="c in adminCards" :key="c.code">
               <td style="text-align: center;"><input type="checkbox" :value="c.code" v-model="selectedCards" /></td>
               <td class="font-mono text-cyan">{{ c.code }}</td>
-              <td style="white-space: nowrap;">{{ c.traffic_gb === 0 ? '♾️ 不限' : c.traffic_gb + ' GB' }} / {{ c.days >= 3650 ? '永久' : c.days + ' 天' }}</td>
+              
+              <!-- 核心优化：配额列清晰区分 每月流量 与 一次性固定流量 -->
               <td>
-                <span v-if="c.is_monthly === 1" class="badge badge-monthly">每月重置</span>
-                <span v-else class="text-muted" style="font-size: 11px;">普通固定</span>
+                <div v-if="c.is_monthly === 1">
+                  <b class="text-green" style="font-size: 14px;">
+                    {{ c.traffic_gb === 0 ? '不限流量' : c.traffic_gb + ' GB / 每月' }}
+                  </b>
+                  <div style="font-size: 10px; color: #34d399; margin-top: 2px;">⚡ 每月自动刷新满格</div>
+                </div>
+                <div v-else>
+                  <b style="font-size: 13px; color: #f1f5f9;">
+                    {{ c.traffic_gb === 0 ? '♾️ 不限流量' : c.traffic_gb + ' GB' }}
+                  </b>
+                  <div style="font-size: 10px; color: #64748b; margin-top: 2px;">一次性固定包</div>
+                </div>
               </td>
+
+              <!-- 核心优化：属性列清晰展现年卡/季卡/月卡并标注总天数 -->
+              <td>
+                <div v-if="c.is_monthly === 1">
+                  <span class="badge badge-monthly" style="font-weight: 700;">
+                    🔄 {{ getMonthlyCardBadge(c.days) }}
+                  </span>
+                  <div style="font-size: 11px; color: #38bdf8; margin-top: 3px; font-family: monospace;">
+                    总服务时限: {{ c.days >= 3650 ? '永久' : c.days + ' 天' }}
+                  </div>
+                </div>
+                <div v-else>
+                  <span class="badge" style="background: rgba(148, 163, 184, 0.15); color: #94a3b8;">普通固定包</span>
+                  <div style="font-size: 11px; color: #64748b; margin-top: 3px; font-family: monospace;">
+                    时限: {{ c.days >= 3650 ? '永久' : c.days + ' 天' }}
+                  </div>
+                </div>
+              </td>
+
               <td><span class="badge" :class="c.is_used ? 'badge-used' : 'badge-ready'">{{ c.is_used ? '已核销' : '待售/有效' }}</span></td>
               <td class="text-muted" style="white-space: nowrap;">{{ c.created_at || '早期' }}</td>
               <td style="white-space: nowrap; font-size: 11px; color: #38bdf8;">{{ c.used_at || '-' }}</td>
@@ -155,11 +204,12 @@ const emit = defineEmits(['copy', 'reload-all'])
 
 const loading = ref(false)
 const cardSubTab = ref('inventory')
-const cardGenForm = reactive({ traffic_gb: 50, days: 30, count: 5, is_monthly: false })
+const cardGenForm = reactive({ traffic_gb: 50, days: 365, count: 5, is_monthly: true })
 
 const fakaEnable = ref(true)
 const fakaToken = ref('faka_secret_token_8899')
 
+// 默认近 30 天日期范围
 const getDefaultDateRange = () => {
   const now = new Date()
   const end = now.toISOString().split('T')[0]
@@ -181,6 +231,53 @@ onMounted(async () => {
     }
   } catch (_) {}
 })
+
+// 快捷填表模板
+const applyPreset = (type) => {
+  if (type === 'monthly_year') {
+    cardGenForm.traffic_gb = 50
+    cardGenForm.days = 365
+    cardGenForm.is_monthly = true
+    ElMessage.success('已应用【年卡·每月50G】预设 (享12期刷新)')
+  } else if (type === 'monthly_month') {
+    cardGenForm.traffic_gb = 100
+    cardGenForm.days = 30
+    cardGenForm.is_monthly = true
+    ElMessage.success('已应用【月卡·每月100G】预设')
+  } else if (type === 'fixed_year') {
+    cardGenForm.traffic_gb = 1000
+    cardGenForm.days = 365
+    cardGenForm.is_monthly = false
+    ElMessage.info('已应用【普通年卡·一次性1000G】预设')
+  } else if (type === 'unlimited') {
+    cardGenForm.traffic_gb = 0
+    cardGenForm.days = 36500
+    cardGenForm.is_monthly = false
+    ElMessage.warning('已应用【永久不限流量】预设')
+  }
+}
+
+// 动态卡密特性预览提示
+const cardPreviewText = computed(() => {
+  const t = cardGenForm.traffic_gb === 0 ? '不限流量' : `${cardGenForm.traffic_gb} GB`
+  const d = cardGenForm.days >= 3650 ? '永久' : `${cardGenForm.days} 天`
+  if (cardGenForm.is_monthly) {
+    let cycle = '周期月卡'
+    if (cardGenForm.days >= 360 && cardGenForm.days <= 370) cycle = '周期年卡 (享 12 期重置)'
+    else if (cardGenForm.days >= 85 && cardGenForm.days <= 95) cycle = '周期季卡 (享 3 期重置)'
+    return `💡 当前卡密规格预览：【${cycle}】。用户充值后，每月固定获得 ${t} 流量，服务时效 ${d}。`
+  } else {
+    return `💡 当前卡密规格预览：【普通固定卡】。用户充值后，一次性获得 ${t} 流量，在 ${d} 内用完即止。`
+  }
+})
+
+// 智能判断月度卡属性标签
+const getMonthlyCardBadge = (days) => {
+  if (days >= 360 && days <= 370) return '周期年卡 (12期)'
+  if (days >= 85 && days <= 95) return '周期季卡 (3期)'
+  if (days >= 28 && days <= 32) return '周期月卡 (1期)'
+  return '周期月度卡'
+}
 
 const fakaApiUrlSample = computed(() => {
   const host = window.location.origin
@@ -234,7 +331,7 @@ const generateCards = async () => {
       ...cardGenForm
     })
     if (res.data.code === 200) {
-      ElMessage.success('卡密批量生成成功')
+      ElMessage.success('卡密批量生成成功！规格已同步入库。')
       emit('reload-all')
     }
   } finally {
@@ -335,5 +432,46 @@ const handleDeleteInvalidCards = async () => {
   flex-direction: column;
   justify-content: flex-end;
   gap: 8px;
+}
+
+.preset-chip-group {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.chip-btn {
+  background: #0f172a;
+  border: 1px solid #334155;
+  color: #38bdf8;
+  font-size: 11px;
+  padding: 4px 10px;
+  border-radius: 20px;
+  cursor: pointer;
+  transition: all 0.2s;
+  white-space: nowrap;
+}
+.chip-btn:hover {
+  background: rgba(56, 189, 248, 0.15);
+  border-color: #38bdf8;
+  box-shadow: 0 0 8px rgba(56, 189, 248, 0.3);
+}
+
+.preview-tip-bar {
+  font-size: 12px;
+  color: #94a3b8;
+  background: rgba(15, 23, 42, 0.6);
+  border: 1px dashed #334155;
+  border-radius: 6px;
+  padding: 8px 14px;
+  margin-top: -14px;
+  margin-bottom: 20px;
+  transition: all 0.3s;
+}
+.preview-tip-bar.highlight-monthly {
+  color: #34d399;
+  border-color: rgba(16, 185, 129, 0.4);
+  background: rgba(16, 185, 129, 0.05);
 }
 </style>
