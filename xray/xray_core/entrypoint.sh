@@ -5,7 +5,6 @@ TEMPLATE_FILE="/etc/xray/config.template.json"
 CONFIG_FILE="/data/config.json"
 CLIENT_INFO_FILE="/data/client_info.txt"
 PUBLIC_KEY_FILE="/data/public_key.txt"
-PRIVATE_KEY_FILE="/data/private_key.txt"
 SHORT_ID_FILE="/data/short_id.txt"
 NODE_ID_FILE="/data/node_id.txt"
 NODE_KEY_FILE="/data/node_key.txt"
@@ -59,42 +58,92 @@ SERVER_NAMES_JSON=$(echo "$SERVER_NAMES" | awk -F',' '{
     printf "]"
 }')
 
-# ================= 3. 核心修复：REALITY 密钥对原子生成与数学自愈校验 =================
+# ================= 3. 核心优化：REALITY 密钥状态判定与公钥文件生成 =================
 
-# 函数：生成全新的配对密钥对 (私钥 + 对应公钥)
-generate_new_keypair() {
-    echo "==> [Key Pair] 正在使用 xray x25519 生成全新配对密钥..."
+# 写入 public_key.txt (首行存放纯公钥，下方附带友好管理说明)
+write_public_key_file() {
+    cat <<EOF > "$PUBLIC_KEY_FILE"
+$1
+
+# ================================================================
+# 【Xray REALITY 客户端公钥 (Public Key)】
+# 1. 本文件第 1 行为客户端连接所需的真实公钥 (PublicKey)。
+# 2. 服务端私钥 (PrivateKey) 已持久化保存在 /data/config.json 中。
+# 3. 【彻底重置密钥对】：
+#    如需更换全新私钥与公钥，请直接删除本文件 (rm -f /data/public_key.txt)
+#    并重启容器，系统将自动生成全新私钥更新至 config.json 并重写本文件。
+# 4. 【重新计算公钥】：
+#    如公钥丢失或需重新计算，请清空本文件内容 (保留 0 字节空文件) 并重启，
+#    系统将自动从 config.json 中的 privateKey 重新计算并还原公钥。
+# ================================================================
+EOF
+}
+
+# 彻底清理历史遗留的 private_key.txt 文件
+[ -f "/data/private_key.txt" ] && rm -f "/data/private_key.txt"
+
+if [ ! -s "$CONFIG_FILE" ]; then
+    # 场景 A: 首次部署 (无 config.json)
+    echo "==> [Init] 首次部署，正在生成全新 REALITY 密钥对..."
     KEY_PAIR=$(/usr/bin/xray x25519)
     PRIVATE_KEY=$(echo "$KEY_PAIR" | grep -i "Private" | head -n 1 | awk '{print $NF}' | tr -d ' \r\n')
     PUBLIC_KEY=$(echo "$KEY_PAIR" | grep -iE "Public|Password" | head -n 1 | awk '{print $NF}' | tr -d ' \r\n')
-    
-    echo "$PRIVATE_KEY" > "$PRIVATE_KEY_FILE"
-    echo "$PUBLIC_KEY" > "$PUBLIC_KEY_FILE"
-}
+    write_public_key_file "$PUBLIC_KEY"
 
-# A. 检查本地是否有持久化私钥
-if [ -f "$PRIVATE_KEY_FILE" ] && [ -s "$PRIVATE_KEY_FILE" ]; then
-    PRIVATE_KEY=$(cat "$PRIVATE_KEY_FILE" | tr -d ' \r\n')
-fi
+elif [ ! -f "$PUBLIC_KEY_FILE" ]; then
+    # 场景 B: 用户删除了 public_key.txt (触发彻底重置密钥对)
+    echo "==> [Key Reset] 检测到 public_key.txt 已被删除，正在生成全新密钥对并更新至 config.json..."
+    KEY_PAIR=$(/usr/bin/xray x25519)
+    PRIVATE_KEY=$(echo "$KEY_PAIR" | grep -i "Private" | head -n 1 | awk '{print $NF}' | tr -d ' \r\n')
+    PUBLIC_KEY=$(echo "$KEY_PAIR" | grep -iE "Public|Password" | head -n 1 | awk '{print $NF}' | tr -d ' \r\n')
+    write_public_key_file "$PUBLIC_KEY"
 
-# B. 如果私钥不存在或异常，重新生成完整密钥对
-if [ -z "$PRIVATE_KEY" ]; then
-    generate_new_keypair
+    # 同步把新生成的 privateKey 热更回 config.json
+    TMP_RESET="/tmp/config.resetkey.tmp.json"
+    jq --arg privkey "$PRIVATE_KEY" '
+        (.inbounds[] | select(.protocol == "vless")) |= (
+            .streamSettings.realitySettings.privateKey = $privkey
+        )
+    ' "$CONFIG_FILE" > "$TMP_RESET" && mv "$TMP_RESET" "$CONFIG_FILE"
+
+elif [ ! -s "$PUBLIC_KEY_FILE" ]; then
+    # 场景 C: public_key.txt 为空文件 (触发从 config.json 的 privateKey 重新推导)
+    echo "==> [Key Re-derive] 检测到 public_key.txt 为空文件，正在从 config.json 重新计算公钥..."
+    PRIVATE_KEY=$(jq -r '(.inbounds[] | select(.protocol == "vless")).streamSettings.realitySettings.privateKey // empty' "$CONFIG_FILE" | tr -d ' \r\n')
+
+    if [ -n "$PRIVATE_KEY" ]; then
+        PUBLIC_KEY=$(/usr/bin/xray x25519 -i "$PRIVATE_KEY" 2>/dev/null | grep -iE "Public|Password" | head -n 1 | awk '{print $NF}' | tr -d ' \r\n' || true)
+    fi
+
+    # 若私钥损坏无法推导，则保底重新生成全新密钥对
+    if [ -z "$PUBLIC_KEY" ] || [ $(printf "%s" "$PUBLIC_KEY" | wc -c) -lt 42 ]; then
+        echo "==> [Warning] config.json 中未找到有效私钥，自动生成新密钥对..."
+        KEY_PAIR=$(/usr/bin/xray x25519)
+        PRIVATE_KEY=$(echo "$KEY_PAIR" | grep -i "Private" | head -n 1 | awk '{print $NF}' | tr -d ' \r\n')
+        PUBLIC_KEY=$(echo "$KEY_PAIR" | grep -iE "Public|Password" | head -n 1 | awk '{print $NF}' | tr -d ' \r\n')
+        TMP_RESET="/tmp/config.resetkey.tmp.json"
+        jq --arg privkey "$PRIVATE_KEY" '
+            (.inbounds[] | select(.protocol == "vless")) |= (
+                .streamSettings.realitySettings.privateKey = $privkey
+            )
+        ' "$CONFIG_FILE" > "$TMP_RESET" && mv "$TMP_RESET" "$CONFIG_FILE"
+    fi
+    write_public_key_file "$PUBLIC_KEY"
+
 else
-    # C. 核心安全自愈：用当前私钥推导出数学上唯一正确的真实公钥
-    DERIVED_PUB=$(/usr/bin/xray x25519 -i "$PRIVATE_KEY" 2>/dev/null | grep -iE "Public|Password" | head -n 1 | awk '{print $NF}' | tr -d ' \r\n' || true)
-    
-    if [ -n "$DERIVED_PUB" ] && [ $(printf "%s" "$DERIVED_PUB" | wc -c) -ge 42 ]; then
-        PUBLIC_KEY="$DERIVED_PUB"
-        echo "$PUBLIC_KEY" > "$PUBLIC_KEY_FILE"
-    else
-        # 若私钥已损坏无法推导，整套重新生成
-        generate_new_keypair
+    # 场景 D: 正常启动，读取已有 public_key.txt
+    PUBLIC_KEY=$(grep -v '^#' "$PUBLIC_KEY_FILE" | grep -oE '[A-Za-z0-9_-]{43}' | head -n 1 || true)
+    PRIVATE_KEY=$(jq -r '(.inbounds[] | select(.protocol == "vless")).streamSettings.realitySettings.privateKey // empty' "$CONFIG_FILE" | tr -d ' \r\n')
+
+    # 防御保护：若文件损坏未提取到公钥，自动重新推导
+    if [ -z "$PUBLIC_KEY" ] && [ -n "$PRIVATE_KEY" ]; then
+        PUBLIC_KEY=$(/usr/bin/xray x25519 -i "$PRIVATE_KEY" 2>/dev/null | grep -iE "Public|Password" | head -n 1 | awk '{print $NF}' | tr -d ' \r\n' || true)
+        write_public_key_file "$PUBLIC_KEY"
     fi
 fi
 
 echo "======================================================"
-echo "==> [REALITY Key] 服务端私钥加载就绪！"
+echo "==> [REALITY Key] 服务端私钥已加载于 config.json！"
 echo "==> [REALITY Key] 客户端真实配对公钥 (PublicKey): $PUBLIC_KEY"
 echo "======================================================"
 
@@ -190,11 +239,12 @@ if [ -n "$PANEL_URL" ]; then
         sleep 3
 
         while true; do
+            # 动态读取并过滤提取 43 位合法公钥
             if [ -f "$PUBLIC_KEY_FILE" ]; then
-                PUBLIC_KEY=$(cat "$PUBLIC_KEY_FILE" | tr -d ' \r\n')
+                PUBLIC_KEY=$(grep -v '^#' "$PUBLIC_KEY_FILE" | grep -oE '[A-Za-z0-9_-]{43}' | head -n 1 || true)
             fi
 
-            # 1. 向主控上报健康心跳 (携带精准推导的真实公钥)
+            # 1. 向主控上报健康心跳
             HB_RESP=$(curl -k -s -X POST "${PANEL_URL}/api/node/heartbeat" \
                  -H "Content-Type: application/json" \
                  --connect-timeout 8 \
@@ -223,6 +273,7 @@ if [ -n "$PANEL_URL" ]; then
 
                 TMP_SYNC="/tmp/config.agent.sync.json"
 
+                # 精准更新 VLESS 协议入站
                 jq --argjson new_clients "$REMOTE_USERS" \
                    --arg port "$REMOTE_PORT" \
                    --arg dest "$REMOTE_DEST" \
