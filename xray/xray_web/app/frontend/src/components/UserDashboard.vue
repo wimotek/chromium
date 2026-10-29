@@ -129,7 +129,7 @@
             </div>
           </div>
 
-          <!-- 面板 2：核心新增 更换绑定电子邮箱 (带新邮箱真实性验证) -->
+          <!-- 面板 2：更换绑定电子邮箱 (带新邮箱真实性验证) -->
           <div class="panel-card">
             <h4>2. 更换绑定电子邮箱 (新邮箱验证)</h4>
             <div style="font-size: 12px; color: #94a3b8; margin: 8px 0 12px 0;">
@@ -251,7 +251,7 @@ const handleUserResetUuid = async () => {
   }
 }
 
-// 核心功能 1：向拟绑定的新邮箱投递验证码 (验证真实性)
+// 核心功能 1：向拟绑定的新邮箱投递验证码
 const sendChangeEmailCode = async () => {
   if (!emailForm.new_email || !emailForm.new_email.includes('@')) {
     return ElMessage.warning('请输入合法的新电子邮箱地址')
@@ -283,7 +283,7 @@ const sendChangeEmailCode = async () => {
   }
 }
 
-// 核心功能 2：校验验证码与密码，执行换绑
+// 核心功能 2：改绑成功后立即穿透更新内存与 localStorage，彻底解决刷新还原 Bug！
 const submitChangeEmail = async () => {
   if (!emailForm.new_email || !emailForm.code || !emailForm.password) {
     return ElMessage.warning('请填写新邮箱、验证码以及登录密码')
@@ -299,6 +299,18 @@ const submitChangeEmail = async () => {
     })
     if (res.data.code === 200) {
       ElMessage.success(res.data.msg)
+      
+      // 1. 立即更新当前视图对象
+      const newEmail = res.data.new_email || emailForm.new_email
+      props.currentUser.email = newEmail
+
+      // 2. 同步覆写 localStorage 缓存，彻底杜绝 F5 刷新还原
+      const session = JSON.parse(localStorage.getItem('xray_auth_session') || '{}')
+      if (session.user) {
+        session.user.email = newEmail
+        localStorage.setItem('xray_auth_session', JSON.stringify(session))
+      }
+
       emailForm.new_email = ''
       emailForm.code = ''
       emailForm.password = ''

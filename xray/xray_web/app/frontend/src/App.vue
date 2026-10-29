@@ -46,7 +46,6 @@
             <span class="count-tag">{{ adminUsers.length }} 位用户</span>
           </button>
 
-          <!-- 核心修复：点击立即激活 nodes 选项卡 -->
           <button class="tab-card-btn" :class="{ active: activeTab === 'nodes' }" @click="openNodesTab">
             <span class="tab-icon">🌐</span>
             <div class="tab-text">
@@ -142,9 +141,10 @@ onMounted(async () => {
         Object.assign(currentUser, parsed.user)
         adminPassword.value = parsed.password || ''
 
-        if (currentUser.role === 'user') {
-          refreshUserInfo()
-        } else if (currentUser.role === 'admin') {
+        // 核心修复：F5 刷新后无论普通用户还是管理员，一律通过 API 拉取数据库真实最新邮箱，绝不依赖陈旧缓存！
+        await refreshUserInfo()
+
+        if (currentUser.role === 'admin') {
           reloadAllAdminData()
         }
       }
@@ -179,6 +179,7 @@ const onLoginSuccess = ({ user, password }) => {
   }
 }
 
+// 核心修复：更新内存同时同步覆写 localStorage，杜绝 F5 还原
 const refreshUserInfo = async () => {
   try {
     const res = await axios.post('/api/user/refresh_info', { username: currentUser.username })
@@ -194,7 +195,7 @@ const refreshUserInfo = async () => {
 }
 
 const reloadAllAdminData = async () => {
-  await Promise.all([loadAdminData(), fetchNodesData()])
+  await Promise.all([refreshUserInfo(), loadAdminData(), fetchNodesData()])
 }
 
 const loadAdminData = async () => {
@@ -222,7 +223,6 @@ const fetchNodesData = async () => {
   } catch (_) {}
 }
 
-// 核心修复点：点击时先切 activeTab，再拉取数据
 const openNodesTab = async () => {
   activeTab.value = 'nodes'
   await fetchNodesData()
@@ -353,7 +353,6 @@ const logout = () => {
 .cyber-textarea { resize: vertical; min-height: 70px; font-family: inherit; }
 .auth-box .cyber-input, .modal-input { width: 100% !important; min-width: 0 !important; max-width: 100% !important; }
 
-/* 核心恢复：制卡表单经典的 4 列横排网格样式 */
 .gen-form {
   display: grid;
   grid-template-columns: 1fr 1fr 1fr 1.2fr;

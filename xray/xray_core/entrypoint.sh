@@ -58,7 +58,7 @@ SERVER_NAMES_JSON=$(echo "$SERVER_NAMES" | awk -F',' '{
     printf "]"
 }')
 
-# ================= 3. REALITY 密钥状态判定与公钥文件生成 =================
+# ================= 3. 密钥管理：不存 private_key.txt，公钥首行纯净输出 =================
 
 write_public_key_file() {
     cat <<EOF > "$PUBLIC_KEY_FILE"
@@ -67,12 +67,12 @@ $1
 # ================================================================
 # 【Xray REALITY 客户端公钥 (Public Key)】
 # 1. 本文件第 1 行为客户端连接所需的真实公钥 (PublicKey)。
-# 2. 服务端私钥 (PrivateKey) 已持久化保存在 /data/config.json 中。
+# 2. 服务端私钥 (PrivateKey) 已加密保存在 /data/config.json 中。
 # 3. 【彻底重置密钥对】：
-#    如需更换全新私钥与公钥，请直接删除本文件 (rm -f /data/public_key.txt)
-#    并重启容器，系统将自动生成全新私钥更新至 config.json 并重写本文件。
+#    如需生成全新私钥与公钥，请直接删除本文件 (rm -f /data/public_key.txt)
+#    并重启容器，系统将自动生成新私钥更新至 config.json 并重写本文件。
 # 4. 【重新计算公钥】：
-#    如公钥丢失或需重新计算，请清空本文件内容 (保留 0 字节空文件) 并重启，
+#    如公钥显示异常，清空本文件 (保留0字节空文件) 并重启容器，
 #    系统将自动从 config.json 中的 privateKey 重新计算并还原公钥。
 # ================================================================
 EOF
@@ -81,7 +81,7 @@ EOF
 [ -f "/data/private_key.txt" ] && rm -f "/data/private_key.txt"
 
 if [ ! -s "$CONFIG_FILE" ]; then
-    # 场景 A: 首次部署 (无 config.json)
+    # 场景 A: 首次部署 (无 config.json)，生成全新配对密钥
     echo "==> [Init] 首次部署，正在生成全新 REALITY 密钥对..."
     KEY_PAIR=$(/usr/bin/xray x25519)
     PRIVATE_KEY=$(echo "$KEY_PAIR" | grep -i "Private" | head -n 1 | awk '{print $NF}' | tr -d ' \r\n')
@@ -89,8 +89,8 @@ if [ ! -s "$CONFIG_FILE" ]; then
     write_public_key_file "$PUBLIC_KEY"
 
 elif [ ! -f "$PUBLIC_KEY_FILE" ]; then
-    # 场景 B: 用户删除了 public_key.txt (彻底重置密钥对)
-    echo "==> [Key Reset] 检测到 public_key.txt 已被删除，正在生成全新密钥对并更新至 config.json..."
+    # 场景 B: 用户删除了 public_key.txt (触发彻底重置密钥对)
+    echo "==> [Key Reset] 检测到 public_key.txt 已删除，生成新密钥对并更新至 config.json..."
     KEY_PAIR=$(/usr/bin/xray x25519)
     PRIVATE_KEY=$(echo "$KEY_PAIR" | grep -i "Private" | head -n 1 | awk '{print $NF}' | tr -d ' \r\n')
     PUBLIC_KEY=$(echo "$KEY_PAIR" | grep -iE "Public|Password" | head -n 1 | awk '{print $NF}' | tr -d ' \r\n')
@@ -104,8 +104,8 @@ elif [ ! -f "$PUBLIC_KEY_FILE" ]; then
     ' "$CONFIG_FILE" > "$TMP_RESET" && mv "$TMP_RESET" "$CONFIG_FILE"
 
 elif [ ! -s "$PUBLIC_KEY_FILE" ]; then
-    # 场景 C: public_key.txt 为空 (从 config.json 重新推导)
-    echo "==> [Key Re-derive] 检测到 public_key.txt 为空文件，正在从 config.json 重新计算公钥..."
+    # 场景 C: public_key.txt 为空文件 (触发从 config.json 重新推导)
+    echo "==> [Key Re-derive] 检测到 public_key.txt 为空，从 config.json 重新推导公钥..."
     PRIVATE_KEY=$(jq -r '(.inbounds[] | select(.protocol == "vless")).streamSettings.realitySettings.privateKey // empty' "$CONFIG_FILE" | tr -d ' \r\n')
 
     if [ -n "$PRIVATE_KEY" ]; then
@@ -127,7 +127,7 @@ elif [ ! -s "$PUBLIC_KEY_FILE" ]; then
     write_public_key_file "$PUBLIC_KEY"
 
 else
-    # 场景 D: 正常启动 (首行纯公钥提取)
+    # 场景 D: 正常启动，首行读取公钥
     PUBLIC_KEY=$(head -n 1 "$PUBLIC_KEY_FILE" | tr -d ' \r\n')
     PRIVATE_KEY=$(jq -r '(.inbounds[] | select(.protocol == "vless")).streamSettings.realitySettings.privateKey // empty' "$CONFIG_FILE" | tr -d ' \r\n')
 
@@ -202,7 +202,8 @@ trap 'echo "正在停止服务..."; [ -n "$XRAY_PID" ] && kill -TERM "$XRAY_PID"
 if [ -n "$PANEL_URL" ]; then
     [ -f "$CLIENT_INFO_FILE" ] && rm -f "$CLIENT_INFO_FILE"
 
-    # 核心优化：每次重新配置生成节点时，赋予唯一的节点标识与通信密钥，绝不与旧节点冲突
+    # 核心回归：完全采用纯随机 16 进制码标识节点！
+    # 每次重新生成部署或清空配置，自动生成全新的 node_id 和 node_key，绝不与旧节点冲突
     if [ -f "$NODE_ID_FILE" ] && [ -s "$NODE_ID_FILE" ]; then
         NODE_ID=$(cat "$NODE_ID_FILE" | tr -d ' \r\n')
     else
@@ -220,11 +221,11 @@ if [ -n "$PANEL_URL" ]; then
     fi
 
     remote_agent_loop() {
-        echo "==> [Cluster Node] 守护进程启动 (主控: $PANEL_URL | 节点ID: $NODE_ID)..."
+        echo "==> [Cluster Node] 守护进程启动 (主控: $PANEL_URL | 节点专属随机ID: $NODE_ID)..."
         sleep 3
 
         while true; do
-            # 首行纯净读取公钥，杜绝正则匹配故障
+            # 首行纯净读取公钥，杜绝正则解析故障
             if [ -f "$PUBLIC_KEY_FILE" ]; then
                 PUBLIC_KEY=$(head -n 1 "$PUBLIC_KEY_FILE" | tr -d ' \r\n')
             fi

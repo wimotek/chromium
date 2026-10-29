@@ -255,7 +255,7 @@ def open_faka_generate():
 
     return code, 200, {"Content-Type": "text/plain; charset=utf-8"}
 
-# ==================== 远程节点集群心跳 (支持新老交替自动下线旧节点与重置上报熔断) ====================
+# ==================== 远程节点集群心跳 ====================
 
 @app.route('/api/node/heartbeat', methods=['POST'])
 def node_heartbeat():
@@ -298,17 +298,19 @@ def node_heartbeat():
 
     conn = get_db()
     c = conn.cursor()
+
+    # 自动将相同 IP 和端口的其它旧节点标记为下线
+    c.execute("""
+        UPDATE nodes 
+        SET status=0, last_heartbeat='已下线 (新节点接管)' 
+        WHERE ip=? AND port=? AND node_id!=?
+    """, (node_ip, node_port, node_id))
+
     c.execute("SELECT * FROM nodes WHERE node_id=?", (node_id,))
     node = c.fetchone()
 
-    # 场景 1：全新节点首次接入 (自动识别并将同 IP、同端口的旧实例标记为下线，彻底避免冲突)
+    # 场景 1：全新独立节点接入
     if not node:
-        c.execute("""
-            UPDATE nodes 
-            SET status=0, last_heartbeat='已下线 (被新节点接管)' 
-            WHERE ip=? AND port=? AND node_id!=?
-        """, (node_ip, node_port, node_id))
-
         auto_name = f"节点-{node_ip}"
         c.execute("""
             INSERT INTO nodes 
@@ -317,12 +319,12 @@ def node_heartbeat():
         """, (node_id, node_key, auto_name, node_ip, node_port, dest, primary_sni, server_names_str, pbk, sid, now_str))
         conn.commit()
         conn.close()
-        return jsonify({"code": 200, "msg": "新节点首次接入成功！同地址旧节点已自动识别下线。"})
+        return jsonify({"code": 200, "msg": "新节点首次接入成功！旧实例已自动标记下线。"})
 
     current_key = node["node_key"]
     pending_key = node["pending_key"]
 
-    # 场景 2：后台点击了“重置上报”(pending_key='FORCE_RESYNC')，开启重置接纳模式，允许节点换密钥重绑
+    # 场景 2：重置上报熔断保护 (pending_key='FORCE_RESYNC')
     if pending_key == 'FORCE_RESYNC':
         c.execute("""
             UPDATE nodes 
@@ -333,7 +335,7 @@ def node_heartbeat():
         conn.close()
         return jsonify({"code": 200, "msg": "重置接纳完成，密钥与公钥已重新绑定生效！"})
 
-    # 场景 3：后台下发了新密钥，等待节点回传确认
+    # 场景 3：后台下发了新密钥
     if pending_key and node_key == current_key:
         c.execute("""
             UPDATE nodes 
@@ -344,7 +346,7 @@ def node_heartbeat():
         conn.close()
         return jsonify({"code": 200, "msg": "心跳成功，已为您同步下发新密钥", "new_node_key": pending_key})
 
-    # 场景 4：正常周期心跳 (仅更新在线状态、IP、公钥与时间戳，不反向覆盖后台配置)
+    # 场景 4：正常心跳 (强校验 node_key)
     if node_key == current_key:
         c.execute("""
             UPDATE nodes 
@@ -368,7 +370,6 @@ def node_sync_users():
     c = conn.cursor()
     c.execute("SELECT * FROM nodes WHERE node_id=?", (node_id,))
     node = c.fetchone()
-    # 支持在重置上报模式下免密拉取
     if not node or (node["node_key"] != token and node["pending_key"] != 'FORCE_RESYNC'):
         conn.close()
         return jsonify({"code": 403, "msg": "鉴权失败"}), 403
@@ -421,6 +422,7 @@ def node_report_traffic():
 
 # ==================== 用户端与邮箱安全改绑 ====================
 
+# 核心修复点：在此接口完整返回真实的 email、username、role，彻底解决改绑后刷新还原 Bug！
 @app.route('/api/user/refresh_info', methods=['POST'])
 def user_refresh_info():
     data = request.json or {}
@@ -458,17 +460,23 @@ def user_refresh_info():
                 "link": link
             })
 
+    # 关键修复：补全返回真实的 email 与基础信息
     return jsonify({
         "code": 200,
         "data": {
             "username": user['username'],
             "email": user['email'],
+            "role": user['role'],
             "uuid": user['uuid'],
             "used_mb": user['used_mb'],
             "limit_mb": user['traffic_limit_mb'],
             "expire_date": user['expire_date'],
+            "is_monthly": user['is_monthly'] or 0,
+            "reset_day": user['reset_day'] or 1,
             "sub_url": sub_url,
-            "nodes": nodes_data
+            "nodes": nodes_data,
+            "notify_type": user['notify_type'] or 'email',
+            "serverchan_key": user['serverchan_key'] or ''
         }
     })
 
@@ -517,6 +525,7 @@ def send_change_email_code():
 
     return jsonify({"code": 200, "msg": "验证码已成功投递至新邮箱，请前往查收"})
 
+# 核心修复点：支持同时匹配用户名或旧邮箱，且将成功改绑后的 new_email 显式返回给前端
 @app.route('/api/user/change_email', methods=['POST'])
 def user_change_email():
     data = request.json or {}
@@ -530,7 +539,7 @@ def user_change_email():
 
     conn = get_db()
     c = conn.cursor()
-    c.execute("SELECT * FROM users WHERE username=? AND password_hash=?", (username, hash_pwd(password)))
+    c.execute("SELECT * FROM users WHERE (username=? OR email=?) AND password_hash=?", (username, username, hash_pwd(password)))
     user = c.fetchone()
     if not user:
         conn.close()
@@ -542,17 +551,18 @@ def user_change_email():
         conn.close()
         return jsonify({"code": 400, "msg": "新邮箱验证码错误或已失效"})
 
-    c.execute("SELECT id FROM users WHERE email=? AND username!=?", (new_email, username))
+    real_username = user['username']
+    c.execute("SELECT id FROM users WHERE email=? AND username!=?", (new_email, real_username))
     if c.fetchone():
         conn.close()
         return jsonify({"code": 400, "msg": "该新邮箱已被其他账号占用"}), 400
 
-    c.execute("UPDATE users SET email=? WHERE username=?", (new_email, username))
+    c.execute("UPDATE users SET email=? WHERE username=?", (new_email, real_username))
     c.execute("DELETE FROM verify_codes WHERE email=?", (new_email,))
     conn.commit()
     conn.close()
 
-    notice_content = f"您好 {username}，您的账号绑定邮箱已于 {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 成功更换为 {new_email}。"
+    notice_content = f"您好 {real_username}，您的账号绑定邮箱已于 {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 成功更换为 {new_email}。"
     notify_user(dict(user), "【安全通知】账号绑定邮箱已成功修改", f"<p>{notice_content}</p>", notice_content)
 
     return jsonify({"code": 200, "msg": "绑定邮箱修改成功！", "new_email": new_email})
@@ -1068,7 +1078,6 @@ def admin_save_node_config():
 
     return jsonify({"code": 200, "msg": "节点配置已更新！多域名列表已同步，远程节点下次回传时自动热重载。"})
 
-# 核心升级：重置上报熔断保护，防止节点更新密钥后遭遇 403
 @app.route('/api/admin/nodes/force_resync', methods=['POST'])
 def admin_nodes_force_resync():
     data = request.json or {}
@@ -1077,7 +1086,6 @@ def admin_nodes_force_resync():
     node_id = data.get('node_id')
     conn = get_db()
     c = conn.cursor()
-    # 挂载 FORCE_RESYNC 状态位，清空 pbk 和 sid，允许新节点即使带着新密钥也能直接重绑
     c.execute("UPDATE nodes SET pbk='', sid='', pending_key='FORCE_RESYNC', last_heartbeat='等待重新上报' WHERE node_id=?", (node_id,))
     conn.commit()
     conn.close()
@@ -1388,8 +1396,11 @@ def edit_user_quota():
 
     conn = get_db()
     c = conn.cursor()
-    c.execute("UPDATE users SET traffic_limit_mb=?, expire_date=?, is_monthly=?, reset_day=? WHERE username=?",
-              (limit_mb, expire_date, is_monthly, reset_day, target_user))
+    c.execute("""
+        UPDATE users 
+        SET traffic_limit_mb=?, expire_date=?, is_monthly=?, reset_day=? 
+        WHERE username=?
+    """, (limit_mb, expire_date, is_monthly, reset_day, target_user))
     conn.commit()
     conn.close()
     return jsonify({"code": 200, "msg": f"用户 [{target_user}] 属性已更新"})

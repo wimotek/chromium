@@ -12,7 +12,8 @@
             <th>节点别名</th>
             <th>连接地址与端口</th>
             <th>伪装域名列表 (ServerNames)</th>
-            <th>通信凭证 (NODE_KEY)</th>
+            <!-- 核心优化：正式将通信凭证列替换为 ShortId (sid) -->
+            <th>ShortId (sid)</th>
             <th>REALITY 公钥 (PBK)</th>
             <th style="white-space: nowrap;">心跳在线状态</th>
             <th>集群操作</th>
@@ -25,25 +26,25 @@
             <td style="font-size: 11px; color: #94a3b8; max-width: 220px; word-break: break-all;">
               {{ n.server_names || n.sni }}
             </td>
+
+            <!-- 展示 ShortId (sid) 及一键复制 -->
             <td class="font-mono text-cyan" style="font-size: 11px; white-space: nowrap;">
-              {{ n.node_key ? n.node_key.substring(0, 8) + '...' : '未设置' }}
-              <button class="btn-link-action" style="margin-left: 4px;" @click="$emit('copy', n.node_key)">复制</button>
+              {{ n.sid || '未就绪' }}
+              <button v-if="n.sid" class="btn-link-action" style="margin-left: 4px;" @click="$emit('copy', n.sid)">复制</button>
             </td>
+
             <td class="font-mono text-green" style="font-size: 11px; white-space: nowrap;">
               {{ n.pbk ? n.pbk.substring(0, 10) + '...' : '等待回传' }}
               <button v-if="n.pbk" class="btn-link-action" style="margin-left: 4px;" @click="$emit('copy', n.pbk)">复制</button>
             </td>
 
-            <!-- 核心优化：动态智能状态灯系统 -->
+            <!-- 动态真实状态灯：根据真实心跳时效判断在线与下线 -->
             <td class="status-cell-nowrap">
-              <span v-if="n.status === 0 || (n.last_heartbeat && n.last_heartbeat.includes('下线'))" class="badge badge-used">
+              <span v-if="!isNodeOnline(n)" class="badge badge-used">
                 🔴 已下线
               </span>
               <span v-else-if="!n.pbk || (n.last_heartbeat && n.last_heartbeat.includes('等待'))" class="badge badge-monthly">
                 🟡 等待回传
-              </span>
-              <span v-else-if="isHeartbeatExpired(n.last_heartbeat)" class="badge badge-used">
-                🔴 离线 (心跳超时)
               </span>
               <span v-else class="badge badge-ready">
                 🟢 在线
@@ -68,7 +69,7 @@
       </table>
     </div>
 
-    <!-- 远程海外 VPS 接入指令 (纯净无引号) -->
+    <!-- 远程海外 VPS 接入指令 -->
     <div class="panel-card" style="margin-top: 25px;">
       <h4 style="margin: 0 0 10px 0; color: #38bdf8;">🖥️ 远程海外 VPS 一键接入指令 (HTTPS 模式)</h4>
       <p class="card-desc">节点秒级上线，自动推导并向本面板回传真实公钥与网络参数：</p>
@@ -164,13 +165,14 @@ const nodeEditForm = reactive({ node_id: '', name: '', ip: '', port: 443, dest: 
 
 const publicMasterHost = computed(() => window.location.hostname)
 
-// 智能判定心跳是否超时 (超过 120 秒未上报)
-const isHeartbeatExpired = (hbStr) => {
-  if (!hbStr || hbStr.includes('等待') || hbStr.includes('下线')) return false
+// 智能判定心跳是否存活：超过 120 秒未收到心跳即判定为已下线
+const isNodeOnline = (n) => {
+  if (!n || n.status === 0 || !n.last_heartbeat) return false
+  if (n.last_heartbeat.includes('下线') || n.last_heartbeat.includes('等待')) return false
   try {
-    const hbTime = new Date(hbStr.replace(/-/g, '/')).getTime()
+    const hbTime = new Date(n.last_heartbeat.replace(/-/g, '/')).getTime()
     const now = new Date().getTime()
-    return (now - hbTime) > 120 * 1000
+    return (now - hbTime) <= 120 * 1000
   } catch (_) {
     return false
   }

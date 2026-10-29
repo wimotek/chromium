@@ -74,7 +74,7 @@
             </button>
           </div>
 
-          <!-- 面板 B：管理员自身通知通道、换绑邮箱与改密 -->
+          <!-- 面板 B：管理员自身通知通道、换绑与改密 -->
           <div class="panel-card">
             <div class="panel-card-header">
               <div class="panel-title-wrap">
@@ -103,7 +103,7 @@
               <button class="btn-cyber-action" style="padding: 6px 14px; font-size: 12px;" @click="testUserNotify">测试通知</button>
             </div>
 
-            <!-- 2. 更换管理员绑定邮箱 (补全明确的文字标签) -->
+            <!-- 2. 更换管理员绑定邮箱 (带新邮箱真实性验证) -->
             <div class="inner-divider">
               <div class="inner-divider-title">📧 更换管理员绑定邮箱 (新邮箱验证)</div>
               <div style="font-size: 12px; color: #94a3b8; margin: 4px 0 10px 0;">
@@ -118,11 +118,11 @@
                   </button>
                 </div>
               </div>
-              <div class="form-item">
+              <div class="form-item" style="margin-bottom: 8px;">
                 <label>新邮箱 6 位验证码</label>
                 <input v-model="adminEmailForm.code" type="text" class="cyber-input" placeholder="输入新邮箱收到的 6 位验证码" />
               </div>
-              <div class="form-item">
+              <div class="form-item" style="margin-bottom: 12px;">
                 <label>管理员当前登录密码 (身份核验)</label>
                 <input v-model="adminEmailForm.password" type="password" class="cyber-input" placeholder="输入管理员登录密码确认改绑" />
               </div>
@@ -134,15 +134,15 @@
             <!-- 3. 修改管理员自身登录密码 -->
             <div class="inner-divider">
               <div class="inner-divider-title">🔑 修改管理员自身登录密码</div>
-              <div class="form-item">
+              <div class="form-item" style="margin-bottom: 8px;">
                 <label>当前原旧密码</label>
                 <input v-model="pwdForm.old_pwd" type="password" class="cyber-input" placeholder="当前原旧密码" />
               </div>
-              <div class="form-item">
+              <div class="form-item" style="margin-bottom: 8px;">
                 <label>设置新密码 (至少6位)</label>
                 <input v-model="pwdForm.new_pwd" type="password" class="cyber-input" placeholder="新密码 (至少6位)" />
               </div>
-              <div class="form-item">
+              <div class="form-item" style="margin-bottom: 12px;">
                 <label>再次确认新密码</label>
                 <input v-model="pwdForm.confirm_pwd" type="password" class="cyber-input" placeholder="确认新密码" />
               </div>
@@ -474,7 +474,7 @@ const sendAdminChangeEmailCode = async () => {
   }
 }
 
-// 验证码 + 管理员密码双向确认换绑邮箱
+// 核心功能：验证码 + 管理员密码双向确认换绑邮箱 (即时更新内存并回写 localStorage，彻底解决刷新还原 Bug！)
 const submitAdminChangeEmail = async () => {
   if (!adminEmailForm.new_email || !adminEmailForm.code || !adminEmailForm.password) {
     return ElMessage.warning('请填写新邮箱、验证码以及管理员密码')
@@ -490,6 +490,18 @@ const submitAdminChangeEmail = async () => {
     })
     if (res.data.code === 200) {
       ElMessage.success(res.data.msg)
+
+      // 1. 立即更新当前视图对象
+      const newEmail = res.data.new_email || adminEmailForm.new_email
+      props.currentUser.email = newEmail
+
+      // 2. 同步覆写 localStorage 缓存，彻底杜绝 F5 刷新还原为 richard！
+      const session = JSON.parse(localStorage.getItem('xray_auth_session') || '{}')
+      if (session.user) {
+        session.user.email = newEmail
+        localStorage.setItem('xray_auth_session', JSON.stringify(session))
+      }
+
       adminEmailForm.new_email = ''
       adminEmailForm.code = ''
       adminEmailForm.password = ''
