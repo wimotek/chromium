@@ -1,8 +1,8 @@
 # Minimal Chromium (Web UI + CDP + Clipboard Sync)
 
-[![Docker Image Size](https://img.shields.io/docker/image-size/wimotek/minimal-chromium/latest?style=flat-square)](https://hub.docker.com/r/wimotek/minimal-chromium)
-[![Docker Pulls](https://img.shields.io/docker/pulls/wimotek/minimal-chromium?style=flat-square)](https://hub.docker.com/r/wimotek/minimal-chromium)
-[![Supported Architectures](https://img.shields.io/badge/arch-amd64%20%7C%20arm64-blue?style=flat-square)](https://hub.docker.com/r/wimotek/minimal-chromium)
+[![Docker Image Size](https://img.shields.io/docker/image-size/wimotek/chromium/latest?style=flat-square)](https://hub.docker.com/r/wimotek/chromium)
+[![Docker Pulls](https://img.shields.io/docker/pulls/wimotek/chromium?style=flat-square)](https://hub.docker.com/r/wimotek/chromium)
+[![Supported Architectures](https://img.shields.io/badge/arch-amd64%20%7C%20arm64-blue?style=flat-square)](https://hub.docker.com/r/wimotek/chromium)
 [![License](https://img.shields.io/badge/license-MIT-green?style=flat-square)](LICENSE)
 
 专为 **AI Agent（Claude Computer Use / AutoGPT / Browser-Use）、自动化测试（Playwright / Puppeteer）与远程云桌面** 设计的高性能轻量 Chromium 容器镜像。
@@ -61,7 +61,7 @@ docker run -d \
   -v /etc/letsencrypt/live/yourdomain.com:/certs:ro \
   --shm-size="2gb" \
   --restart unless-stopped \
-  wimotek/minimal-chromium:novnc \
+  wimotek/chromium:novnc \
   https://www.bing.com
 ```
 HTTP 访问：http://<服务器IP>:6080
@@ -80,14 +80,14 @@ docker run -d \
   -e VNC_PASSWORD="MySecurePassword123" \
   -e RESOLUTION=1920x1080 \
   -v chromium_data:/data \
-  wimotek/minimal-chromium:kasmvnc \
+  wimotek/chromium:kasmvnc \
   https://www.google.com
 ```
 #### 2. 使用 docker-compose.yml
 ```Yaml
 services:
   chromium:
-    image: wimotek/minimal-chromium:kasmvnc
+    image: wimotek/chromium:kasmvnc
     container_name: chromium
     ports:
       - "8444:8444"            # KasmVNC Web 端 (HTTPS)
@@ -164,10 +164,10 @@ ssh -N -L 9222:127.0.0.1:9222 root@<公网服务器IP>
 ```bash
 Bash
 # 启动时打开指定网址
-docker run -d -p 8444:8444 wimotek/minimal-chromium:latest https://news.ycombinator.com
+docker run -d -p 8444:8444 wimotek/chromium:latest https://news.ycombinator.com
 
 # 启动时以无痕模式打开多个标签页
-docker run -d -p 8444:8444 wimotek/minimal-chromium:latest --incognito https://github.com https://google.com
+docker run -d -p 8444:8444 wimotek/chromium:latest --incognito https://github.com https://google.com
 ```
 
 

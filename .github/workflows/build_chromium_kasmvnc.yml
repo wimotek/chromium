@@ -14,6 +14,9 @@ permissions:
   contents: read
   packages: write
 
+env:
+  IMAGE_NAME: ${{ secrets.DOCKERHUB_USERNAME }}/chromium
+
 jobs:
   build-kasmvnc:
     runs-on: ubuntu-latest
@@ -48,8 +51,8 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: |
-            ${{ secrets.DOCKERHUB_USERNAME }}/minimal-chromium
-            ghcr.io/${{ github.repository_owner }}/minimal-chromium
+            ${{ secrets.DOCKERHUB_USERNAME }}/chromium
+            ghcr.io/${{ github.repository_owner }}/chromium
           tags: |
             type=raw,value=kasmvnc
             type=semver,pattern={{version}}-kasmvnc
@@ -72,6 +75,6 @@ jobs:
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
-          repository: ${{ secrets.DOCKERHUB_USERNAME }}/minimal-chromium
+          repository: ${{ env.IMAGE_NAME }}
           readme-filepath: ./README.md
           short-description: "Chromium in Docker with KasmVNC (60FPS), CDP and Clipboard sync"

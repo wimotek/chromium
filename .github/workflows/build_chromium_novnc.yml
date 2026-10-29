@@ -15,7 +15,7 @@ permissions:
   packages: write
 
 env:
-  IMAGE_NAME: ${{ secrets.DOCKERHUB_USERNAME }}/minimal-chromium
+  IMAGE_NAME: ${{ secrets.DOCKERHUB_USERNAME }}/chromium
 
 jobs:
   build-novnc:
@@ -49,7 +49,7 @@ jobs:
         with:
           images: |
             ${{ env.IMAGE_NAME }}
-            ghcr.io/${{ github.repository_owner }}/minimal-chromium
+            ghcr.io/${{ github.repository_owner }}/chromium
           tags: |
             type=raw,value=latest
             type=raw,value=novnc
