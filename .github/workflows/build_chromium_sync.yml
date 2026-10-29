@@ -1,0 +1,51 @@
+name: Build and Push Sync Docker Image
+
+on:
+  push:
+    branches: [ "main" ]
+    # 仅当 chromium_sync 目录内容变动时触发
+    paths:
+      - 'chromium/chromium_sync/**'
+  workflow_dispatch: # 支持在 GitHub 后台手动点击执行
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write # GHCR 推送镜像必备权限
+
+    steps:
+      - name: 检出仓库代码
+        uses: actions/checkout@v4
+
+      - name: 设置 Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # 1. 登录到 GitHub Packages (GHCR)
+      - name: 登录到 GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # 2. 登录到 Docker Hub
+      - name: 登录到 Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # 3. 编译并推送到两个仓库 (带 Docker 构建缓存优化)
+      - name: 编译并推送到 GHCR 和 Docker Hub
+        uses: docker/build-push-action@v6
+        with:
+          context: ./chromium/chromium_sync
+          file: ./chromium/chromium_sync/Dockerfile
+          push: true
+          tags: |
+            ghcr.io/wimotek/chromium:sync
+            ${{ secrets.DOCKERHUB_USERNAME }}/chromium:sync
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

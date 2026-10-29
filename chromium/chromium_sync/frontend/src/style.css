@@ -1,0 +1,15 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+body {
+  background-color: #0b0f17;
+  color: #e2e8f0;
+}
+
+/* 核心要求：宽度 70%，有最小和最大限制，自适应居中 */
+.adaptive-input {
+  width: 70% !important;
+  min-width: 260px !important;
+  max-width: 580px !important;
+}
