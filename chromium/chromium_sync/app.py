@@ -3,6 +3,7 @@ import time
 import json
 import uuid
 import random
+import secrets
 import sqlite3
 import logging
 import asyncio
@@ -23,27 +24,28 @@ from pydantic import BaseModel
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("CDP_Sync")
 
-# 根目录数据路径规范化
-DATA_DIR = os.getenv("DATA_DIR", "/data")
+# 根目录与证书存储路径
+DATA_DIR = "/data"
 KEYS_DIR = os.path.join(DATA_DIR, "keys")
 DB_PATH = os.path.join(DATA_DIR, "app.db")
 os.makedirs(KEYS_DIR, exist_ok=True)
 
-JWT_SECRET = os.getenv("JWT_SECRET", "cdp-sync-super-secret-key-999")
 INIT_PASSWORD = os.getenv("ADMIN_INIT_PASS", "Admin@123456")
 
-# 引入 chromium_sync_module
+# 引入 chromium_sync_module 模块
 MODULE_AVAILABLE = False
 try:
     from chromium_sync_module import sync_cdp_cookies
     MODULE_AVAILABLE = True
-    logger.info("已成功集成 chromium_sync_module 模块！")
+    logger.info("成功加载本地 chromium_sync_module 模块！")
 except Exception:
-    logger.warning("未引入外部 chromium_sync_module，启用内置原生 CDP 引擎。")
+    logger.warning("未检测到外部 chromium_sync_module，将启用内置原生 CDP Cookie 同步引擎。")
 
-def init_db():
+# 数据库与 JWT 秘钥初始化
+def init_db_and_jwt():
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
+    # 节点表
     cur.execute('''CREATE TABLE IF NOT EXISTS nodes (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         name TEXT NOT NULL,
@@ -65,16 +67,29 @@ def init_db():
         status TEXT,
         details TEXT
     )''')
+    
+    # 初始化密码
     cur.execute("SELECT value FROM settings WHERE key='admin_password'")
     if not cur.fetchone():
         hashed = bcrypt.hash(INIT_PASSWORD)
         cur.execute("INSERT INTO settings (key, value) VALUES ('admin_password', ?)", (hashed,))
+    
+    # 自动生成 64 位 JWT 签名秘钥并持久化
+    cur.execute("SELECT value FROM settings WHERE key='jwt_secret'")
+    jwt_row = cur.fetchone()
+    if jwt_row:
+        secret = jwt_row[0]
+    else:
+        secret = secrets.token_hex(32)
+        cur.execute("INSERT INTO settings (key, value) VALUES ('jwt_secret', ?)", (secret,))
+
     conn.commit()
     conn.close()
+    return secret
 
-init_db()
+JWT_SECRET = init_db_and_jwt()
 
-# --- SSH 隧道运行池 ---
+# SSH 隧道管理器
 class TunnelManager:
     def __init__(self):
         self.tunnels: Dict[int, SSHTunnelForwarder] = {}
@@ -91,6 +106,7 @@ class TunnelManager:
             "set_keepalive": 30.0
         }
         
+        # 区分并挂载证书
         if node.get('ssh_key_filename'):
             key_path = os.path.join(KEYS_DIR, node['ssh_key_filename'])
             if os.path.exists(key_path):
@@ -103,6 +119,7 @@ class TunnelManager:
             tunnel.start()
             self.tunnels[node_id] = tunnel
             self._update_node_status(node_id, "connected")
+            logger.info(f"节点 [{node['name']}] SSH 映射成功 -> 本地端口 {node['local_bind_port']}")
             return True, "Connected"
         except Exception as e:
             self._update_node_status(node_id, f"error: {str(e)[:30]}")
@@ -126,26 +143,27 @@ class TunnelManager:
 
 tunnel_mgr = TunnelManager()
 
-# --- 内置 CDP 同步引擎 ---
+# 原生 CDP Cookie 交互
 async def get_cdp_ws_url(local_port: int) -> str:
     url = f"http://127.0.0.1:{local_port}/json/version"
     async with httpx.AsyncClient(timeout=4.0) as client:
         res = await client.get(url)
         return res.json()["webSocketDebuggerUrl"]
 
-async def fetch_cookies(local_port: int) -> List[dict]:
+async def fetch_cookies_native(local_port: int) -> List[dict]:
     ws_url = await get_cdp_ws_url(local_port)
     async with websockets.connect(ws_url) as ws:
         await ws.send(json.dumps({"id": 1, "method": "Storage.getCookies"}))
         resp = await ws.recv()
         return json.loads(resp).get("result", {}).get("cookies", [])
 
-async def inject_cookies(local_port: int, cookies: List[dict]):
+async def inject_cookies_native(local_port: int, cookies: List[dict]):
     ws_url = await get_cdp_ws_url(local_port)
     async with websockets.connect(ws_url) as ws:
         await ws.send(json.dumps({"id": 2, "method": "Network.setCookies", "params": {"cookies": cookies}}))
         await ws.recv()
 
+# 同步执行主流程
 async def execute_sync_task():
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
@@ -156,6 +174,7 @@ async def execute_sync_task():
 
     source = next((n for n in nodes if n["is_source"] == 1), None)
     if not source:
+        logger.warning("未设定源节点 (Source)，跳过同步。")
         return
 
     targets = [n for n in nodes if n["is_source"] == 0]
@@ -166,23 +185,23 @@ async def execute_sync_task():
         if MODULE_AVAILABLE:
             cookies = sync_cdp_cookies.extract(source["local_bind_port"])
         else:
-            cookies = await fetch_cookies(source["local_bind_port"])
+            cookies = await fetch_cookies_native(source["local_bind_port"])
 
-        log_detail.append(f"源节点 [{source['name']}] 成功捕获 {len(cookies)} 个 Cookie")
+        log_detail.append(f"从源节点 [{source['name']}] 捕获到 {len(cookies)} 个 Cookie")
 
         for target in targets:
             try:
                 if MODULE_AVAILABLE:
                     sync_cdp_cookies.inject(target["local_bind_port"], cookies)
                 else:
-                    await inject_cookies(target["local_bind_port"], cookies)
-                log_detail.append(f"-> 节点 [{target['name']}] 注入成功")
+                    await inject_cookies_native(target["local_bind_port"], cookies)
+                log_detail.append(f"-> 节点 [{target['name']}] 写入成功")
             except Exception as ex:
-                log_detail.append(f"-> 节点 [{target['name']}] 注入失败: {str(ex)}")
+                log_detail.append(f"-> 节点 [{target['name']}] 失败: {str(ex)}")
         status = "SUCCESS"
     except Exception as e:
         status = "FAILED"
-        log_detail.append(f"提取中断: {str(e)}")
+        log_detail.append(f"源节点读取中断: {str(e)}")
 
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
@@ -192,16 +211,16 @@ async def execute_sync_task():
     conn.commit()
     conn.close()
 
-# --- 验证码防刷与鉴权 ---
+# 验证码与 IP 爆破防护
 CAPTCHA_STORE = {}
 LOGIN_ATTEMPTS = {}
 
 def check_ip_rate_limit(ip: str):
     record = LOGIN_ATTEMPTS.get(ip, {"count": 0, "lock_until": 0})
     if time.time() < record["lock_until"]:
-        raise HTTPException(status_code=429, detail="登录尝试过多，IP 已暂时锁定 15 分钟")
+        raise HTTPException(status_code=429, detail="尝试次数过多，IP 已暂时锁定 15 分钟")
 
-app = FastAPI(title="CDP Sync API")
+app = FastAPI(title="CDP Sync System")
 
 def verify_token(authorization: Optional[str] = Header(None)):
     if not authorization or not authorization.startswith("Bearer "):
@@ -236,7 +255,7 @@ def login(data: LoginDTO, req: Request):
     cap = CAPTCHA_STORE.get(data.captcha_token)
     if not cap or time.time() > cap["exp"] or str(cap["ans"]) != data.captcha_answer.strip():
         LOGIN_ATTEMPTS[ip] = {"count": LOGIN_ATTEMPTS.get(ip, {}).get("count", 0) + 1, "lock_until": time.time() + 900 if LOGIN_ATTEMPTS.get(ip, {}).get("count", 0) >= 4 else 0}
-        raise HTTPException(status_code=400, detail="验证码错误或已失效")
+        raise HTTPException(status_code=400, detail="验证码错误或已过期")
 
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
@@ -284,7 +303,7 @@ def create_node(data: dict, user: dict = Depends(verify_token)):
                  data.get('remote_cdp_port', 9222), data['local_bind_port']))
     conn.commit()
     conn.close()
-    return {"message": "创建成功"}
+    return {"message": "节点添加成功"}
 
 @app.delete("/api/nodes/{node_id}")
 def delete_node(node_id: int, user: dict = Depends(verify_token)):
@@ -294,7 +313,7 @@ def delete_node(node_id: int, user: dict = Depends(verify_token)):
     cur.execute("DELETE FROM nodes WHERE id=?", (node_id,))
     conn.commit()
     conn.close()
-    return {"message": "已删除"}
+    return {"message": "节点已删除"}
 
 @app.post("/api/nodes/{node_id}/toggle-tunnel")
 def toggle_tunnel(node_id: int, user: dict = Depends(verify_token)):
@@ -322,7 +341,7 @@ def set_source(node_id: int, user: dict = Depends(verify_token)):
     cur.execute("UPDATE nodes SET is_source = 1 WHERE id=?", (node_id,))
     conn.commit()
     conn.close()
-    return {"message": "已切换源节点"}
+    return {"message": "已设置为默认源节点"}
 
 @app.get("/api/ssh-keys")
 def list_keys(user: dict = Depends(verify_token)):
@@ -334,20 +353,20 @@ async def upload_key(file: UploadFile = File(...), user: dict = Depends(verify_t
     content = await file.read()
     with open(path, "wb") as f:
         f.write(content)
-    os.chmod(path, 0o600)
-    return {"message": "证书上传成功"}
+    os.chmod(path, 0o600)  # SSH 严格要求 600 私钥权限
+    return {"message": f"证书 {file.filename} 上传完成"}
 
 @app.delete("/api/ssh-keys/{filename}")
 def delete_key(filename: str, user: dict = Depends(verify_token)):
     p = os.path.join(KEYS_DIR, filename)
     if os.path.exists(p):
         os.remove(p)
-    return {"message": "已删除"}
+    return {"message": "证书已删除"}
 
 @app.post("/api/sync/trigger")
 async def trigger_sync(user: dict = Depends(verify_token)):
     await execute_sync_task()
-    return {"message": "同步触发完成"}
+    return {"message": "手动同步任务完成"}
 
 @app.get("/api/sync/logs")
 def get_logs(user: dict = Depends(verify_token)):
@@ -359,15 +378,16 @@ def get_logs(user: dict = Depends(verify_token)):
     conn.close()
     return logs
 
+# 启动 15 分钟间隔定时调度器
 scheduler = BackgroundScheduler()
 scheduler.add_job(lambda: asyncio.run(execute_sync_task()), 'interval', minutes=15)
 scheduler.start()
 
-# 静态托管 Vue 3 编译后的 dist
+# 静态托管由 Vite 打包编译生成的 dist 产物
 if os.path.exists("dist"):
     app.mount("/assets", StaticFiles(directory="dist/assets"), name="assets")
     @app.get("/{full_path:path}")
-    def serve_vue(full_path: str):
+    def serve_spa(full_path: str):
         return FileResponse("dist/index.html")
 
 if __name__ == "__main__":

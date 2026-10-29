@@ -4,6 +4,7 @@ services:
   chromium-sync:
     image: ghcr.io/wimotek/chromium:sync
     container_name: cdp_sync_manager
+    pull_policy: always    # 每次启动都会先尝试从远程拉取最新镜像
     restart: unless-stopped
     ports:
       - "8080:8080"
@@ -13,5 +14,3 @@ services:
       - ./data:/data
     environment:
       - ADMIN_INIT_PASS=Admin@123456
-      - JWT_SECRET=cdp-sync-super-secret-key-change-me
-      - DATA_DIR=/data

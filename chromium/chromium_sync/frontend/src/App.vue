@@ -174,7 +174,7 @@ onMounted(() => {
             <div @click="refreshCaptcha" class="cursor-pointer" title="点击刷新" v-html="captchaSvg"></div>
           </div>
           <button type="submit" class="adaptive-input py-2.5 bg-cyan-600 hover:bg-cyan-500 font-medium rounded-lg text-white transition shadow-lg shadow-cyan-600/30">
-            登录
+            登入控制台
           </button>
         </form>
       </div>
@@ -203,8 +203,8 @@ onMounted(() => {
               <tr>
                 <th class="p-3">身份</th>
                 <th class="p-3">节点名</th>
-                <th class="p-3">SSH 连接</th>
-                <th class="p-3">本地端口</th>
+                <th class="p-3">SSH 连接凭证</th>
+                <th class="p-3">本地转发端口</th>
                 <th class="p-3">状态</th>
                 <th class="p-3">操作</th>
               </tr>
@@ -216,7 +216,16 @@ onMounted(() => {
                   <button v-else @click="setSource(node.id)" class="text-xs text-slate-500 hover:text-cyan-400">设为源</button>
                 </td>
                 <td class="p-3 font-medium text-white">{{ node.name }}</td>
-                <td class="p-3 font-mono text-xs">{{ node.ssh_user }}@{{ node.ssh_host }}:{{ node.ssh_port }}</td>
+                <td class="p-3 font-mono text-xs">
+                  <div>{{ node.ssh_user }}@{{ node.ssh_host }}:{{ node.ssh_port }}</div>
+                  <!-- 区分证书与密码：清晰标注该节点选择绑定的证书文件名 -->
+                  <span v-if="node.ssh_key_filename" class="inline-block mt-1 px-1.5 py-0.5 rounded text-[10px] bg-cyan-950/70 text-cyan-400 border border-cyan-800">
+                    🔑 {{ node.ssh_key_filename }}
+                  </span>
+                  <span v-else class="inline-block mt-1 px-1.5 py-0.5 rounded text-[10px] bg-slate-800 text-slate-400">
+                    🔒 密码认证
+                  </span>
+                </td>
                 <td class="p-3 font-mono text-cyan-300">127.0.0.1:{{ node.local_bind_port }}</td>
                 <td class="p-3">
                   <span :class="{'text-green-400': node.status==='connected', 'text-yellow-400': node.status==='stopped', 'text-red-400': node.status.startsWith('error')}" class="text-xs font-mono">
@@ -248,7 +257,7 @@ onMounted(() => {
           </section>
 
           <section class="bg-slate-900 border border-slate-800 rounded-xl p-6">
-            <h2 class="text-lg font-semibold text-slate-100 mb-4">实时任务日志</h2>
+            <h2 class="text-lg font-semibold text-slate-100 mb-4">任务日志</h2>
             <div class="bg-slate-950 p-4 rounded-lg font-mono text-xs h-48 overflow-y-auto space-y-2 border border-slate-800">
               <div v-for="l in logs" :key="l.id">
                 <span class="text-slate-500">[{{ l.timestamp }}]</span>
@@ -260,7 +269,7 @@ onMounted(() => {
         </div>
       </main>
 
-      <!-- 新增节点弹窗 (输入框 70% 宽度自适应约束) -->
+      <!-- 新增节点弹窗 (输入框 70% 宽度自适应约束与证书选择下拉菜单) -->
       <div v-if="showNodeModal" class="fixed inset-0 bg-black/70 flex items-center justify-center p-4">
         <div class="bg-slate-900 border border-slate-800 rounded-xl p-6 w-full max-w-xl">
           <h3 class="text-lg font-bold mb-4 text-center">添加 CDP 节点</h3>
@@ -269,10 +278,13 @@ onMounted(() => {
             <input v-model="newNode.ssh_host" required placeholder="SSH Host" class="adaptive-input p-2.5 bg-slate-800 border border-slate-700 rounded text-sm">
             <input v-model="newNode.ssh_port" type="number" placeholder="SSH Port (默认 22)" class="adaptive-input p-2.5 bg-slate-800 border border-slate-700 rounded text-sm">
             <input v-model="newNode.ssh_user" required placeholder="SSH 用户名" class="adaptive-input p-2.5 bg-slate-800 border border-slate-700 rounded text-sm">
+            
+            <!-- 证书选择下拉框：多台主机可随意复用选同一个证书 -->
             <select v-model="newNode.ssh_key_filename" class="adaptive-input p-2.5 bg-slate-800 border border-slate-700 rounded text-sm">
-              <option value="">使用密码认证</option>
-              <option v-for="k in keys" :value="k.filename">{{ k.filename }}</option>
+              <option value="">使用账号密码认证（不使用证书）</option>
+              <option v-for="k in keys" :key="k.filename" :value="k.filename">{{ k.filename }}</option>
             </select>
+
             <input v-if="!newNode.ssh_key_filename" v-model="newNode.ssh_password" type="password" placeholder="SSH 密码" class="adaptive-input p-2.5 bg-slate-800 border border-slate-700 rounded text-sm">
             <input v-model="newNode.remote_cdp_port" type="number" placeholder="远程 CDP 端口 (默认 9222)" class="adaptive-input p-2.5 bg-slate-800 border border-slate-700 rounded text-sm">
             <input v-model="newNode.local_bind_port" type="number" required placeholder="本地隧道绑定端口 (如 19222)" class="adaptive-input p-2.5 bg-slate-800 border border-slate-700 rounded text-sm">
@@ -288,7 +300,7 @@ onMounted(() => {
       <!-- 修改密码弹窗 -->
       <div v-if="showPwdModal" class="fixed inset-0 bg-black/70 flex items-center justify-center p-4">
         <div class="bg-slate-900 border border-slate-800 rounded-xl p-6 w-full max-w-md">
-          <h3 class="text-lg font-bold mb-4 text-center">重置登录密码</h3>
+          <h3 class="text-lg font-bold mb-4 text-center">重置管理员密码</h3>
           <form @submit.prevent="changePassword" class="flex flex-col items-center space-y-4">
             <input v-model="newPassword" type="password" required minlength="6" placeholder="输入新密码 (至少6位)" class="adaptive-input p-2.5 bg-slate-800 border border-slate-700 rounded text-sm">
             <div class="flex gap-4">
