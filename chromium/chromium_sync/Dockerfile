@@ -13,7 +13,7 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# 安装 SSH 客户端、openssl（用于生成自签证书）及 curl
+# 安装 SSH 客户端、openssl（自签名证书生成）与基础工具
 RUN apt-get update && apt-get install -y --no-install-recommends \
     openssh-client \
     openssl \
@@ -23,14 +23,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
 
-# 拷贝后端核心及自带的 chromium_sync_module
+# 拷贝后端入口
 COPY app.py .
-COPY chromium_sync_module ./chromium_sync_module
 
-# 从 Stage 1 提取前端编译产物
+# 直接将包含 __init__.py 的真实包目录拷贝至容器根下
+COPY chromium_sync_module/chromium_sync ./chromium_sync
+
+# 从 Stage 1 拷贝编译好的前端静态资源
 COPY --from=frontend-builder /build/dist ./dist
 
-# 初始化根目录 /data、/certs 目录
+# 初始化数据与证书目录
 RUN mkdir -p /data/keys /certs
 
 EXPOSE 8443

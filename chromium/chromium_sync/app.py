@@ -3,6 +3,7 @@ import time
 import json
 import uuid
 import random
+import inspect
 import secrets
 import sqlite3
 import logging
@@ -11,10 +12,10 @@ import subprocess
 from typing import Optional, List, Dict
 from datetime import datetime, timedelta
 
+import bcrypt
 import httpx
 import websockets
 import jwt
-from passlib.hash import bcrypt
 from sshtunnel import SSHTunnelForwarder
 from apscheduler.schedulers.background import BackgroundScheduler
 from fastapi import FastAPI, HTTPException, Depends, Header, UploadFile, File, Request
@@ -25,38 +26,45 @@ from pydantic import BaseModel
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("CDP_Sync")
 
-# 根目录与证书存储路径
+# 目录与存储路径
 DATA_DIR = "/data"
 KEYS_DIR = os.path.join(DATA_DIR, "keys")
 DB_PATH = os.path.join(DATA_DIR, "app.db")
-os.makedirs(KEYS_DIR, exist_ok=True)
-
-# SSL 证书配置
 CERTS_DIR = "/certs"
 SSL_CERT_FILE = os.path.join(CERTS_DIR, "fullchain.pem")
 SSL_KEY_FILE = os.path.join(CERTS_DIR, "privkey.pem")
+os.makedirs(KEYS_DIR, exist_ok=True)
 
 INIT_PASSWORD = os.getenv("ADMIN_INIT_PASS", "Admin@123456")
 
-# 引入 chromium_sync_module 模块
-MODULE_AVAILABLE = False
+# ==================== 1. 直接原生导入 ChromiumSync ====================
+ChromiumSync = None
 try:
-    from chromium_sync_module import sync_cdp_cookies
-    MODULE_AVAILABLE = True
-    logger.info("成功加载本地 chromium_sync_module 模块！")
-except Exception:
-    logger.warning("未检测到外部 chromium_sync_module，将启用内置原生 CDP Cookie 同步引擎。")
+    from chromium_sync import ChromiumSync
+    logger.info("已成功加载 chromium_sync 模块！")
+except Exception as e:
+    logger.warning(f"未能引入外部 ChromiumSync ({e})，将启用内置原生 CDP WebSocket 引擎。")
 
-# --- 检查或自动生成自签名 SSL 证书 ---
+# ==================== 2. 原生 bcrypt 安全哈希 (修复 passlib 报错) ====================
+def hash_password(password: str) -> str:
+    pwd_bytes = password.encode('utf-8')[:72]
+    return bcrypt.hashpw(pwd_bytes, bcrypt.gensalt()).decode('utf-8')
+
+def verify_password(password: str, hashed: str) -> bool:
+    try:
+        pwd_bytes = password.encode('utf-8')[:72]
+        return bcrypt.checkpw(pwd_bytes, hashed.encode('utf-8'))
+    except Exception:
+        return False
+
+# ==================== 3. SSL 证书自签与环境检测 ====================
 def ensure_ssl_certificates():
     os.makedirs(CERTS_DIR, exist_ok=True)
-    
-    # 检测通用命名的证书文件是否存在且非空
     has_cert = os.path.exists(SSL_CERT_FILE) and os.path.getsize(SSL_CERT_FILE) > 0
     has_key = os.path.exists(SSL_KEY_FILE) and os.path.getsize(SSL_KEY_FILE) > 0
 
     if not (has_cert and has_key):
-        logger.warning("未检测到挂载的有效 SSL 证书，正在自动生成自签名证书 (有效期 10 年)...")
+        logger.warning("未检测到有效挂载证书，正在自动生成自签名 SSL 证书 (10 年期)...")
         try:
             cmd = [
                 "openssl", "req", "-x509", "-nodes", "-days", "3650",
@@ -67,14 +75,11 @@ def ensure_ssl_certificates():
             ]
             subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             os.chmod(SSL_KEY_FILE, 0o600)
-            logger.info(f"自签名证书生成成功: {SSL_CERT_FILE}, {SSL_KEY_FILE}")
+            logger.info("自签名 SSL 证书生成完毕。")
         except Exception as e:
-            logger.error(f"生成自签名证书失败: {e}")
-            raise RuntimeError("无法创建 SSL 证书环境")
-    else:
-        logger.info(f"成功加载外部 SSL 证书: {SSL_CERT_FILE}")
+            logger.error(f"生成自签证书失败: {e}")
+            raise RuntimeError("SSL 初始化异常")
 
-# 数据库与 JWT 秘钥初始化
 def init_db_and_jwt():
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
@@ -102,8 +107,7 @@ def init_db_and_jwt():
     
     cur.execute("SELECT value FROM settings WHERE key='admin_password'")
     if not cur.fetchone():
-        hashed = bcrypt.hash(INIT_PASSWORD)
-        cur.execute("INSERT INTO settings (key, value) VALUES ('admin_password', ?)", (hashed,))
+        cur.execute("INSERT INTO settings (key, value) VALUES ('admin_password', ?)", (hash_password(INIT_PASSWORD),))
     
     cur.execute("SELECT value FROM settings WHERE key='jwt_secret'")
     jwt_row = cur.fetchone()
@@ -119,7 +123,7 @@ def init_db_and_jwt():
 
 JWT_SECRET = init_db_and_jwt()
 
-# SSH 隧道管理器
+# ==================== 4. SSH 隧道管理 (手动穿透通道) ====================
 class TunnelManager:
     def __init__(self):
         self.tunnels: Dict[int, SSHTunnelForwarder] = {}
@@ -172,7 +176,7 @@ class TunnelManager:
 
 tunnel_mgr = TunnelManager()
 
-# 原生 CDP Cookie 交互
+# ==================== 5. 原生 WebSocket CDP 容灾回退引擎 ====================
 async def get_cdp_ws_url(local_port: int) -> str:
     url = f"http://127.0.0.1:{local_port}/json/version"
     async with httpx.AsyncClient(timeout=4.0) as client:
@@ -192,7 +196,37 @@ async def inject_cookies_native(local_port: int, cookies: List[dict]):
         await ws.send(json.dumps({"id": 2, "method": "Network.setCookies", "params": {"cookies": cookies}}))
         await ws.recv()
 
-# 同步流程
+# ==================== 6. 同步任务调度核心 ====================
+def sync_single_node_with_module(node: dict, default_source_port: int) -> str:
+    remote_ssh = f"{node['ssh_user']}@{node['ssh_host']}"
+    
+    # 动态探测 ChromiumSync 支持的入参，防止参数不匹配崩溃
+    sig = inspect.signature(ChromiumSync.__init__)
+    kwargs = {
+        "remote_ssh": remote_ssh,
+        "remote_ssh_port": int(node['ssh_port']),
+        "local_cdp_port": default_source_port,
+        "remote_cdp_port": int(node['remote_cdp_port']),
+        "remote_tunnel_port": int(node['remote_cdp_port']),
+        "direction": "auto",
+        "timeout": 0
+    }
+    
+    filtered_kwargs = {k: v for k, v in kwargs.items() if k in sig.parameters}
+    
+    # 探测私钥参数并注入
+    if node.get('ssh_key_filename'):
+        key_path = os.path.join(KEYS_DIR, node['ssh_key_filename'])
+        for key_arg in ['ssh_key', 'key_file', 'key_filename', 'pkey', 'identity_file']:
+            if key_arg in sig.parameters:
+                filtered_kwargs[key_arg] = key_path
+                break
+        os.environ["GIT_SSH_COMMAND"] = f"ssh -i {key_path} -o StrictHostKeyChecking=no"
+
+    syncer = ChromiumSync(**filtered_kwargs)
+    syncer.run()
+    return f"ChromiumSync 成功同步节点 [{node['name']}]"
+
 async def execute_sync_task():
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
@@ -203,7 +237,7 @@ async def execute_sync_task():
 
     source = next((n for n in nodes if n["is_source"] == 1), None)
     if not source:
-        logger.warning("未设定源节点 (Source)，跳过同步。")
+        logger.warning("未配置默认源节点 (Source)，跳过同步。")
         return
 
     targets = [n for n in nodes if n["is_source"] == 0]
@@ -211,26 +245,29 @@ async def execute_sync_task():
     log_detail = []
 
     try:
-        if MODULE_AVAILABLE:
-            cookies = sync_cdp_cookies.extract(source["local_bind_port"])
+        # A. 优先调用已导入的 ChromiumSync 模块
+        if ChromiumSync is not None:
+            for target in targets:
+                try:
+                    res_msg = await asyncio.to_thread(sync_single_node_with_module, target, source["local_bind_port"])
+                    log_detail.append(f"-> {res_msg}")
+                except Exception as ex:
+                    log_detail.append(f"-> 节点 [{target['name']}] 模块同步失败: {str(ex)}")
+            status = "SUCCESS"
         else:
+            # B. 备用容灾：原生 WebSocket CDP 提取与注入
             cookies = await fetch_cookies_native(source["local_bind_port"])
-
-        log_detail.append(f"从源节点 [{source['name']}] 捕获到 {len(cookies)} 个 Cookie")
-
-        for target in targets:
-            try:
-                if MODULE_AVAILABLE:
-                    sync_cdp_cookies.inject(target["local_bind_port"], cookies)
-                else:
+            log_detail.append(f"原生模式：从源节点 [{source['name']}] 提取到 {len(cookies)} 个 Cookie")
+            for target in targets:
+                try:
                     await inject_cookies_native(target["local_bind_port"], cookies)
-                log_detail.append(f"-> 节点 [{target['name']}] 写入成功")
-            except Exception as ex:
-                log_detail.append(f"-> 节点 [{target['name']}] 失败: {str(ex)}")
-        status = "SUCCESS"
+                    log_detail.append(f"-> 原生节点 [{target['name']}] 注入成功")
+                except Exception as ex:
+                    log_detail.append(f"-> 原生节点 [{target['name']}] 注入失败: {str(ex)}")
+            status = "SUCCESS"
     except Exception as e:
         status = "FAILED"
-        log_detail.append(f"源节点读取中断: {str(e)}")
+        log_detail.append(f"同步执行中断: {str(e)}")
 
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
@@ -240,7 +277,7 @@ async def execute_sync_task():
     conn.commit()
     conn.close()
 
-# 验证码与 IP 爆破防护
+# ==================== 7. 防机器人验证码与 Web API ====================
 CAPTCHA_STORE = {}
 LOGIN_ATTEMPTS = {}
 
@@ -249,7 +286,7 @@ def check_ip_rate_limit(ip: str):
     if time.time() < record["lock_until"]:
         raise HTTPException(status_code=429, detail="尝试次数过多，IP 已暂时锁定 15 分钟")
 
-app = FastAPI(title="CDP Sync System (SSL)")
+app = FastAPI(title="CDP Sync Control Hub")
 
 def verify_token(authorization: Optional[str] = Header(None)):
     if not authorization or not authorization.startswith("Bearer "):
@@ -257,7 +294,7 @@ def verify_token(authorization: Optional[str] = Header(None)):
     try:
         return jwt.decode(authorization.split(" ")[1], JWT_SECRET, algorithms=["HS256"])
     except Exception:
-        raise HTTPException(status_code=401, detail="登录已过期")
+        raise HTTPException(status_code=401, detail="登录凭证失效")
 
 @app.get("/api/captcha")
 def get_captcha():
@@ -292,7 +329,7 @@ def login(data: LoginDTO, req: Request):
     hashed = cur.fetchone()[0]
     conn.close()
 
-    if not bcrypt.verify(data.password, hashed):
+    if not verify_password(data.password, hashed):
         LOGIN_ATTEMPTS[ip] = {"count": LOGIN_ATTEMPTS.get(ip, {}).get("count", 0) + 1, "lock_until": time.time() + 900 if LOGIN_ATTEMPTS.get(ip, {}).get("count", 0) >= 4 else 0}
         raise HTTPException(status_code=401, detail="密码不正确")
 
@@ -306,7 +343,7 @@ def change_password(data: dict, user: dict = Depends(verify_token)):
         raise HTTPException(status_code=400, detail="密码长度必须至少6位")
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
-    cur.execute("UPDATE settings SET value=? WHERE key='admin_password'", (bcrypt.hash(new_pass),))
+    cur.execute("UPDATE settings SET value=? WHERE key='admin_password'", (hash_password(new_pass),))
     conn.commit()
     conn.close()
     return {"message": "密码修改成功"}
@@ -395,7 +432,7 @@ def delete_key(filename: str, user: dict = Depends(verify_token)):
 @app.post("/api/sync/trigger")
 async def trigger_sync(user: dict = Depends(verify_token)):
     await execute_sync_task()
-    return {"message": "手动同步任务完成"}
+    return {"message": "同步任务执行完毕"}
 
 @app.get("/api/sync/logs")
 def get_logs(user: dict = Depends(verify_token)):
@@ -407,19 +444,19 @@ def get_logs(user: dict = Depends(verify_token)):
     conn.close()
     return logs
 
-# 启动定时调度器
+# 调度器：每 15 分钟触发一次自动同步
 scheduler = BackgroundScheduler()
 scheduler.add_job(lambda: asyncio.run(execute_sync_task()), 'interval', minutes=15)
 scheduler.start()
 
-# 静态托管 Vue 产物
+# 静态托管由 Vite 编译生成的 dist 产物
 if os.path.exists("dist"):
     app.mount("/assets", StaticFiles(directory="dist/assets"), name="assets")
     @app.get("/{full_path:path}")
     def serve_spa(full_path: str):
         return FileResponse("dist/index.html")
 
-# --- 启动 HTTPS 服务 ---
+# 启动 SSL HTTPS
 if __name__ == "__main__":
     ensure_ssl_certificates()
     import uvicorn
