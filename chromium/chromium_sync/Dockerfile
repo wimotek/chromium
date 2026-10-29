@@ -13,9 +13,10 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# 安装 SSH 客户端及必要基础组件
+# 安装 SSH 客户端、openssl（用于生成自签证书）及 curl
 RUN apt-get update && apt-get install -y --no-install-recommends \
     openssh-client \
+    openssl \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
@@ -29,10 +30,10 @@ COPY chromium_sync_module ./chromium_sync_module
 # 从 Stage 1 提取前端编译产物
 COPY --from=frontend-builder /build/dist ./dist
 
-# 初始化根目录 /data 及证书子目录
-RUN mkdir -p /data/keys
+# 初始化根目录 /data、/certs 目录
+RUN mkdir -p /data/keys /certs
 
-EXPOSE 8080
+EXPOSE 8443
 ENV PYTHONUNBUFFERED=1
 
 CMD ["python", "app.py"]

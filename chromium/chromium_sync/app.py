@@ -7,6 +7,7 @@ import secrets
 import sqlite3
 import logging
 import asyncio
+import subprocess
 from typing import Optional, List, Dict
 from datetime import datetime, timedelta
 
@@ -30,6 +31,11 @@ KEYS_DIR = os.path.join(DATA_DIR, "keys")
 DB_PATH = os.path.join(DATA_DIR, "app.db")
 os.makedirs(KEYS_DIR, exist_ok=True)
 
+# SSL 证书配置
+CERTS_DIR = "/certs"
+SSL_CERT_FILE = os.path.join(CERTS_DIR, "fullchain.pem")
+SSL_KEY_FILE = os.path.join(CERTS_DIR, "privkey.pem")
+
 INIT_PASSWORD = os.getenv("ADMIN_INIT_PASS", "Admin@123456")
 
 # 引入 chromium_sync_module 模块
@@ -41,11 +47,37 @@ try:
 except Exception:
     logger.warning("未检测到外部 chromium_sync_module，将启用内置原生 CDP Cookie 同步引擎。")
 
+# --- 检查或自动生成自签名 SSL 证书 ---
+def ensure_ssl_certificates():
+    os.makedirs(CERTS_DIR, exist_ok=True)
+    
+    # 检测通用命名的证书文件是否存在且非空
+    has_cert = os.path.exists(SSL_CERT_FILE) and os.path.getsize(SSL_CERT_FILE) > 0
+    has_key = os.path.exists(SSL_KEY_FILE) and os.path.getsize(SSL_KEY_FILE) > 0
+
+    if not (has_cert and has_key):
+        logger.warning("未检测到挂载的有效 SSL 证书，正在自动生成自签名证书 (有效期 10 年)...")
+        try:
+            cmd = [
+                "openssl", "req", "-x509", "-nodes", "-days", "3650",
+                "-newkey", "rsa:2048",
+                "-keyout", SSL_KEY_FILE,
+                "-out", SSL_CERT_FILE,
+                "-subj", "/C=CN/ST=Global/L=CDP/O=ChromiumSync/CN=localhost"
+            ]
+            subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            os.chmod(SSL_KEY_FILE, 0o600)
+            logger.info(f"自签名证书生成成功: {SSL_CERT_FILE}, {SSL_KEY_FILE}")
+        except Exception as e:
+            logger.error(f"生成自签名证书失败: {e}")
+            raise RuntimeError("无法创建 SSL 证书环境")
+    else:
+        logger.info(f"成功加载外部 SSL 证书: {SSL_CERT_FILE}")
+
 # 数据库与 JWT 秘钥初始化
 def init_db_and_jwt():
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
-    # 节点表
     cur.execute('''CREATE TABLE IF NOT EXISTS nodes (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         name TEXT NOT NULL,
@@ -68,13 +100,11 @@ def init_db_and_jwt():
         details TEXT
     )''')
     
-    # 初始化密码
     cur.execute("SELECT value FROM settings WHERE key='admin_password'")
     if not cur.fetchone():
         hashed = bcrypt.hash(INIT_PASSWORD)
         cur.execute("INSERT INTO settings (key, value) VALUES ('admin_password', ?)", (hashed,))
     
-    # 自动生成 64 位 JWT 签名秘钥并持久化
     cur.execute("SELECT value FROM settings WHERE key='jwt_secret'")
     jwt_row = cur.fetchone()
     if jwt_row:
@@ -106,7 +136,6 @@ class TunnelManager:
             "set_keepalive": 30.0
         }
         
-        # 区分并挂载证书
         if node.get('ssh_key_filename'):
             key_path = os.path.join(KEYS_DIR, node['ssh_key_filename'])
             if os.path.exists(key_path):
@@ -163,7 +192,7 @@ async def inject_cookies_native(local_port: int, cookies: List[dict]):
         await ws.send(json.dumps({"id": 2, "method": "Network.setCookies", "params": {"cookies": cookies}}))
         await ws.recv()
 
-# 同步执行主流程
+# 同步流程
 async def execute_sync_task():
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
@@ -220,7 +249,7 @@ def check_ip_rate_limit(ip: str):
     if time.time() < record["lock_until"]:
         raise HTTPException(status_code=429, detail="尝试次数过多，IP 已暂时锁定 15 分钟")
 
-app = FastAPI(title="CDP Sync System")
+app = FastAPI(title="CDP Sync System (SSL)")
 
 def verify_token(authorization: Optional[str] = Header(None)):
     if not authorization or not authorization.startswith("Bearer "):
@@ -353,7 +382,7 @@ async def upload_key(file: UploadFile = File(...), user: dict = Depends(verify_t
     content = await file.read()
     with open(path, "wb") as f:
         f.write(content)
-    os.chmod(path, 0o600)  # SSH 严格要求 600 私钥权限
+    os.chmod(path, 0o600)
     return {"message": f"证书 {file.filename} 上传完成"}
 
 @app.delete("/api/ssh-keys/{filename}")
@@ -378,18 +407,26 @@ def get_logs(user: dict = Depends(verify_token)):
     conn.close()
     return logs
 
-# 启动 15 分钟间隔定时调度器
+# 启动定时调度器
 scheduler = BackgroundScheduler()
 scheduler.add_job(lambda: asyncio.run(execute_sync_task()), 'interval', minutes=15)
 scheduler.start()
 
-# 静态托管由 Vite 打包编译生成的 dist 产物
+# 静态托管 Vue 产物
 if os.path.exists("dist"):
     app.mount("/assets", StaticFiles(directory="dist/assets"), name="assets")
     @app.get("/{full_path:path}")
     def serve_spa(full_path: str):
         return FileResponse("dist/index.html")
 
+# --- 启动 HTTPS 服务 ---
 if __name__ == "__main__":
+    ensure_ssl_certificates()
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8080)
+    uvicorn.run(
+        app,
+        host="0.0.0.0",
+        port=8443,
+        ssl_certfile=SSL_CERT_FILE,
+        ssl_keyfile=SSL_KEY_FILE
+    )
