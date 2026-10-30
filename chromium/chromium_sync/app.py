@@ -560,32 +560,38 @@ def update_profile(data: dict, user: dict = Depends(verify_token)):
     return {"message": "配置更新成功"}
 
 # 2. 通知设置
+# 修改 get_notification_settings 响应字段
 @app.get("/api/notifications/settings")
 def get_notification_settings(user: dict = Depends(verify_token)):
     return {
+        "email_notify_enabled": get_setting("email_notify_enabled", "1") == "1",
         "smtp_host": get_setting("smtp_host", "smtp.yeah.net"),
         "smtp_port": get_setting("smtp_port", "465"),
         "smtp_ssl": get_setting("smtp_ssl", "1") == "1",
         "smtp_sender_name": get_setting("smtp_sender_name", "CDP 节点中心"),
         "smtp_user": get_setting("smtp_user"),
         "smtp_pass": "",
+        "smtp_to": get_setting("smtp_to"),
         "smtp_status": get_setting("smtp_status", "untested"),
         "serverchan_enabled": get_setting("serverchan_enabled", "0") == "1",
         "serverchan_key": get_setting("serverchan_key")
     }
 
+# 修改 save_notification_settings 保存字段
 @app.post("/api/notifications/settings")
 def save_notification_settings(data: dict, user: dict = Depends(verify_token)):
-    for k in ["smtp_host", "smtp_port", "smtp_sender_name", "smtp_user", "serverchan_key"]:
+    for k in ["smtp_host", "smtp_port", "smtp_sender_name", "smtp_user", "smtp_to", "serverchan_key"]:
         if k in data:
             set_setting(k, data[k])
     if data.get("smtp_pass"):
         set_setting("smtp_pass", data["smtp_pass"].strip())
+    if "email_notify_enabled" in data:
+        set_setting("email_notify_enabled", "1" if data["email_notify_enabled"] else "0")
     if "smtp_ssl" in data:
         set_setting("smtp_ssl", "1" if data["smtp_ssl"] else "0")
     if "serverchan_enabled" in data:
         set_setting("serverchan_enabled", "1" if data["serverchan_enabled"] else "0")
-    return {"message": "发信参数已保存"}
+    return {"message": "通知推送参数已保存"}
 
 class TestEmailDTO(BaseModel):
     test_email: Optional[str] = None

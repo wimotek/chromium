@@ -76,7 +76,8 @@ onMounted(() => {
     <div class="content-full-card">
       <h3 class="card-inner-h3" style="margin-bottom:16px;">👤 管理员账号与外部接入 API</h3>
       
-      <div style="background:#09122a; border:1px solid #172554; border-radius:8px; padding:12px; margin-bottom:16px;">
+      <!-- 70% 宽度的 API Key 展示卡片 -->
+      <div style="background:#09122a; border:1px solid #172554; border-radius:8px; padding:12px; margin-bottom:16px; width:70%; min-width:260px; max-width:520px;">
         <div style="display:flex; justify-content:space-between; align-items:center;">
           <span style="font-size:12px; color:#38bdf8; font-weight:bold;">外部 Agent / 爬虫调用 Key</span>
           <button @click="regenApiKey" class="link-probe" style="font-size:11px;">重新生成</button>
@@ -98,7 +99,9 @@ onMounted(() => {
           <label class="form-label">重置访问密码 (留空则不修改)</label>
           <input v-model="profile.new_password" type="password" placeholder="至少 6 位安全字符" minlength="6" class="cdp-input">
         </div>
-        <button type="submit" class="btn-primary-gradient" style="width:100%; padding:10px; margin-top:10px;">保存账号修改</button>
+        <div>
+          <button type="submit" class="btn-primary-gradient">保存账号修改</button>
+        </div>
       </form>
     </div>
 
