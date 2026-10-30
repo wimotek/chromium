@@ -13,7 +13,6 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 
-/* 视口全屏容器 */
 .cdp-app-viewport {
   min-height: 100vh;
   width: 100%;
@@ -44,7 +43,7 @@ body {
   to { opacity: 1; transform: translate(-50%, 0); }
 }
 
-/* 1. 登录窗口：绝对垂直水平死锁居中 */
+/* 1. 登录窗口：绝对死锁垂直水平居中 */
 .login-screen-center {
   min-height: 100vh;
   width: 100vw;
@@ -84,11 +83,11 @@ body {
 .form-row { display: flex; flex-direction: column; gap: 6px; }
 .form-label { font-size: 12px; color: #94a3b8; }
 
-/* 核心要求：表单输入框 70% 宽度，自适应，有最小和最大限制 */
+/* 核心输入框规范：严格应用 70% 黄金宽度，自适应，有最小与最大限制 */
 .cdp-input {
-  width: 70%;
-  min-width: 260px;
-  max-width: 520px;
+  width: 70% !important;
+  min-width: 260px !important;
+  max-width: 520px !important;
   box-sizing: border-box;
   background-color: #0f1c3f;
   border: 1px solid #1e3a8a;
@@ -114,9 +113,9 @@ body {
 .row-flex-gap-70 {
   display: flex;
   gap: 12px;
-  width: 70%;
-  min-width: 260px;
-  max-width: 520px;
+  width: 70% !important;
+  min-width: 260px !important;
+  max-width: 520px !important;
 }
 @media (max-width: 640px) {
   .row-flex-gap-70 {
@@ -141,21 +140,22 @@ body {
   flex-shrink: 0;
 }
 
-/* 核心要求：按钮不再无脑 100% 占满全宽，收敛为紧凑精干的胶囊动作条 */
+/* 核心按钮规范：自然尺寸，禁止 100% 满屏占满拉伸 */
 .btn-primary-gradient {
   background: linear-gradient(135deg, #0284c7, #2563eb);
   color: #ffffff;
   border: none;
   border-radius: 6px;
-  padding: 8px 22px;
-  font-size: 13px;
+  padding: 7px 18px;
+  font-size: 12px;
   font-weight: 600;
   cursor: pointer;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   gap: 6px;
-  width: auto;
+  width: auto !important;
+  height: 34px;
   transition: opacity 0.2s, transform 0.15s;
 }
 .btn-primary-gradient:hover { opacity: 0.9; transform: translateY(-1px); }
@@ -206,7 +206,7 @@ body {
 }
 .btn-logout:hover { border-color: #9ca3af; color: #ffffff; }
 
-/* 3. 全屏流式自适应主容器 (100% 满宽，消除固定宽度瓶颈) */
+/* 3. 全屏流式自适应主容器 (100% 满宽铺满，彻底消除两侧黑框死角) */
 .main-fluid-canvas {
   width: 100% !important;
   max-width: 100% !important;
@@ -509,7 +509,7 @@ body {
   display: flex; align-items: center; gap: 6px;
   background: #09122a; border: 1px solid #172554;
   padding: 8px 12px; border-radius: 6px; font-size: 12px;
-  width: 70%; min-width: 260px; max-width: 520px;
+  width: 70% !important; min-width: 260px !important; max-width: 520px !important;
 }
 @media (max-width: 640px) {
   .smtp-status-indicator { width: 100% !important; min-width: 100% !important; }
@@ -524,7 +524,7 @@ body {
   margin-top: 10px; padding-top: 14px;
   border-top: 1px dashed #1e3a8a;
   display: flex; gap: 10px; align-items: center;
-  width: 70%; min-width: 260px; max-width: 520px;
+  width: 70% !important; min-width: 260px !important; max-width: 520px !important;
 }
 @media (max-width: 640px) {
   .smtp-test-dashed-area { width: 100% !important; min-width: 100% !important; }
@@ -534,7 +534,7 @@ body {
   background: #1e293b; color: #e2e8f0; border: 1px solid #334155;
   border-radius: 6px; padding: 7px 16px; font-size: 12px; font-weight: 500;
   cursor: pointer; white-space: nowrap; transition: all 0.2s;
-  height: 35px;
+  height: 34px; width: auto !important;
 }
 .btn-gray-test:hover { background: #334155; color: #ffffff; }
 .check-box-blue { width: 16px; height: 16px; accent-color: #2563eb; cursor: pointer; }
