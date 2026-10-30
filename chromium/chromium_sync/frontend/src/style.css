@@ -2,14 +2,112 @@
 @tailwind components;
 @tailwind utilities;
 
-body {
-  background-color: #0b0f17;
-  color: #e2e8f0;
+:root {
+  --bg-obsidian: #080c14;
+  --card-slate: #0f172a;
+  --sub-deep: #0b1120;
+  --border-neon: rgba(56, 189, 248, 0.2);
+  --border-sub: #1e293b;
+  --cyan-main: #38bdf8;
 }
 
-/* 核心样式要求：输入框宽度 70%，自适应并具备最大/最小宽度限制 */
-.adaptive-input {
-  width: 70% !important;
-  min-width: 260px !important;
-  max-width: 580px !important;
+body {
+  background-color: var(--bg-obsidian);
+  color: #f8fafc;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  overflow-x: hidden;
+  background-image: 
+    radial-gradient(circle at 50% 0%, rgba(56, 189, 248, 0.08) 0%, transparent 60%),
+    linear-gradient(rgba(255, 255, 255, 0.015) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.015) 1px, transparent 1px);
+  background-size: 100% 100%, 32px 32px, 32px 32px;
+}
+
+/* 严格黄金比例输入框规范：70% 居中，最小260px，最大500px，移动端自适应 100% */
+.hud-input-ergonomic {
+  width: 70%;
+  min-width: 260px;
+  max-width: 500px;
+  background-color: #1e293b;
+  border: 1px solid #334155;
+  color: #f8fafc;
+  outline: none;
+  transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+@media (max-width: 640px) {
+  .hud-input-ergonomic {
+    width: 100% !important;
+    min-width: 100% !important;
+  }
+}
+
+.hud-input-ergonomic:focus,
+.hud-dialog-input:focus {
+  border-color: #38bdf8;
+  box-shadow: 0 0 12px rgba(56, 189, 248, 0.35);
+  background-color: #0f172a;
+}
+
+/* 模态框专用 100% 满宽输入框 */
+.hud-dialog-input {
+  width: 100%;
+  background-color: #1e293b;
+  border: 1px solid #334155;
+  color: #f8fafc;
+  outline: none;
+  transition: all 0.25s ease;
+}
+
+/* 赛博朋克控制台 HUD 卡片与质感 */
+.hud-card {
+  background-color: #0f172a;
+  border: 1px solid rgba(56, 189, 248, 0.2);
+  border-radius: 12px;
+  position: relative;
+  box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.5);
+}
+
+.hud-card-sub {
+  background-color: #0b1120;
+  border: 1px solid #1e293b;
+  border-radius: 8px;
+}
+
+/* 呼吸微发光与上浮动画 */
+.hud-btn-primary {
+  background: linear-gradient(135deg, #0284c7, #2563eb);
+  color: #ffffff;
+  border: 1px solid rgba(56, 189, 248, 0.4);
+  transition: all 0.25s ease;
+}
+
+.hud-btn-primary:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 0 18px rgba(56, 189, 248, 0.4);
+}
+
+.hud-btn-action {
+  transition: all 0.2s ease;
+}
+
+.hud-btn-action:hover {
+  transform: translateY(-1.5px);
+  box-shadow: 0 0 12px rgba(56, 189, 248, 0.25);
+}
+
+/* 滚动条极客暗黑定制 */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: #080c14;
+}
+::-webkit-scrollbar-thumb {
+  background: #1e293b;
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #38bdf8;
 }

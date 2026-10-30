@@ -1,4 +1,5 @@
 import os
+import sys
 import time
 import json
 import uuid
@@ -23,30 +24,34 @@ from fastapi.responses import JSONResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+# 日志规范化配置
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("CDP_Sync")
 
-# 目录与存储路径
+# 核心路径常量（固定在 /data 与 /certs）
 DATA_DIR = "/data"
 KEYS_DIR = os.path.join(DATA_DIR, "keys")
 DB_PATH = os.path.join(DATA_DIR, "app.db")
 CERTS_DIR = "/certs"
 SSL_CERT_FILE = os.path.join(CERTS_DIR, "fullchain.pem")
 SSL_KEY_FILE = os.path.join(CERTS_DIR, "privkey.pem")
+
 os.makedirs(KEYS_DIR, exist_ok=True)
+os.makedirs(CERTS_DIR, exist_ok=True)
 
 INIT_PASSWORD = os.getenv("ADMIN_INIT_PASS", "Admin@123456")
 
-# ==================== 1. 直接原生导入 ChromiumSync ====================
+# ==================== 1. 原生直接导入 ChromiumSync ====================
 ChromiumSync = None
 try:
     from chromium_sync import ChromiumSync
-    logger.info("已成功加载 chromium_sync 模块！")
+    logger.info("已成功加载并就绪 chromium_sync 核心模块！")
 except Exception as e:
     logger.warning(f"未能引入外部 ChromiumSync ({e})，将启用内置原生 CDP WebSocket 引擎。")
 
-# ==================== 2. 原生 bcrypt 安全哈希 (修复 passlib 报错) ====================
+# ==================== 2. 原生 bcrypt 安全密码处理 ====================
 def hash_password(password: str) -> str:
+    # 严格截断 72 字节，彻底杜绝 bcrypt 长度越界报错
     pwd_bytes = password.encode('utf-8')[:72]
     return bcrypt.hashpw(pwd_bytes, bcrypt.gensalt()).decode('utf-8')
 
@@ -59,7 +64,6 @@ def verify_password(password: str, hashed: str) -> bool:
 
 # ==================== 3. SSL 证书自签与环境检测 ====================
 def ensure_ssl_certificates():
-    os.makedirs(CERTS_DIR, exist_ok=True)
     has_cert = os.path.exists(SSL_CERT_FILE) and os.path.getsize(SSL_CERT_FILE) > 0
     has_key = os.path.exists(SSL_KEY_FILE) and os.path.getsize(SSL_KEY_FILE) > 0
 
@@ -75,14 +79,16 @@ def ensure_ssl_certificates():
             ]
             subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             os.chmod(SSL_KEY_FILE, 0o600)
-            logger.info("自签名 SSL 证书生成完毕。")
+            logger.info("自签名 SSL 证书已成功就绪。")
         except Exception as e:
             logger.error(f"生成自签证书失败: {e}")
             raise RuntimeError("SSL 初始化异常")
 
+# ==================== 4. 数据库初始化与热更新迁移 ====================
 def init_db_and_jwt():
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
+    # 节点清单表（包含 cookie_count）
     cur.execute('''CREATE TABLE IF NOT EXISTS nodes (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         name TEXT NOT NULL,
@@ -94,9 +100,17 @@ def init_db_and_jwt():
         ssh_password TEXT,
         remote_cdp_port INTEGER DEFAULT 9222,
         local_bind_port INTEGER UNIQUE NOT NULL,
+        cookie_count INTEGER DEFAULT 0,
         status TEXT DEFAULT 'stopped',
         last_sync TEXT
     )''')
+
+    # 为已存在的历史数据库平滑热迁移添加 cookie_count 列
+    try:
+        cur.execute("ALTER TABLE nodes ADD COLUMN cookie_count INTEGER DEFAULT 0")
+    except Exception:
+        pass
+
     cur.execute('''CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)''')
     cur.execute('''CREATE TABLE IF NOT EXISTS sync_logs (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -104,11 +118,13 @@ def init_db_and_jwt():
         status TEXT,
         details TEXT
     )''')
-    
+
+    # 初始化管理员密码
     cur.execute("SELECT value FROM settings WHERE key='admin_password'")
     if not cur.fetchone():
         cur.execute("INSERT INTO settings (key, value) VALUES ('admin_password', ?)", (hash_password(INIT_PASSWORD),))
-    
+
+    # 自动生成 64 位 JWT 随机私钥并固化
     cur.execute("SELECT value FROM settings WHERE key='jwt_secret'")
     jwt_row = cur.fetchone()
     if jwt_row:
@@ -123,7 +139,7 @@ def init_db_and_jwt():
 
 JWT_SECRET = init_db_and_jwt()
 
-# ==================== 4. SSH 隧道管理 (手动穿透通道) ====================
+# ==================== 5. SSH 隧道运行池管理 ====================
 class TunnelManager:
     def __init__(self):
         self.tunnels: Dict[int, SSHTunnelForwarder] = {}
@@ -131,7 +147,7 @@ class TunnelManager:
     def start_tunnel(self, node: dict):
         node_id = node['id']
         self.stop_tunnel(node_id)
-        
+
         ssh_kwargs = {
             "ssh_address_or_host": (node['ssh_host'], int(node['ssh_port'])),
             "ssh_username": node['ssh_user'],
@@ -139,7 +155,7 @@ class TunnelManager:
             "local_bind_address": ('0.0.0.0', int(node['local_bind_port'])),
             "set_keepalive": 30.0
         }
-        
+
         if node.get('ssh_key_filename'):
             key_path = os.path.join(KEYS_DIR, node['ssh_key_filename'])
             if os.path.exists(key_path):
@@ -152,7 +168,7 @@ class TunnelManager:
             tunnel.start()
             self.tunnels[node_id] = tunnel
             self._update_node_status(node_id, "connected")
-            logger.info(f"节点 [{node['name']}] SSH 映射成功 -> 本地端口 {node['local_bind_port']}")
+            logger.info(f"节点 [{node['name']}] SSH 穿透成功 -> 绑定端口 {node['local_bind_port']}")
             return True, "Connected"
         except Exception as e:
             self._update_node_status(node_id, f"error: {str(e)[:30]}")
@@ -176,7 +192,7 @@ class TunnelManager:
 
 tunnel_mgr = TunnelManager()
 
-# ==================== 5. 原生 WebSocket CDP 容灾回退引擎 ====================
+# ==================== 6. 原生 WebSocket CDP 引擎 (兼 Cookie 探测器) ====================
 async def get_cdp_ws_url(local_port: int) -> str:
     url = f"http://127.0.0.1:{local_port}/json/version"
     async with httpx.AsyncClient(timeout=4.0) as client:
@@ -196,11 +212,11 @@ async def inject_cookies_native(local_port: int, cookies: List[dict]):
         await ws.send(json.dumps({"id": 2, "method": "Network.setCookies", "params": {"cookies": cookies}}))
         await ws.recv()
 
-# ==================== 6. 同步任务调度核心 ====================
+# ==================== 7. 同步任务调度核心 ====================
 def sync_single_node_with_module(node: dict, default_source_port: int) -> str:
+    """调用 ChromiumSync 模块执行穿透与智能同步"""
     remote_ssh = f"{node['ssh_user']}@{node['ssh_host']}"
-    
-    # 动态探测 ChromiumSync 支持的入参，防止参数不匹配崩溃
+
     sig = inspect.signature(ChromiumSync.__init__)
     kwargs = {
         "remote_ssh": remote_ssh,
@@ -211,10 +227,9 @@ def sync_single_node_with_module(node: dict, default_source_port: int) -> str:
         "direction": "auto",
         "timeout": 0
     }
-    
+
     filtered_kwargs = {k: v for k, v in kwargs.items() if k in sig.parameters}
-    
-    # 探测私钥参数并注入
+
     if node.get('ssh_key_filename'):
         key_path = os.path.join(KEYS_DIR, node['ssh_key_filename'])
         for key_arg in ['ssh_key', 'key_file', 'key_filename', 'pkey', 'identity_file']:
@@ -245,8 +260,8 @@ async def execute_sync_task():
     log_detail = []
 
     try:
-        # A. 优先调用已导入的 ChromiumSync 模块
         if ChromiumSync is not None:
+            # 模式 A：直接调度 ChromiumSync
             for target in targets:
                 try:
                     res_msg = await asyncio.to_thread(sync_single_node_with_module, target, source["local_bind_port"])
@@ -255,7 +270,7 @@ async def execute_sync_task():
                     log_detail.append(f"-> 节点 [{target['name']}] 模块同步失败: {str(ex)}")
             status = "SUCCESS"
         else:
-            # B. 备用容灾：原生 WebSocket CDP 提取与注入
+            # 模式 B：原生 CDP WebSocket 提取并批量下发
             cookies = await fetch_cookies_native(source["local_bind_port"])
             log_detail.append(f"原生模式：从源节点 [{source['name']}] 提取到 {len(cookies)} 个 Cookie")
             for target in targets:
@@ -265,6 +280,23 @@ async def execute_sync_task():
                 except Exception as ex:
                     log_detail.append(f"-> 原生节点 [{target['name']}] 注入失败: {str(ex)}")
             status = "SUCCESS"
+
+        # 同步完成后，探测源节点的当前最新 Cookie 总量并写入数据库
+        try:
+            curr_cookies = await fetch_cookies_native(source["local_bind_port"])
+            cookie_count = len(curr_cookies)
+        except Exception:
+            cookie_count = 0
+
+        # 回写 Cookie 数量统计
+        conn = sqlite3.connect(DB_PATH)
+        cur = conn.cursor()
+        cur.execute("UPDATE nodes SET cookie_count=?, last_sync=? WHERE id=?", (cookie_count, sync_time, source['id']))
+        for target in targets:
+            cur.execute("UPDATE nodes SET cookie_count=?, last_sync=? WHERE id=?", (cookie_count, sync_time, target['id']))
+        conn.commit()
+        conn.close()
+
     except Exception as e:
         status = "FAILED"
         log_detail.append(f"同步执行中断: {str(e)}")
@@ -273,11 +305,10 @@ async def execute_sync_task():
     cur = conn.cursor()
     cur.execute("INSERT INTO sync_logs (timestamp, status, details) VALUES (?, ?, ?)",
                 (sync_time, status, "\n".join(log_detail)))
-    cur.execute("UPDATE nodes SET last_sync=? WHERE id=?", (sync_time, source['id']))
     conn.commit()
     conn.close()
 
-# ==================== 7. 防机器人验证码与 Web API ====================
+# ==================== 8. 防机器人人机验证与 Web API ====================
 CAPTCHA_STORE = {}
 LOGIN_ATTEMPTS = {}
 
@@ -286,7 +317,7 @@ def check_ip_rate_limit(ip: str):
     if time.time() < record["lock_until"]:
         raise HTTPException(status_code=429, detail="尝试次数过多，IP 已暂时锁定 15 分钟")
 
-app = FastAPI(title="CDP Sync Control Hub")
+app = FastAPI(title="CDP Sync Control Hub (Obsidian HUD)")
 
 def verify_token(authorization: Optional[str] = Header(None)):
     if not authorization or not authorization.startswith("Bearer "):
@@ -302,9 +333,9 @@ def get_captcha():
     token = str(uuid.uuid4())
     CAPTCHA_STORE[token] = {"ans": a + b, "exp": time.time() + 180}
     svg = f'''<svg xmlns="http://www.w3.org/2000/svg" width="120" height="40" viewBox="0 0 120 40">
-        <rect width="100%" height="100%" fill="#1e293b" rx="6"/>
-        <line x1="5" y1="{random.randint(5,35)}" x2="115" y2="{random.randint(5,35)}" stroke="#475569" stroke-width="2"/>
-        <text x="18" y="26" font-family="Arial" font-size="18" font-weight="bold" fill="#38bdf8">{a} + {b} = ?</text>
+        <rect width="100%" height="100%" fill="#0f172a" rx="6"/>
+        <line x1="5" y1="{random.randint(5,35)}" x2="115" y2="{random.randint(5,35)}" stroke="#334155" stroke-width="2"/>
+        <text x="18" y="26" font-family="monospace" font-size="18" font-weight="bold" fill="#38bdf8">{a} + {b} = ?</text>
     </svg>'''
     return {"token": token, "svg": svg}
 
@@ -317,7 +348,7 @@ class LoginDTO(BaseModel):
 def login(data: LoginDTO, req: Request):
     ip = req.client.host
     check_ip_rate_limit(ip)
-    
+
     cap = CAPTCHA_STORE.get(data.captcha_token)
     if not cap or time.time() > cap["exp"] or str(cap["ans"]) != data.captcha_answer.strip():
         LOGIN_ATTEMPTS[ip] = {"count": LOGIN_ATTEMPTS.get(ip, {}).get("count", 0) + 1, "lock_until": time.time() + 900 if LOGIN_ATTEMPTS.get(ip, {}).get("count", 0) >= 4 else 0}
@@ -362,8 +393,8 @@ def list_nodes(user: dict = Depends(verify_token)):
 def create_node(data: dict, user: dict = Depends(verify_token)):
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
-    cur.execute('''INSERT INTO nodes (name, is_source, ssh_host, ssh_port, ssh_user, ssh_key_filename, ssh_password, remote_cdp_port, local_bind_port)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+    cur.execute('''INSERT INTO nodes (name, is_source, ssh_host, ssh_port, ssh_user, ssh_key_filename, ssh_password, remote_cdp_port, local_bind_port, cookie_count)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0)''',
                 (data['name'], 1 if data.get('is_source') else 0, data['ssh_host'], data.get('ssh_port', 22),
                  data['ssh_user'], data.get('ssh_key_filename'), data.get('ssh_password'),
                  data.get('remote_cdp_port', 9222), data['local_bind_port']))
@@ -456,7 +487,7 @@ if os.path.exists("dist"):
     def serve_spa(full_path: str):
         return FileResponse("dist/index.html")
 
-# 启动 SSL HTTPS
+# ==================== 9. 服务启动入口 ====================
 if __name__ == "__main__":
     ensure_ssl_certificates()
     import uvicorn
