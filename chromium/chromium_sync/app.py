@@ -12,11 +12,17 @@ import logging
 import asyncio
 import subprocess
 import ipaddress
+import warnings
 from datetime import datetime, timedelta, timezone
 from email.mime.text import MIMEText
 from email.header import Header
 from urllib.parse import urlparse, urlunparse
 from typing import Optional, List, Dict
+
+# 消除 Paramiko 与 Cryptography 的 TripleDES 废弃警告日志
+from cryptography.utils import CryptographyDeprecationWarning
+warnings.filterwarnings("ignore", category=CryptographyDeprecationWarning)
+warnings.filterwarnings("ignore", module="paramiko")
 
 from cryptography import x509
 from cryptography.x509.oid import NameOID
@@ -30,7 +36,7 @@ from sshtunnel import SSHTunnelForwarder
 from apscheduler.schedulers.background import BackgroundScheduler
 from fastapi import FastAPI, HTTPException, Depends, Header as ReqHeader, UploadFile, File, Request, Query, Security
 from fastapi.security.api_key import APIKeyHeader, APIKeyQuery
-from fastapi.responses import JSONResponse, FileResponse
+from fastapi.responses import JSONResponse, FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -38,7 +44,26 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 logger = logging.getLogger("CDP_Sync")
 
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
-DIST_DIR = os.path.abspath(os.path.join(CURRENT_DIR, "../frontend/dist"))
+
+# 智能探测前端编译产物 dist 真实路径
+CANDIDATE_DIST_DIRS = [
+    os.path.abspath(os.path.join(CURRENT_DIR, "../frontend/dist")),
+    os.path.abspath(os.path.join(CURRENT_DIR, "frontend/dist")),
+    os.path.abspath(os.path.join(CURRENT_DIR, "dist")),
+    "/app/frontend/dist",
+    "/app/dist"
+]
+
+DIST_DIR = None
+for candidate in CANDIDATE_DIST_DIRS:
+    if os.path.exists(candidate) and os.path.exists(os.path.join(candidate, "index.html")):
+        DIST_DIR = candidate
+        logger.info(f"✅ 成功定位前端静态资源目录: {DIST_DIR}")
+        break
+
+if not DIST_DIR:
+    logger.warning(f"⚠️ 未检测到前端 dist 编译产物，已检索路径: {CANDIDATE_DIST_DIRS}")
+
 DATA_DIR = "/data"
 KEYS_DIR = os.path.join(DATA_DIR, "keys")
 DB_PATH = os.path.join(DATA_DIR, "app.db")
@@ -51,10 +76,11 @@ os.makedirs(CERTS_DIR, exist_ok=True)
 
 INIT_PASSWORD = os.getenv("ADMIN_INIT_PASS", "Admin@123456")
 
+# 引入 ChromiumSync 模块
 ChromiumSync = None
 try:
     from chromium_sync import ChromiumSync
-    logger.info("已成功加载 chromium_sync 核心模块！")
+    logger.info("已成功加载外部 ChromiumSync 模块！")
 except Exception as e:
     logger.warning(f"外部 ChromiumSync 模块未激活 ({e})，启用内置 WebSocket 探测引擎。")
 
@@ -115,7 +141,7 @@ def ensure_ssl_certificates():
     has_key = os.path.exists(SSL_KEY_FILE) and os.path.getsize(SSL_KEY_FILE) > 0
 
     if not (has_cert and has_key):
-        logger.warning("未检测到有效证书，正在生成自签 SSL 证书...")
+        logger.warning("未检测到有效证书，正在通过原生引擎生成自签 SSL 证书...")
         try:
             os.makedirs(CERTS_DIR, exist_ok=True)
             generate_self_signed_cert(SSL_CERT_FILE, SSL_KEY_FILE)
@@ -127,7 +153,7 @@ def ensure_ssl_certificates():
             SSL_CERT_FILE = os.path.join(fallback_dir, "fullchain.pem")
             SSL_KEY_FILE = os.path.join(fallback_dir, "privkey.pem")
             generate_self_signed_cert(SSL_CERT_FILE, SSL_KEY_FILE)
-            logger.info(f"自签名证书已降级生成于: {fallback_dir}")
+            logger.info(f"自签名证书已成功降级生成于: {fallback_dir}")
 
 # ==================== 2. 数据库与通知初始化 ====================
 def init_db_and_jwt():
@@ -175,7 +201,7 @@ def init_db_and_jwt():
         'smtp_sender_name': 'CDP 节点中心',
         'smtp_user': '',
         'smtp_pass': '',
-        'smtp_status': 'untested', # 'ready' | 'error' | 'untested'
+        'smtp_status': 'untested',
         'serverchan_enabled': '0',
         'serverchan_key': ''
     }
@@ -218,7 +244,7 @@ def send_email_notification(title: str, content: str, override_to: Optional[str]
     to_email = override_to if override_to else user
 
     if not (host and user and password and to_email):
-        return False, "SMTP 配置不完整 (缺少主机、账号或授权码)"
+        return False, "SMTP 配置不完整 (缺少主机、发件账号或密码)"
 
     try:
         msg = MIMEText(content, 'plain', 'utf-8')
@@ -262,7 +288,7 @@ async def dispatch_notification(title: str, content: str):
     send_email_notification(title, content)
     await send_serverchan_notification(title, content)
 
-# ==================== 4. 解决容器与宿主机的自适应 CDP 探测 ====================
+# ==================== 4. CDP 探测引擎 ====================
 async def resolve_cdp_endpoint(local_port: int) -> tuple[str, str]:
     candidate_hosts = ["127.0.0.1", "host.docker.internal", "172.17.0.1"]
     async with httpx.AsyncClient(timeout=2.0) as client:
@@ -289,7 +315,6 @@ async def fetch_cookies_native(local_port: int) -> List[dict]:
         if cookies:
             return cookies
 
-        # 回退至 Network 域获取
         await ws.send(json.dumps({"id": 2, "method": "Network.enable"}))
         await ws.recv()
         await ws.send(json.dumps({"id": 3, "method": "Network.getAllCookies"}))
@@ -534,7 +559,7 @@ def update_profile(data: dict, user: dict = Depends(verify_token)):
         set_setting("api_key", 'cdp_' + secrets.token_urlsafe(24))
     return {"message": "配置更新成功"}
 
-# 2. 通知设置 (支持密码留空保持 + 状态指示)
+# 2. 通知设置
 @app.get("/api/notifications/settings")
 def get_notification_settings(user: dict = Depends(verify_token)):
     return {
@@ -543,7 +568,7 @@ def get_notification_settings(user: dict = Depends(verify_token)):
         "smtp_ssl": get_setting("smtp_ssl", "1") == "1",
         "smtp_sender_name": get_setting("smtp_sender_name", "CDP 节点中心"),
         "smtp_user": get_setting("smtp_user"),
-        "smtp_pass": "", # 留空回显，保护密码
+        "smtp_pass": "",
         "smtp_status": get_setting("smtp_status", "untested"),
         "serverchan_enabled": get_setting("serverchan_enabled", "0") == "1",
         "serverchan_key": get_setting("serverchan_key")
@@ -554,7 +579,6 @@ def save_notification_settings(data: dict, user: dict = Depends(verify_token)):
     for k in ["smtp_host", "smtp_port", "smtp_sender_name", "smtp_user", "serverchan_key"]:
         if k in data:
             set_setting(k, data[k])
-    # 密码支持留空保持
     if data.get("smtp_pass"):
         set_setting("smtp_pass", data["smtp_pass"].strip())
     if "smtp_ssl" in data:
@@ -781,17 +805,28 @@ scheduler = BackgroundScheduler()
 scheduler.add_job(lambda: asyncio.run(execute_sync_task()), 'interval', minutes=15)
 scheduler.start()
 
-if os.path.exists(DIST_DIR):
+# ==================== 5. 彻底解决 404：挂载静态资源与根路径兜底 ====================
+if DIST_DIR:
     assets_dir = os.path.join(DIST_DIR, "assets")
     if os.path.exists(assets_dir):
         app.mount("/assets", StaticFiles(directory=assets_dir), name="assets")
 
+    # 关键修复 1：显式注册根路径 GET /
+    @app.get("/")
+    async def serve_index():
+        return FileResponse(os.path.join(DIST_DIR, "index.html"))
+
+    # 关键修复 2：处理 SPA 刷新时的前端子路由
     @app.get("/{full_path:path}")
     async def serve_vue(full_path: str):
         target_file = os.path.join(DIST_DIR, full_path)
         if full_path and os.path.exists(target_file) and os.path.isfile(target_file):
             return FileResponse(target_file)
         return FileResponse(os.path.join(DIST_DIR, "index.html"))
+else:
+    @app.get("/")
+    async def fallback_error():
+        return HTMLResponse("<h3>❌ 前端静态文件未生成，请检查前端编译。</h3>", status_code=500)
 
 if __name__ == "__main__":
     ensure_ssl_certificates()

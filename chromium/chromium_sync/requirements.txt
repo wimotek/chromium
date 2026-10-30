@@ -7,4 +7,6 @@ sshtunnel==0.4.0
 apscheduler==3.10.4
 websockets==12.0
 httpx==0.27.0
+cryptography>=3.3
 python-multipart==0.0.9
+playwright>=1.40.0
