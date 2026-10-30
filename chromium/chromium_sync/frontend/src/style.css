@@ -3,154 +3,203 @@
 @tailwind utilities;
 
 :root {
-  --bg-page: #080c14;
-  --bg-card: #0f172a;
-  --bg-card-hover: #162036;
-  --bg-sub: #1e293b;
-  --border-main: #1e293b;
-  --border-focus: #2563eb;
-  --brand-blue: #2563eb;
+  --bg-page: #060b17;
+  --bg-card: #0b132b;
+  --border-card: #172554;
+  --border-active: #38bdf8;
 }
 
 body {
   background-color: var(--bg-page);
-  color: #f1f5f9;
+  color: #f8fafc;
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
   letter-spacing: -0.01em;
   min-height: 100vh;
 }
 
-/* 顶部大卡片导航基础质感 (致敬 Marzban & Vercel) */
-.nav-kpi-card {
-  background-color: var(--bg-card);
-  border: 1px solid var(--border-main);
-  border-radius: 0.75rem;
-  padding: 1rem 1.25rem;
+/* 顶部大卡片导航 (1:1 截图复刻) */
+.xray-nav-card {
+  background-color: #0b132b;
+  border: 1px solid #172554;
+  border-radius: 12px;
+  padding: 18px 20px;
   cursor: pointer;
-  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+  transition: all 0.25s ease;
   position: relative;
-  overflow: hidden;
 }
 
-.nav-kpi-card:hover {
-  background-color: var(--bg-card-hover);
-  border-color: #334155;
-  transform: translateY(-2px);
+.xray-nav-card:hover {
+  background-color: #0e1836;
+  border-color: #1e3a8a;
+  transform: translateY(-1.5px);
 }
 
-.nav-kpi-card-active {
-  background-color: #111e38 !important;
-  border-color: #3b82f6 !important;
-  box-shadow: 0 4px 14px 0 rgba(37, 99, 235, 0.2);
+/* 激活态电光蓝光晕 */
+.xray-nav-card-active {
+  border-color: #38bdf8 !important;
+  box-shadow: 0 0 16px rgba(56, 189, 248, 0.35) !important;
 }
 
-/* 激活卡片顶部蓝色指示条 */
-.nav-kpi-card-active::before {
-  content: "";
-  position: absolute;
-  top: 0;
-  left: 0;
-  right: 0;
-  height: 3px;
-  background-color: #3b82f6;
+/* 胶囊数量徽章 */
+.xray-badge-pill {
+  background-color: #0f1f42;
+  border: 1px solid #1d4ed8;
+  color: #38bdf8;
+  border-radius: 9999px;
+  font-size: 11px;
+  padding: 2px 10px;
+  font-weight: 500;
 }
 
-/* 内容主卡片 */
-.dash-card {
-  background-color: var(--bg-card);
-  border: 1px solid var(--border-main);
-  border-radius: 0.75rem;
-  box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.3);
+/* 主数据大卡片 */
+.xray-main-container {
+  background-color: #0b132b;
+  border: 1px solid #172554;
+  border-radius: 14px;
 }
 
-/* 黄金比例表单输入框：桌面端 70%，最小 260px，最大 500px，移动端 100% 自适应 */
+/* 截图同款表格胶囊标签 */
+.badge-active {
+  background-color: rgba(6, 78, 59, 0.8);
+  border: 1px solid #059669;
+  color: #34d399;
+  border-radius: 9999px;
+  font-size: 11px;
+  padding: 2px 9px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.badge-standby {
+  background-color: rgba(69, 26, 3, 0.8);
+  border: 1px solid #d97706;
+  color: #fbbf24;
+  border-radius: 9999px;
+  font-size: 11px;
+  padding: 2px 9px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.badge-error {
+  background-color: rgba(69, 10, 10, 0.8);
+  border: 1px solid #dc2626;
+  color: #f87171;
+  border-radius: 9999px;
+  font-size: 11px;
+  padding: 2px 9px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+/* 截图同款多彩微型治理操作按钮 */
+.btn-gov-orange {
+  background-color: #d97706;
+  color: #ffffff;
+  border-radius: 4px;
+  padding: 3px 8px;
+  font-size: 11px;
+  font-weight: 500;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  transition: opacity 0.15s;
+}
+.btn-gov-orange:hover { opacity: 0.88; }
+
+.btn-gov-red {
+  background-color: #dc2626;
+  color: #ffffff;
+  border-radius: 4px;
+  padding: 3px 8px;
+  font-size: 11px;
+  font-weight: 500;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  transition: opacity 0.15s;
+}
+.btn-gov-red:hover { opacity: 0.88; }
+
+.btn-gov-purple {
+  background-color: #7c3aed;
+  color: #ffffff;
+  border-radius: 4px;
+  padding: 3px 8px;
+  font-size: 11px;
+  font-weight: 500;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  transition: opacity 0.15s;
+}
+.btn-gov-purple:hover { opacity: 0.88; }
+
+.btn-gov-blue {
+  background: linear-gradient(135deg, #0284c7, #2563eb);
+  color: #ffffff;
+  border-radius: 4px;
+  padding: 3px 8px;
+  font-size: 11px;
+  font-weight: 500;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  transition: opacity 0.15s;
+}
+.btn-gov-blue:hover { opacity: 0.88; }
+
+/* 刷新数据渐变按钮 */
+.btn-refresh-gradient {
+  background: linear-gradient(135deg, #0284c7, #2563eb);
+  color: #ffffff;
+  border-radius: 6px;
+  padding: 6px 14px;
+  font-size: 12px;
+  font-weight: 600;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  box-shadow: 0 2px 8px rgba(37, 99, 235, 0.35);
+  transition: transform 0.15s, opacity 0.15s;
+}
+.btn-refresh-gradient:hover {
+  transform: translateY(-1px);
+  opacity: 0.95;
+}
+
+/* 黄金比例输入框规范 (70% 居中，最大 500px) */
 .form-input-golden {
   width: 70%;
   min-width: 260px;
   max-width: 500px;
-  background-color: var(--bg-sub);
-  border: 1px solid #334155;
-  color: #f8fafc;
-  border-radius: 0.5rem;
-  padding: 0.625rem 0.875rem;
-  font-size: 0.875rem;
+  background-color: #0f1c3f;
+  border: 1px solid #1e3a8a;
+  color: #ffffff;
+  border-radius: 6px;
+  padding: 8px 12px;
+  font-size: 13px;
   outline: none;
-  transition: all 0.15s ease;
+  transition: border-color 0.2s;
 }
-
 @media (max-width: 640px) {
-  .form-input-golden {
-    width: 100% !important;
-    min-width: 100% !important;
-  }
+  .form-input-golden { width: 100% !important; min-width: 100% !important; }
+}
+.form-input-golden:focus, .dialog-input:focus {
+  border-color: #38bdf8;
+  box-shadow: 0 0 8px rgba(56, 189, 248, 0.4);
 }
 
-.form-input-golden:focus,
-.modal-input:focus {
-  border-color: #3b82f6;
-  box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.25);
-  background-color: #0f172a;
-}
-
-/* 弹窗专用 100% 满宽输入框 */
-.modal-input {
+.dialog-input {
   width: 100%;
-  background-color: var(--bg-sub);
-  border: 1px solid #334155;
-  color: #f8fafc;
-  border-radius: 0.5rem;
-  padding: 0.625rem 0.875rem;
-  font-size: 0.875rem;
+  background-color: #0f1c3f;
+  border: 1px solid #1e3a8a;
+  color: #ffffff;
+  border-radius: 6px;
+  padding: 8px 12px;
+  font-size: 13px;
   outline: none;
-  transition: all 0.15s ease;
-}
-
-/* 按钮样式 */
-.btn-primary {
-  background-color: #2563eb;
-  color: #ffffff;
-  border-radius: 0.5rem;
-  padding: 0.5rem 1rem;
-  font-size: 0.875rem;
-  font-weight: 500;
-  transition: background-color 0.15s ease;
-}
-.btn-primary:hover {
-  background-color: #1d4ed8;
-}
-
-.btn-secondary {
-  background-color: #1e293b;
-  color: #cbd5e1;
-  border: 1px solid #334155;
-  border-radius: 0.5rem;
-  padding: 0.4rem 0.85rem;
-  font-size: 0.8125rem;
-  transition: all 0.15s ease;
-}
-.btn-secondary:hover {
-  background-color: #334155;
-  color: #ffffff;
-}
-
-/* 状态胶囊标签 */
-.tag-online {
-  background: rgba(16, 185, 129, 0.15);
-  color: #34d399;
-  border: 1px solid rgba(16, 185, 129, 0.3);
-}
-.tag-standby {
-  background: rgba(245, 158, 11, 0.15);
-  color: #fbbf24;
-  border: 1px solid rgba(245, 158, 11, 0.3);
-}
-.tag-error {
-  background: rgba(239, 68, 68, 0.15);
-  color: #f87171;
-  border: 1px solid rgba(239, 68, 68, 0.3);
-}
-.tag-local {
-  background: rgba(59, 130, 246, 0.15);
-  color: #60a5fa;
-  border: 1px solid rgba(59, 130, 246, 0.3);
 }
