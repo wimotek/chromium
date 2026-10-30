@@ -28,7 +28,8 @@ import websockets
 import jwt
 from sshtunnel import SSHTunnelForwarder
 from apscheduler.schedulers.background import BackgroundScheduler
-from fastapi import FastAPI, HTTPException, Depends, Header as ReqHeader, UploadFile, File, Request
+from fastapi import FastAPI, HTTPException, Depends, Header as ReqHeader, UploadFile, File, Request, Query, Security
+from fastapi.security.api_key import APIKeyHeader, APIKeyQuery
 from fastapi.responses import JSONResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -36,6 +37,8 @@ from pydantic import BaseModel
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("CDP_Sync")
 
+CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
+DIST_DIR = os.path.abspath(os.path.join(CURRENT_DIR, "../frontend/dist"))
 DATA_DIR = "/data"
 KEYS_DIR = os.path.join(DATA_DIR, "keys")
 DB_PATH = os.path.join(DATA_DIR, "app.db")
@@ -48,7 +51,6 @@ os.makedirs(CERTS_DIR, exist_ok=True)
 
 INIT_PASSWORD = os.getenv("ADMIN_INIT_PASS", "Admin@123456")
 
-# 引入 ChromiumSync 核心模块
 ChromiumSync = None
 try:
     from chromium_sync import ChromiumSync
@@ -67,7 +69,7 @@ def verify_password(password: str, hashed: str) -> bool:
     except Exception:
         return False
 
-# ==================== 1. 证书与环境初始化 ====================
+# ==================== 1. SSL 证书原生纯内存生成 ====================
 def generate_self_signed_cert(cert_file: str, key_file: str):
     key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
     subject = issuer = x509.Name([
@@ -113,7 +115,7 @@ def ensure_ssl_certificates():
     has_key = os.path.exists(SSL_KEY_FILE) and os.path.getsize(SSL_KEY_FILE) > 0
 
     if not (has_cert and has_key):
-        logger.warning("未检测到有效证书，正在通过原生引擎生成自签名 SSL 证书...")
+        logger.warning("未检测到有效证书，正在生成自签 SSL 证书...")
         try:
             os.makedirs(CERTS_DIR, exist_ok=True)
             generate_self_signed_cert(SSL_CERT_FILE, SSL_KEY_FILE)
@@ -125,9 +127,9 @@ def ensure_ssl_certificates():
             SSL_CERT_FILE = os.path.join(fallback_dir, "fullchain.pem")
             SSL_KEY_FILE = os.path.join(fallback_dir, "privkey.pem")
             generate_self_signed_cert(SSL_CERT_FILE, SSL_KEY_FILE)
-            logger.info(f"自签名证书已成功降级生成于: {fallback_dir}")
+            logger.info(f"自签名证书已降级生成于: {fallback_dir}")
 
-# ==================== 2. 数据库与本地节点热迁移 ====================
+# ==================== 2. 数据库与通知初始化 ====================
 def init_db_and_jwt():
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
@@ -148,7 +150,6 @@ def init_db_and_jwt():
         last_sync TEXT
     )''')
 
-    # 为现有表热迁移 is_local 和 cookie_count
     for col, col_type in [("is_local", "INTEGER DEFAULT 0"), ("cookie_count", "INTEGER DEFAULT 0")]:
         try:
             cur.execute(f"ALTER TABLE nodes ADD COLUMN {col} {col_type}")
@@ -165,17 +166,18 @@ def init_db_and_jwt():
 
     defaults = {
         'admin_username': 'admin',
-        'admin_email': 'admin@wimotek.com',
         'admin_password': hash_password(INIT_PASSWORD),
         'jwt_secret': secrets.token_hex(32),
-        'smtp_host': '',
+        'api_key': 'cdp_' + secrets.token_urlsafe(24),
+        'smtp_host': 'smtp.yeah.net',
         'smtp_port': '465',
         'smtp_ssl': '1',
+        'smtp_sender_name': 'CDP 节点中心',
         'smtp_user': '',
         'smtp_pass': '',
-        'smtp_to': '',
-        'serverchan_key': '',
-        'serverchan_enabled': '0'
+        'smtp_status': 'untested', # 'ready' | 'error' | 'untested'
+        'serverchan_enabled': '0',
+        'serverchan_key': ''
     }
 
     for k, v in defaults.items():
@@ -205,23 +207,24 @@ def set_setting(key: str, value: str):
 
 JWT_SECRET = get_setting('jwt_secret')
 
-# ==================== 3. 通知系统 ====================
-def send_email_notification(title: str, content: str) -> bool:
+# ==================== 3. 增强型 SMTP 发信与 Server酱通知 ====================
+def send_email_notification(title: str, content: str, override_to: Optional[str] = None) -> tuple[bool, str]:
     host = get_setting('smtp_host')
     port = int(get_setting('smtp_port') or '465')
     use_ssl = get_setting('smtp_ssl') == '1'
     user = get_setting('smtp_user')
     password = get_setting('smtp_pass')
-    to_email = get_setting('smtp_to') or get_setting('admin_email')
+    sender_name = get_setting('smtp_sender_name', 'CDP 节点中心')
+    to_email = override_to if override_to else user
 
     if not (host and user and password and to_email):
-        return False
+        return False, "SMTP 配置不完整 (缺少主机、账号或授权码)"
 
     try:
         msg = MIMEText(content, 'plain', 'utf-8')
-        msg['From'] = Header(f"CDP-Sync Manager <{user}>", 'utf-8')
+        msg['From'] = Header(f"{sender_name} <{user}>", 'utf-8')
         msg['To'] = Header(to_email, 'utf-8')
-        msg['Subject'] = Header(f"[CDP通知] {title}", 'utf-8')
+        msg['Subject'] = Header(f"[CDP 集群告警] {title}", 'utf-8')
 
         if use_ssl:
             server = smtplib.SMTP_SSL(host, port, timeout=10)
@@ -232,15 +235,18 @@ def send_email_notification(title: str, content: str) -> bool:
         server.login(user, password)
         server.sendmail(user, [to_email], msg.as_string())
         server.quit()
-        return True
+        return True, "发信正常"
     except Exception as e:
-        logger.error(f"邮件通知发送失败: {e}")
-        return False
+        err_msg = str(e)
+        logger.error(f"邮件发送失败: {err_msg}")
+        return False, err_msg
 
 async def send_serverchan_notification(title: str, content: str) -> bool:
+    if get_setting('serverchan_enabled', '0') != '1':
+        return False
+
     key = get_setting('serverchan_key')
-    enabled = get_setting('serverchan_enabled') == '1'
-    if not (enabled and key):
+    if not key:
         return False
 
     url = f"https://sctapi.ftqq.com/{key}.send"
@@ -256,63 +262,78 @@ async def dispatch_notification(title: str, content: str):
     send_email_notification(title, content)
     await send_serverchan_notification(title, content)
 
-# ==================== 4. 增强型 CDP WebSocket 探针与 Cookie 读写 ====================
-async def get_cdp_ws_url(local_port: int) -> str:
-    url = f"http://127.0.0.1:{local_port}/json/version"
-    async with httpx.AsyncClient(timeout=3.0) as client:
-        res = await client.get(url)
-        raw_ws = res.json()["webSocketDebuggerUrl"]
-        parsed = urlparse(raw_ws)
-        # 强制替换为本地直连/隧道端口
-        corrected_ws = urlunparse(parsed._replace(netloc=f"127.0.0.1:{local_port}"))
-        return corrected_ws
+# ==================== 4. 解决容器与宿主机的自适应 CDP 探测 ====================
+async def resolve_cdp_endpoint(local_port: int) -> tuple[str, str]:
+    candidate_hosts = ["127.0.0.1", "host.docker.internal", "172.17.0.1"]
+    async with httpx.AsyncClient(timeout=2.0) as client:
+        for host in candidate_hosts:
+            try:
+                url = f"http://{host}:{local_port}/json/version"
+                res = await client.get(url)
+                if res.status_code == 200:
+                    raw_ws = res.json()["webSocketDebuggerUrl"]
+                    parsed = urlparse(raw_ws)
+                    corrected_ws = urlunparse(parsed._replace(netloc=f"{host}:{local_port}"))
+                    return host, corrected_ws
+            except Exception:
+                continue
+    raise ConnectionRefusedError(f"无法连通本地/宿主机端口 {local_port} 的 CDP 服务")
 
 async def fetch_cookies_native(local_port: int) -> List[dict]:
-    ws_url = await get_cdp_ws_url(local_port)
+    host, ws_url = await resolve_cdp_endpoint(local_port)
     async with websockets.connect(ws_url, timeout=5.0) as ws:
         await ws.send(json.dumps({"id": 1, "method": "Storage.getCookies"}))
         resp = await asyncio.wait_for(ws.recv(), timeout=5.0)
         data = json.loads(resp)
-        return data.get("result", {}).get("cookies", [])
+        cookies = data.get("result", {}).get("cookies", [])
+        if cookies:
+            return cookies
+
+        # 回退至 Network 域获取
+        await ws.send(json.dumps({"id": 2, "method": "Network.enable"}))
+        await ws.recv()
+        await ws.send(json.dumps({"id": 3, "method": "Network.getAllCookies"}))
+        resp2 = await asyncio.wait_for(ws.recv(), timeout=5.0)
+        data2 = json.loads(resp2)
+        return data2.get("result", {}).get("cookies", [])
 
 async def inject_cookies_native(local_port: int, cookies: List[dict]):
-    ws_url = await get_cdp_ws_url(local_port)
-    async with websockets.connect(ws_url, timeout=5.0) as ws:
-        await ws.send(json.dumps({"id": 2, "method": "Network.setCookies", "params": {"cookies": cookies}}))
-        await asyncio.wait_for(ws.recv(), timeout=5.0)
+    host, ws_url = await resolve_cdp_endpoint(local_port)
+    async with websockets.connect(ws_url, timeout=6.0) as ws:
+        await ws.send(json.dumps({"id": 1, "method": "Network.setCookies", "params": {"cookies": cookies}}))
+        await asyncio.wait_for(ws.recv(), timeout=6.0)
 
-async def probe_node_cookies(local_port: int) -> int:
+async def probe_node_cookies(local_port: int) -> tuple[int, str]:
     try:
         cookies = await fetch_cookies_native(local_port)
-        return len(cookies)
+        return len(cookies), "OK"
+    except ConnectionRefusedError as ce:
+        return 0, str(ce)
     except Exception as e:
-        logger.debug(f"探测端口 {local_port} Cookie 失败: {e}")
-        return 0
+        return 0, f"探测异常: {str(e)[:35]}"
 
-# ==================== 5. SSH 隧道管理 (本地直连节点自动豁免) ====================
+# ==================== 5. SSH 隧道管理 ====================
 class TunnelManager:
     def __init__(self):
         self.tunnels: Dict[int, SSHTunnelForwarder] = {}
 
-    def start_tunnel(self, node: dict):
+    async def start_tunnel(self, node: dict):
         node_id = node['id']
         self.stop_tunnel(node_id)
 
-        # 本地直连节点：直接探测其本地 CDP 接口健康状态，无需 SSH
+        # 本地直连节点：真实探测连通性
         if node.get('is_local') == 1:
             try:
-                # 访问本地 CDP 端口检测连通性
-                res = httpx.get(f"http://127.0.0.1:{node['local_bind_port']}/json/version", timeout=2.0)
-                if res.status_code == 200:
-                    self._update_node_status(node_id, "connected")
-                    asyncio.create_task(self._auto_probe(node))
-                    return True, "Local Direct Connected"
+                count, msg = await probe_node_cookies(node['local_bind_port'])
+                if msg == "OK":
+                    self._update_node_status(node_id, "connected", count)
+                    return True, f"连通正常，嗅探到 {count} 条 Cookies"
                 else:
-                    self._update_node_status(node_id, "error: not cdp")
-                    return False, "Not a CDP service"
+                    self._update_node_status(node_id, "error: refused", 0)
+                    return False, f"本地CDP未响应: {msg}"
             except Exception as e:
-                self._update_node_status(node_id, "error: connection refused")
-                return False, f"本地CDP未运行或拒绝连接: {e}"
+                self._update_node_status(node_id, "error: offline", 0)
+                return False, f"连接异常: {e}"
 
         # 远程节点：启动 SSH 隧道
         ssh_kwargs = {
@@ -335,22 +356,15 @@ class TunnelManager:
             tunnel.start()
             self.tunnels[node_id] = tunnel
             self._update_node_status(node_id, "connected")
-            logger.info(f"节点 [{node['name']}] SSH 隧道启动成功 -> 映射端口 {node['local_bind_port']}")
+            logger.info(f"节点 [{node['name']}] SSH 隧道建立成功 -> 映射端口 {node['local_bind_port']}")
 
-            asyncio.create_task(self._auto_probe(node))
-            return True, "Connected"
+            await asyncio.sleep(1.0)
+            count, _ = await probe_node_cookies(node['local_bind_port'])
+            self._update_node_status(node_id, "connected", count)
+            return True, f"穿透成功，探测到 {count} 条 Cookies"
         except Exception as e:
-            self._update_node_status(node_id, f"error: {str(e)[:30]}")
+            self._update_node_status(node_id, f"error: {str(e)[:25]}")
             return False, str(e)
-
-    async def _auto_probe(self, node: dict):
-        await asyncio.sleep(1.2)
-        count = await probe_node_cookies(node['local_bind_port'])
-        conn = sqlite3.connect(DB_PATH)
-        cur = conn.cursor()
-        cur.execute("UPDATE nodes SET cookie_count=? WHERE id=?", (count, node['id']))
-        conn.commit()
-        conn.close()
 
     def stop_tunnel(self, node_id: int):
         if node_id in self.tunnels:
@@ -361,16 +375,19 @@ class TunnelManager:
             del self.tunnels[node_id]
         self._update_node_status(node_id, "stopped")
 
-    def _update_node_status(self, node_id: int, status: str):
+    def _update_node_status(self, node_id: int, status: str, cookie_count: Optional[int] = None):
         conn = sqlite3.connect(DB_PATH)
         cur = conn.cursor()
-        cur.execute("UPDATE nodes SET status=? WHERE id=?", (status, node_id))
+        if cookie_count is not None:
+            cur.execute("UPDATE nodes SET status=?, cookie_count=? WHERE id=?", (status, cookie_count, node_id))
+        else:
+            cur.execute("UPDATE nodes SET status=? WHERE id=?", (status, node_id))
         conn.commit()
         conn.close()
 
 tunnel_mgr = TunnelManager()
 
-# ==================== 6. 同步调度引擎 (兼容本地/远程混部) ====================
+# ==================== 6. 同步调度引擎 ====================
 async def execute_sync_task():
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
@@ -388,19 +405,16 @@ async def execute_sync_task():
     log_detail = []
 
     try:
-        # 获取源节点 Cookie
         cookies = await fetch_cookies_native(source['local_bind_port'])
         source_count = len(cookies)
-        log_detail.append(f"源节点 [{source['name']}] 提取到 {source_count} 个 Cookies")
+        log_detail.append(f"源节点 [{source['name']}] 捕获到 {source_count} 个 Cookies")
 
         for target in targets:
             try:
-                # 场景 A: 目标是本地节点，直接通过原生 WebSocket 注入，完全不走 SSH
                 if target.get('is_local') == 1:
                     await inject_cookies_native(target['local_bind_port'], cookies)
-                    target_count = await probe_node_cookies(target['local_bind_port'])
-                    log_detail.append(f"-> 本地直连节点 [{target['name']}] 注入成功，当前 Cookies: {target_count}")
-                # 场景 B: 目标是远程节点
+                    target_count, _ = await probe_node_cookies(target['local_bind_port'])
+                    log_detail.append(f"-> 本地直连 [{target['name']}] 注入完成，当前: {target_count}")
                 else:
                     if ChromiumSync is not None:
                         remote_ssh = f"{target['ssh_user']}@{target['ssh_host']}"
@@ -417,8 +431,8 @@ async def execute_sync_task():
                     else:
                         await inject_cookies_native(target['local_bind_port'], cookies)
 
-                    target_count = await probe_node_cookies(target['local_bind_port'])
-                    log_detail.append(f"-> 远程节点 [{target['name']}] 同步完成，当前 Cookies: {target_count}")
+                    target_count, _ = await probe_node_cookies(target['local_bind_port'])
+                    log_detail.append(f"-> 远程节点 [{target['name']}] 同步完成，当前: {target_count}")
             except Exception as ex:
                 log_detail.append(f"-> 节点 [{target['name']}] 同步异常: {str(ex)}")
 
@@ -440,7 +454,10 @@ async def execute_sync_task():
 
 # ==================== 7. API 路由 ====================
 CAPTCHA_STORE = {}
-app = FastAPI(title="X-CDP Hub")
+app = FastAPI(title="CDP Cluster Hub")
+
+api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
+api_key_query = APIKeyQuery(name="api_key", auto_error=False)
 
 def verify_token(authorization: Optional[str] = ReqHeader(None)):
     if not authorization or not authorization.startswith("Bearer "):
@@ -450,19 +467,35 @@ def verify_token(authorization: Optional[str] = ReqHeader(None)):
     except Exception:
         raise HTTPException(status_code=401, detail="登录凭证失效")
 
+def verify_agent_access(
+    header_key: Optional[str] = Security(api_key_header),
+    query_key: Optional[str] = Security(api_key_query),
+    authorization: Optional[str] = ReqHeader(None)
+):
+    valid_key = get_setting('api_key')
+    if (header_key and header_key == valid_key) or (query_key and query_key == valid_key):
+        return {"sub": "external_agent"}
+    if authorization and authorization.startswith("Bearer "):
+        try:
+            return jwt.decode(authorization.split(" ")[1], JWT_SECRET, algorithms=["HS256"])
+        except Exception:
+            pass
+    raise HTTPException(status_code=403, detail="未授权调用: 请在 Header 提供 X-API-Key 或在 URL 提供 ?api_key=")
+
 @app.get("/api/captcha")
 def get_captcha():
     a, b = random.randint(10, 50), random.randint(1, 9)
     token = str(uuid.uuid4())
     CAPTCHA_STORE[token] = {"ans": a + b, "exp": time.time() + 180}
     svg = f'''<svg xmlns="http://www.w3.org/2000/svg" width="120" height="38" viewBox="0 0 120 38">
-        <rect width="100%" height="100%" fill="#262626" rx="4"/>
-        <text x="18" y="25" font-family="-apple-system, system-ui" font-size="16" font-weight="bold" fill="#1677ff">{a} + {b} = ?</text>
+        <rect width="100%" height="100%" fill="#09122a" rx="4"/>
+        <text x="18" y="25" font-family="-apple-system, system-ui" font-size="16" font-weight="bold" fill="#00f0ff">{a} + {b} = ?</text>
     </svg>'''
     return {"token": token, "svg": svg}
 
+# 1. 登录逻辑
 class LoginDTO(BaseModel):
-    account: str
+    username: str
     password: str
     captcha_token: str
     captcha_answer: str
@@ -471,18 +504,16 @@ class LoginDTO(BaseModel):
 def login(data: LoginDTO, req: Request):
     cap = CAPTCHA_STORE.get(data.captcha_token)
     if not cap or time.time() > cap["exp"] or str(cap["ans"]) != data.captcha_answer.strip():
-        raise HTTPException(status_code=400, detail="验证码错误或已失效")
+        raise HTTPException(status_code=400, detail="验证码计算错误或已过期")
 
     admin_user = get_setting('admin_username', 'admin')
-    admin_email = get_setting('admin_email', 'admin@wimotek.com')
     hashed_pwd = get_setting('admin_password')
 
-    input_acc = data.account.strip().lower()
-    if input_acc != admin_user.lower() and input_acc != admin_email.lower():
-        raise HTTPException(status_code=401, detail="账号或密码错误")
+    if data.username.strip() != admin_user:
+        raise HTTPException(status_code=401, detail="用户名或密码错误")
 
     if not verify_password(data.password, hashed_pwd):
-        raise HTTPException(status_code=401, detail="账号或密码错误")
+        raise HTTPException(status_code=401, detail="用户名或密码错误")
 
     return {"token": jwt.encode({"sub": admin_user, "exp": datetime.utcnow() + timedelta(days=7)}, JWT_SECRET, algorithm="HS256")}
 
@@ -490,57 +521,71 @@ def login(data: LoginDTO, req: Request):
 def get_profile(user: dict = Depends(verify_token)):
     return {
         "username": get_setting("admin_username"),
-        "email": get_setting("admin_email")
+        "api_key": get_setting("api_key")
     }
 
 @app.post("/api/profile")
 def update_profile(data: dict, user: dict = Depends(verify_token)):
     if data.get("username"):
         set_setting("admin_username", data["username"].strip())
-    if data.get("email"):
-        set_setting("admin_email", data["email"].strip())
     if data.get("new_password"):
         set_setting("admin_password", hash_password(data["new_password"]))
-    return {"message": "个人配置更新成功"}
+    if data.get("regenerate_key"):
+        set_setting("api_key", 'cdp_' + secrets.token_urlsafe(24))
+    return {"message": "配置更新成功"}
 
+# 2. 通知设置 (支持密码留空保持 + 状态指示)
 @app.get("/api/notifications/settings")
 def get_notification_settings(user: dict = Depends(verify_token)):
     return {
-        "smtp_host": get_setting("smtp_host"),
+        "smtp_host": get_setting("smtp_host", "smtp.yeah.net"),
         "smtp_port": get_setting("smtp_port", "465"),
         "smtp_ssl": get_setting("smtp_ssl", "1") == "1",
+        "smtp_sender_name": get_setting("smtp_sender_name", "CDP 节点中心"),
         "smtp_user": get_setting("smtp_user"),
-        "smtp_pass": get_setting("smtp_pass"),
-        "smtp_to": get_setting("smtp_to"),
-        "serverchan_key": get_setting("serverchan_key"),
-        "serverchan_enabled": get_setting("serverchan_enabled", "0") == "1"
+        "smtp_pass": "", # 留空回显，保护密码
+        "smtp_status": get_setting("smtp_status", "untested"),
+        "serverchan_enabled": get_setting("serverchan_enabled", "0") == "1",
+        "serverchan_key": get_setting("serverchan_key")
     }
 
 @app.post("/api/notifications/settings")
 def save_notification_settings(data: dict, user: dict = Depends(verify_token)):
-    for k in ["smtp_host", "smtp_port", "smtp_user", "smtp_pass", "smtp_to", "serverchan_key"]:
+    for k in ["smtp_host", "smtp_port", "smtp_sender_name", "smtp_user", "serverchan_key"]:
         if k in data:
             set_setting(k, data[k])
+    # 密码支持留空保持
+    if data.get("smtp_pass"):
+        set_setting("smtp_pass", data["smtp_pass"].strip())
     if "smtp_ssl" in data:
         set_setting("smtp_ssl", "1" if data["smtp_ssl"] else "0")
     if "serverchan_enabled" in data:
         set_setting("serverchan_enabled", "1" if data["serverchan_enabled"] else "0")
-    return {"message": "通知设置已保存"}
+    return {"message": "发信参数已保存"}
+
+class TestEmailDTO(BaseModel):
+    test_email: Optional[str] = None
 
 @app.post("/api/notifications/test-email")
-def test_email(user: dict = Depends(verify_token)):
-    ok = send_email_notification("测试邮件", "这是一封来自 CDP Sync 系统的测试邮件，SMTP 配置一切正常。")
-    if not ok:
-        raise HTTPException(status_code=500, detail="邮件发送失败，请检查 SMTP 账号密码或端口")
-    return {"message": "测试邮件已成功发出"}
+def test_email(data: TestEmailDTO, user: dict = Depends(verify_token)):
+    target = data.test_email.strip() if data.test_email else None
+    ok, info = send_email_notification("发信测试", "这是一封来自 CDP Sync 系统的测试邮件，SMTP 配置工作正常。", override_to=target)
+    if ok:
+        set_setting("smtp_status", "ready")
+        dest = target if target else get_setting('smtp_user')
+        return {"message": f"测试邮件已成功投递至: {dest}", "smtp_status": "ready"}
+    else:
+        set_setting("smtp_status", f"error: {info[:30]}")
+        raise HTTPException(status_code=500, detail=f"发信失败: {info}")
 
 @app.post("/api/notifications/test-serverchan")
 async def test_serverchan(user: dict = Depends(verify_token)):
     ok = await send_serverchan_notification("CDP 测试推送", "Server酱微信通道运行正常。")
     if not ok:
         raise HTTPException(status_code=500, detail="Server酱推送失败，请检查 SendKey")
-    return {"message": "Server酱微信推送触发成功"}
+    return {"message": "Server酱微信测试推送成功"}
 
+# 3. 节点管理
 @app.get("/api/nodes")
 def list_nodes(user: dict = Depends(verify_token)):
     conn = sqlite3.connect(DB_PATH)
@@ -559,7 +604,7 @@ def create_node(data: dict, user: dict = Depends(verify_token)):
     cur.execute('''INSERT INTO nodes (
         name, is_source, is_local, ssh_host, ssh_port, ssh_user, ssh_key_filename,
         ssh_password, remote_cdp_port, local_bind_port, cookie_count, status
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)''',
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'stopped')''',
     (
         data['name'],
         1 if data.get('is_source') else 0,
@@ -570,12 +615,11 @@ def create_node(data: dict, user: dict = Depends(verify_token)):
         "" if is_local else data.get('ssh_key_filename', ''),
         "" if is_local else data.get('ssh_password', ''),
         9222 if is_local else data.get('remote_cdp_port', 9222),
-        data['local_bind_port'],
-        "connected" if is_local else "stopped"
+        data['local_bind_port']
     ))
     conn.commit()
     conn.close()
-    return {"message": "节点配置已保存"}
+    return {"message": "节点配置已写入 (初始状态为离线，请点击连通测试)"}
 
 @app.delete("/api/nodes/{node_id}")
 def delete_node(node_id: int, user: dict = Depends(verify_token)):
@@ -596,16 +640,21 @@ async def probe_node(node_id: int, user: dict = Depends(verify_token)):
     node = dict(cur.fetchone())
     conn.close()
 
-    count = await probe_node_cookies(node['local_bind_port'])
+    count, msg = await probe_node_cookies(node['local_bind_port'])
+    new_status = "connected" if msg == "OK" else "error: refused"
+
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
-    cur.execute("UPDATE nodes SET cookie_count=? WHERE id=?", (count, node_id))
+    cur.execute("UPDATE nodes SET cookie_count=?, status=? WHERE id=?", (count, new_status, node_id))
     conn.commit()
     conn.close()
-    return {"cookie_count": count}
+
+    if msg != "OK":
+        raise HTTPException(status_code=502, detail=f"探针失败: {msg}")
+    return {"cookie_count": count, "message": f"探测成功: 捕获到 {count} 条 Cookies"}
 
 @app.post("/api/nodes/{node_id}/toggle-tunnel")
-def toggle_tunnel(node_id: int, user: dict = Depends(verify_token)):
+async def toggle_tunnel(node_id: int, user: dict = Depends(verify_token)):
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     cur = conn.cursor()
@@ -613,19 +662,14 @@ def toggle_tunnel(node_id: int, user: dict = Depends(verify_token)):
     node = dict(cur.fetchone())
     conn.close()
 
-    if node.get('is_local') == 1:
-        # 本地直连节点：测试本地端口健康状态
-        ok, msg = tunnel_mgr.start_tunnel(node)
-        return {"status": "connected" if ok else "stopped"}
-
-    if node_id in tunnel_mgr.tunnels:
+    if node.get('is_local') != 1 and node_id in tunnel_mgr.tunnels:
         tunnel_mgr.stop_tunnel(node_id)
-        return {"status": "stopped"}
-    else:
-        ok, msg = tunnel_mgr.start_tunnel(node)
-        if not ok:
-            raise HTTPException(status_code=500, detail=msg)
-        return {"status": "connected"}
+        return {"status": "stopped", "message": "隧道已断开"}
+
+    ok, msg = await tunnel_mgr.start_tunnel(node)
+    if not ok:
+        raise HTTPException(status_code=500, detail=msg)
+    return {"status": "connected", "message": msg}
 
 @app.post("/api/nodes/{node_id}/set-source")
 def set_source(node_id: int, user: dict = Depends(verify_token)):
@@ -672,15 +716,82 @@ def get_logs(user: dict = Depends(verify_token)):
     conn.close()
     return logs
 
+# ==================== 4. 外部开放 API ====================
+@app.get("/api/v1/nodes", summary="获取所有在线 CDP 节点列表")
+def external_list_nodes(auth: dict = Depends(verify_agent_access)):
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM nodes")
+    rows = [dict(r) for r in cur.fetchall()]
+    conn.close()
+
+    online_nodes = []
+    for r in rows:
+        online_nodes.append({
+            "id": r["id"],
+            "name": r["name"],
+            "is_source": bool(r["is_source"]),
+            "is_local": bool(r["is_local"]),
+            "status": r["status"],
+            "local_port": r["local_bind_port"],
+            "cdp_http_endpoint": f"http://127.0.0.1:{r['local_bind_port']}",
+            "cookie_count": r["cookie_count"],
+            "last_sync": r["last_sync"],
+            "cookies_export_url": f"/api/v1/nodes/{r['id']}/cookies"
+        })
+    return {
+        "code": 200,
+        "total": len(rows),
+        "online_count": len([n for n in rows if n["status"] == "connected"]),
+        "nodes": online_nodes
+    }
+
+@app.get("/api/v1/nodes/{node_id}/cookies", summary="提取目标节点全量 Cookies")
+async def external_get_cookies(node_id: int, auth: dict = Depends(verify_agent_access)):
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM nodes WHERE id=?", (node_id,))
+    row = cur.fetchone()
+    conn.close()
+
+    if not row:
+        raise HTTPException(status_code=404, detail="目标节点不存在")
+    node = dict(row)
+
+    try:
+        cookies = await fetch_cookies_native(node['local_bind_port'])
+        return {
+            "code": 200,
+            "node_id": node_id,
+            "node_name": node["name"],
+            "total_cookies": len(cookies),
+            "cookies": cookies
+        }
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"提取 Cookies 失败: {e}")
+
+@app.post("/api/v1/sync", summary="外部自动化触发全网同步")
+async def external_trigger_sync(auth: dict = Depends(verify_agent_access)):
+    await execute_sync_task()
+    return {"code": 200, "message": "全网 Cookie 同步任务已触发"}
+
 scheduler = BackgroundScheduler()
 scheduler.add_job(lambda: asyncio.run(execute_sync_task()), 'interval', minutes=15)
 scheduler.start()
 
-if os.path.exists("dist"):
-    app.mount("/assets", StaticFiles(directory="dist/assets"), name="assets")
+if os.path.exists(DIST_DIR):
+    assets_dir = os.path.join(DIST_DIR, "assets")
+    if os.path.exists(assets_dir):
+        app.mount("/assets", StaticFiles(directory=assets_dir), name="assets")
+
     @app.get("/{full_path:path}")
-    def serve_spa(full_path: str):
-        return FileResponse("dist/index.html")
+    async def serve_vue(full_path: str):
+        target_file = os.path.join(DIST_DIR, full_path)
+        if full_path and os.path.exists(target_file) and os.path.isfile(target_file):
+            return FileResponse(target_file)
+        return FileResponse(os.path.join(DIST_DIR, "index.html"))
 
 if __name__ == "__main__":
     ensure_ssl_certificates()

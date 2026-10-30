@@ -1,55 +1,33 @@
 <script setup>
 import { ref, reactive, computed, onMounted } from 'vue'
+import NodeManager from './components/NodeManager.vue'
+import SyncManager from './components/SyncManager.vue'
+import NotifyManager from './components/NotifyManager.vue'
+import SettingsManager from './components/SettingsManager.vue'
 
 const token = ref(localStorage.getItem('token') || '')
-// 对应顶部的 4 个大卡片导航
-const activeNav = ref('nodes') // 'nodes' | 'sync' | 'notifications' | 'settings'
+const activeNav = ref('nodes')
 const captchaSvg = ref('')
+const toastMsg = ref('')
+const toastType = ref('success')
+
+const showToast = (msg, type = 'success') => {
+  toastMsg.value = msg
+  toastType.value = type
+  setTimeout(() => { toastMsg.value = '' }, 3500)
+}
 
 const nodes = ref([])
-const keys = ref([])
-const logs = ref([])
-const isSyncing = ref(false)
-const showNodeModal = ref(false)
+const totalCookies = computed(() => nodes.value.reduce((acc, n) => acc + (n.cookie_count || 0), 0))
+const notifStatus = ref({ smtp_status: 'untested', serverchan_enabled: false })
+const profile = reactive({ username: '' })
 
 const loginForm = reactive({
-  account: '',
+  username: '',
   password: '',
   captcha_token: '',
   captcha_answer: ''
 })
-
-const profile = reactive({
-  username: '',
-  email: '',
-  new_password: ''
-})
-
-const notif = reactive({
-  smtp_host: '',
-  smtp_port: '465',
-  smtp_ssl: true,
-  smtp_user: '',
-  smtp_pass: '',
-  smtp_to: '',
-  serverchan_key: '',
-  serverchan_enabled: false
-})
-
-const newNode = reactive({
-  name: '',
-  is_local: true,
-  ssh_host: '',
-  ssh_port: 22,
-  ssh_user: 'root',
-  ssh_key_filename: '',
-  ssh_password: '',
-  remote_cdp_port: 9222,
-  local_bind_port: 9222
-})
-
-const totalCookies = computed(() => nodes.value.reduce((acc, n) => acc + (n.cookie_count || 0), 0))
-const onlineCount = computed(() => nodes.value.filter(n => n.status === 'connected').length)
 
 const api = async (url, options = {}) => {
   options.headers = options.headers || {}
@@ -76,9 +54,9 @@ const login = async () => {
   if (res.ok) {
     token.value = data.token
     localStorage.setItem('token', data.token)
-    loadAll()
+    loadBaseInfo()
   } else {
-    alert(data.detail || '用户名、邮箱或密码错误')
+    showToast(data.detail || '用户名或密码错误', 'error')
     refreshCaptcha()
   }
 }
@@ -89,129 +67,34 @@ const logout = () => {
   refreshCaptcha()
 }
 
-const loadAll = async () => {
-  const [nRes, kRes, lRes, pRes, sRes] = await Promise.all([
+const loadBaseInfo = async () => {
+  const [nRes, pRes, sRes] = await Promise.all([
     api('/api/nodes'),
-    api('/api/ssh-keys'),
-    api('/api/sync/logs'),
     api('/api/profile'),
     api('/api/notifications/settings')
   ])
   nodes.value = await nRes.json()
-  keys.value = await kRes.json()
-  logs.value = await lRes.json()
   Object.assign(profile, await pRes.json())
-  Object.assign(notif, await sRes.json())
-}
-
-const probeNode = async (node) => {
-  const res = await api(`/api/nodes/${node.id}/probe`, { method: 'POST' })
-  const data = await res.json()
-  node.cookie_count = data.cookie_count
-}
-
-const triggerSync = async () => {
-  if (isSyncing.value) return
-  isSyncing.value = true
-  try {
-    const res = await api('/api/sync/trigger', { method: 'POST' })
-    const data = await res.json()
-    alert(data.message)
-    loadAll()
-  } finally {
-    isSyncing.value = false
-  }
-}
-
-const toggleTunnel = async (node) => {
-  await api(`/api/nodes/${node.id}/toggle-tunnel`, { method: 'POST' })
-  loadAll()
-}
-
-const setSource = async (id) => {
-  await api(`/api/nodes/${id}/set-source`, { method: 'POST' })
-  loadAll()
-}
-
-const deleteNode = async (id) => {
-  if (confirm('确认销毁该 CDP 节点的连接与调度配置？')) {
-    await api(`/api/nodes/${id}`, { method: 'DELETE' })
-    loadAll()
-  }
-}
-
-const createNode = async () => {
-  await api('/api/nodes', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(newNode)
-  })
-  showNodeModal.value = false
-  newNode.name = ''
-  newNode.ssh_host = ''
-  newNode.local_bind_port += 1
-  loadAll()
-}
-
-const saveNotif = async () => {
-  const res = await api('/api/notifications/settings', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(notif)
-  })
-  if (res.ok) alert('通知配置已持久化保存')
-}
-
-const testEmail = async () => {
-  const res = await api('/api/notifications/test-email', { method: 'POST' })
-  const data = await res.json()
-  alert(data.message || data.detail)
-}
-
-const testServerChan = async () => {
-  const res = await api('/api/notifications/test-serverchan', { method: 'POST' })
-  const data = await res.json()
-  alert(data.message || data.detail)
-}
-
-const saveProfile = async () => {
-  const res = await api('/api/profile', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(profile)
-  })
-  if (res.ok) {
-    alert('管理员配置已保存')
-    if (profile.new_password) logout()
-  }
-}
-
-const uploadKey = async (e) => {
-  const file = e.target.files[0]
-  if (!file) return
-  const fd = new FormData()
-  fd.append('file', file)
-  await api('/api/ssh-keys', { method: 'POST', body: fd })
-  loadAll()
-}
-
-const deleteKey = async (name) => {
-  if (confirm(`确认销毁密钥 [${name}]？`)) {
-    await api(`/api/ssh-keys/${name}`, { method: 'DELETE' })
-    loadAll()
-  }
+  const sData = await sRes.json()
+  notifStatus.value.smtp_status = sData.smtp_status
+  notifStatus.value.serverchan_enabled = sData.serverchan_enabled
 }
 
 onMounted(() => {
   if (!token.value) refreshCaptcha()
-  else loadAll()
+  else loadBaseInfo()
 })
 </script>
 
 <template>
   <div class="cdp-app-viewport">
     
-    <!-- 1. 登录界面 (屏幕正中央垂直水平死锁居中) -->
+    <!-- 全局操作 Toast 提示 -->
+    <div v-if="toastMsg" class="global-toast-bar" :class="toastType === 'error' ? 'toast-err' : 'toast-ok'">
+      {{ toastType === 'error' ? '❌' : '✅' }} {{ toastMsg }}
+    </div>
+
+    <!-- 1. 登录界面 (屏幕正中央垂直水平居中) -->
     <div v-if="!token" class="login-screen-center">
       <div class="login-card-navy">
         <div class="login-brand-line">
@@ -222,12 +105,12 @@ onMounted(() => {
 
         <form @submit.prevent="login" class="login-form-stack">
           <div class="form-row">
-            <label class="form-label">管理员账号 / 邮箱</label>
-            <input v-model="loginForm.account" required placeholder="admin 或 admin@wimotek.com" class="cdp-input">
+            <label class="form-label">管理员用户名</label>
+            <input v-model="loginForm.username" required placeholder="admin" class="cdp-input">
           </div>
 
           <div class="form-row">
-            <label class="form-label">访问密码</label>
+            <label class="form-label">登录密码</label>
             <input type="password" v-model="loginForm.password" required placeholder="••••••••••••" class="cdp-input">
           </div>
 
@@ -248,827 +131,80 @@ onMounted(() => {
       </div>
     </div>
 
-    <!-- 2. 后台控制台 (全屏流式自适应 + 4 个顶置横排大卡片 + 治理列表) -->
+    <!-- 2. 后台控制台 (全屏 100% 流式自适应 + 4 个顶置横排大卡片) -->
     <div v-else class="dashboard-fluid-layout">
-      
-      <!-- 顶栏 (截图 1:1 复刻：⚡ 标头 + 鲜红 SYSTEM ADMIN + 用户名 + 线框退出按钮) -->
+      <!-- 顶栏 -->
       <header class="header-full-bar">
         <div class="header-left">
           <span class="bolt-symbol">⚡</span>
           <span class="brand-white">CDP</span>
-          <span class="brand-cyan">SYNC CLUSTER</span>
+          <span class="brand-cyan">CLUSTER // SYNC MATRIX</span>
         </div>
 
         <div class="header-right">
           <span class="badge-admin">SYSTEM ADMIN</span>
-          <span class="username-label">{{ profile.username || 'richard' }}</span>
+          <span class="username-label">{{ profile.username || 'admin' }}</span>
           <button @click="logout" class="btn-logout">退出</button>
         </div>
       </header>
 
-      <!-- 主视图容器 (全屏自适应流式排版，无固定 1560px 限制！) -->
+      <!-- 全屏流式主容器 -->
       <main class="main-fluid-canvas">
         
-        <!-- 4 个顶置横排大卡片 (纯原生 CSS Grid 强制 4 列等宽横排平铺) -->
+        <!-- 4 个顶置横排大卡片导航 -->
         <div class="top-cards-row-4">
-          
-          <!-- 卡片 1: CDP 节点集群调度 (带电光蓝发光激活态) -->
-          <div 
-            @click="activeNav = 'nodes'"
-            :class="['kpi-card', activeNav === 'nodes' ? 'kpi-card-active' : '']"
-          >
+          <div @click="activeNav = 'nodes'" :class="['kpi-card', activeNav === 'nodes' ? 'kpi-card-active' : '']">
             <div class="kpi-left">
               <div class="icon-avatar avatar-purple">👥</div>
               <div class="kpi-info">
-                <div class="kpi-title">CDP 节点集群实例治理</div>
-                <div class="kpi-desc">本地直连/远程SSH穿透监管、在线检测、端口映射与接入</div>
+                <div class="kpi-title">CDP 节点集群调度</div>
+                <div class="kpi-desc">本地直连/远程穿透监管、探针状态检测与接入</div>
               </div>
             </div>
             <div class="pill-badge">{{ nodes.length }} 个节点</div>
           </div>
 
-          <!-- 卡片 2: 全网 Cookie 同步中枢 -->
-          <div 
-            @click="activeNav = 'sync'"
-            :class="['kpi-card', activeNav === 'sync' ? 'kpi-card-active' : '']"
-          >
+          <div @click="activeNav = 'sync'" :class="['kpi-card', activeNav === 'sync' ? 'kpi-card-active' : '']">
             <div class="kpi-left">
               <div class="icon-avatar avatar-cyan">🌐</div>
               <div class="kpi-info">
-                <div class="kpi-title">全网 Cookie 同步与调度</div>
-                <div class="kpi-desc">15分钟全自动调度、源节点指定、双向智能注入与探针</div>
+                <div class="kpi-title">全网 Cookie 同步中枢</div>
+                <div class="kpi-desc">15分钟定时调度、源节点指定、双向智能注入与分发</div>
               </div>
             </div>
             <div class="pill-badge">{{ totalCookies }} 条存量</div>
           </div>
 
-          <!-- 卡片 3: 告警预警与发信中心 -->
-          <div 
-            @click="activeNav = 'notifications'"
-            :class="['kpi-card', activeNav === 'notifications' ? 'kpi-card-active' : '']"
-          >
+          <div @click="activeNav = 'notifications'" :class="['kpi-card', activeNav === 'notifications' ? 'kpi-card-active' : '']">
             <div class="kpi-left">
-              <div class="icon-avatar avatar-pink">🎫</div>
+              <div class="icon-avatar avatar-pink">🔔</div>
               <div class="kpi-info">
                 <div class="kpi-title">通知预警与发信中心</div>
                 <div class="kpi-desc">SMTP 邮件发信、Server酱微信实时推送、故障秒级告警</div>
               </div>
             </div>
-            <div class="pill-badge">{{ notif.serverchan_enabled ? '微信已启' : '邮件通知' }}</div>
+            <div class="pill-badge">{{ notifStatus.smtp_status === 'ready' ? '邮件正常' : (notifStatus.serverchan_enabled ? '微信已启' : '未就绪') }}</div>
           </div>
 
-          <!-- 卡片 4: 运维与安全配置 -->
-          <div 
-            @click="activeNav = 'settings'"
-            :class="['kpi-card', activeNav === 'settings' ? 'kpi-card-active' : '']"
-          >
+          <div @click="activeNav = 'settings'" :class="['kpi-card', activeNav === 'settings' ? 'kpi-card-active' : '']">
             <div class="kpi-left">
               <div class="icon-avatar avatar-indigo">⚙️</div>
               <div class="kpi-info">
-                <div class="kpi-title">系统发信与全局运维配置</div>
-                <div class="kpi-desc">SSH 密钥金库、管理员配置、HTTPS 自签证书与账号密码</div>
+                <div class="kpi-title">系统安全与外部 API</div>
+                <div class="kpi-desc">Agent 对外接口 Key、SSH 密钥金库与管理员密码设置</div>
               </div>
             </div>
-            <div class="pill-badge">配置中心</div>
-          </div>
-
-        </div>
-
-        <!-- 主内容大容器 (全屏自适应扩展) -->
-        
-        <!-- 页面 1: 节点治理列表 -->
-        <div v-if="activeNav === 'nodes'" class="content-full-card">
-          <div class="table-header-bar">
-            <div class="table-title">
-              <span class="icon-duo-users">👥</span>
-              <h2>CDP 节点实例治理列表</h2>
-            </div>
-            <div style="display:flex; gap:10px;">
-              <button @click="showNodeModal = true" class="btn-primary-gradient">+ 新增接入节点</button>
-              <button @click="loadAll" class="btn-primary-gradient">🔄 刷新数据</button>
-            </div>
-          </div>
-
-          <!-- 表格 (与截图字段排版一致，内容完全贴合 CDP & Cookie 业务) -->
-          <div class="table-responsive">
-            <table class="cdp-fluid-table">
-              <thead>
-                <tr>
-                  <th style="width: 22%;">节点名称 / 调试地址</th>
-                  <th style="width: 10%;">连通状态</th>
-                  <th style="width: 14%;">本地映射端口</th>
-                  <th style="width: 14%;">Cookie 实时存量</th>
-                  <th style="width: 12%;">接入类型</th>
-                  <th style="width: 12%;">同步角色</th>
-                  <th style="width: 16%; text-align: right;">治理操作</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr v-for="node in nodes" :key="node.id">
-                  <td>
-                    <div class="cell-main-name">{{ node.name }}</div>
-                    <div class="cell-sub-desc">
-                      {{ node.is_local ? '127.0.0.1 (本机调试端口)' : `${node.ssh_user}@${node.ssh_host}:${node.ssh_port}` }}
-                    </div>
-                  </td>
-
-                  <!-- 连通状态: 截图同款深绿底色胶囊: ● 活跃 -->
-                  <td>
-                    <span v-if="node.status === 'connected'" class="status-active">● 活跃</span>
-                    <span v-else-if="node.status === 'stopped'" class="status-standby">○ 离线</span>
-                    <span v-else class="status-error">✕ 异常</span>
-                  </td>
-
-                  <td class="font-cyan-mono">127.0.0.1:{{ node.local_bind_port }}</td>
-
-                  <td>
-                    <div class="cookie-badge">
-                      <span>🍪 {{ node.cookie_count || 0 }} 条</span>
-                      <button @click="probeNode(node)" class="link-probe">刷新</button>
-                    </div>
-                  </td>
-
-                  <!-- 接入类型: 普通固定 (本地) / SSH穿透 (远程) -->
-                  <td>
-                    <span v-if="node.is_local" class="tag-plan-blue">普通固定 (本地)</span>
-                    <span v-else class="tag-plan-indigo">SSH 穿透 (远程)</span>
-                  </td>
-
-                  <!-- 同步角色: 截图同款专属凭证二维码蓝按钮 -->
-                  <td>
-                    <button v-if="node.is_source" class="btn-qrcode">★ 默认源节点</button>
-                    <button v-else @click="setSource(node.id)" class="btn-set-source">设为源</button>
-                  </td>
-
-                  <!-- 治理操作: 截图同款横排微型彩色治理按钮组 -->
-                  <td style="text-align: right;">
-                    <div class="btn-group-row">
-                      <button @click="toggleTunnel(node)" class="btn-micro btn-orange">
-                        🔑 {{ node.is_local ? '测试连通' : (node.status === 'connected' ? '断开' : '穿透') }}
-                      </button>
-                      <button @click="probeNode(node)" class="btn-micro btn-purple">🔀 探针</button>
-                      <button @click="deleteNode(node.id)" class="btn-micro btn-trash">🗑️</button>
-                    </div>
-                  </td>
-                </tr>
-              </tbody>
-            </table>
+            <div class="pill-badge">配置就绪</div>
           </div>
         </div>
 
-        <!-- 页面 2: Cookie 同步调度中心 -->
-        <div v-if="activeNav === 'sync'" class="content-full-card">
-          <div class="table-header-bar">
-            <div class="table-title">
-              <span class="icon-duo-users" style="color:#38bdf8;">🌐</span>
-              <h2>全网 Cookie 自动同步与集群调度治理</h2>
-            </div>
-            <button @click="triggerSync" :disabled="isSyncing" class="btn-primary-gradient">
-              {{ isSyncing ? '同步调度中...' : '⚡ 立即触发同步' }}
-            </button>
-          </div>
-          <div class="info-banner-blue">
-            <p>• 定时调度机制：系统后台每隔 <span style="color:#00f0ff; font-weight:bold;">15 分钟</span> 自动从默认源节点抓取最新全量 Cookies 并极速注入所有活跃目标节点。</p>
-            <p>• 本地加速特性：本地直连节点跳过 SSH 隧道封装，直接通过本机 CDP WebSocket 极速注入，耗时近乎零开销。</p>
-          </div>
-          <div style="margin-top:20px;">
-            <h3 style="font-size:13px; font-weight:bold; color:#cbd5e1; margin-bottom:8px;">调度审计追踪事件：</h3>
-            <div class="console-box">
-              <div v-for="l in logs" :key="l.id" class="console-item">
-                <div class="console-meta">
-                  <span>[{{ l.timestamp }}]</span>
-                  <span :style="{ color: l.status==='SUCCESS' ? '#34d399' : '#f87171', fontWeight: 'bold' }">[{{ l.status }}]</span>
-                </div>
-                <pre class="console-pre">{{ l.details }}</pre>
-              </div>
-              <div v-if="logs.length === 0" style="text-align:center; color:#64748b; padding:40px;">暂无调度事件</div>
-            </div>
-          </div>
-        </div>
-
-        <!-- 页面 3: 告警预警与发信中心 (左右双列对称) -->
-        <div v-if="activeNav === 'notifications'" class="grid-2col-fluid">
-          <!-- SMTP -->
-          <div class="content-full-card">
-            <div class="table-header-bar">
-              <h3 class="card-inner-h3">📧 SMTP 邮件发信通道</h3>
-              <button @click="testEmail" class="link-probe" style="font-size:12px;">发送测试邮件</button>
-            </div>
-            <div class="form-v-stack">
-              <div>
-                <label class="form-label">SMTP 发信服务器</label>
-                <input v-model="notif.smtp_host" placeholder="smtp.qq.com" class="cdp-input">
-              </div>
-              <div class="row-flex-gap">
-                <div style="flex:1;">
-                  <label class="form-label">端口</label>
-                  <input v-model="notif.smtp_port" placeholder="465" class="cdp-input">
-                </div>
-                <div style="flex:1;">
-                  <label class="form-label">加密协议</label>
-                  <select v-model="notif.smtp_ssl" class="cdp-input">
-                    <option :value="true">SSL / TLS</option>
-                    <option :value="false">STARTTLS / 明文</option>
-                  </select>
-                </div>
-              </div>
-              <div>
-                <label class="form-label">发信账号</label>
-                <input v-model="notif.smtp_user" placeholder="user@domain.com" class="cdp-input">
-              </div>
-              <div>
-                <label class="form-label">发信授权码 / 密码</label>
-                <input v-model="notif.smtp_pass" type="password" placeholder="授权码" class="cdp-input">
-              </div>
-              <div>
-                <label class="form-label">接收预警邮箱</label>
-                <input v-model="notif.smtp_to" placeholder="admin@domain.com" class="cdp-input">
-              </div>
-              <button @click="saveNotif" class="btn-primary-gradient" style="width:100%; padding:10px;">保存邮件配置</button>
-            </div>
-          </div>
-
-          <!-- Server酱微信 -->
-          <div class="content-full-card">
-            <div class="table-header-bar">
-              <h3 class="card-inner-h3">📱 Server酱 (微信推送)</h3>
-              <button @click="testServerChan" class="link-probe" style="font-size:12px;">发送微信测试</button>
-            </div>
-            <div class="form-v-stack">
-              <div style="display:flex; align-items:center; gap:8px;">
-                <input type="checkbox" v-model="notif.serverchan_enabled" id="s_c_box">
-                <label for="s_c_box" style="font-size:13px; color:#cbd5e1;">启用微信实时推送</label>
-              </div>
-              <div>
-                <label class="form-label">Server酱 SendKey</label>
-                <input v-model="notif.serverchan_key" placeholder="SCTxxxxxxxxxxxxxxxx" class="cdp-input" style="font-family:monospace;">
-                <p style="font-size:11px; color:#64748b; margin-top:6px;">在 sct.ftqq.com 申请的 SendKey。同步失败或节点下线时自动推送到微信。</p>
-              </div>
-              <button @click="saveNotif" class="btn-primary-gradient" style="width:100%; padding:10px; margin-top:30px;">保存微信配置</button>
-            </div>
-          </div>
-        </div>
-
-        <!-- 页面 4: 全局运维配置与账号安全 -->
-        <div v-if="activeNav === 'settings'" class="grid-2col-fluid">
-          <div class="content-full-card">
-            <h3 class="card-inner-h3" style="margin-bottom:16px;">👤 管理员账号与登录安全</h3>
-            <form @submit.prevent="saveProfile" class="form-v-stack">
-              <div>
-                <label class="form-label">登录用户名</label>
-                <input v-model="profile.username" required class="cdp-input">
-              </div>
-              <div>
-                <label class="form-label">绑定邮箱 (支持直接登录)</label>
-                <input v-model="profile.email" type="email" required class="cdp-input">
-              </div>
-              <div>
-                <label class="form-label">重置新密码 (留空则不改)</label>
-                <input v-model="profile.new_password" type="password" placeholder="至少 6 位安全字符" minlength="6" class="cdp-input">
-              </div>
-              <button type="submit" class="btn-primary-gradient" style="width:100%; padding:10px; margin-top:10px;">保存账号修改</button>
-            </form>
-          </div>
-
-          <div class="content-full-card">
-            <div class="table-header-bar">
-              <h3 class="card-inner-h3">🔑 SSH 密钥存储库</h3>
-              <span style="font-size:12px; color:#64748b;">{{ keys.length }} 个凭据</span>
-            </div>
-            <div style="margin-bottom: 12px;">
-              <input type="file" @change="uploadKey" style="font-size:12px; color:#94a3b8;">
-            </div>
-            <ul class="keys-list">
-              <li v-for="k in keys" :key="k.filename" class="key-row">
-                <span style="font-family:monospace;">🔑 {{ k.filename }} ({{ k.size }} Bytes)</span>
-                <button @click="deleteKey(k.filename)" class="link-probe" style="color:#f87171;">销毁</button>
-              </li>
-              <li v-if="keys.length === 0" style="text-align:center; color:#64748b; padding:20px;">暂无私钥证书</li>
-            </ul>
-          </div>
-        </div>
+        <!-- 挂载各拆分子组件 -->
+        <NodeManager v-if="activeNav === 'nodes'" :api="api" :showToast="showToast" @update-nodes="loadBaseInfo" />
+        <SyncManager v-if="activeNav === 'sync'" :api="api" :showToast="showToast" />
+        <NotifyManager v-if="activeNav === 'notifications'" :api="api" :showToast="showToast" @update-status="loadBaseInfo" />
+        <SettingsManager v-if="activeNav === 'settings'" :api="api" :showToast="showToast" @logout="logout" />
 
       </main>
-
-      <!-- 新增节点 Dialog 弹窗 -->
-      <div v-if="showNodeModal" class="modal-backdrop">
-        <div class="modal-card">
-          <div class="modal-title-bar">
-            <h3 style="font-size:14px; font-weight:bold; color:#fff;">接入新 CDP 实例节点</h3>
-            <button @click="showNodeModal = false" style="background:none; border:none; color:#94a3b8; font-size:16px; cursor:pointer;">✕</button>
-          </div>
-
-          <form @submit.prevent="createNode" class="form-v-stack" style="margin-top:14px;">
-            <div>
-              <label class="form-label">接入类型</label>
-              <div class="row-flex-gap">
-                <label :class="['radio-pill-card', newNode.is_local ? 'radio-pill-active' : '']">
-                  <input type="radio" v-model="newNode.is_local" :value="true" style="display:none;">
-                  <span>💻 本地直连 (免SSH)</span>
-                </label>
-                <label :class="['radio-pill-card', !newNode.is_local ? 'radio-pill-active' : '']">
-                  <input type="radio" v-model="newNode.is_local" :value="false" style="display:none;">
-                  <span>🌐 远程 SSH 穿透</span>
-                </label>
-              </div>
-            </div>
-
-            <div>
-              <label class="form-label">节点名称</label>
-              <input v-model="newNode.name" required placeholder="如: 本机 Chrome 01" class="cdp-input">
-            </div>
-
-            <div v-if="newNode.is_local" style="background:#09122a; padding:12px; border-radius:6px; border:1px solid #172554;">
-              <label class="form-label">本地 CDP 调试端口 (默认 9222)</label>
-              <input v-model="newNode.local_bind_port" type="number" required placeholder="9222" class="cdp-input font-cyan-mono">
-              <p style="font-size:11px; color:#64748b; margin-top:6px;">直接接入本机 Chromium 实例，无需任何 SSH 握手开销。</p>
-            </div>
-
-            <div v-else class="form-v-stack">
-              <div class="row-flex-gap">
-                <div style="flex:1;">
-                  <label class="form-label">SSH 主机 / IP</label>
-                  <input v-model="newNode.ssh_host" required placeholder="192.168.1.100" class="cdp-input" style="font-family:monospace;">
-                </div>
-                <div style="flex:1;">
-                  <label class="form-label">SSH 端口</label>
-                  <input v-model="newNode.ssh_port" type="number" placeholder="22" class="cdp-input" style="font-family:monospace;">
-                </div>
-              </div>
-
-              <div>
-                <label class="form-label">SSH 用户名</label>
-                <input v-model="newNode.ssh_user" required placeholder="root" class="cdp-input" style="font-family:monospace;">
-              </div>
-
-              <div>
-                <label class="form-label">绑定 SSH 证书 (选填)</label>
-                <select v-model="newNode.ssh_key_filename" class="cdp-input" style="font-family:monospace;">
-                  <option value="">密码认证 (不选择私钥)</option>
-                  <option v-for="k in keys" :key="k.filename" :value="k.filename">🔑 {{ k.filename }}</option>
-                </select>
-              </div>
-
-              <div v-if="!newNode.ssh_key_filename">
-                <label class="form-label">SSH 密码</label>
-                <input v-model="newNode.ssh_password" type="password" placeholder="••••••••" class="cdp-input">
-              </div>
-
-              <div class="row-flex-gap">
-                <div style="flex:1;">
-                  <label class="form-label">远程 CDP 端口</label>
-                  <input v-model="newNode.remote_cdp_port" type="number" placeholder="9222" class="cdp-input" style="font-family:monospace;">
-                </div>
-                <div style="flex:1;">
-                  <label class="form-label">本地穿透绑定端口</label>
-                  <input v-model="newNode.local_bind_port" type="number" required placeholder="19222" class="cdp-input font-cyan-mono">
-                </div>
-              </div>
-            </div>
-
-            <div style="display:flex; justify-content:flex-end; gap:8px; margin-top:16px;">
-              <button type="button" @click="showNodeModal = false" class="btn-set-source" style="padding:6px 14px;">取消</button>
-              <button type="submit" class="btn-primary-gradient">保存节点</button>
-            </div>
-          </form>
-        </div>
-      </div>
-
     </div>
   </div>
 </template>
-
-<style scoped>
-/* ==================== 纯原生 CSS，100% 全屏流式自适应排版 ==================== */
-
-.cdp-app-viewport {
-  min-height: 100vh;
-  width: 100%;
-  background-color: #060b17;
-  color: #f8fafc;
-  box-sizing: border-box;
-}
-
-/* 1. 登录窗口绝对死锁垂直水平居中 */
-.login-screen-center {
-  min-height: 100vh;
-  width: 100vw;
-  display: flex !important;
-  align-items: center !important;
-  justify-content: center !important;
-  background-color: #060b17;
-  padding: 20px;
-  box-sizing: border-box;
-}
-
-.login-card-navy {
-  width: 420px;
-  max-width: 95vw;
-  background-color: #0b132b;
-  border: 1px solid #172554;
-  border-radius: 14px;
-  padding: 32px;
-  box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.7);
-  box-sizing: border-box;
-}
-
-.login-brand-line {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding-bottom: 16px;
-  margin-bottom: 24px;
-  border-bottom: 1px solid #172554;
-}
-
-.bolt-symbol { color: #f59e0b; font-size: 19px; font-weight: bold; }
-.brand-white { font-weight: 800; font-size: 16px; color: #ffffff; letter-spacing: 1px; }
-.brand-cyan  { font-weight: 800; font-size: 16px; color: #00f0ff; letter-spacing: 1px; }
-
-.login-form-stack { display: flex; flex-direction: column; gap: 16px; }
-.form-row { display: flex; flex-direction: column; gap: 6px; }
-.form-label { font-size: 12px; color: #94a3b8; }
-
-.cdp-input {
-  width: 100%;
-  box-sizing: border-box;
-  background-color: #0f1c3f;
-  border: 1px solid #1e3a8a;
-  color: #ffffff;
-  border-radius: 6px;
-  padding: 8px 12px;
-  font-size: 13px;
-  outline: none;
-  transition: all 0.2s;
-}
-.cdp-input:focus {
-  border-color: #00f0ff;
-  box-shadow: 0 0 8px rgba(0, 240, 255, 0.35);
-}
-
-.captcha-row { display: flex; gap: 10px; align-items: center; }
-.captcha-box {
-  width: 120px;
-  height: 38px;
-  background: #09122a;
-  border: 1px solid #172554;
-  border-radius: 6px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  cursor: pointer;
-  overflow: hidden;
-  flex-shrink: 0;
-}
-
-.btn-primary-gradient {
-  background: linear-gradient(135deg, #0284c7, #2563eb);
-  color: #ffffff;
-  border: none;
-  border-radius: 6px;
-  padding: 6px 14px;
-  font-size: 12px;
-  font-weight: bold;
-  cursor: pointer;
-  transition: opacity 0.2s, transform 0.15s;
-}
-.btn-primary-gradient:hover { opacity: 0.9; transform: translateY(-1px); }
-
-/* 2. 顶栏 (通顶铺满) */
-.dashboard-fluid-layout {
-  min-height: 100vh;
-  width: 100%;
-  display: flex;
-  flex-direction: column;
-}
-
-.header-full-bar {
-  height: 60px;
-  width: 100%;
-  padding: 0 32px;
-  background-color: #060b17;
-  border-bottom: 1px solid #111c38;
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  box-sizing: border-box;
-}
-
-.header-left { display: flex; align-items: center; gap: 8px; }
-.header-right { display: flex; align-items: center; gap: 12px; }
-
-.badge-admin {
-  background-color: #dc2626;
-  color: #ffffff;
-  font-size: 11px;
-  font-weight: bold;
-  padding: 2px 8px;
-  border-radius: 4px;
-  letter-spacing: 0.5px;
-}
-
-.username-label { font-size: 13px; font-weight: 600; color: #ffffff; }
-
-.btn-logout {
-  background: transparent;
-  border: 1px solid #4b5563;
-  color: #d1d5db;
-  padding: 2px 10px;
-  border-radius: 4px;
-  font-size: 12px;
-  cursor: pointer;
-}
-.btn-logout:hover { border-color: #9ca3af; color: #ffffff; }
-
-/* 3. 全屏流式自适应主容器 (100% 撑开，消除居中窄框死角) */
-.main-fluid-canvas {
-  width: 100% !important;
-  max-width: 100% !important;
-  flex: 1;
-  padding: 20px 32px;
-  box-sizing: border-box;
-  display: flex;
-  flex-direction: column;
-  gap: 20px;
-}
-
-/* 4. 核心 4 个大卡片横排平铺 */
-.top-cards-row-4 {
-  display: grid !important;
-  grid-template-columns: repeat(4, 1fr) !important;
-  gap: 16px !important;
-  width: 100%;
-  box-sizing: border-box;
-}
-
-@media (max-width: 1200px) {
-  .top-cards-row-4 { grid-template-columns: repeat(2, 1fr) !important; }
-}
-@media (max-width: 680px) {
-  .top-cards-row-4 { grid-template-columns: 1fr !important; }
-}
-
-.kpi-card {
-  background-color: #0b132b;
-  border: 1px solid #172554;
-  border-radius: 12px;
-  padding: 16px 20px;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  cursor: pointer;
-  transition: all 0.2s ease;
-  box-sizing: border-box;
-}
-
-.kpi-card:hover {
-  background-color: #0d1736;
-  border-color: #1e3a8a;
-  transform: translateY(-2px);
-}
-
-.kpi-card-active {
-  border-color: #00f0ff !important;
-  box-shadow: 0 0 14px rgba(0, 240, 255, 0.35) !important;
-}
-
-.kpi-left { display: flex; align-items: center; gap: 14px; }
-.icon-avatar {
-  width: 38px;
-  height: 38px;
-  border-radius: 8px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 18px;
-  flex-shrink: 0;
-}
-
-.avatar-purple { background: rgba(88, 28, 135, 0.4); border: 1px solid #7e22ce; }
-.avatar-cyan   { background: rgba(14, 59, 94, 0.4); border: 1px solid #0284c7; }
-.avatar-pink   { background: rgba(131, 24, 67, 0.4); border: 1px solid #db2777; }
-.avatar-indigo { background: rgba(49, 46, 129, 0.4); border: 1px solid #4f46e5; }
-
-.kpi-info { display: flex; flex-direction: column; gap: 3px; }
-.kpi-title { font-size: 13px; font-weight: bold; color: #ffffff; }
-.kpi-desc  { font-size: 11px; color: #64748b; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 260px; }
-
-.pill-badge {
-  background-color: #0f1f42;
-  border: 1px solid #1d4ed8;
-  color: #38bdf8;
-  border-radius: 9999px;
-  padding: 3px 12px;
-  font-size: 11px;
-  font-weight: 500;
-  white-space: nowrap;
-}
-
-/* 5. 主内容卡片容器 (100% 满宽流式排版) */
-.content-full-card {
-  width: 100%;
-  background-color: #0b132b;
-  border: 1px solid #172554;
-  border-radius: 14px;
-  padding: 20px;
-  box-sizing: border-box;
-}
-
-.table-header-bar {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  padding-bottom: 16px;
-  border-bottom: 1px solid #172554;
-  margin-bottom: 16px;
-}
-
-.table-title { display: flex; align-items: center; gap: 8px; }
-.icon-duo-users { font-size: 18px; color: #a855f7; }
-.table-title h2 { font-size: 15px; font-weight: bold; color: #ffffff; }
-
-.table-responsive { width: 100%; overflow-x: auto; }
-.cdp-fluid-table {
-  width: 100%;
-  border-collapse: collapse;
-  font-size: 12px;
-}
-
-.cdp-fluid-table th {
-  color: #64748b;
-  font-weight: 500;
-  padding: 12px 14px;
-  border-bottom: 1px solid #172554;
-  text-align: left;
-}
-
-.cdp-fluid-table td {
-  padding: 14px;
-  border-bottom: 1px solid #131e3d;
-  vertical-align: middle;
-}
-
-.cell-main-name { font-weight: bold; color: #ffffff; font-size: 13px; }
-.cell-sub-desc  { font-size: 11px; color: #64748b; font-family: monospace; margin-top: 3px; }
-
-/* 状态胶囊: ● 活跃 */
-.status-active {
-  background-color: rgba(6, 78, 59, 0.85);
-  border: 1px solid #059669;
-  color: #34d399;
-  border-radius: 9999px;
-  padding: 2px 10px;
-  font-size: 11px;
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-}
-.status-standby {
-  background-color: rgba(69, 26, 3, 0.8);
-  border: 1px solid #d97706;
-  color: #fbbf24;
-  border-radius: 9999px;
-  padding: 2px 10px;
-  font-size: 11px;
-}
-.status-error {
-  background-color: rgba(69, 10, 10, 0.8);
-  border: 1px solid #dc2626;
-  color: #f87171;
-  border-radius: 9999px;
-  padding: 2px 10px;
-  font-size: 11px;
-}
-
-.font-cyan-mono { color: #00f0ff; font-family: monospace; font-weight: bold; }
-
-.cookie-badge {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  background-color: #0f1f42;
-  border: 1px solid #1d4ed8;
-  padding: 2px 8px;
-  border-radius: 4px;
-  color: #fcd34d;
-  font-weight: bold;
-}
-.link-probe { background: none; border: none; color: #38bdf8; cursor: pointer; text-decoration: underline; font-size: 10px; margin-left: 4px; }
-
-/* 套餐特性风格 -> 普通固定蓝标签 */
-.tag-plan-blue { background-color: #1e40af; color: #93c5fd; border-radius: 4px; padding: 2px 8px; font-size: 11px; }
-.tag-plan-indigo { background-color: #312e81; color: #c7d2fe; border-radius: 4px; padding: 2px 8px; font-size: 11px; }
-
-/* 专属凭证风格 -> 截图同款蓝按钮 */
-.btn-qrcode {
-  background-color: #0284c7;
-  color: #ffffff;
-  border: none;
-  border-radius: 4px;
-  padding: 3px 10px;
-  font-size: 11px;
-  font-weight: bold;
-}
-.btn-set-source {
-  background-color: #1e293b;
-  color: #94a3b8;
-  border: 1px solid #334155;
-  border-radius: 4px;
-  padding: 3px 8px;
-  font-size: 11px;
-  cursor: pointer;
-}
-
-/* 治理操作按钮组 */
-.btn-group-row { display: flex; gap: 6px; justify-content: flex-end; }
-.btn-micro { border: none; border-radius: 4px; padding: 4px 8px; font-size: 11px; font-weight: bold; color: #ffffff; cursor: pointer; }
-.btn-orange { background-color: #d97706; }
-.btn-purple { background-color: #7c3aed; }
-.btn-red    { background-color: #dc2626; }
-.btn-trash  { background-color: #991b1b; }
-
-/* 双列对称流式栅格 */
-.grid-2col-fluid {
-  display: grid;
-  grid-template-columns: repeat(2, 1fr);
-  gap: 20px;
-  width: 100%;
-}
-@media (max-width: 960px) {
-  .grid-2col-fluid { grid-template-columns: 1fr; }
-}
-
-.card-inner-h3 { font-size: 14px; font-weight: bold; color: #fff; }
-.row-flex-gap { display: flex; gap: 12px; }
-
-.info-banner-blue {
-  background: #09122a;
-  border: 1px solid #172554;
-  border-radius: 8px;
-  padding: 14px;
-  font-size: 12px;
-  color: #cbd5e1;
-  line-height: 1.8;
-}
-
-.console-box {
-  background: #060b17;
-  border: 1px solid #172554;
-  border-radius: 8px;
-  padding: 14px;
-  font-family: monospace;
-  font-size: 12px;
-  height: 320px;
-  overflow-y: auto;
-}
-.console-item { border-bottom: 1px solid #111c38; padding-bottom: 8px; margin-bottom: 8px; }
-.console-meta { display: flex; justify-content: space-between; font-size: 11px; color: #64748b; }
-.console-pre  { margin-top: 4px; color: #e2e8f0; white-space: pre-wrap; }
-
-.keys-list { list-style: none; padding: 0; margin: 0; }
-.key-row { display: flex; justify-content: space-between; padding: 10px 0; border-bottom: 1px solid #172554; font-size: 12px; }
-
-/* 弹窗遮罩 */
-.modal-backdrop {
-  position: fixed;
-  inset: 0;
-  background: rgba(0, 0, 0, 0.8);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 20px;
-  z-index: 9999;
-}
-.modal-card {
-  width: 520px;
-  max-width: 95vw;
-  background-color: #0b132b;
-  border: 1px solid #1e3a8a;
-  border-radius: 12px;
-  padding: 24px;
-  box-shadow: 0 20px 40px rgba(0, 0, 0, 0.8);
-}
-.modal-title-bar {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  padding-bottom: 12px;
-  border-bottom: 1px solid #172554;
-}
-
-.radio-pill-card {
-  flex: 1;
-  padding: 10px;
-  border-radius: 6px;
-  border: 1px solid #172554;
-  text-align: center;
-  cursor: pointer;
-  font-size: 12px;
-  color: #94a3b8;
-}
-.radio-pill-active {
-  border-color: #00f0ff !important;
-  background: #0f1f42 !important;
-  color: #38bdf8 !important;
-}
-</style>
