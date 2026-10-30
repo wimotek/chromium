@@ -2,7 +2,6 @@
 import { ref, reactive, computed, onMounted } from 'vue'
 
 const token = ref(localStorage.getItem('token') || '')
-// 对应顶部的 4 个大卡片分类
 const activeNav = ref('nodes') // 'nodes' | 'sync' | 'notifications' | 'settings'
 const captchaSvg = ref('')
 
@@ -36,7 +35,6 @@ const notif = reactive({
   serverchan_enabled: false
 })
 
-// 新增节点数据模型（支持本地免SSH直连）
 const newNode = reactive({
   name: '',
   is_local: true,
@@ -50,10 +48,6 @@ const newNode = reactive({
 })
 
 const totalCookies = computed(() => nodes.value.reduce((acc, n) => acc + (n.cookie_count || 0), 0))
-const localCount = computed(() => nodes.value.filter(n => n.is_local === 1).length)
-const remoteCount = computed(() => nodes.value.filter(n => !n.is_local).length)
-const onlineCount = computed(() => nodes.value.filter(n => n.status === 'connected').length)
-const sourceNode = computed(() => nodes.value.find(n => n.is_source === 1))
 
 const api = async (url, options = {}) => {
   options.headers = options.headers || {}
@@ -163,7 +157,7 @@ const saveNotif = async () => {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(notif)
   })
-  if (res.ok) alert('通知设置已持久化保存')
+  if (res.ok) alert('通知设置已保存')
 }
 
 const testEmail = async () => {
@@ -185,7 +179,7 @@ const saveProfile = async () => {
     body: JSON.stringify(profile)
   })
   if (res.ok) {
-    alert('管理员配置已更新')
+    alert('管理员配置已保存')
     if (profile.new_password) logout()
   }
 }
@@ -213,271 +207,206 @@ onMounted(() => {
 </script>
 
 <template>
-  <div class="min-h-screen flex flex-col bg-[#060b17] text-slate-100">
-    <!-- 1. 登录面板 (70% 黄金输入比例) -->
-    <div v-if="!token" class="flex-1 flex items-center justify-center p-6">
-      <div class="xray-main-container p-8 w-full max-w-md bg-[#0b132b] border border-[#172554] shadow-2xl">
-        <div class="flex items-center gap-2 mb-6 pb-3 border-b border-[#172554]">
-          <span class="text-amber-500 text-lg">⚡</span>
-          <span class="font-black tracking-wider text-white text-base font-sans">CDP</span>
-          <span class="font-black tracking-wider text-cyan-400 text-base font-sans">CLUSTER</span>
+  <div class="xray-viewport">
+    
+    <!-- 1. 登录界面 (原生 Flex 垂直水平死锁绝对居中) -->
+    <div v-if="!token" class="login-wrapper-center">
+      <div class="login-card-navy">
+        <div class="login-brand-line">
+          <span class="bolt-symbol">⚡</span>
+          <span class="brand-xray">XRAY</span>
+          <span class="brand-reality">REALITY</span>
         </div>
 
-        <form @submit.prevent="login" class="flex flex-col items-center space-y-4">
-          <div class="w-full flex flex-col items-center">
-            <label class="text-xs text-slate-400 mb-1 w-full text-left pl-[15%]">用户名 或 邮箱</label>
-            <input v-model="loginForm.account" required placeholder="admin 或 admin@wimotek.com" class="form-input-golden">
+        <form @submit.prevent="login" class="login-form-stack">
+          <div class="form-row">
+            <label class="form-label">用户账号 / 绑定邮箱</label>
+            <input v-model="loginForm.account" required placeholder="admin 或 admin@wimotek.com" class="xray-input">
           </div>
 
-          <div class="w-full flex flex-col items-center">
-            <label class="text-xs text-slate-400 mb-1 w-full text-left pl-[15%]">访问密码</label>
-            <input type="password" v-model="loginForm.password" required placeholder="••••••••••••" class="form-input-golden">
+          <div class="form-row">
+            <label class="form-label">访问密码</label>
+            <input type="password" v-model="loginForm.password" required placeholder="••••••••••••" class="xray-input">
           </div>
 
-          <div class="w-full flex flex-col items-center">
-            <label class="text-xs text-slate-400 mb-1 w-full text-left pl-[15%]">人机安全验证</label>
-            <div class="form-input-golden flex items-center gap-2 p-1.5 border border-[#1e3a8a] bg-[#0f1c3f]">
-              <input v-model="loginForm.captcha_answer" required placeholder="答案" class="w-1/2 px-2.5 py-1 bg-[#09122a] border border-[#172554] rounded text-slate-100 text-sm outline-none">
-              <div @click="refreshCaptcha" class="w-1/2 flex justify-center cursor-pointer bg-[#09122a] rounded p-0.5 border border-[#172554]" title="点击刷新验证码">
+          <div class="form-row">
+            <label class="form-label">人机验证</label>
+            <div class="captcha-row">
+              <input v-model="loginForm.captcha_answer" required placeholder="计算答案" class="xray-input" style="flex:1;">
+              <div @click="refreshCaptcha" class="captcha-box" title="点击刷新验证码">
                 <div v-html="captchaSvg"></div>
               </div>
             </div>
           </div>
 
-          <button type="submit" class="form-input-golden btn-refresh-gradient justify-center mt-2 py-2.5">
+          <button type="submit" class="btn-primary-gradient" style="width:100%; padding:10px; margin-top:8px;">
             登 录 面 板
           </button>
         </form>
       </div>
     </div>
 
-    <!-- 2. 主控制台 (截图同款：顶栏 + 4 个顶置大卡片 + 全宽自适应治理列表) -->
-    <div v-else class="flex-1 flex flex-col w-full">
-      
-      <!-- 顶栏 (1:1 截图复刻：⚡ 标题 + 鲜红 SYSTEM ADMIN + 用户名 + 线框退出) -->
-      <header class="h-16 px-6 lg:px-10 border-b border-[#111c38] bg-[#060b17] flex items-center justify-between sticky top-0 z-40">
-        <div class="flex items-center space-x-2">
-          <span class="text-amber-500 text-xl font-bold">⚡</span>
-          <span class="font-extrabold tracking-wider text-white text-lg font-sans">CDP</span>
-          <span class="font-extrabold tracking-wider text-cyan-400 text-lg font-sans">CLUSTER</span>
+    <!-- 2. 后台控制台 (1:1 截图布局) -->
+    <div v-else class="dashboard-layout">
+      <!-- 顶栏 (截图同款) -->
+      <header class="header-bar">
+        <div class="header-left">
+          <span class="bolt-symbol">⚡</span>
+          <span class="brand-xray">XRAY</span>
+          <span class="brand-reality">REALITY</span>
         </div>
 
-        <div class="flex items-center gap-3">
-          <span class="px-2 py-0.5 rounded text-[11px] font-bold bg-[#dc2626] text-white tracking-wide">
-            SYSTEM ADMIN
-          </span>
-          <span class="text-sm font-semibold text-slate-200">{{ profile.username }}</span>
-          <button @click="logout" class="px-2.5 py-0.5 rounded text-xs border border-slate-600 text-slate-300 hover:text-white hover:border-slate-400 transition">
-            退出
-          </button>
+        <div class="header-right">
+          <span class="badge-admin">SYSTEM ADMIN</span>
+          <span class="username-label">{{ profile.username || 'richard' }}</span>
+          <button @click="logout" class="btn-logout">退出</button>
         </div>
       </header>
 
-      <!-- 全屏自适应容器 -->
-      <div class="flex-1 p-6 lg:p-8 max-w-[1920px] w-full mx-auto space-y-6">
+      <!-- 主视图容器 -->
+      <main class="main-container">
         
-        <!-- ==================== 顶部 4 个大卡片导航栅格 (1:1 截图复刻) ==================== -->
-        <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-5">
+        <!-- 4 个顶置横排大卡片 (纯原生 CSS Grid 强制 4 列，决不占满全屏堆叠！) -->
+        <div class="cards-grid-4">
           
-          <!-- 卡片 1: 节点集群治理 (带激活态电光蓝边框与微光晕) -->
+          <!-- 卡片 1 (第一张带电光蓝发光圈) -->
           <div 
             @click="activeNav = 'nodes'"
-            :class="activeNav === 'nodes' ? 'xray-nav-card-active' : ''"
-            class="xray-nav-card flex items-center justify-between"
+            :class="['kpi-card', activeNav === 'nodes' ? 'kpi-card-active' : '']"
           >
-            <div class="flex items-center gap-3.5">
-              <!-- 紫色节点图标 -->
-              <div class="w-10 h-10 rounded-lg bg-[#581c87]/30 border border-[#7e22ce]/40 flex items-center justify-center text-xl text-purple-400">
-                👥
-              </div>
-              <div>
-                <h3 class="text-sm font-bold text-white tracking-tight">CDP 节点 (Chromium) 集群</h3>
-                <p class="text-[11px] text-slate-400 mt-0.5">本地免SSH/远程节点监管、在线状态、配置修改与接入</p>
+            <div class="kpi-left">
+              <div class="icon-avatar avatar-purple">👥</div>
+              <div class="kpi-info">
+                <div class="kpi-title">全站用户生命周期管理</div>
+                <div class="kpi-desc">配额/时效治理、重置UUID与密码、凭证二维码</div>
               </div>
             </div>
-            <div class="xray-badge-pill shrink-0 ml-2">
-              {{ nodes.length }} 个节点
-            </div>
+            <div class="pill-badge">{{ nodes.length }} 位用户</div>
           </div>
 
-          <!-- 卡片 2: Cookie 同步调度中枢 -->
+          <!-- 卡片 2 -->
           <div 
             @click="activeNav = 'sync'"
-            :class="activeNav === 'sync' ? 'xray-nav-card-active' : ''"
-            class="xray-nav-card flex items-center justify-between"
+            :class="['kpi-card', activeNav === 'sync' ? 'kpi-card-active' : '']"
           >
-            <div class="flex items-center gap-3.5">
-              <!-- 青色地球图标 -->
-              <div class="w-10 h-10 rounded-lg bg-[#0e3b5e]/40 border border-[#0284c7]/40 flex items-center justify-center text-xl text-cyan-400">
-                🌐
-              </div>
-              <div>
-                <h3 class="text-sm font-bold text-white tracking-tight">全站 Cookie 同步与调度</h3>
-                <p class="text-[11px] text-slate-400 mt-0.5">15分钟定时调度、源节点指定、双向智能注入与探针</p>
+            <div class="kpi-left">
+              <div class="icon-avatar avatar-cyan">🌐</div>
+              <div class="kpi-info">
+                <div class="kpi-title">远程节点 (xray_core) 集群</div>
+                <div class="kpi-desc">多节点公钥监管、在线状态、配置修改与接入</div>
               </div>
             </div>
-            <div class="xray-badge-pill shrink-0 ml-2">
-              {{ totalCookies }} 条资产
-            </div>
+            <div class="pill-badge">{{ totalCookies }} 条资产</div>
           </div>
 
-          <!-- 卡片 3: 告警通知中心 -->
+          <!-- 卡片 3 -->
           <div 
             @click="activeNav = 'notifications'"
-            :class="activeNav === 'notifications' ? 'xray-nav-card-active' : ''"
-            class="xray-nav-card flex items-center justify-between"
+            :class="['kpi-card', activeNav === 'notifications' ? 'kpi-card-active' : '']"
           >
-            <div class="flex items-center gap-3.5">
-              <!-- 粉红票券图标 -->
-              <div class="w-10 h-10 rounded-lg bg-[#831843]/30 border border-[#db2777]/40 flex items-center justify-center text-xl text-pink-400">
-                🎫
-              </div>
-              <div>
-                <h3 class="text-sm font-bold text-white tracking-tight">通知预警与发信中心</h3>
-                <p class="text-[11px] text-slate-400 mt-0.5">SMTP 发信设置、Server酱微信实时推送、故障秒级告警</p>
+            <div class="kpi-left">
+              <div class="icon-avatar avatar-pink">🎫</div>
+              <div class="kpi-info">
+                <div class="kpi-title">卡密生成与发卡中心</div>
+                <div class="kpi-desc">批量制卡、库存导出、范围清理、对接 API</div>
               </div>
             </div>
-            <div class="xray-badge-pill shrink-0 ml-2">
-              {{ notif.serverchan_enabled ? '微信已启' : '邮件待发' }}
-            </div>
+            <div class="pill-badge">{{ notif.serverchan_enabled ? '微信已启' : '邮件通知' }}</div>
           </div>
 
-          <!-- 卡片 4: 系统运维与安全设置 -->
+          <!-- 卡片 4 -->
           <div 
             @click="activeNav = 'settings'"
-            :class="activeNav === 'settings' ? 'xray-nav-card-active' : ''"
-            class="xray-nav-card flex items-center justify-between"
+            :class="['kpi-card', activeNav === 'settings' ? 'kpi-card-active' : '']"
           >
-            <div class="flex items-center gap-3.5">
-              <!-- 齿轮配置图标 -->
-              <div class="w-10 h-10 rounded-lg bg-[#312e81]/30 border border-[#4f46e5]/40 flex items-center justify-center text-xl text-indigo-400">
-                ⚙️
-              </div>
-              <div>
-                <h3 class="text-sm font-bold text-white tracking-tight">系统运维与凭据管理</h3>
-                <p class="text-[11px] text-slate-400 mt-0.5">SSH 密钥金库、管理员邮箱、HTTPS 自签证书与密码重置</p>
+            <div class="kpi-left">
+              <div class="icon-avatar avatar-indigo">⚙️</div>
+              <div class="kpi-info">
+                <div class="kpi-title">系统发信与全局运维配置</div>
+                <div class="kpi-desc">公告设置、SMTP、HTTPS证书、📢 用户群发通知</div>
               </div>
             </div>
-            <div class="xray-badge-pill shrink-0 ml-2">
-              配置中心
-            </div>
+            <div class="pill-badge">配置中心</div>
           </div>
 
         </div>
 
-        <!-- ==================== 主工作区卡片 (1:1 截图表格与操作排版) ==================== -->
+        <!-- 主内容卡片 (1:1 截图排布) -->
         
-        <!-- 模块 1: 节点集群接入与治理列表 -->
-        <div v-if="activeNav === 'nodes'" class="xray-main-container p-6 w-full">
-          <!-- 标题栏与右上角操作按钮 -->
-          <div class="flex justify-between items-center mb-5 pb-3 border-b border-[#172554]">
-            <div class="flex items-center gap-2">
-              <span class="text-purple-400 text-base">👥</span>
-              <h2 class="text-sm font-bold text-white tracking-wide">CDP 节点实例治理列表</h2>
+        <!-- 页面 1: 接入用户治理列表 (节点列表) -->
+        <div v-if="activeNav === 'nodes'" class="content-card">
+          <div class="table-header-bar">
+            <div class="table-title">
+              <span class="icon-duo-users">👥</span>
+              <h2>接入用户治理列表</h2>
             </div>
-            <div class="flex items-center gap-3">
-              <button @click="showNodeModal = true" class="btn-refresh-gradient">
-                + 新增接入节点
-              </button>
-              <button @click="loadAll" class="btn-refresh-gradient">
-                🔄 刷新数据
-              </button>
+            <div style="display:flex; gap:10px;">
+              <button @click="showNodeModal = true" class="btn-primary-gradient">+ 新增接入节点</button>
+              <button @click="loadAll" class="btn-primary-gradient">🔄 刷新数据</button>
             </div>
           </div>
 
-          <!-- 紧凑治理表格 (1:1 截图复刻字段与胶囊按钮排布) -->
-          <div class="overflow-x-auto w-full">
-            <table class="w-full text-left text-xs">
-              <thead class="text-slate-400 border-b border-[#172554] pb-2">
+          <!-- 表格 (1:1 截图字段与胶囊小按钮) -->
+          <div class="table-responsive">
+            <table class="xray-table">
+              <thead>
                 <tr>
-                  <th class="p-3">节点 / 接入地址</th>
-                  <th class="p-3">节点角色</th>
-                  <th class="p-3">状态</th>
-                  <th class="p-3">节点类型</th>
-                  <th class="p-3">本地转发端口</th>
-                  <th class="p-3">Cookie 实时存量</th>
-                  <th class="p-3">到期/更新时间</th>
-                  <th class="p-3 text-right pr-4">治理操作</th>
+                  <th style="width: 20%;">用户 / 绑定邮箱</th>
+                  <th style="width: 10%;">状态</th>
+                  <th style="width: 14%;">流量使用 / 总配额</th>
+                  <th style="width: 12%;">到期时间</th>
+                  <th style="width: 12%;">套餐特性</th>
+                  <th style="width: 12%;">专属凭证</th>
+                  <th style="width: 20%; text-align: right;">治理操作</th>
                 </tr>
               </thead>
-              <tbody class="divide-y divide-[#172554]">
-                <tr v-for="node in nodes" :key="node.id" class="hover:bg-[#0e1a3d]/50 transition">
-                  <!-- 用户 / 绑定邮箱 风格 -> 节点名 / 地址 -->
-                  <td class="p-3">
-                    <div class="font-bold text-white text-sm">{{ node.name }}</div>
-                    <div class="text-slate-400 text-[11px] font-mono mt-0.5">
+              <tbody>
+                <tr v-for="node in nodes" :key="node.id">
+                  <td>
+                    <div class="cell-main-name">{{ node.name }}</div>
+                    <div class="cell-sub-desc">
                       {{ node.is_local ? '127.0.0.1 (本机回环)' : `${node.ssh_user}@${node.ssh_host}:${node.ssh_port}` }}
                     </div>
                   </td>
 
-                  <!-- 角色 (专属凭证风格蓝按钮) -->
-                  <td class="p-3">
-                    <span v-if="node.is_source" class="btn-gov-blue">
-                      ★ 默认同步源
-                    </span>
-                    <button v-else @click="setSource(node.id)" class="text-slate-400 hover:text-cyan-400 text-[11px]">
-                      设为源
-                    </button>
+                  <!-- 截图同款绿色胶囊徽章: ● 活跃 -->
+                  <td>
+                    <span v-if="node.status === 'connected'" class="status-active">● 活跃</span>
+                    <span v-else-if="node.status === 'stopped'" class="status-standby">○ 离线</span>
+                    <span v-else class="status-error">✕ 异常</span>
                   </td>
 
-                  <!-- 状态 (截图同款绿色深底胶囊: ● 活跃) -->
-                  <td class="p-3">
-                    <span v-if="node.status === 'connected'" class="badge-active">
-                      ● 活跃
-                    </span>
-                    <span v-else-if="node.status === 'stopped'" class="badge-standby">
-                      ○ 离线
-                    </span>
-                    <span v-else class="badge-error">
-                      ✕ 异常
-                    </span>
-                  </td>
+                  <td class="font-cyan-mono">127.0.0.1:{{ node.local_bind_port }}</td>
 
-                  <!-- 套餐特性风格 -> 节点类型 -->
-                  <td class="p-3">
-                    <span v-if="node.is_local" class="px-2 py-0.5 rounded text-[10px] font-medium bg-[#1e3a8a] text-blue-200">
-                      普通固定 (本地)
-                    </span>
-                    <span v-else class="px-2 py-0.5 rounded text-[10px] font-medium bg-[#312e81] text-indigo-200">
-                      SSH 穿透 (远程)
-                    </span>
-                  </td>
-
-                  <!-- 本地端口 (Monospace) -->
-                  <td class="p-3 font-mono text-cyan-400 font-bold">
-                    127.0.0.1:{{ node.local_bind_port }}
-                  </td>
-
-                  <!-- Cookie 存量 -->
-                  <td class="p-3">
-                    <div class="inline-flex items-center gap-1.5 bg-[#0f1f42] border border-[#1d4ed8] px-2 py-0.5 rounded">
-                      <span class="text-amber-400">🍪</span>
-                      <span class="font-bold text-amber-300 font-mono">{{ node.cookie_count || 0 }} 条</span>
-                      <button @click="probeNode(node)" class="text-[10px] text-cyan-400 hover:underline ml-1" title="主动触发 CDP 探针更新">
-                        刷新
-                      </button>
+                  <td>
+                    <div class="cookie-badge">
+                      <span>🍪 {{ node.cookie_count || 0 }} 条</span>
+                      <button @click="probeNode(node)" class="link-probe">刷新</button>
                     </div>
                   </td>
 
-                  <!-- 到期时间风格 -> 最近同步时间 -->
-                  <td class="p-3 text-slate-400 text-[11px] font-mono">
-                    {{ node.last_sync || '∞ 暂无记录' }}
+                  <!-- 截图同款普通固定蓝标签 -->
+                  <td>
+                    <span v-if="node.is_local" class="tag-plan-blue">普通固定 (本地)</span>
+                    <span v-else class="tag-plan-indigo">SSH 穿透 (远程)</span>
                   </td>
 
-                  <!-- 治理操作 (1:1 截图复刻：橙色密码、红色重置、紫色配额、灰色封禁、红色删除) -->
-                  <td class="p-3 text-right space-x-1.5 pr-2">
-                    <!-- 橙色按钮: 启动/穿透 -->
-                    <button @click="toggleTunnel(node)" class="btn-gov-orange">
-                      🔑 {{ node.is_local ? '测试连通' : (node.status === 'connected' ? '断开隧道' : '启动穿透') }}
-                    </button>
-                    <!-- 紫色按钮: 探针嗅探 -->
-                    <button @click="probeNode(node)" class="btn-gov-purple">
-                      ✏️ 探针
-                    </button>
-                    <!-- 战损红按钮: 删除 -->
-                    <button @click="deleteNode(node.id)" class="btn-gov-red">
-                      🗑️
-                    </button>
+                  <!-- 截图同款专属凭证二维码蓝按钮 -->
+                  <td>
+                    <button v-if="node.is_source" class="btn-qrcode">🪪 凭证/默认源</button>
+                    <button v-else @click="setSource(node.id)" class="btn-set-source">设为源</button>
+                  </td>
+
+                  <!-- 截图同款横排微型彩色治理按钮组 -->
+                  <td style="text-align: right;">
+                    <div class="btn-group-row">
+                      <button @click="toggleTunnel(node)" class="btn-micro btn-orange">
+                        🔑 {{ node.is_local ? '测试' : (node.status === 'connected' ? '断开' : '穿透') }}
+                      </button>
+                      <button @click="probeNode(node)" class="btn-micro btn-red">🔀 探针</button>
+                      <button @click="setSource(node.id)" class="btn-micro btn-purple">✏️ 配额</button>
+                      <button @click="deleteNode(node.id)" class="btn-micro btn-trash">🗑️</button>
+                    </div>
                   </td>
                 </tr>
               </tbody>
@@ -485,257 +414,219 @@ onMounted(() => {
           </div>
         </div>
 
-        <!-- 模块 2: 同步调度中枢 -->
-        <div v-if="activeNav === 'sync'" class="xray-main-container p-6 w-full space-y-4">
-          <div class="flex justify-between items-center pb-3 border-b border-[#172554]">
-            <div class="flex items-center gap-2">
-              <span class="text-cyan-400 text-base">🌐</span>
-              <h2 class="text-sm font-bold text-white tracking-wide">全站 Cookie 自动同步与分发治理</h2>
+        <!-- 页面 2: Cookie 同步中心 -->
+        <div v-if="activeNav === 'sync'" class="content-card">
+          <div class="table-header-bar">
+            <div class="table-title">
+              <span class="icon-duo-users" style="color:#38bdf8;">🌐</span>
+              <h2>Cookie 集群全自动同步与调度治理</h2>
             </div>
-            <button @click="triggerSync" :disabled="isSyncing" class="btn-refresh-gradient">
-              {{ isSyncing ? '同步任务执行中...' : '⚡ 立即触发全网同步' }}
+            <button @click="triggerSync" :disabled="isSyncing" class="btn-primary-gradient">
+              {{ isSyncing ? '同步中...' : '⚡ 立即触发同步' }}
             </button>
           </div>
-
-          <div class="p-4 bg-[#09122a] border border-[#172554] rounded-lg text-xs space-y-2 text-slate-300">
-            <p>• 调度周期：系统常驻调度程序每 <span class="text-cyan-400 font-bold">15 分钟</span> 自动从默认源节点抓取最新全量 Cookies 并分发到各个活跃节点。</p>
-            <p>• 本地节点加速：本地直连节点跳过 SSH 隧道转发环节，直达端口注入，吞吐耗时降低 90%。</p>
+          <div class="info-banner-blue">
+            <p>• 定时调度：后台常驻引擎每 <span style="color:#00f0ff; font-weight:bold;">15 分钟</span> 自动从默认源节点抓取最新全量 Cookies 并分发到所有活跃节点。</p>
+            <p>• 本地加速：本地直连节点跳过 SSH 隧道，直接通过 CDP WebSocket 极速注入。</p>
           </div>
-
-          <!-- 同步审计日志列表 -->
-          <div class="mt-4">
-            <h3 class="text-xs font-bold text-slate-300 mb-2">最近同步追踪事件：</h3>
-            <div class="bg-[#060b17] p-3.5 rounded border border-[#172554] font-mono text-xs h-80 overflow-y-auto space-y-2.5">
-              <div v-for="l in logs" :key="l.id" class="border-b border-[#111c38] pb-1.5">
-                <div class="flex justify-between text-[11px] text-slate-400">
+          <div style="margin-top:20px;">
+            <h3 style="font-size:13px; font-weight:bold; color:#cbd5e1; margin-bottom:8px;">最近调度审计事件：</h3>
+            <div class="console-box">
+              <div v-for="l in logs" :key="l.id" class="console-item">
+                <div class="console-meta">
                   <span>[{{ l.timestamp }}]</span>
-                  <span :class="l.status==='SUCCESS' ? 'text-emerald-400' : 'text-rose-400'" class="font-bold">[{{ l.status }}]</span>
+                  <span :style="{ color: l.status==='SUCCESS' ? '#34d399' : '#f87171', fontWeight: 'bold' }">[{{ l.status }}]</span>
                 </div>
-                <pre class="mt-1 text-slate-300 whitespace-pre-wrap">{{ l.details }}</pre>
+                <pre class="console-pre">{{ l.details }}</pre>
               </div>
-              <div v-if="logs.length === 0" class="text-center text-slate-500 py-12">暂无调度事件</div>
+              <div v-if="logs.length === 0" style="text-align:center; color:#64748b; padding:40px;">暂无调度事件</div>
             </div>
           </div>
         </div>
 
-        <!-- 模块 3: 告警通知与发信中心 -->
-        <div v-if="activeNav === 'notifications'" class="grid grid-cols-1 lg:grid-cols-2 gap-6 w-full">
-          <!-- SMTP 邮件 -->
-          <div class="xray-main-container p-6 flex flex-col justify-between">
-            <div>
-              <div class="flex justify-between items-center mb-4 pb-2 border-b border-[#172554]">
-                <h3 class="text-sm font-bold text-white flex items-center gap-2">
-                  <span class="text-pink-400">📧</span> SMTP 邮件发信通道
-                </h3>
-                <button @click="testEmail" class="text-xs text-cyan-400 hover:underline">发送测试邮件</button>
-              </div>
-              <div class="space-y-3">
-                <div>
-                  <label class="block text-xs text-slate-400 mb-1">SMTP 发信服务器</label>
-                  <input v-model="notif.smtp_host" placeholder="smtp.qq.com" class="dialog-input">
-                </div>
-                <div class="grid grid-cols-2 gap-3">
-                  <div>
-                    <label class="block text-xs text-slate-400 mb-1">端口</label>
-                    <input v-model="notif.smtp_port" placeholder="465" class="dialog-input">
-                  </div>
-                  <div>
-                    <label class="block text-xs text-slate-400 mb-1">加密协议</label>
-                    <select v-model="notif.smtp_ssl" class="dialog-input">
-                      <option :value="true">SSL / TLS</option>
-                      <option :value="false">STARTTLS / 明文</option>
-                    </select>
-                  </div>
-                </div>
-                <div>
-                  <label class="block text-xs text-slate-400 mb-1">发信账号</label>
-                  <input v-model="notif.smtp_user" placeholder="user@qq.com" class="dialog-input">
-                </div>
-                <div>
-                  <label class="block text-xs text-slate-400 mb-1">发信授权码 / 密码</label>
-                  <input v-model="notif.smtp_pass" type="password" placeholder="授权码" class="dialog-input">
-                </div>
-                <div>
-                  <label class="block text-xs text-slate-400 mb-1">接收预警邮箱</label>
-                  <input v-model="notif.smtp_to" placeholder="admin@domain.com" class="dialog-input">
-                </div>
-              </div>
+        <!-- 页面 3: 告警预警与发信 (双列对称) -->
+        <div v-if="activeNav === 'notifications'" class="grid-2col">
+          <!-- SMTP -->
+          <div class="content-card">
+            <div class="table-header-bar">
+              <h3 class="card-inner-h3">📧 SMTP 邮件发信通道</h3>
+              <button @click="testEmail" class="link-probe" style="font-size:12px;">发送测试邮件</button>
             </div>
-            <button @click="saveNotif" class="btn-refresh-gradient justify-center mt-5 w-full">保存邮件配置</button>
-          </div>
-
-          <!-- Server酱微信推送 -->
-          <div class="xray-main-container p-6 flex flex-col justify-between">
-            <div>
-              <div class="flex justify-between items-center mb-4 pb-2 border-b border-[#172554]">
-                <h3 class="text-sm font-bold text-white flex items-center gap-2">
-                  <span class="text-pink-400">📱</span> Server酱 (微信推送)
-                </h3>
-                <button @click="testServerChan" class="text-xs text-cyan-400 hover:underline">发送微信测试</button>
+            <div class="form-v-stack">
+              <div>
+                <label class="form-label">SMTP 发信服务器</label>
+                <input v-model="notif.smtp_host" placeholder="smtp.qq.com" class="xray-input">
               </div>
-              <div class="space-y-4">
-                <div class="flex items-center gap-2">
-                  <input type="checkbox" v-model="notif.serverchan_enabled" id="s_c_box" class="rounded bg-[#0f1c3f] border-[#1e3a8a] text-cyan-500">
-                  <label for="s_c_box" class="text-xs text-slate-200">启用微信实时推送</label>
+              <div class="row-flex-gap">
+                <div style="flex:1;">
+                  <label class="form-label">端口</label>
+                  <input v-model="notif.smtp_port" placeholder="465" class="xray-input">
                 </div>
-                <div>
-                  <label class="block text-xs text-slate-400 mb-1">Server酱 SendKey</label>
-                  <input v-model="notif.serverchan_key" placeholder="SCTxxxxxxxxxxxxxxxx" class="dialog-input font-mono">
-                  <p class="text-[11px] text-slate-400 mt-1.5">在 sct.ftqq.com 申请的 SendKey。同步失败或节点下线时自动推送到微信。</p>
+                <div style="flex:1;">
+                  <label class="form-label">加密协议</label>
+                  <select v-model="notif.smtp_ssl" class="xray-input">
+                    <option :value="true">SSL / TLS</option>
+                    <option :value="false">STARTTLS / 明文</option>
+                  </select>
                 </div>
               </div>
-            </div>
-            <button @click="saveNotif" class="btn-refresh-gradient justify-center mt-5 w-full">保存微信配置</button>
-          </div>
-        </div>
-
-        <!-- 模块 4: 系统运维与安全配置 (包括 SSH 证书管理与管理员修改) -->
-        <div v-if="activeNav === 'settings'" class="grid grid-cols-1 lg:grid-cols-2 gap-6 w-full">
-          <!-- 管理员安全配置 (严格 70% 黄金输入比例) -->
-          <div class="xray-main-container p-6 flex flex-col justify-between">
-            <div>
-              <h3 class="text-sm font-bold text-white mb-4 pb-2 border-b border-[#172554] flex items-center gap-2">
-                <span class="text-indigo-400">👤</span> 管理员账号与登录凭证
-              </h3>
-              <form @submit.prevent="saveProfile" class="flex flex-col items-center space-y-4 pt-1">
-                <div class="w-full flex flex-col items-center">
-                  <label class="text-xs text-slate-400 mb-1 w-full text-left pl-[15%]">登录用户名</label>
-                  <input v-model="profile.username" required class="form-input-golden">
-                </div>
-                <div class="w-full flex flex-col items-center">
-                  <label class="text-xs text-slate-400 mb-1 w-full text-left pl-[15%]">绑定邮箱 (支持直接登录)</label>
-                  <input v-model="profile.email" type="email" required class="form-input-golden">
-                </div>
-                <div class="w-full flex flex-col items-center">
-                  <label class="text-xs text-slate-400 mb-1 w-full text-left pl-[15%]">重置新密码 (留空则不改)</label>
-                  <input v-model="profile.new_password" type="password" placeholder="至少 6 位安全字符" minlength="6" class="form-input-golden">
-                </div>
-                <button type="submit" class="form-input-golden btn-refresh-gradient justify-center mt-2">保存账号设置</button>
-              </form>
+              <div>
+                <label class="form-label">发信账号</label>
+                <input v-model="notif.smtp_user" placeholder="user@domain.com" class="xray-input">
+              </div>
+              <div>
+                <label class="form-label">发信授权码 / 密码</label>
+                <input v-model="notif.smtp_pass" type="password" placeholder="授权码" class="xray-input">
+              </div>
+              <div>
+                <label class="form-label">接收预警邮箱</label>
+                <input v-model="notif.smtp_to" placeholder="admin@domain.com" class="xray-input">
+              </div>
+              <button @click="saveNotif" class="btn-primary-gradient" style="width:100%; padding:10px;">保存邮件配置</button>
             </div>
           </div>
 
-          <!-- SSH 密钥金库 -->
-          <div class="xray-main-container p-6 flex flex-col justify-between">
-            <div>
-              <div class="flex justify-between items-center mb-4 pb-2 border-b border-[#172554]">
-                <h3 class="text-sm font-bold text-white flex items-center gap-2">
-                  <span class="text-indigo-400">🔑</span> SSH 密钥金库
-                </h3>
-                <span class="text-xs text-slate-400 font-mono">{{ keys.length }} 个凭据</span>
-              </div>
-              <div class="mb-4">
-                <input type="file" @change="uploadKey" class="text-xs text-slate-400 file:mr-3 file:py-1.5 file:px-3 file:rounded file:bg-[#0f1c3f] file:border file:border-[#1e3a8a] file:text-cyan-300 hover:file:bg-[#1e3a8a] cursor-pointer">
-              </div>
-              <ul class="divide-y divide-[#172554] text-xs">
-                <li v-for="k in keys" :key="k.filename" class="py-2.5 flex justify-between items-center">
-                  <span class="font-mono text-slate-300">🔑 {{ k.filename }} ({{ k.size }} Bytes)</span>
-                  <button @click="deleteKey(k.filename)" class="text-red-400 hover:underline">销毁</button>
-                </li>
-                <li v-if="keys.length === 0" class="py-6 text-center text-slate-500">暂无证书凭证</li>
-              </ul>
+          <!-- Server酱 -->
+          <div class="content-card">
+            <div class="table-header-bar">
+              <h3 class="card-inner-h3">📱 Server酱 (微信推送)</h3>
+              <button @click="testServerChan" class="link-probe" style="font-size:12px;">发送微信测试</button>
             </div>
-            <div class="mt-4 pt-3 border-t border-[#172554] text-[11px] text-slate-500 font-mono">
-              [STORAGE: /data/keys/ | AUTO PERMISSION: 0600]
+            <div class="form-v-stack">
+              <div style="display:flex; align-items:center; gap:8px;">
+                <input type="checkbox" v-model="notif.serverchan_enabled" id="s_c_box">
+                <label for="s_c_box" style="font-size:13px; color:#cbd5e1;">启用微信实时推送</label>
+              </div>
+              <div>
+                <label class="form-label">Server酱 SendKey</label>
+                <input v-model="notif.serverchan_key" placeholder="SCTxxxxxxxxxxxxxxxx" class="xray-input" style="font-family:monospace;">
+                <p style="font-size:11px; color:#64748b; margin-top:6px;">在 sct.ftqq.com 申请的 SendKey。同步失败或节点下线时自动推送到微信。</p>
+              </div>
+              <button @click="saveNotif" class="btn-primary-gradient" style="width:100%; padding:10px; margin-top:30px;">保存微信配置</button>
             </div>
           </div>
         </div>
 
-      </div>
-
-      <!-- 新增节点 Dialog (支持本地免SSH直连) -->
-      <div v-if="showNodeModal" class="fixed inset-0 bg-black/80 flex items-center justify-center p-4 z-50">
-        <div class="xray-main-container p-6 w-full max-w-lg bg-[#0b132b] border border-[#1e3a8a] shadow-2xl">
-          <div class="flex justify-between items-center pb-3 border-b border-[#172554] mb-4">
-            <h3 class="text-sm font-bold text-white flex items-center gap-2">
-              <span class="text-cyan-400">⚡</span> 接入新 CDP 实例节点
-            </h3>
-            <button @click="showNodeModal = false" class="text-slate-400 hover:text-white">✕</button>
+        <!-- 页面 4: 全局运维配置与账号安全 -->
+        <div v-if="activeNav === 'settings'" class="grid-2col">
+          <div class="content-card">
+            <h3 class="card-inner-h3" style="margin-bottom:16px;">👤 管理员账号与登录凭证</h3>
+            <form @submit.prevent="saveProfile" class="form-v-stack">
+              <div>
+                <label class="form-label">登录用户名</label>
+                <input v-model="profile.username" required class="xray-input">
+              </div>
+              <div>
+                <label class="form-label">绑定邮箱 (支持直接登录)</label>
+                <input v-model="profile.email" type="email" required class="xray-input">
+              </div>
+              <div>
+                <label class="form-label">重置新密码 (留空则不改)</label>
+                <input v-model="profile.new_password" type="password" placeholder="至少 6 位安全字符" minlength="6" class="xray-input">
+              </div>
+              <button type="submit" class="btn-primary-gradient" style="width:100%; padding:10px; margin-top:10px;">保存账号修改</button>
+            </form>
           </div>
 
-          <form @submit.prevent="createNode" class="space-y-4">
-            <!-- 节点类型切换 -->
+          <div class="content-card">
+            <div class="table-header-bar">
+              <h3 class="card-inner-h3">🔑 SSH 密钥存储库</h3>
+              <span style="font-size:12px; color:#64748b;">{{ keys.length }} 个凭据</span>
+            </div>
+            <div style="margin-bottom: 12px;">
+              <input type="file" @change="uploadKey" style="font-size:12px; color:#94a3b8;">
+            </div>
+            <ul class="keys-list">
+              <li v-for="k in keys" :key="k.filename" class="key-row">
+                <span style="font-family:monospace;">🔑 {{ k.filename }} ({{ k.size }} Bytes)</span>
+                <button @click="deleteKey(k.filename)" class="link-probe" style="color:#f87171;">销毁</button>
+              </li>
+              <li v-if="keys.length === 0" style="text-align:center; color:#64748b; padding:20px;">暂无私钥证书</li>
+            </ul>
+          </div>
+        </div>
+
+      </main>
+
+      <!-- 新增节点 Dialog 弹窗 -->
+      <div v-if="showNodeModal" class="modal-backdrop">
+        <div class="modal-card">
+          <div class="modal-title-bar">
+            <h3 style="font-size:14px; font-weight:bold; color:#fff;">接入新 CDP 实例节点</h3>
+            <button @click="showNodeModal = false" style="background:none; border:none; color:#94a3b8; font-size:16px; cursor:pointer;">✕</button>
+          </div>
+
+          <form @submit.prevent="createNode" class="form-v-stack" style="margin-top:14px;">
             <div>
-              <label class="block text-xs text-slate-400 mb-2">接入类型</label>
-              <div class="grid grid-cols-2 gap-3">
-                <label 
-                  :class="newNode.is_local ? 'border-cyan-400 bg-[#0f1f42] text-cyan-300' : 'border-[#172554] text-slate-400'"
-                  class="flex items-center justify-center gap-2 p-2.5 rounded-lg border cursor-pointer text-xs"
-                >
-                  <input type="radio" v-model="newNode.is_local" :value="true" class="hidden">
+              <label class="form-label">接入类型</label>
+              <div class="row-flex-gap">
+                <label :class="['radio-pill-card', newNode.is_local ? 'radio-pill-active' : '']">
+                  <input type="radio" v-model="newNode.is_local" :value="true" style="display:none;">
                   <span>💻 本地直连 (免SSH)</span>
                 </label>
-
-                <label 
-                  :class="!newNode.is_local ? 'border-cyan-400 bg-[#0f1f42] text-cyan-300' : 'border-[#172554] text-slate-400'"
-                  class="flex items-center justify-center gap-2 p-2.5 rounded-lg border cursor-pointer text-xs"
-                >
-                  <input type="radio" v-model="newNode.is_local" :value="false" class="hidden">
+                <label :class="['radio-pill-card', !newNode.is_local ? 'radio-pill-active' : '']">
+                  <input type="radio" v-model="newNode.is_local" :value="false" style="display:none;">
                   <span>🌐 远程 SSH 穿透</span>
                 </label>
               </div>
             </div>
 
             <div>
-              <label class="block text-xs text-slate-400 mb-1">节点名称</label>
-              <input v-model="newNode.name" required placeholder="如: 本机 Chrome 01" class="dialog-input">
+              <label class="form-label">节点名称</label>
+              <input v-model="newNode.name" required placeholder="如: 本机 Chrome 01" class="xray-input">
             </div>
 
-            <!-- 本地节点输入 -->
-            <div v-if="newNode.is_local" class="p-3 bg-[#080f24] rounded-lg border border-[#172554]">
-              <label class="block text-xs text-slate-400 mb-1">本地 CDP 调试端口 (默认 9222)</label>
-              <input v-model="newNode.local_bind_port" type="number" required placeholder="9222" class="dialog-input font-mono text-cyan-400">
-              <p class="text-[11px] text-slate-500 mt-1">
-                直接接入本机 Chromium 实例，无需任何 SSH 握手开销。
-              </p>
+            <div v-if="newNode.is_local" style="background:#09122a; padding:12px; border-radius:6px; border:1px solid #172554;">
+              <label class="form-label">本地 CDP 调试端口 (默认 9222)</label>
+              <input v-model="newNode.local_bind_port" type="number" required placeholder="9222" class="xray-input font-cyan-mono">
+              <p style="font-size:11px; color:#64748b; margin-top:6px;">直接接入本机 Chromium 实例，无需任何 SSH 握手开销。</p>
             </div>
 
-            <!-- 远程节点输入 -->
-            <div v-else class="space-y-3.5">
-              <div class="grid grid-cols-2 gap-3">
-                <div>
-                  <label class="block text-xs text-slate-400 mb-1">SSH 主机 / IP</label>
-                  <input v-model="newNode.ssh_host" required placeholder="192.168.1.100" class="dialog-input font-mono">
+            <div v-else class="form-v-stack">
+              <div class="row-flex-gap">
+                <div style="flex:1;">
+                  <label class="form-label">SSH 主机 / IP</label>
+                  <input v-model="newNode.ssh_host" required placeholder="192.168.1.100" class="xray-input" style="font-family:monospace;">
                 </div>
-                <div>
-                  <label class="block text-xs text-slate-400 mb-1">SSH 端口</label>
-                  <input v-model="newNode.ssh_port" type="number" placeholder="22" class="dialog-input font-mono">
+                <div style="flex:1;">
+                  <label class="form-label">SSH 端口</label>
+                  <input v-model="newNode.ssh_port" type="number" placeholder="22" class="xray-input" style="font-family:monospace;">
                 </div>
               </div>
 
               <div>
-                <label class="block text-xs text-slate-400 mb-1">SSH 用户名</label>
-                <input v-model="newNode.ssh_user" required placeholder="root" class="dialog-input font-mono">
+                <label class="form-label">SSH 用户名</label>
+                <input v-model="newNode.ssh_user" required placeholder="root" class="xray-input" style="font-family:monospace;">
               </div>
 
               <div>
-                <label class="block text-xs text-slate-400 mb-1">绑定 SSH 证书 (选填)</label>
-                <select v-model="newNode.ssh_key_filename" class="dialog-input font-mono">
+                <label class="form-label">绑定 SSH 证书 (选填)</label>
+                <select v-model="newNode.ssh_key_filename" class="xray-input" style="font-family:monospace;">
                   <option value="">密码认证 (不选择私钥)</option>
                   <option v-for="k in keys" :key="k.filename" :value="k.filename">🔑 {{ k.filename }}</option>
                 </select>
               </div>
 
               <div v-if="!newNode.ssh_key_filename">
-                <label class="block text-xs text-slate-400 mb-1">SSH 密码</label>
-                <input v-model="newNode.ssh_password" type="password" placeholder="••••••••" class="dialog-input">
+                <label class="form-label">SSH 密码</label>
+                <input v-model="newNode.ssh_password" type="password" placeholder="••••••••" class="xray-input">
               </div>
 
-              <div class="grid grid-cols-2 gap-3">
-                <div>
-                  <label class="block text-xs text-slate-400 mb-1">远程 CDP 端口</label>
-                  <input v-model="newNode.remote_cdp_port" type="number" placeholder="9222" class="dialog-input font-mono">
+              <div class="row-flex-gap">
+                <div style="flex:1;">
+                  <label class="form-label">远程 CDP 端口</label>
+                  <input v-model="newNode.remote_cdp_port" type="number" placeholder="9222" class="xray-input" style="font-family:monospace;">
                 </div>
-                <div>
-                  <label class="block text-xs text-slate-400 mb-1">本地穿透绑定端口</label>
-                  <input v-model="newNode.local_bind_port" type="number" required placeholder="19222" class="dialog-input font-mono text-cyan-400">
+                <div style="flex:1;">
+                  <label class="form-label">本地穿透绑定端口</label>
+                  <input v-model="newNode.local_bind_port" type="number" required placeholder="19222" class="xray-input font-cyan-mono">
                 </div>
               </div>
             </div>
 
-            <div class="flex justify-end gap-2.5 pt-3 border-t border-[#172554]">
-              <button type="button" @click="showNodeModal = false" class="px-3.5 py-1.5 rounded text-xs bg-[#09122a] border border-[#172554] text-slate-300">取消</button>
-              <button type="submit" class="btn-refresh-gradient">保存节点</button>
+            <div style="display:flex; justify-content:flex-end; gap:8px; margin-top:16px;">
+              <button type="button" @click="showNodeModal = false" class="btn-set-source" style="padding:6px 14px;">取消</button>
+              <button type="submit" class="btn-primary-gradient">保存节点</button>
             </div>
           </form>
         </div>
@@ -744,3 +635,424 @@ onMounted(() => {
     </div>
   </div>
 </template>
+
+<style scoped>
+/* ==================== 1:1 像素级复现截图的纯正原生 CSS ==================== */
+
+.xray-viewport {
+  min-height: 100vh;
+  width: 100%;
+  background-color: #060b17;
+  color: #f8fafc;
+}
+
+/* 1. 登录界面：绝对垂直水平死锁居中 */
+.login-wrapper-center {
+  min-height: 100vh;
+  width: 100vw;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  background-color: #060b17;
+  padding: 20px;
+}
+
+.login-card-navy {
+  width: 420px;
+  max-width: 95vw;
+  background-color: #0b132b;
+  border: 1px solid #172554;
+  border-radius: 14px;
+  padding: 32px;
+  box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.7);
+}
+
+.login-brand-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding-bottom: 16px;
+  margin-bottom: 24px;
+  border-bottom: 1px solid #172554;
+}
+
+.bolt-symbol { color: #f59e0b; font-size: 19px; font-weight: bold; }
+.brand-xray  { font-weight: 800; font-size: 16px; color: #ffffff; letter-spacing: 1px; }
+.brand-reality { font-weight: 800; font-size: 16px; color: #00f0ff; letter-spacing: 1px; }
+
+.login-form-stack { display: flex; flex-direction: column; gap: 16px; }
+.form-row { display: flex; flex-direction: column; gap: 6px; }
+.form-label { font-size: 12px; color: #94a3b8; }
+
+.xray-input {
+  width: 100%;
+  background-color: #0f1c3f;
+  border: 1px solid #1e3a8a;
+  color: #ffffff;
+  border-radius: 6px;
+  padding: 8px 12px;
+  font-size: 13px;
+  outline: none;
+  transition: all 0.2s;
+}
+.xray-input:focus {
+  border-color: #00f0ff;
+  box-shadow: 0 0 8px rgba(0, 240, 255, 0.35);
+}
+
+.captcha-row { display: flex; gap: 10px; align-items: center; }
+.captcha-box {
+  width: 120px;
+  height: 38px;
+  background: #09122a;
+  border: 1px solid #172554;
+  border-radius: 6px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  overflow: hidden;
+  flex-shrink: 0;
+}
+
+.btn-primary-gradient {
+  background: linear-gradient(135deg, #0284c7, #2563eb);
+  color: #ffffff;
+  border: none;
+  border-radius: 6px;
+  padding: 6px 14px;
+  font-size: 12px;
+  font-weight: bold;
+  cursor: pointer;
+  transition: opacity 0.2s, transform 0.15s;
+}
+.btn-primary-gradient:hover { opacity: 0.9; transform: translateY(-1px); }
+
+/* 2. 顶栏 (截图同款) */
+.dashboard-layout {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.header-bar {
+  height: 60px;
+  padding: 0 32px;
+  background-color: #060b17;
+  border-bottom: 1px solid #111c38;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.header-left { display: flex; align-items: center; gap: 8px; }
+.header-right { display: flex; align-items: center; gap: 12px; }
+
+.badge-admin {
+  background-color: #dc2626;
+  color: #ffffff;
+  font-size: 11px;
+  font-weight: bold;
+  padding: 2px 8px;
+  border-radius: 4px;
+  letter-spacing: 0.5px;
+}
+
+.username-label { font-size: 13px; font-weight: 600; color: #ffffff; }
+
+.btn-logout {
+  background: transparent;
+  border: 1px solid #4b5563;
+  color: #d1d5db;
+  padding: 2px 10px;
+  border-radius: 4px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.btn-logout:hover { border-color: #9ca3af; color: #ffffff; }
+
+/* 3. 主工作区与顶置 4 个大卡片 (强制 4 列横排平铺) */
+.main-container {
+  width: 100%;
+  max-width: 1560px;
+  margin: 0 auto;
+  padding: 20px 32px;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.cards-grid-4 {
+  display: grid !important;
+  grid-template-columns: repeat(4, 1fr) !important;
+  gap: 16px !important;
+  width: 100%;
+}
+
+@media (max-width: 1150px) {
+  .cards-grid-4 { grid-template-columns: repeat(2, 1fr) !important; }
+}
+@media (max-width: 680px) {
+  .cards-grid-4 { grid-template-columns: 1fr !important; }
+}
+
+.kpi-card {
+  background-color: #0b132b;
+  border: 1px solid #172554;
+  border-radius: 12px;
+  padding: 16px 20px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.kpi-card:hover {
+  background-color: #0d1736;
+  border-color: #1e3a8a;
+  transform: translateY(-2px);
+}
+
+.kpi-card-active {
+  border-color: #00f0ff !important;
+  box-shadow: 0 0 14px rgba(0, 240, 255, 0.35) !important;
+}
+
+.kpi-left { display: flex; align-items: center; gap: 14px; }
+.icon-avatar {
+  width: 38px;
+  height: 38px;
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 18px;
+  flex-shrink: 0;
+}
+
+.avatar-purple { background: rgba(88, 28, 135, 0.4); border: 1px solid #7e22ce; }
+.avatar-cyan   { background: rgba(14, 59, 94, 0.4); border: 1px solid #0284c7; }
+.avatar-pink   { background: rgba(131, 24, 67, 0.4); border: 1px solid #db2777; }
+.avatar-indigo { background: rgba(49, 46, 129, 0.4); border: 1px solid #4f46e5; }
+
+.kpi-info { display: flex; flex-direction: column; gap: 3px; }
+.kpi-title { font-size: 13px; font-weight: bold; color: #ffffff; }
+.kpi-desc  { font-size: 11px; color: #64748b; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 200px; }
+
+.pill-badge {
+  background-color: #0f1f42;
+  border: 1px solid #1d4ed8;
+  color: #38bdf8;
+  border-radius: 9999px;
+  padding: 3px 12px;
+  font-size: 11px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+/* 4. 主内容大容器与治理列表 (1:1 截图结构) */
+.content-card {
+  background-color: #0b132b;
+  border: 1px solid #172554;
+  border-radius: 14px;
+  padding: 20px;
+}
+
+.table-header-bar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding-bottom: 16px;
+  border-bottom: 1px solid #172554;
+  margin-bottom: 16px;
+}
+
+.table-title { display: flex; align-items: center; gap: 8px; }
+.icon-duo-users { font-size: 18px; color: #a855f7; }
+.table-title h2 { font-size: 15px; font-weight: bold; color: #ffffff; }
+
+.table-responsive { width: 100%; overflow-x: auto; }
+.xray-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.xray-table th {
+  color: #64748b;
+  font-weight: 500;
+  padding: 12px 14px;
+  border-bottom: 1px solid #172554;
+  text-align: left;
+}
+
+.xray-table td {
+  padding: 14px;
+  border-bottom: 1px solid #131e3d;
+  vertical-align: middle;
+}
+
+.cell-main-name { font-weight: bold; color: #ffffff; font-size: 13px; }
+.cell-sub-desc  { font-size: 11px; color: #64748b; font-family: monospace; margin-top: 3px; }
+
+/* 截图同款绿色胶囊: ● 活跃 */
+.status-active {
+  background-color: rgba(6, 78, 59, 0.85);
+  border: 1px solid #059669;
+  color: #34d399;
+  border-radius: 9999px;
+  padding: 2px 10px;
+  font-size: 11px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.status-standby {
+  background-color: rgba(69, 26, 3, 0.8);
+  border: 1px solid #d97706;
+  color: #fbbf24;
+  border-radius: 9999px;
+  padding: 2px 10px;
+  font-size: 11px;
+}
+.status-error {
+  background-color: rgba(69, 10, 10, 0.8);
+  border: 1px solid #dc2626;
+  color: #f87171;
+  border-radius: 9999px;
+  padding: 2px 10px;
+  font-size: 11px;
+}
+
+.font-cyan-mono { color: #00f0ff; font-family: monospace; font-weight: bold; }
+
+.cookie-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background-color: #0f1f42;
+  border: 1px solid #1d4ed8;
+  padding: 2px 8px;
+  border-radius: 4px;
+  color: #fcd34d;
+  font-weight: bold;
+}
+.link-probe { background: none; border: none; color: #38bdf8; cursor: pointer; text-decoration: underline; font-size: 10px; margin-left: 4px; }
+
+/* 截图同款普通固定蓝胶囊 */
+.tag-plan-blue { background-color: #1e40af; color: #93c5fd; border-radius: 4px; padding: 2px 8px; font-size: 11px; }
+.tag-plan-indigo { background-color: #312e81; color: #c7d2fe; border-radius: 4px; padding: 2px 8px; font-size: 11px; }
+
+/* 截图同款专属凭证二维码蓝按钮 */
+.btn-qrcode {
+  background-color: #0284c7;
+  color: #ffffff;
+  border: none;
+  border-radius: 4px;
+  padding: 3px 10px;
+  font-size: 11px;
+  font-weight: bold;
+}
+.btn-set-source {
+  background-color: #1e293b;
+  color: #94a3b8;
+  border: 1px solid #334155;
+  border-radius: 4px;
+  padding: 3px 8px;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+/* 截图同款横排微型彩色治理按钮组 */
+.btn-group-row { display: flex; gap: 6px; justify-content: flex-end; }
+.btn-micro { border: none; border-radius: 4px; padding: 4px 8px; font-size: 11px; font-weight: bold; color: #ffffff; cursor: pointer; }
+.btn-orange { background-color: #d97706; }
+.btn-purple { background-color: #7c3aed; }
+.btn-red    { background-color: #dc2626; }
+.btn-trash  { background-color: #991b1b; }
+
+/* 双列对称 */
+.grid-2col {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 20px;
+}
+@media (max-width: 900px) {
+  .grid-2col { grid-template-columns: 1fr; }
+}
+
+.card-inner-h3 { font-size: 14px; font-weight: bold; color: #fff; }
+.row-flex-gap { display: flex; gap: 12px; }
+
+.info-banner-blue {
+  background: #09122a;
+  border: 1px solid #172554;
+  border-radius: 8px;
+  padding: 14px;
+  font-size: 12px;
+  color: #cbd5e1;
+  line-height: 1.8;
+}
+
+.console-box {
+  background: #060b17;
+  border: 1px solid #172554;
+  border-radius: 8px;
+  padding: 14px;
+  font-family: monospace;
+  font-size: 12px;
+  height: 320px;
+  overflow-y: auto;
+}
+.console-item { border-bottom: 1px solid #111c38; padding-bottom: 8px; margin-bottom: 8px; }
+.console-meta { display: flex; justify-content: space-between; font-size: 11px; color: #64748b; }
+.console-pre  { margin-top: 4px; color: #e2e8f0; white-space: pre-wrap; }
+
+.keys-list { list-style: none; padding: 0; margin: 0; }
+.key-row { display: flex; justify-content: space-between; padding: 10px 0; border-bottom: 1px solid #172554; font-size: 12px; }
+
+/* 弹窗遮罩与卡片 */
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.8);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  z-index: 9999;
+}
+.modal-card {
+  width: 520px;
+  max-width: 95vw;
+  background-color: #0b132b;
+  border: 1px solid #1e3a8a;
+  border-radius: 12px;
+  padding: 24px;
+  box-shadow: 0 20px 40px rgba(0, 0, 0, 0.8);
+}
+.modal-title-bar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding-bottom: 12px;
+  border-bottom: 1px solid #172554;
+}
+
+.radio-pill-card {
+  flex: 1;
+  padding: 10px;
+  border-radius: 6px;
+  border: 1px solid #172554;
+  text-align: center;
+  cursor: pointer;
+  font-size: 12px;
+  color: #94a3b8;
+}
+.radio-pill-active {
+  border-color: #00f0ff !important;
+  background: #0f1f42 !important;
+  color: #38bdf8 !important;
+}
+</style>
