@@ -2,6 +2,7 @@
 import { ref, reactive, computed, onMounted } from 'vue'
 
 const token = ref(localStorage.getItem('token') || '')
+// 对应顶部的 4 个大卡片导航
 const activeNav = ref('nodes') // 'nodes' | 'sync' | 'notifications' | 'settings'
 const captchaSvg = ref('')
 
@@ -48,6 +49,7 @@ const newNode = reactive({
 })
 
 const totalCookies = computed(() => nodes.value.reduce((acc, n) => acc + (n.cookie_count || 0), 0))
+const onlineCount = computed(() => nodes.value.filter(n => n.status === 'connected').length)
 
 const api = async (url, options = {}) => {
   options.headers = options.headers || {}
@@ -132,7 +134,7 @@ const setSource = async (id) => {
 }
 
 const deleteNode = async (id) => {
-  if (confirm('确认销毁该节点治理配置？')) {
+  if (confirm('确认销毁该 CDP 节点的连接与调度配置？')) {
     await api(`/api/nodes/${id}`, { method: 'DELETE' })
     loadAll()
   }
@@ -157,7 +159,7 @@ const saveNotif = async () => {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(notif)
   })
-  if (res.ok) alert('通知设置已保存')
+  if (res.ok) alert('通知配置已持久化保存')
 }
 
 const testEmail = async () => {
@@ -207,32 +209,32 @@ onMounted(() => {
 </script>
 
 <template>
-  <div class="xray-viewport">
+  <div class="cdp-app-viewport">
     
-    <!-- 1. 登录界面 (原生 Flex 垂直水平死锁绝对居中) -->
-    <div v-if="!token" class="login-wrapper-center">
+    <!-- 1. 登录界面 (屏幕正中央垂直水平死锁居中) -->
+    <div v-if="!token" class="login-screen-center">
       <div class="login-card-navy">
         <div class="login-brand-line">
           <span class="bolt-symbol">⚡</span>
-          <span class="brand-xray">XRAY</span>
-          <span class="brand-reality">REALITY</span>
+          <span class="brand-white">CDP</span>
+          <span class="brand-cyan">CLUSTER</span>
         </div>
 
         <form @submit.prevent="login" class="login-form-stack">
           <div class="form-row">
-            <label class="form-label">用户账号 / 绑定邮箱</label>
-            <input v-model="loginForm.account" required placeholder="admin 或 admin@wimotek.com" class="xray-input">
+            <label class="form-label">管理员账号 / 邮箱</label>
+            <input v-model="loginForm.account" required placeholder="admin 或 admin@wimotek.com" class="cdp-input">
           </div>
 
           <div class="form-row">
             <label class="form-label">访问密码</label>
-            <input type="password" v-model="loginForm.password" required placeholder="••••••••••••" class="xray-input">
+            <input type="password" v-model="loginForm.password" required placeholder="••••••••••••" class="cdp-input">
           </div>
 
           <div class="form-row">
             <label class="form-label">人机验证</label>
             <div class="captcha-row">
-              <input v-model="loginForm.captcha_answer" required placeholder="计算答案" class="xray-input" style="flex:1;">
+              <input v-model="loginForm.captcha_answer" required placeholder="计算答案" class="cdp-input" style="flex:1;">
               <div @click="refreshCaptcha" class="captcha-box" title="点击刷新验证码">
                 <div v-html="captchaSvg"></div>
               </div>
@@ -240,20 +242,21 @@ onMounted(() => {
           </div>
 
           <button type="submit" class="btn-primary-gradient" style="width:100%; padding:10px; margin-top:8px;">
-            登 录 面 板
+            登 录 控 制 台
           </button>
         </form>
       </div>
     </div>
 
-    <!-- 2. 后台控制台 (1:1 截图布局) -->
-    <div v-else class="dashboard-layout">
-      <!-- 顶栏 (截图同款) -->
-      <header class="header-bar">
+    <!-- 2. 后台控制台 (全屏流式自适应 + 4 个顶置横排大卡片 + 治理列表) -->
+    <div v-else class="dashboard-fluid-layout">
+      
+      <!-- 顶栏 (截图 1:1 复刻：⚡ 标头 + 鲜红 SYSTEM ADMIN + 用户名 + 线框退出按钮) -->
+      <header class="header-full-bar">
         <div class="header-left">
           <span class="bolt-symbol">⚡</span>
-          <span class="brand-xray">XRAY</span>
-          <span class="brand-reality">REALITY</span>
+          <span class="brand-white">CDP</span>
+          <span class="brand-cyan">SYNC CLUSTER</span>
         </div>
 
         <div class="header-right">
@@ -263,13 +266,13 @@ onMounted(() => {
         </div>
       </header>
 
-      <!-- 主视图容器 -->
-      <main class="main-container">
+      <!-- 主视图容器 (全屏自适应流式排版，无固定 1560px 限制！) -->
+      <main class="main-fluid-canvas">
         
-        <!-- 4 个顶置横排大卡片 (纯原生 CSS Grid 强制 4 列，决不占满全屏堆叠！) -->
-        <div class="cards-grid-4">
+        <!-- 4 个顶置横排大卡片 (纯原生 CSS Grid 强制 4 列等宽横排平铺) -->
+        <div class="top-cards-row-4">
           
-          <!-- 卡片 1 (第一张带电光蓝发光圈) -->
+          <!-- 卡片 1: CDP 节点集群调度 (带电光蓝发光激活态) -->
           <div 
             @click="activeNav = 'nodes'"
             :class="['kpi-card', activeNav === 'nodes' ? 'kpi-card-active' : '']"
@@ -277,14 +280,14 @@ onMounted(() => {
             <div class="kpi-left">
               <div class="icon-avatar avatar-purple">👥</div>
               <div class="kpi-info">
-                <div class="kpi-title">全站用户生命周期管理</div>
-                <div class="kpi-desc">配额/时效治理、重置UUID与密码、凭证二维码</div>
+                <div class="kpi-title">CDP 节点集群实例治理</div>
+                <div class="kpi-desc">本地直连/远程SSH穿透监管、在线检测、端口映射与接入</div>
               </div>
             </div>
-            <div class="pill-badge">{{ nodes.length }} 位用户</div>
+            <div class="pill-badge">{{ nodes.length }} 个节点</div>
           </div>
 
-          <!-- 卡片 2 -->
+          <!-- 卡片 2: 全网 Cookie 同步中枢 -->
           <div 
             @click="activeNav = 'sync'"
             :class="['kpi-card', activeNav === 'sync' ? 'kpi-card-active' : '']"
@@ -292,14 +295,14 @@ onMounted(() => {
             <div class="kpi-left">
               <div class="icon-avatar avatar-cyan">🌐</div>
               <div class="kpi-info">
-                <div class="kpi-title">远程节点 (xray_core) 集群</div>
-                <div class="kpi-desc">多节点公钥监管、在线状态、配置修改与接入</div>
+                <div class="kpi-title">全网 Cookie 同步与调度</div>
+                <div class="kpi-desc">15分钟全自动调度、源节点指定、双向智能注入与探针</div>
               </div>
             </div>
-            <div class="pill-badge">{{ totalCookies }} 条资产</div>
+            <div class="pill-badge">{{ totalCookies }} 条存量</div>
           </div>
 
-          <!-- 卡片 3 -->
+          <!-- 卡片 3: 告警预警与发信中心 -->
           <div 
             @click="activeNav = 'notifications'"
             :class="['kpi-card', activeNav === 'notifications' ? 'kpi-card-active' : '']"
@@ -307,14 +310,14 @@ onMounted(() => {
             <div class="kpi-left">
               <div class="icon-avatar avatar-pink">🎫</div>
               <div class="kpi-info">
-                <div class="kpi-title">卡密生成与发卡中心</div>
-                <div class="kpi-desc">批量制卡、库存导出、范围清理、对接 API</div>
+                <div class="kpi-title">通知预警与发信中心</div>
+                <div class="kpi-desc">SMTP 邮件发信、Server酱微信实时推送、故障秒级告警</div>
               </div>
             </div>
             <div class="pill-badge">{{ notif.serverchan_enabled ? '微信已启' : '邮件通知' }}</div>
           </div>
 
-          <!-- 卡片 4 -->
+          <!-- 卡片 4: 运维与安全配置 -->
           <div 
             @click="activeNav = 'settings'"
             :class="['kpi-card', activeNav === 'settings' ? 'kpi-card-active' : '']"
@@ -323,7 +326,7 @@ onMounted(() => {
               <div class="icon-avatar avatar-indigo">⚙️</div>
               <div class="kpi-info">
                 <div class="kpi-title">系统发信与全局运维配置</div>
-                <div class="kpi-desc">公告设置、SMTP、HTTPS证书、📢 用户群发通知</div>
+                <div class="kpi-desc">SSH 密钥金库、管理员配置、HTTPS 自签证书与账号密码</div>
               </div>
             </div>
             <div class="pill-badge">配置中心</div>
@@ -331,14 +334,14 @@ onMounted(() => {
 
         </div>
 
-        <!-- 主内容卡片 (1:1 截图排布) -->
+        <!-- 主内容大容器 (全屏自适应扩展) -->
         
-        <!-- 页面 1: 接入用户治理列表 (节点列表) -->
-        <div v-if="activeNav === 'nodes'" class="content-card">
+        <!-- 页面 1: 节点治理列表 -->
+        <div v-if="activeNav === 'nodes'" class="content-full-card">
           <div class="table-header-bar">
             <div class="table-title">
               <span class="icon-duo-users">👥</span>
-              <h2>接入用户治理列表</h2>
+              <h2>CDP 节点实例治理列表</h2>
             </div>
             <div style="display:flex; gap:10px;">
               <button @click="showNodeModal = true" class="btn-primary-gradient">+ 新增接入节点</button>
@@ -346,18 +349,18 @@ onMounted(() => {
             </div>
           </div>
 
-          <!-- 表格 (1:1 截图字段与胶囊小按钮) -->
+          <!-- 表格 (与截图字段排版一致，内容完全贴合 CDP & Cookie 业务) -->
           <div class="table-responsive">
-            <table class="xray-table">
+            <table class="cdp-fluid-table">
               <thead>
                 <tr>
-                  <th style="width: 20%;">用户 / 绑定邮箱</th>
-                  <th style="width: 10%;">状态</th>
-                  <th style="width: 14%;">流量使用 / 总配额</th>
-                  <th style="width: 12%;">到期时间</th>
-                  <th style="width: 12%;">套餐特性</th>
-                  <th style="width: 12%;">专属凭证</th>
-                  <th style="width: 20%; text-align: right;">治理操作</th>
+                  <th style="width: 22%;">节点名称 / 调试地址</th>
+                  <th style="width: 10%;">连通状态</th>
+                  <th style="width: 14%;">本地映射端口</th>
+                  <th style="width: 14%;">Cookie 实时存量</th>
+                  <th style="width: 12%;">接入类型</th>
+                  <th style="width: 12%;">同步角色</th>
+                  <th style="width: 16%; text-align: right;">治理操作</th>
                 </tr>
               </thead>
               <tbody>
@@ -365,11 +368,11 @@ onMounted(() => {
                   <td>
                     <div class="cell-main-name">{{ node.name }}</div>
                     <div class="cell-sub-desc">
-                      {{ node.is_local ? '127.0.0.1 (本机回环)' : `${node.ssh_user}@${node.ssh_host}:${node.ssh_port}` }}
+                      {{ node.is_local ? '127.0.0.1 (本机调试端口)' : `${node.ssh_user}@${node.ssh_host}:${node.ssh_port}` }}
                     </div>
                   </td>
 
-                  <!-- 截图同款绿色胶囊徽章: ● 活跃 -->
+                  <!-- 连通状态: 截图同款深绿底色胶囊: ● 活跃 -->
                   <td>
                     <span v-if="node.status === 'connected'" class="status-active">● 活跃</span>
                     <span v-else-if="node.status === 'stopped'" class="status-standby">○ 离线</span>
@@ -385,26 +388,25 @@ onMounted(() => {
                     </div>
                   </td>
 
-                  <!-- 截图同款普通固定蓝标签 -->
+                  <!-- 接入类型: 普通固定 (本地) / SSH穿透 (远程) -->
                   <td>
                     <span v-if="node.is_local" class="tag-plan-blue">普通固定 (本地)</span>
                     <span v-else class="tag-plan-indigo">SSH 穿透 (远程)</span>
                   </td>
 
-                  <!-- 截图同款专属凭证二维码蓝按钮 -->
+                  <!-- 同步角色: 截图同款专属凭证二维码蓝按钮 -->
                   <td>
-                    <button v-if="node.is_source" class="btn-qrcode">🪪 凭证/默认源</button>
+                    <button v-if="node.is_source" class="btn-qrcode">★ 默认源节点</button>
                     <button v-else @click="setSource(node.id)" class="btn-set-source">设为源</button>
                   </td>
 
-                  <!-- 截图同款横排微型彩色治理按钮组 -->
+                  <!-- 治理操作: 截图同款横排微型彩色治理按钮组 -->
                   <td style="text-align: right;">
                     <div class="btn-group-row">
                       <button @click="toggleTunnel(node)" class="btn-micro btn-orange">
-                        🔑 {{ node.is_local ? '测试' : (node.status === 'connected' ? '断开' : '穿透') }}
+                        🔑 {{ node.is_local ? '测试连通' : (node.status === 'connected' ? '断开' : '穿透') }}
                       </button>
-                      <button @click="probeNode(node)" class="btn-micro btn-red">🔀 探针</button>
-                      <button @click="setSource(node.id)" class="btn-micro btn-purple">✏️ 配额</button>
+                      <button @click="probeNode(node)" class="btn-micro btn-purple">🔀 探针</button>
                       <button @click="deleteNode(node.id)" class="btn-micro btn-trash">🗑️</button>
                     </div>
                   </td>
@@ -414,23 +416,23 @@ onMounted(() => {
           </div>
         </div>
 
-        <!-- 页面 2: Cookie 同步中心 -->
-        <div v-if="activeNav === 'sync'" class="content-card">
+        <!-- 页面 2: Cookie 同步调度中心 -->
+        <div v-if="activeNav === 'sync'" class="content-full-card">
           <div class="table-header-bar">
             <div class="table-title">
               <span class="icon-duo-users" style="color:#38bdf8;">🌐</span>
-              <h2>Cookie 集群全自动同步与调度治理</h2>
+              <h2>全网 Cookie 自动同步与集群调度治理</h2>
             </div>
             <button @click="triggerSync" :disabled="isSyncing" class="btn-primary-gradient">
-              {{ isSyncing ? '同步中...' : '⚡ 立即触发同步' }}
+              {{ isSyncing ? '同步调度中...' : '⚡ 立即触发同步' }}
             </button>
           </div>
           <div class="info-banner-blue">
-            <p>• 定时调度：后台常驻引擎每 <span style="color:#00f0ff; font-weight:bold;">15 分钟</span> 自动从默认源节点抓取最新全量 Cookies 并分发到所有活跃节点。</p>
-            <p>• 本地加速：本地直连节点跳过 SSH 隧道，直接通过 CDP WebSocket 极速注入。</p>
+            <p>• 定时调度机制：系统后台每隔 <span style="color:#00f0ff; font-weight:bold;">15 分钟</span> 自动从默认源节点抓取最新全量 Cookies 并极速注入所有活跃目标节点。</p>
+            <p>• 本地加速特性：本地直连节点跳过 SSH 隧道封装，直接通过本机 CDP WebSocket 极速注入，耗时近乎零开销。</p>
           </div>
           <div style="margin-top:20px;">
-            <h3 style="font-size:13px; font-weight:bold; color:#cbd5e1; margin-bottom:8px;">最近调度审计事件：</h3>
+            <h3 style="font-size:13px; font-weight:bold; color:#cbd5e1; margin-bottom:8px;">调度审计追踪事件：</h3>
             <div class="console-box">
               <div v-for="l in logs" :key="l.id" class="console-item">
                 <div class="console-meta">
@@ -444,10 +446,10 @@ onMounted(() => {
           </div>
         </div>
 
-        <!-- 页面 3: 告警预警与发信 (双列对称) -->
-        <div v-if="activeNav === 'notifications'" class="grid-2col">
+        <!-- 页面 3: 告警预警与发信中心 (左右双列对称) -->
+        <div v-if="activeNav === 'notifications'" class="grid-2col-fluid">
           <!-- SMTP -->
-          <div class="content-card">
+          <div class="content-full-card">
             <div class="table-header-bar">
               <h3 class="card-inner-h3">📧 SMTP 邮件发信通道</h3>
               <button @click="testEmail" class="link-probe" style="font-size:12px;">发送测试邮件</button>
@@ -455,16 +457,16 @@ onMounted(() => {
             <div class="form-v-stack">
               <div>
                 <label class="form-label">SMTP 发信服务器</label>
-                <input v-model="notif.smtp_host" placeholder="smtp.qq.com" class="xray-input">
+                <input v-model="notif.smtp_host" placeholder="smtp.qq.com" class="cdp-input">
               </div>
               <div class="row-flex-gap">
                 <div style="flex:1;">
                   <label class="form-label">端口</label>
-                  <input v-model="notif.smtp_port" placeholder="465" class="xray-input">
+                  <input v-model="notif.smtp_port" placeholder="465" class="cdp-input">
                 </div>
                 <div style="flex:1;">
                   <label class="form-label">加密协议</label>
-                  <select v-model="notif.smtp_ssl" class="xray-input">
+                  <select v-model="notif.smtp_ssl" class="cdp-input">
                     <option :value="true">SSL / TLS</option>
                     <option :value="false">STARTTLS / 明文</option>
                   </select>
@@ -472,22 +474,22 @@ onMounted(() => {
               </div>
               <div>
                 <label class="form-label">发信账号</label>
-                <input v-model="notif.smtp_user" placeholder="user@domain.com" class="xray-input">
+                <input v-model="notif.smtp_user" placeholder="user@domain.com" class="cdp-input">
               </div>
               <div>
                 <label class="form-label">发信授权码 / 密码</label>
-                <input v-model="notif.smtp_pass" type="password" placeholder="授权码" class="xray-input">
+                <input v-model="notif.smtp_pass" type="password" placeholder="授权码" class="cdp-input">
               </div>
               <div>
                 <label class="form-label">接收预警邮箱</label>
-                <input v-model="notif.smtp_to" placeholder="admin@domain.com" class="xray-input">
+                <input v-model="notif.smtp_to" placeholder="admin@domain.com" class="cdp-input">
               </div>
               <button @click="saveNotif" class="btn-primary-gradient" style="width:100%; padding:10px;">保存邮件配置</button>
             </div>
           </div>
 
-          <!-- Server酱 -->
-          <div class="content-card">
+          <!-- Server酱微信 -->
+          <div class="content-full-card">
             <div class="table-header-bar">
               <h3 class="card-inner-h3">📱 Server酱 (微信推送)</h3>
               <button @click="testServerChan" class="link-probe" style="font-size:12px;">发送微信测试</button>
@@ -499,7 +501,7 @@ onMounted(() => {
               </div>
               <div>
                 <label class="form-label">Server酱 SendKey</label>
-                <input v-model="notif.serverchan_key" placeholder="SCTxxxxxxxxxxxxxxxx" class="xray-input" style="font-family:monospace;">
+                <input v-model="notif.serverchan_key" placeholder="SCTxxxxxxxxxxxxxxxx" class="cdp-input" style="font-family:monospace;">
                 <p style="font-size:11px; color:#64748b; margin-top:6px;">在 sct.ftqq.com 申请的 SendKey。同步失败或节点下线时自动推送到微信。</p>
               </div>
               <button @click="saveNotif" class="btn-primary-gradient" style="width:100%; padding:10px; margin-top:30px;">保存微信配置</button>
@@ -508,27 +510,27 @@ onMounted(() => {
         </div>
 
         <!-- 页面 4: 全局运维配置与账号安全 -->
-        <div v-if="activeNav === 'settings'" class="grid-2col">
-          <div class="content-card">
-            <h3 class="card-inner-h3" style="margin-bottom:16px;">👤 管理员账号与登录凭证</h3>
+        <div v-if="activeNav === 'settings'" class="grid-2col-fluid">
+          <div class="content-full-card">
+            <h3 class="card-inner-h3" style="margin-bottom:16px;">👤 管理员账号与登录安全</h3>
             <form @submit.prevent="saveProfile" class="form-v-stack">
               <div>
                 <label class="form-label">登录用户名</label>
-                <input v-model="profile.username" required class="xray-input">
+                <input v-model="profile.username" required class="cdp-input">
               </div>
               <div>
                 <label class="form-label">绑定邮箱 (支持直接登录)</label>
-                <input v-model="profile.email" type="email" required class="xray-input">
+                <input v-model="profile.email" type="email" required class="cdp-input">
               </div>
               <div>
                 <label class="form-label">重置新密码 (留空则不改)</label>
-                <input v-model="profile.new_password" type="password" placeholder="至少 6 位安全字符" minlength="6" class="xray-input">
+                <input v-model="profile.new_password" type="password" placeholder="至少 6 位安全字符" minlength="6" class="cdp-input">
               </div>
               <button type="submit" class="btn-primary-gradient" style="width:100%; padding:10px; margin-top:10px;">保存账号修改</button>
             </form>
           </div>
 
-          <div class="content-card">
+          <div class="content-full-card">
             <div class="table-header-bar">
               <h3 class="card-inner-h3">🔑 SSH 密钥存储库</h3>
               <span style="font-size:12px; color:#64748b;">{{ keys.length }} 个凭据</span>
@@ -573,12 +575,12 @@ onMounted(() => {
 
             <div>
               <label class="form-label">节点名称</label>
-              <input v-model="newNode.name" required placeholder="如: 本机 Chrome 01" class="xray-input">
+              <input v-model="newNode.name" required placeholder="如: 本机 Chrome 01" class="cdp-input">
             </div>
 
             <div v-if="newNode.is_local" style="background:#09122a; padding:12px; border-radius:6px; border:1px solid #172554;">
               <label class="form-label">本地 CDP 调试端口 (默认 9222)</label>
-              <input v-model="newNode.local_bind_port" type="number" required placeholder="9222" class="xray-input font-cyan-mono">
+              <input v-model="newNode.local_bind_port" type="number" required placeholder="9222" class="cdp-input font-cyan-mono">
               <p style="font-size:11px; color:#64748b; margin-top:6px;">直接接入本机 Chromium 实例，无需任何 SSH 握手开销。</p>
             </div>
 
@@ -586,22 +588,22 @@ onMounted(() => {
               <div class="row-flex-gap">
                 <div style="flex:1;">
                   <label class="form-label">SSH 主机 / IP</label>
-                  <input v-model="newNode.ssh_host" required placeholder="192.168.1.100" class="xray-input" style="font-family:monospace;">
+                  <input v-model="newNode.ssh_host" required placeholder="192.168.1.100" class="cdp-input" style="font-family:monospace;">
                 </div>
                 <div style="flex:1;">
                   <label class="form-label">SSH 端口</label>
-                  <input v-model="newNode.ssh_port" type="number" placeholder="22" class="xray-input" style="font-family:monospace;">
+                  <input v-model="newNode.ssh_port" type="number" placeholder="22" class="cdp-input" style="font-family:monospace;">
                 </div>
               </div>
 
               <div>
                 <label class="form-label">SSH 用户名</label>
-                <input v-model="newNode.ssh_user" required placeholder="root" class="xray-input" style="font-family:monospace;">
+                <input v-model="newNode.ssh_user" required placeholder="root" class="cdp-input" style="font-family:monospace;">
               </div>
 
               <div>
                 <label class="form-label">绑定 SSH 证书 (选填)</label>
-                <select v-model="newNode.ssh_key_filename" class="xray-input" style="font-family:monospace;">
+                <select v-model="newNode.ssh_key_filename" class="cdp-input" style="font-family:monospace;">
                   <option value="">密码认证 (不选择私钥)</option>
                   <option v-for="k in keys" :key="k.filename" :value="k.filename">🔑 {{ k.filename }}</option>
                 </select>
@@ -609,17 +611,17 @@ onMounted(() => {
 
               <div v-if="!newNode.ssh_key_filename">
                 <label class="form-label">SSH 密码</label>
-                <input v-model="newNode.ssh_password" type="password" placeholder="••••••••" class="xray-input">
+                <input v-model="newNode.ssh_password" type="password" placeholder="••••••••" class="cdp-input">
               </div>
 
               <div class="row-flex-gap">
                 <div style="flex:1;">
                   <label class="form-label">远程 CDP 端口</label>
-                  <input v-model="newNode.remote_cdp_port" type="number" placeholder="9222" class="xray-input" style="font-family:monospace;">
+                  <input v-model="newNode.remote_cdp_port" type="number" placeholder="9222" class="cdp-input" style="font-family:monospace;">
                 </div>
                 <div style="flex:1;">
                   <label class="form-label">本地穿透绑定端口</label>
-                  <input v-model="newNode.local_bind_port" type="number" required placeholder="19222" class="xray-input font-cyan-mono">
+                  <input v-model="newNode.local_bind_port" type="number" required placeholder="19222" class="cdp-input font-cyan-mono">
                 </div>
               </div>
             </div>
@@ -637,17 +639,18 @@ onMounted(() => {
 </template>
 
 <style scoped>
-/* ==================== 1:1 像素级复现截图的纯正原生 CSS ==================== */
+/* ==================== 纯原生 CSS，100% 全屏流式自适应排版 ==================== */
 
-.xray-viewport {
+.cdp-app-viewport {
   min-height: 100vh;
   width: 100%;
   background-color: #060b17;
   color: #f8fafc;
+  box-sizing: border-box;
 }
 
-/* 1. 登录界面：绝对垂直水平死锁居中 */
-.login-wrapper-center {
+/* 1. 登录窗口绝对死锁垂直水平居中 */
+.login-screen-center {
   min-height: 100vh;
   width: 100vw;
   display: flex !important;
@@ -655,6 +658,7 @@ onMounted(() => {
   justify-content: center !important;
   background-color: #060b17;
   padding: 20px;
+  box-sizing: border-box;
 }
 
 .login-card-navy {
@@ -665,6 +669,7 @@ onMounted(() => {
   border-radius: 14px;
   padding: 32px;
   box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.7);
+  box-sizing: border-box;
 }
 
 .login-brand-line {
@@ -677,15 +682,16 @@ onMounted(() => {
 }
 
 .bolt-symbol { color: #f59e0b; font-size: 19px; font-weight: bold; }
-.brand-xray  { font-weight: 800; font-size: 16px; color: #ffffff; letter-spacing: 1px; }
-.brand-reality { font-weight: 800; font-size: 16px; color: #00f0ff; letter-spacing: 1px; }
+.brand-white { font-weight: 800; font-size: 16px; color: #ffffff; letter-spacing: 1px; }
+.brand-cyan  { font-weight: 800; font-size: 16px; color: #00f0ff; letter-spacing: 1px; }
 
 .login-form-stack { display: flex; flex-direction: column; gap: 16px; }
 .form-row { display: flex; flex-direction: column; gap: 6px; }
 .form-label { font-size: 12px; color: #94a3b8; }
 
-.xray-input {
+.cdp-input {
   width: 100%;
+  box-sizing: border-box;
   background-color: #0f1c3f;
   border: 1px solid #1e3a8a;
   color: #ffffff;
@@ -695,7 +701,7 @@ onMounted(() => {
   outline: none;
   transition: all 0.2s;
 }
-.xray-input:focus {
+.cdp-input:focus {
   border-color: #00f0ff;
   box-shadow: 0 0 8px rgba(0, 240, 255, 0.35);
 }
@@ -728,21 +734,24 @@ onMounted(() => {
 }
 .btn-primary-gradient:hover { opacity: 0.9; transform: translateY(-1px); }
 
-/* 2. 顶栏 (截图同款) */
-.dashboard-layout {
+/* 2. 顶栏 (通顶铺满) */
+.dashboard-fluid-layout {
   min-height: 100vh;
+  width: 100%;
   display: flex;
   flex-direction: column;
 }
 
-.header-bar {
+.header-full-bar {
   height: 60px;
+  width: 100%;
   padding: 0 32px;
   background-color: #060b17;
   border-bottom: 1px solid #111c38;
   display: flex;
   justify-content: space-between;
   align-items: center;
+  box-sizing: border-box;
 }
 
 .header-left { display: flex; align-items: center; gap: 8px; }
@@ -771,29 +780,32 @@ onMounted(() => {
 }
 .btn-logout:hover { border-color: #9ca3af; color: #ffffff; }
 
-/* 3. 主工作区与顶置 4 个大卡片 (强制 4 列横排平铺) */
-.main-container {
-  width: 100%;
-  max-width: 1560px;
-  margin: 0 auto;
+/* 3. 全屏流式自适应主容器 (100% 撑开，消除居中窄框死角) */
+.main-fluid-canvas {
+  width: 100% !important;
+  max-width: 100% !important;
+  flex: 1;
   padding: 20px 32px;
+  box-sizing: border-box;
   display: flex;
   flex-direction: column;
   gap: 20px;
 }
 
-.cards-grid-4 {
+/* 4. 核心 4 个大卡片横排平铺 */
+.top-cards-row-4 {
   display: grid !important;
   grid-template-columns: repeat(4, 1fr) !important;
   gap: 16px !important;
   width: 100%;
+  box-sizing: border-box;
 }
 
-@media (max-width: 1150px) {
-  .cards-grid-4 { grid-template-columns: repeat(2, 1fr) !important; }
+@media (max-width: 1200px) {
+  .top-cards-row-4 { grid-template-columns: repeat(2, 1fr) !important; }
 }
 @media (max-width: 680px) {
-  .cards-grid-4 { grid-template-columns: 1fr !important; }
+  .top-cards-row-4 { grid-template-columns: 1fr !important; }
 }
 
 .kpi-card {
@@ -806,6 +818,7 @@ onMounted(() => {
   justify-content: space-between;
   cursor: pointer;
   transition: all 0.2s ease;
+  box-sizing: border-box;
 }
 
 .kpi-card:hover {
@@ -838,7 +851,7 @@ onMounted(() => {
 
 .kpi-info { display: flex; flex-direction: column; gap: 3px; }
 .kpi-title { font-size: 13px; font-weight: bold; color: #ffffff; }
-.kpi-desc  { font-size: 11px; color: #64748b; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 200px; }
+.kpi-desc  { font-size: 11px; color: #64748b; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 260px; }
 
 .pill-badge {
   background-color: #0f1f42;
@@ -851,12 +864,14 @@ onMounted(() => {
   white-space: nowrap;
 }
 
-/* 4. 主内容大容器与治理列表 (1:1 截图结构) */
-.content-card {
+/* 5. 主内容卡片容器 (100% 满宽流式排版) */
+.content-full-card {
+  width: 100%;
   background-color: #0b132b;
   border: 1px solid #172554;
   border-radius: 14px;
   padding: 20px;
+  box-sizing: border-box;
 }
 
 .table-header-bar {
@@ -873,13 +888,13 @@ onMounted(() => {
 .table-title h2 { font-size: 15px; font-weight: bold; color: #ffffff; }
 
 .table-responsive { width: 100%; overflow-x: auto; }
-.xray-table {
+.cdp-fluid-table {
   width: 100%;
   border-collapse: collapse;
   font-size: 12px;
 }
 
-.xray-table th {
+.cdp-fluid-table th {
   color: #64748b;
   font-weight: 500;
   padding: 12px 14px;
@@ -887,7 +902,7 @@ onMounted(() => {
   text-align: left;
 }
 
-.xray-table td {
+.cdp-fluid-table td {
   padding: 14px;
   border-bottom: 1px solid #131e3d;
   vertical-align: middle;
@@ -896,7 +911,7 @@ onMounted(() => {
 .cell-main-name { font-weight: bold; color: #ffffff; font-size: 13px; }
 .cell-sub-desc  { font-size: 11px; color: #64748b; font-family: monospace; margin-top: 3px; }
 
-/* 截图同款绿色胶囊: ● 活跃 */
+/* 状态胶囊: ● 活跃 */
 .status-active {
   background-color: rgba(6, 78, 59, 0.85);
   border: 1px solid #059669;
@@ -940,11 +955,11 @@ onMounted(() => {
 }
 .link-probe { background: none; border: none; color: #38bdf8; cursor: pointer; text-decoration: underline; font-size: 10px; margin-left: 4px; }
 
-/* 截图同款普通固定蓝胶囊 */
+/* 套餐特性风格 -> 普通固定蓝标签 */
 .tag-plan-blue { background-color: #1e40af; color: #93c5fd; border-radius: 4px; padding: 2px 8px; font-size: 11px; }
 .tag-plan-indigo { background-color: #312e81; color: #c7d2fe; border-radius: 4px; padding: 2px 8px; font-size: 11px; }
 
-/* 截图同款专属凭证二维码蓝按钮 */
+/* 专属凭证风格 -> 截图同款蓝按钮 */
 .btn-qrcode {
   background-color: #0284c7;
   color: #ffffff;
@@ -964,7 +979,7 @@ onMounted(() => {
   cursor: pointer;
 }
 
-/* 截图同款横排微型彩色治理按钮组 */
+/* 治理操作按钮组 */
 .btn-group-row { display: flex; gap: 6px; justify-content: flex-end; }
 .btn-micro { border: none; border-radius: 4px; padding: 4px 8px; font-size: 11px; font-weight: bold; color: #ffffff; cursor: pointer; }
 .btn-orange { background-color: #d97706; }
@@ -972,14 +987,15 @@ onMounted(() => {
 .btn-red    { background-color: #dc2626; }
 .btn-trash  { background-color: #991b1b; }
 
-/* 双列对称 */
-.grid-2col {
+/* 双列对称流式栅格 */
+.grid-2col-fluid {
   display: grid;
   grid-template-columns: repeat(2, 1fr);
   gap: 20px;
+  width: 100%;
 }
-@media (max-width: 900px) {
-  .grid-2col { grid-template-columns: 1fr; }
+@media (max-width: 960px) {
+  .grid-2col-fluid { grid-template-columns: 1fr; }
 }
 
 .card-inner-h3 { font-size: 14px; font-weight: bold; color: #fff; }
@@ -1012,7 +1028,7 @@ onMounted(() => {
 .keys-list { list-style: none; padding: 0; margin: 0; }
 .key-row { display: flex; justify-content: space-between; padding: 10px 0; border-bottom: 1px solid #172554; font-size: 12px; }
 
-/* 弹窗遮罩与卡片 */
+/* 弹窗遮罩 */
 .modal-backdrop {
   position: fixed;
   inset: 0;
