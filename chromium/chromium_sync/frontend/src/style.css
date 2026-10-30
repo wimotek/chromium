@@ -3,111 +3,83 @@
 @tailwind utilities;
 
 :root {
-  --bg-obsidian: #080c14;
-  --card-slate: #0f172a;
-  --sub-deep: #0b1120;
-  --border-neon: rgba(56, 189, 248, 0.2);
-  --border-sub: #1e293b;
-  --cyan-main: #38bdf8;
+  --bg-main: #0b0f19;
+  --bg-card: #111827;
+  --bg-sub: #1f2937;
+  --border-card: #374151;
+  --text-main: #f9fafb;
+  --text-muted: #9ca3af;
+  --color-brand: #3b82f6;
 }
 
 body {
-  background-color: var(--bg-obsidian);
-  color: #f8fafc;
+  background-color: var(--bg-main);
+  color: var(--text-main);
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
-  overflow-x: hidden;
-  background-image: 
-    radial-gradient(circle at 50% 0%, rgba(56, 189, 248, 0.08) 0%, transparent 60%),
-    linear-gradient(rgba(255, 255, 255, 0.015) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(255, 255, 255, 0.015) 1px, transparent 1px);
-  background-size: 100% 100%, 32px 32px, 32px 32px;
+  letter-spacing: -0.01em;
 }
 
-/* 严格黄金比例输入框规范：70% 居中，最小260px，最大500px，移动端自适应 100% */
-.hud-input-ergonomic {
-  width: 70%;
-  min-width: 260px;
-  max-width: 500px;
-  background-color: #1e293b;
-  border: 1px solid #334155;
-  color: #f8fafc;
+/* 沉稳卡片 */
+.kuma-card {
+  background-color: var(--bg-card);
+  border: 1px solid #1f2937;
+  border-radius: 0.75rem;
+  box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.3), 0 2px 4px -2px rgba(0, 0, 0, 0.2);
+}
+
+.kuma-input {
+  background-color: #1f2937;
+  border: 1px solid #374151;
+  color: #f9fafb;
+  border-radius: 0.5rem;
+  padding: 0.625rem 0.875rem;
+  font-size: 0.875rem;
   outline: none;
-  transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
 }
 
-@media (max-width: 640px) {
-  .hud-input-ergonomic {
-    width: 100% !important;
-    min-width: 100% !important;
-  }
+.kuma-input:focus {
+  border-color: #3b82f6;
+  box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.2);
 }
 
-.hud-input-ergonomic:focus,
-.hud-dialog-input:focus {
-  border-color: #38bdf8;
-  box-shadow: 0 0 12px rgba(56, 189, 248, 0.35);
-  background-color: #0f172a;
-}
-
-/* 模态框专用 100% 满宽输入框 */
-.hud-dialog-input {
-  width: 100%;
-  background-color: #1e293b;
-  border: 1px solid #334155;
-  color: #f8fafc;
-  outline: none;
-  transition: all 0.25s ease;
-}
-
-/* 赛博朋克控制台 HUD 卡片与质感 */
-.hud-card {
-  background-color: #0f172a;
-  border: 1px solid rgba(56, 189, 248, 0.2);
-  border-radius: 12px;
-  position: relative;
-  box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.5);
-}
-
-.hud-card-sub {
-  background-color: #0b1120;
-  border: 1px solid #1e293b;
-  border-radius: 8px;
-}
-
-/* 呼吸微发光与上浮动画 */
-.hud-btn-primary {
-  background: linear-gradient(135deg, #0284c7, #2563eb);
+/* 按钮微光过渡 */
+.kuma-btn-primary {
+  background-color: #2563eb;
   color: #ffffff;
-  border: 1px solid rgba(56, 189, 248, 0.4);
-  transition: all 0.25s ease;
+  font-weight: 500;
+  border-radius: 0.5rem;
+  transition: background-color 0.15s ease, transform 0.1s ease;
+}
+.kuma-btn-primary:hover {
+  background-color: #1d4ed8;
 }
 
-.hud-btn-primary:hover {
-  transform: translateY(-2px);
-  box-shadow: 0 0 18px rgba(56, 189, 248, 0.4);
+.kuma-btn-secondary {
+  background-color: #1f2937;
+  color: #d1d5db;
+  border: 1px solid #374151;
+  border-radius: 0.5rem;
+  transition: background-color 0.15s ease;
+}
+.kuma-btn-secondary:hover {
+  background-color: #374151;
+  color: #ffffff;
 }
 
-.hud-btn-action {
-  transition: all 0.2s ease;
+/* 状态徽章 */
+.badge-online {
+  background-color: rgba(16, 185, 129, 0.15);
+  color: #34d399;
+  border: 1px solid rgba(16, 185, 129, 0.25);
 }
-
-.hud-btn-action:hover {
-  transform: translateY(-1.5px);
-  box-shadow: 0 0 12px rgba(56, 189, 248, 0.25);
+.badge-standby {
+  background-color: rgba(245, 158, 11, 0.15);
+  color: #fbbf24;
+  border: 1px solid rgba(245, 158, 11, 0.25);
 }
-
-/* 滚动条极客暗黑定制 */
-::-webkit-scrollbar {
-  width: 6px;
-  height: 6px;
-}
-::-webkit-scrollbar-track {
-  background: #080c14;
-}
-::-webkit-scrollbar-thumb {
-  background: #1e293b;
-  border-radius: 3px;
-}
-::-webkit-scrollbar-thumb:hover {
-  background: #38bdf8;
+.badge-danger {
+  background-color: rgba(239, 68, 68, 0.15);
+  color: #f87171;
+  border: 1px solid rgba(239, 68, 68, 0.25);
 }

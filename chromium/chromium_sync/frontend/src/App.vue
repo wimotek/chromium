@@ -2,19 +2,37 @@
 import { ref, reactive, computed, onMounted } from 'vue'
 
 const token = ref(localStorage.getItem('token') || '')
+const currentTab = ref('nodes') // 'nodes' | 'notifications' | 'keys' | 'profile' | 'logs'
 const captchaSvg = ref('')
+
 const nodes = ref([])
 const keys = ref([])
 const logs = ref([])
 const isSyncing = ref(false)
 const showNodeModal = ref(false)
-const showPwdModal = ref(false)
-const newPassword = ref('')
 
 const loginForm = reactive({
+  account: '', // 邮箱或用户名
   password: '',
   captcha_token: '',
   captcha_answer: ''
+})
+
+const profile = reactive({
+  username: '',
+  email: '',
+  new_password: ''
+})
+
+const notif = reactive({
+  smtp_host: '',
+  smtp_port: '465',
+  smtp_ssl: true,
+  smtp_user: '',
+  smtp_pass: '',
+  smtp_to: '',
+  serverchan_key: '',
+  serverchan_enabled: false
 })
 
 const newNode = reactive({
@@ -28,36 +46,22 @@ const newNode = reactive({
   local_bind_port: 19222
 })
 
-// 统计面板指标计算
-const totalCookies = computed(() => {
-  return nodes.value.reduce((acc, cur) => acc + (cur.cookie_count || 0), 0)
-})
-const connectedTunnels = computed(() => {
-  return nodes.value.filter(n => n.status === 'connected').length
-})
-const sourceNode = computed(() => {
-  return nodes.value.find(n => n.is_source === 1)
-})
+const totalCookies = computed(() => nodes.value.reduce((acc, n) => acc + (n.cookie_count || 0), 0))
+const onlineCount = computed(() => nodes.value.filter(n => n.status === 'connected').length)
 
 const api = async (url, options = {}) => {
   options.headers = options.headers || {}
-  if (token.value) {
-    options.headers['Authorization'] = `Bearer ${token.value}`
-  }
+  if (token.value) options.headers['Authorization'] = `Bearer ${token.value}`
   const res = await fetch(url, options)
   if (res.status === 401) logout()
   return res
 }
 
 const refreshCaptcha = async () => {
-  try {
-    const res = await fetch('/api/captcha')
-    const data = await res.json()
-    captchaSvg.value = data.svg
-    loginForm.captcha_token = data.token
-  } catch (e) {
-    console.error('获取验证码失败', e)
-  }
+  const res = await fetch('/api/captcha')
+  const data = await res.json()
+  captchaSvg.value = data.svg
+  loginForm.captcha_token = data.token
 }
 
 const login = async () => {
@@ -72,7 +76,7 @@ const login = async () => {
     localStorage.setItem('token', data.token)
     loadAll()
   } else {
-    alert(data.detail || '认证失败，请核对信息')
+    alert(data.detail || '认证失败')
     refreshCaptcha()
   }
 }
@@ -84,14 +88,25 @@ const logout = () => {
 }
 
 const loadAll = async () => {
-  const [n, k, l] = await Promise.all([
+  const [nRes, kRes, lRes, pRes, sRes] = await Promise.all([
     api('/api/nodes'),
     api('/api/ssh-keys'),
-    api('/api/sync/logs')
+    api('/api/sync/logs'),
+    api('/api/profile'),
+    api('/api/notifications/settings')
   ])
-  nodes.value = await n.json()
-  keys.value = await k.json()
-  logs.value = await l.json()
+  nodes.value = await nRes.json()
+  keys.value = await kRes.json()
+  logs.value = await lRes.json()
+  Object.assign(profile, await pRes.json())
+  Object.assign(notif, await sRes.json())
+}
+
+// 主动探测节点最新 Cookie
+const probeNode = async (node) => {
+  const res = await api(`/api/nodes/${node.id}/probe`, { method: 'POST' })
+  const data = await res.json()
+  node.cookie_count = data.cookie_count
 }
 
 const triggerSync = async () => {
@@ -101,14 +116,14 @@ const triggerSync = async () => {
     const res = await api('/api/sync/trigger', { method: 'POST' })
     const data = await res.json()
     alert(data.message)
-    await loadAll()
+    loadAll()
   } finally {
     isSyncing.value = false
   }
 }
 
-const toggleTunnel = async (id) => {
-  await api(`/api/nodes/${id}/toggle-tunnel`, { method: 'POST' })
+const toggleTunnel = async (node) => {
+  await api(`/api/nodes/${node.id}/toggle-tunnel`, { method: 'POST' })
   loadAll()
 }
 
@@ -118,7 +133,7 @@ const setSource = async (id) => {
 }
 
 const deleteNode = async (id) => {
-  if (confirm('确认销毁该节点隧道与同步配置？')) {
+  if (confirm('确认删除此节点配置？')) {
     await api(`/api/nodes/${id}`, { method: 'DELETE' })
     loadAll()
   }
@@ -131,11 +146,43 @@ const createNode = async () => {
     body: JSON.stringify(newNode)
   })
   showNodeModal.value = false
-  // 重置表单
   newNode.name = ''
   newNode.ssh_host = ''
   newNode.local_bind_port += 1
   loadAll()
+}
+
+const saveNotif = async () => {
+  const res = await api('/api/notifications/settings', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(notif)
+  })
+  if (res.ok) alert('通知配置已更新')
+}
+
+const testEmail = async () => {
+  const res = await api('/api/notifications/test-email', { method: 'POST' })
+  const data = await res.json()
+  alert(data.message || data.detail)
+}
+
+const testServerChan = async () => {
+  const res = await api('/api/notifications/test-serverchan', { method: 'POST' })
+  const data = await res.json()
+  alert(data.message || data.detail)
+}
+
+const saveProfile = async () => {
+  const res = await api('/api/profile', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(profile)
+  })
+  if (res.ok) {
+    alert('账号信息已更新')
+    if (profile.new_password) logout()
+  }
 }
 
 const uploadKey = async (e) => {
@@ -148,422 +195,419 @@ const uploadKey = async (e) => {
 }
 
 const deleteKey = async (name) => {
-  if (confirm(`确认销毁证书 [${name}]？`)) {
+  if (confirm(`确认销毁密钥 [${name}]？`)) {
     await api(`/api/ssh-keys/${name}`, { method: 'DELETE' })
     loadAll()
   }
 }
 
-const changePassword = async () => {
-  const res = await api('/api/change-password', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ new_password: newPassword.value })
-  })
-  if (res.ok) {
-    alert('密码更新完毕，请重新鉴权')
-    logout()
-  }
-}
-
 onMounted(() => {
-  if (!token.value) {
-    refreshCaptcha()
-  } else {
-    loadAll()
-  }
+  if (!token.value) refreshCaptcha()
+  else loadAll()
 })
 </script>
 
 <template>
-  <div class="min-h-screen flex flex-col selection:bg-cyan-500 selection:text-black">
-    <!-- 1. 登录面板 (严格黄金比例输入框) -->
+  <div class="min-h-screen flex flex-col bg-[#0b0f19] text-slate-100">
+    <!-- 登录视图 (支持用户名或邮箱) -->
     <div v-if="!token" class="flex-1 flex items-center justify-center p-6">
-      <div class="hud-card p-8 w-full max-w-lg border border-cyan-500/30 backdrop-blur-md">
-        <div class="flex items-center justify-center gap-3 mb-2">
-          <div class="w-3 h-3 bg-cyan-400 rounded-full animate-pulse shadow-[0_0_12px_#38bdf8]"></div>
-          <h1 class="text-2xl font-black tracking-widest text-transparent bg-clip-text bg-gradient-to-r from-cyan-400 to-blue-500 font-mono">
-            OBSIDIAN // SYNC-HUD
-          </h1>
+      <div class="kuma-card p-8 w-full max-w-md bg-[#111827] border border-gray-800 rounded-xl shadow-2xl">
+        <div class="flex items-center gap-3 mb-6">
+          <div class="w-3.5 h-3.5 bg-blue-500 rounded-full"></div>
+          <h1 class="text-xl font-bold tracking-tight text-white font-sans">CDP 集群控制台</h1>
         </div>
-        <p class="text-slate-400 text-xs text-center font-mono tracking-wider mb-8">[CDP CLUSTER TUNNEL & COOKIE MATRIX]</p>
 
-        <form @submit.prevent="login" class="flex flex-col items-center space-y-6">
-          <div class="w-full flex flex-col items-center">
-            <span class="text-xs text-slate-400 mb-1.5 self-start sm:pl-[15%] font-mono tracking-wider">ROOT ACCESS KEY // 密码</span>
+        <form @submit.prevent="login" class="space-y-4">
+          <div>
+            <label class="block text-xs font-medium text-gray-400 mb-1.5">邮箱地址 或 用户名</label>
+            <input 
+              v-model="loginForm.account" 
+              required 
+              placeholder="admin 或 admin@wimotek.com"
+              class="w-full kuma-input"
+            >
+          </div>
+
+          <div>
+            <label class="block text-xs font-medium text-gray-400 mb-1.5">登录密码</label>
             <input 
               type="password" 
               v-model="loginForm.password" 
               required 
               placeholder="••••••••••••"
-              class="hud-input-ergonomic px-4 py-2.5 rounded-lg text-sm"
+              class="w-full kuma-input"
             >
           </div>
 
-          <div class="w-full flex flex-col items-center">
-            <span class="text-xs text-slate-400 mb-1.5 self-start sm:pl-[15%] font-mono tracking-wider">BOT CHALLENGE // 算术验证</span>
-            <div class="hud-input-ergonomic flex items-center gap-2 p-1.5 rounded-lg border border-slate-700 bg-slate-800">
+          <div>
+            <label class="block text-xs font-medium text-gray-400 mb-1.5">人机验证</label>
+            <div class="flex items-center gap-2">
               <input 
-                type="text" 
                 v-model="loginForm.captcha_answer" 
                 required 
                 placeholder="计算答案"
-                class="w-1/2 px-3 py-1.5 bg-slate-900 border border-slate-700 rounded text-slate-100 text-sm focus:border-cyan-400 outline-none font-mono"
+                class="w-1/2 kuma-input"
               >
-              <div @click="refreshCaptcha" class="w-1/2 flex justify-center cursor-pointer overflow-hidden rounded" title="点击刷新挑战">
+              <div @click="refreshCaptcha" class="w-1/2 flex justify-center cursor-pointer bg-gray-800 rounded-lg p-1 border border-gray-700" title="点击刷新验证码">
                 <div v-html="captchaSvg"></div>
               </div>
             </div>
           </div>
 
-          <button type="submit" class="hud-input-ergonomic py-2.5 hud-btn-primary rounded-lg font-mono text-sm tracking-widest font-bold">
-            INITIALIZE SESSION
+          <button type="submit" class="w-full py-2.5 kuma-btn-primary mt-2">
+            登 录
           </button>
         </form>
       </div>
     </div>
 
-    <!-- 2. HUD 赛博朋克控制台主界面 -->
+    <!-- 登录后主控制台 (卡片分类 Tab 导航) -->
     <div v-else class="flex-1 flex flex-col">
-      <!-- 磨砂半透明毛玻璃顶栏 -->
-      <header class="h-16 px-8 border-b border-cyan-500/20 sticky top-0 z-40 flex items-center justify-between"
-              style="background: rgba(13, 19, 33, 0.85); backdrop-filter: blur(10px);">
-        <div class="flex items-center space-x-4">
-          <span class="relative flex h-3 w-3">
-            <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-cyan-400 opacity-75"></span>
-            <span class="relative inline-flex rounded-full h-3 w-3 bg-cyan-500"></span>
-          </span>
-          <span class="font-mono font-bold text-lg text-cyan-400 tracking-wider">CHROMIUM.CDP // SYNC-MATRIX</span>
-          <span class="hidden md:inline-block px-2 py-0.5 text-[11px] font-mono bg-cyan-950/60 text-cyan-300 border border-cyan-500/30 rounded">SYS.VER.2.4</span>
+      <!-- 顶部导航 -->
+      <header class="h-16 px-6 border-b border-gray-800 bg-[#111827]/90 sticky top-0 z-30 flex items-center justify-between">
+        <div class="flex items-center space-x-3">
+          <div class="w-3 h-3 bg-emerald-500 rounded-full animate-pulse"></div>
+          <span class="font-bold text-base tracking-tight text-white">Chromium CDP Hub</span>
+          <span class="text-xs px-2 py-0.5 rounded bg-gray-800 text-gray-400 border border-gray-700">v2.5</span>
         </div>
 
-        <div class="flex items-center gap-4">
-          <button 
-            @click="triggerSync" 
-            :disabled="isSyncing"
-            class="hud-btn-primary px-4 py-1.5 rounded-lg text-xs font-mono font-bold tracking-wider flex items-center gap-2"
-          >
-            <span v-if="isSyncing" class="animate-spin text-base">⟳</span>
-            <span v-else>⚡</span>
-            <span>{{ isSyncing ? 'SYNCING MATRIX...' : 'TRIGGER SYNC' }}</span>
+        <!-- 顶部操作 -->
+        <div class="flex items-center gap-3">
+          <button @click="triggerSync" :disabled="isSyncing" class="px-3.5 py-1.5 kuma-btn-primary text-xs flex items-center gap-1.5">
+            <span>{{ isSyncing ? '同步中...' : '⚡ 立即触发同步' }}</span>
           </button>
-          <button @click="showPwdModal = true" class="hud-btn-action px-3 py-1.5 bg-slate-800 border border-slate-700 text-slate-300 hover:text-white rounded-lg text-xs font-mono">
-            PASSKEY
-          </button>
-          <button @click="logout" class="hud-btn-action px-3 py-1.5 bg-red-950/40 border border-red-500/30 text-red-400 hover:bg-red-900/60 rounded-lg text-xs font-mono">
-            DISCONNECT
+          <button @click="logout" class="px-3 py-1.5 kuma-btn-secondary text-xs">
+            退出登录
           </button>
         </div>
       </header>
 
-      <!-- 控制台主体 -->
-      <main class="flex-1 p-6 md:p-8 max-w-7xl mx-auto w-full space-y-6">
-        
-        <!-- 核心指标 HUD 矩阵概览 -->
-        <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
-          <div class="hud-card p-4 flex flex-col justify-between">
-            <span class="text-[11px] font-mono text-slate-400 tracking-widest">[TOTAL NODES]</span>
-            <div class="mt-2 flex items-baseline justify-between">
-              <span class="text-2xl font-mono font-bold text-cyan-400">{{ nodes.length }}</span>
-              <span class="text-xs text-slate-500 font-mono">NODES</span>
-            </div>
-          </div>
+      <!-- 次级卡片分类导航栏 (Tabs) -->
+      <div class="px-6 border-b border-gray-800 bg-[#0d1322]">
+        <div class="max-w-7xl mx-auto flex space-x-1 sm:space-x-4">
+          <button 
+            @click="currentTab = 'nodes'"
+            :class="currentTab === 'nodes' ? 'border-blue-500 text-blue-400 font-medium' : 'border-transparent text-gray-400 hover:text-gray-200'"
+            class="py-3 px-3 border-b-2 text-sm flex items-center gap-2"
+          >
+            <span>🌐</span> <span>节点列表与监控</span>
+            <span class="text-xs px-1.5 py-0.2 rounded-full bg-gray-800 text-gray-300">{{ nodes.length }}</span>
+          </button>
 
-          <div class="hud-card p-4 flex flex-col justify-between">
-            <span class="text-[11px] font-mono text-slate-400 tracking-widest">[ACTIVE TUNNELS]</span>
-            <div class="mt-2 flex items-baseline justify-between">
-              <span class="text-2xl font-mono font-bold text-emerald-400">{{ connectedTunnels }}</span>
-              <span class="text-xs text-emerald-500 font-mono">ONLINE</span>
-            </div>
-          </div>
+          <button 
+            @click="currentTab = 'notifications'"
+            :class="currentTab === 'notifications' ? 'border-blue-500 text-blue-400 font-medium' : 'border-transparent text-gray-400 hover:text-gray-200'"
+            class="py-3 px-3 border-b-2 text-sm flex items-center gap-2"
+          >
+            <span>🔔</span> <span>告警与通知设置</span>
+          </button>
 
-          <div class="hud-card p-4 flex flex-col justify-between">
-            <span class="text-[11px] font-mono text-slate-400 tracking-widest">[COOKIES IN POOL]</span>
-            <div class="mt-2 flex items-baseline justify-between">
-              <span class="text-2xl font-mono font-bold text-amber-400">{{ totalCookies }}</span>
-              <span class="text-xs text-amber-500 font-mono">SYNCED</span>
-            </div>
-          </div>
+          <button 
+            @click="currentTab = 'keys'"
+            :class="currentTab === 'keys' ? 'border-blue-500 text-blue-400 font-medium' : 'border-transparent text-gray-400 hover:text-gray-200'"
+            class="py-3 px-3 border-b-2 text-sm flex items-center gap-2"
+          >
+            <span>🔑</span> <span>SSH 证书库</span>
+          </button>
 
-          <div class="hud-card p-4 flex flex-col justify-between">
-            <span class="text-[11px] font-mono text-slate-400 tracking-widest">[SOURCE NODE]</span>
-            <div class="mt-2 flex items-baseline justify-between truncate">
-              <span class="text-sm font-mono font-bold text-cyan-300 truncate">{{ sourceNode ? sourceNode.name : 'UNSET' }}</span>
-              <span class="text-[10px] px-1.5 py-0.5 rounded bg-cyan-950 text-cyan-400 border border-cyan-500/30">SRC</span>
-            </div>
-          </div>
-        </div>
+          <button 
+            @click="currentTab = 'profile'"
+            :class="currentTab === 'profile' ? 'border-blue-500 text-blue-400 font-medium' : 'border-transparent text-gray-400 hover:text-gray-200'"
+            class="py-3 px-3 border-b-2 text-sm flex items-center gap-2"
+          >
+            <span>👤</span> <span>安全与个人资料</span>
+          </button>
 
-        <!-- 节点列表控制面板 -->
-        <section class="hud-card p-6">
-          <div class="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 mb-6 pb-4 border-b border-slate-800">
-            <div>
-              <h2 class="text-base font-bold text-slate-100 tracking-wide font-mono flex items-center gap-2">
-                <span class="text-cyan-400">❖</span> CDP CLUSTER NODES // 节点状态矩阵
-              </h2>
-              <p class="text-xs text-slate-500 mt-1">管理各远程 Chrome 实例穿透映射与 Cookie 双向分发</p>
-            </div>
-            <button 
-              @click="showNodeModal = true" 
-              class="hud-btn-action px-3.5 py-1.5 bg-cyan-950/60 hover:bg-cyan-900/60 text-cyan-400 border border-cyan-500/40 rounded-lg text-xs font-mono font-bold tracking-wider flex items-center gap-1.5"
-            >
-              <span>+</span> <span>DEPLOY NODE</span>
-            </button>
-          </div>
-
-          <div class="overflow-x-auto">
-            <table class="w-full text-left text-sm">
-              <thead class="text-xs font-mono uppercase bg-[#080c14]/60 text-slate-500 border-b border-[#1e293b]">
-                <tr>
-                  <th class="p-3.5">角色</th>
-                  <th class="p-3.5">节点标识</th>
-                  <th class="p-3.5">SSH 凭证与目标</th>
-                  <th class="p-3.5">本地 CDP 映射端口</th>
-                  <th class="p-3.5">Cookie 统计</th>
-                  <th class="p-3.5">隧道状态</th>
-                  <th class="p-3.5">最近同步</th>
-                  <th class="p-3.5 text-right">操作指令</th>
-                </tr>
-              </thead>
-              <tbody class="divide-y divide-[#1e293b] font-mono text-xs">
-                <tr v-for="node in nodes" :key="node.id" class="hover:bg-slate-800/25 transition">
-                  <!-- 角色 -->
-                  <td class="p-3.5">
-                    <span v-if="node.is_source" class="inline-flex items-center px-2 py-0.5 rounded text-[10px] bg-cyan-500/20 text-cyan-300 border border-cyan-400/40 shadow-[0_0_8px_rgba(56,189,248,0.2)]">
-                      ★ 源节点 (SRC)
-                    </span>
-                    <button v-else @click="setSource(node.id)" class="text-slate-500 hover:text-cyan-400 transition text-[11px]">
-                      设为源
-                    </button>
-                  </td>
-
-                  <!-- 节点名称 -->
-                  <td class="p-3.5 font-sans font-bold text-slate-100">
-                    {{ node.name }}
-                  </td>
-
-                  <!-- SSH 连接 -->
-                  <td class="p-3.5 text-slate-300">
-                    <div>{{ node.ssh_user }}@{{ node.ssh_host }}:{{ node.ssh_port }}</div>
-                    <span v-if="node.ssh_key_filename" class="inline-block mt-1 px-1.5 py-0.2 rounded text-[10px] bg-cyan-950 text-cyan-400 border border-cyan-800/60">
-                      🔑 {{ node.ssh_key_filename }}
-                    </span>
-                    <span v-else class="inline-block mt-1 px-1.5 py-0.2 rounded text-[10px] bg-slate-800 text-slate-400 border border-slate-700">
-                      🔒 密码凭证
-                    </span>
-                  </td>
-
-                  <!-- 本地端口 -->
-                  <td class="p-3.5 text-cyan-400 font-bold">
-                    127.0.0.1:{{ node.local_bind_port }}
-                  </td>
-
-                  <!-- Cookie 统计 (核心新增数据展示) -->
-                  <td class="p-3.5">
-                    <div class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-[#0b1120] border border-[#1e293b]">
-                      <span class="text-amber-400">🍪</span>
-                      <span class="text-amber-300 font-bold">{{ node.cookie_count || 0 }}</span>
-                      <span class="text-[10px] text-slate-500">条</span>
-                    </div>
-                  </td>
-
-                  <!-- 状态胶囊徽章 -->
-                  <td class="p-3.5">
-                    <span v-if="node.status === 'connected'" class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-medium"
-                          style="background: rgba(16, 185, 129, 0.15); border: 1px solid rgba(16, 185, 129, 0.3); color: #34d399;">
-                      <span class="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span>
-                      <span>在线 (ONLINE)</span>
-                    </span>
-                    <span v-else-if="node.status === 'stopped'" class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-medium"
-                          style="background: rgba(245, 158, 11, 0.15); border: 1px solid rgba(245, 158, 11, 0.3); color: #fbbf24;">
-                      <span class="w-1.5 h-1.5 rounded-full bg-amber-400"></span>
-                      <span>已断开 (STANDBY)</span>
-                    </span>
-                    <span v-else class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-medium"
-                          style="background: rgba(239, 68, 68, 0.15); border: 1px solid rgba(239, 68, 68, 0.3); color: #f87171;">
-                      <span class="w-1.5 h-1.5 rounded-full bg-red-400"></span>
-                      <span>异常 (FAULT)</span>
-                    </span>
-                  </td>
-
-                  <!-- 最近同步 -->
-                  <td class="p-3.5 text-slate-400 text-[11px]">
-                    {{ node.last_sync || '---' }}
-                  </td>
-
-                  <!-- 操作按钮 -->
-                  <td class="p-3.5 text-right space-x-2">
-                    <button 
-                      @click="toggleTunnel(node.id)" 
-                      class="hud-btn-action px-2.5 py-1 rounded text-[11px] font-medium border"
-                      :class="node.status === 'connected' ? 'bg-amber-950/40 border-amber-600/40 text-amber-300' : 'bg-cyan-950/40 border-cyan-600/40 text-cyan-300'"
-                    >
-                      {{ node.status === 'connected' ? '断开隧道' : '启动穿透' }}
-                    </button>
-                    <button 
-                      @click="deleteNode(node.id)" 
-                      class="hud-btn-action px-2 py-1 rounded text-[11px] font-medium bg-red-950/30 border border-red-800/40 text-red-400 hover:bg-red-900/50"
-                    >
-                      销毁
-                    </button>
-                  </td>
-                </tr>
-              </tbody>
-            </table>
-          </div>
-        </section>
-
-        <!-- 2-Column 对称卡片栅格：SSH 证书库 + 实时任务日志 -->
-        <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
-          
-          <!-- SSH 证书库 -->
-          <section class="hud-card p-6 flex flex-col justify-between">
-            <div>
-              <div class="flex items-center justify-between mb-4 pb-2 border-b border-slate-800">
-                <h3 class="text-sm font-bold font-mono tracking-wider text-slate-200 flex items-center gap-2">
-                  <span class="text-cyan-400">❖</span> KEY VAULT // SSH 密钥库
-                </h3>
-                <span class="text-xs text-slate-500 font-mono">{{ keys.length }} KEYS STORED</span>
-              </div>
-              <div class="mb-4">
-                <input 
-                  type="file" 
-                  @change="uploadKey" 
-                  class="text-xs text-slate-400 file:mr-3 file:py-1.5 file:px-3 file:rounded file:border file:border-cyan-500/30 file:bg-cyan-950/40 file:text-cyan-300 hover:file:bg-cyan-900/60 cursor-pointer"
-                >
-              </div>
-              <ul class="divide-y divide-[#1e293b] font-mono text-xs max-h-56 overflow-y-auto">
-                <li v-for="k in keys" :key="k.filename" class="py-2.5 flex justify-between items-center hover:bg-slate-800/20 px-2 rounded">
-                  <div class="flex items-center gap-2">
-                    <span class="text-cyan-400">🔑</span>
-                    <span class="text-slate-300 font-bold">{{ k.filename }}</span>
-                    <span class="text-[10px] text-slate-500">({{ k.size }} Bytes)</span>
-                  </div>
-                  <button @click="deleteKey(k.filename)" class="text-red-400 hover:text-red-300 text-xs">销毁</button>
-                </li>
-                <li v-if="keys.length === 0" class="py-6 text-center text-slate-500">
-                  暂无私钥证书，支持上传 .pem / id_rsa
-                </li>
-              </ul>
-            </div>
-            <div class="mt-4 pt-3 border-t border-slate-800 text-[11px] text-slate-500 font-mono">
-              [STORAGE PATH: /data/keys/ | STRICT PERMISSION: 0600]
-            </div>
-          </section>
-
-          <!-- 实时同步日志 -->
-          <section class="hud-card p-6 flex flex-col justify-between">
-            <div>
-              <div class="flex items-center justify-between mb-4 pb-2 border-b border-slate-800">
-                <h3 class="text-sm font-bold font-mono tracking-wider text-slate-200 flex items-center gap-2">
-                  <span class="text-cyan-400">❖</span> TELEMETRY LOGS // 同步追踪日志
-                </h3>
-                <span class="text-xs text-slate-500 font-mono">CRON: 15 MINS</span>
-              </div>
-              <div class="hud-card-sub p-3 font-mono text-xs h-60 overflow-y-auto space-y-3">
-                <div v-for="l in logs" :key="l.id" class="border-b border-slate-800/60 pb-2">
-                  <div class="flex items-center justify-between text-[11px]">
-                    <span class="text-cyan-400/80">[{{ l.timestamp }}]</span>
-                    <span 
-                      class="px-1.5 py-0.2 rounded text-[10px] font-bold"
-                      :class="l.status==='SUCCESS' ? 'text-emerald-400 bg-emerald-950/40 border border-emerald-500/30' : 'text-red-400 bg-red-950/40 border border-red-500/30'"
-                    >
-                      {{ l.status }}
-                    </span>
-                  </div>
-                  <pre class="mt-1 text-slate-400 text-[11px] whitespace-pre-wrap leading-relaxed">{{ l.details }}</pre>
-                </div>
-                <div v-if="logs.length === 0" class="text-slate-600 text-center py-10 font-mono">
-                  [WAITING FOR FIRST DISPATCH EVENT...]
-                </div>
-              </div>
-            </div>
-            <div class="mt-4 pt-3 border-t border-slate-800 text-[11px] text-slate-500 font-mono">
-              [ENGINE: CHROMIUM_SYNC_MODULE / AUTO-FAILOVER: ENABLED]
-            </div>
-          </section>
-
-        </div>
-      </main>
-
-      <!-- 弹窗 1：创建节点 (模态框内允许 100% 满宽输入) -->
-      <div v-if="showNodeModal" class="fixed inset-0 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4 z-50">
-        <div class="hud-card p-6 w-full max-w-xl border-cyan-500/40 shadow-[0_0_30px_rgba(56,189,248,0.2)]">
-          <div class="flex items-center justify-between pb-3 border-b border-slate-800 mb-5">
-            <h3 class="text-base font-bold font-mono text-cyan-400 tracking-wider">DEPLOY NEW CDP NODE // 配置节点</h3>
-            <button @click="showNodeModal = false" class="text-slate-400 hover:text-white font-mono">✕</button>
-          </div>
-          
-          <form @submit.prevent="createNode" class="space-y-4">
-            <div class="grid grid-cols-2 gap-4">
-              <div>
-                <label class="block text-xs font-mono text-slate-400 mb-1">NODE ALIAS // 节点名</label>
-                <input v-model="newNode.name" required placeholder="例如: 欧洲节点-01" class="hud-dialog-input p-2.5 rounded text-sm">
-              </div>
-              <div>
-                <label class="block text-xs font-mono text-slate-400 mb-1">SSH HOST / IP</label>
-                <input v-model="newNode.ssh_host" required placeholder="192.168.1.100" class="hud-dialog-input p-2.5 rounded text-sm font-mono">
-              </div>
-            </div>
-
-            <div class="grid grid-cols-2 gap-4">
-              <div>
-                <label class="block text-xs font-mono text-slate-400 mb-1">SSH PORT (默认 22)</label>
-                <input v-model="newNode.ssh_port" type="number" placeholder="22" class="hud-dialog-input p-2.5 rounded text-sm font-mono">
-              </div>
-              <div>
-                <label class="block text-xs font-mono text-slate-400 mb-1">SSH USER</label>
-                <input v-model="newNode.ssh_user" required placeholder="root" class="hud-dialog-input p-2.5 rounded text-sm font-mono">
-              </div>
-            </div>
-
-            <div>
-              <label class="block text-xs font-mono text-slate-400 mb-1">AUTH CERTIFICATE // 绑定证书 (选填)</label>
-              <select v-model="newNode.ssh_key_filename" class="hud-dialog-input p-2.5 rounded text-sm font-mono">
-                <option value="">使用账号密码登录（不选择证书）</option>
-                <option v-for="k in keys" :key="k.filename" :value="k.filename">🔑 {{ k.filename }}</option>
-              </select>
-            </div>
-
-            <div v-if="!newNode.ssh_key_filename">
-              <label class="block text-xs font-mono text-slate-400 mb-1">SSH PASSWORD</label>
-              <input v-model="newNode.ssh_password" type="password" placeholder="••••••••" class="hud-dialog-input p-2.5 rounded text-sm">
-            </div>
-
-            <div class="grid grid-cols-2 gap-4">
-              <div>
-                <label class="block text-xs font-mono text-slate-400 mb-1">REMOTE CDP PORT</label>
-                <input v-model="newNode.remote_cdp_port" type="number" placeholder="9222" class="hud-dialog-input p-2.5 rounded text-sm font-mono">
-              </div>
-              <div>
-                <label class="block text-xs font-mono text-slate-400 mb-1">LOCAL FORWARD PORT</label>
-                <input v-model="newNode.local_bind_port" type="number" required placeholder="19222" class="hud-dialog-input p-2.5 rounded text-sm font-mono text-cyan-400">
-              </div>
-            </div>
-
-            <div class="flex justify-end gap-3 pt-4 border-t border-slate-800">
-              <button type="button" @click="showNodeModal = false" class="px-4 py-2 bg-slate-800 text-slate-300 rounded text-xs font-mono">CANCEL</button>
-              <button type="submit" class="hud-btn-primary px-5 py-2 rounded text-xs font-mono font-bold tracking-wider">DEPLOY NODE</button>
-            </div>
-          </form>
+          <button 
+            @click="currentTab = 'logs'"
+            :class="currentTab === 'logs' ? 'border-blue-500 text-blue-400 font-medium' : 'border-transparent text-gray-400 hover:text-gray-200'"
+            class="py-3 px-3 border-b-2 text-sm flex items-center gap-2"
+          >
+            <span>📜</span> <span>同步日志</span>
+          </button>
         </div>
       </div>
 
-      <!-- 弹窗 2：修改密码 -->
-      <div v-if="showPwdModal" class="fixed inset-0 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4 z-50">
-        <div class="hud-card p-6 w-full max-w-md border-cyan-500/40">
-          <div class="flex items-center justify-between pb-3 border-b border-slate-800 mb-5">
-            <h3 class="text-base font-bold font-mono text-cyan-400 tracking-wider">UPDATE PASSKEY // 密码重置</h3>
-            <button @click="showPwdModal = false" class="text-slate-400 hover:text-white font-mono">✕</button>
-          </div>
-          <form @submit.prevent="changePassword" class="space-y-4">
-            <div>
-              <label class="block text-xs font-mono text-slate-400 mb-1">NEW ACCESS KEY</label>
-              <input v-model="newPassword" type="password" required minlength="6" placeholder="至少 6 位安全字符串" class="hud-dialog-input p-2.5 rounded text-sm">
+      <!-- 控制台主体视图 -->
+      <main class="flex-1 p-6 max-w-7xl mx-auto w-full space-y-6">
+        
+        <!-- Tab 1: 节点列表与监控 -->
+        <div v-if="currentTab === 'nodes'" class="space-y-6">
+          <!-- 统计概览小卡片 -->
+          <div class="grid grid-cols-1 sm:grid-cols-3 gap-4">
+            <div class="kuma-card p-4">
+              <span class="text-xs text-gray-400 font-medium">总节点数</span>
+              <div class="text-2xl font-bold mt-1 text-white">{{ nodes.length }}</div>
             </div>
-            <div class="flex justify-end gap-3 pt-2">
-              <button type="button" @click="showPwdModal = false" class="px-4 py-2 bg-slate-800 text-slate-300 rounded text-xs font-mono">CANCEL</button>
-              <button type="submit" class="hud-btn-primary px-5 py-2 rounded text-xs font-mono font-bold">COMMIT CHANGE</button>
+            <div class="kuma-card p-4">
+              <span class="text-xs text-gray-400 font-medium">在线穿透隧道</span>
+              <div class="text-2xl font-bold mt-1 text-emerald-400">{{ onlineCount }}</div>
+            </div>
+            <div class="kuma-card p-4">
+              <span class="text-xs text-gray-400 font-medium">已同步 Cookie 总数</span>
+              <div class="text-2xl font-bold mt-1 text-amber-400">{{ totalCookies }}</div>
+            </div>
+          </div>
+
+          <!-- 节点主卡片 -->
+          <div class="kuma-card p-6">
+            <div class="flex justify-between items-center mb-5 pb-3 border-b border-gray-800">
+              <h2 class="text-base font-semibold text-white">CDP 映射实例</h2>
+              <button @click="showNodeModal = true" class="px-3.5 py-1.5 kuma-btn-primary text-xs">
+                + 新增 CDP 节点
+              </button>
+            </div>
+
+            <div class="overflow-x-auto">
+              <table class="w-full text-left text-sm">
+                <thead class="text-xs text-gray-400 bg-gray-900/50 uppercase border-b border-gray-800">
+                  <tr>
+                    <th class="p-3">类型</th>
+                    <th class="p-3">节点名</th>
+                    <th class="p-3">SSH 连接凭证</th>
+                    <th class="p-3">本地转发端口</th>
+                    <th class="p-3">Cookie 实时统计</th>
+                    <th class="p-3">隧道状态</th>
+                    <th class="p-3">最近同步时间</th>
+                    <th class="p-3 text-right">操作</th>
+                  </tr>
+                </thead>
+                <tbody class="divide-y divide-gray-800 text-xs">
+                  <tr v-for="node in nodes" :key="node.id" class="hover:bg-gray-800/30">
+                    <td class="p-3">
+                      <span v-if="node.is_source" class="px-2 py-0.5 rounded text-[11px] font-medium bg-blue-900/60 text-blue-300 border border-blue-700">
+                        源节点 (Source)
+                      </span>
+                      <button v-else @click="setSource(node.id)" class="text-gray-400 hover:text-blue-400">
+                        设为源
+                      </button>
+                    </td>
+
+                    <td class="p-3 font-semibold text-white">{{ node.name }}</td>
+
+                    <td class="p-3 text-gray-300 font-mono">
+                      <div>{{ node.ssh_user }}@{{ node.ssh_host }}:{{ node.ssh_port }}</div>
+                      <span v-if="node.ssh_key_filename" class="text-[10px] text-gray-400">🔑 {{ node.ssh_key_filename }}</span>
+                      <span v-else class="text-[10px] text-gray-500">🔒 密码认证</span>
+                    </td>
+
+                    <td class="p-3 font-mono text-blue-400 font-semibold">127.0.0.1:{{ node.local_bind_port }}</td>
+
+                    <!-- Cookie 实时统计展示与主动探查 -->
+                    <td class="p-3">
+                      <div class="inline-flex items-center gap-1.5 bg-gray-800/80 px-2 py-1 rounded border border-gray-700">
+                        <span class="text-amber-400">🍪</span>
+                        <span class="font-bold text-amber-300">{{ node.cookie_count || 0 }}</span>
+                        <button @click="probeNode(node)" class="text-[10px] text-blue-400 hover:underline ml-1" title="通过 CDP 接口主动探测最新 Cookie 数">
+                          刷新
+                        </button>
+                      </div>
+                    </td>
+
+                    <td class="p-3">
+                      <span v-if="node.status === 'connected'" class="px-2 py-0.5 rounded-full badge-online text-[11px] font-medium">
+                        ● 在线
+                      </span>
+                      <span v-else-if="node.status === 'stopped'" class="px-2 py-0.5 rounded-full badge-standby text-[11px] font-medium">
+                        ○ 离线
+                      </span>
+                      <span v-else class="px-2 py-0.5 rounded-full badge-danger text-[11px] font-medium">
+                        ✕ 异常
+                      </span>
+                    </td>
+
+                    <td class="p-3 text-gray-400">{{ node.last_sync || '暂无同步' }}</td>
+
+                    <td class="p-3 text-right space-x-2">
+                      <button @click="toggleTunnel(node)" class="px-2.5 py-1 kuma-btn-secondary text-[11px]">
+                        {{ node.status === 'connected' ? '断开隧道' : '启动连接' }}
+                      </button>
+                      <button @click="deleteNode(node.id)" class="px-2 py-1 bg-red-950/40 text-red-400 border border-red-900 rounded hover:bg-red-900/50 text-[11px]">
+                        删除
+                      </button>
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+
+        <!-- Tab 2: 告警与通知设置 (Email + Server酱) -->
+        <div v-if="currentTab === 'notifications'" class="grid grid-cols-1 md:grid-cols-2 gap-6">
+          <!-- 邮件通知配置卡片 -->
+          <div class="kuma-card p-6 flex flex-col justify-between">
+            <div>
+              <div class="flex justify-between items-center mb-4 pb-2 border-b border-gray-800">
+                <h3 class="text-sm font-semibold text-white">📧 邮件发信设置 (SMTP)</h3>
+                <button @click="testEmail" class="text-xs text-blue-400 hover:underline">发送测试邮件</button>
+              </div>
+              <div class="space-y-3">
+                <div>
+                  <label class="block text-xs text-gray-400 mb-1">SMTP 主机</label>
+                  <input v-model="notif.smtp_host" placeholder="smtp.qq.com / smtp.163.com" class="w-full kuma-input">
+                </div>
+                <div class="grid grid-cols-2 gap-3">
+                  <div>
+                    <label class="block text-xs text-gray-400 mb-1">SMTP 端口</label>
+                    <input v-model="notif.smtp_port" placeholder="465" class="w-full kuma-input">
+                  </div>
+                  <div>
+                    <label class="block text-xs text-gray-400 mb-1">加密方式</label>
+                    <select v-model="notif.smtp_ssl" class="w-full kuma-input">
+                      <option :value="true">SSL / TLS (默认)</option>
+                      <option :value="false">STARTTLS / 明文</option>
+                    </select>
+                  </div>
+                </div>
+                <div>
+                  <label class="block text-xs text-gray-400 mb-1">发信邮箱账号</label>
+                  <input v-model="notif.smtp_user" placeholder="user@domain.com" class="w-full kuma-input">
+                </div>
+                <div>
+                  <label class="block text-xs text-gray-400 mb-1">发信授权码 / 密码</label>
+                  <input v-model="notif.smtp_pass" type="password" placeholder="邮箱授权码" class="w-full kuma-input">
+                </div>
+                <div>
+                  <label class="block text-xs text-gray-400 mb-1">接收预警邮箱 (留空默认为管理员邮箱)</label>
+                  <input v-model="notif.smtp_to" placeholder="receiver@domain.com" class="w-full kuma-input">
+                </div>
+              </div>
+            </div>
+            <button @click="saveNotif" class="mt-5 py-2 kuma-btn-primary w-full text-xs">保存邮件通知设置</button>
+          </div>
+
+          <!-- Server酱微信推送配置卡片 -->
+          <div class="kuma-card p-6 flex flex-col justify-between">
+            <div>
+              <div class="flex justify-between items-center mb-4 pb-2 border-b border-gray-800">
+                <h3 class="text-sm font-semibold text-white">📱 Server酱 (微信服务号推送)</h3>
+                <button @click="testServerChan" class="text-xs text-blue-400 hover:underline">发送微信测试</button>
+              </div>
+              <div class="space-y-4">
+                <div class="flex items-center gap-2">
+                  <input type="checkbox" v-model="notif.serverchan_enabled" id="s_enable" class="rounded bg-gray-800 border-gray-700 text-blue-600">
+                  <label for="s_enable" class="text-xs text-gray-300">启用 Server酱 微信实时推送</label>
+                </div>
+                <div>
+                  <label class="block text-xs text-gray-400 mb-1">Server酱 SendKey</label>
+                  <input v-model="notif.serverchan_key" placeholder="SCTxxxxxxxxxxxxxxxx" class="w-full kuma-input font-mono">
+                  <p class="text-[11px] text-gray-500 mt-1">从 sct.ftqq.com 获取的 SendKey，同步失败或离线时将第一时间推送到微信。</p>
+                </div>
+              </div>
+            </div>
+            <button @click="saveNotif" class="mt-5 py-2 kuma-btn-primary w-full text-xs">保存 Server酱 配置</button>
+          </div>
+        </div>
+
+        <!-- Tab 3: SSH 证书管理 -->
+        <div v-if="currentTab === 'keys'" class="kuma-card p-6">
+          <div class="flex justify-between items-center mb-4 pb-2 border-b border-gray-800">
+            <h3 class="text-sm font-semibold text-white">SSH 私钥与凭证库</h3>
+            <span class="text-xs text-gray-400">{{ keys.length }} 个密钥文件已持久化</span>
+          </div>
+          <div class="mb-4">
+            <input type="file" @change="uploadKey" class="text-xs text-gray-400 file:mr-3 file:py-1.5 file:px-3 file:rounded file:bg-gray-800 file:border file:border-gray-700 file:text-gray-300 hover:file:bg-gray-700 cursor-pointer">
+          </div>
+          <ul class="divide-y divide-gray-800 text-xs">
+            <li v-for="k in keys" :key="k.filename" class="py-2.5 flex justify-between items-center">
+              <span class="font-mono text-gray-200 font-medium">🔑 {{ k.filename }} ({{ k.size }} Bytes)</span>
+              <button @click="deleteKey(k.filename)" class="text-red-400 hover:underline">删除</button>
+            </li>
+            <li v-if="keys.length === 0" class="py-4 text-center text-gray-500">暂无上传的私钥凭据</li>
+          </ul>
+        </div>
+
+        <!-- Tab 4: 个人资料与安全设置 (支持修改用户名与邮箱) -->
+        <div v-if="currentTab === 'profile'" class="kuma-card p-6 max-w-xl mx-auto">
+          <h3 class="text-sm font-semibold text-white mb-4 pb-2 border-b border-gray-800">管理员账号与登录安全</h3>
+          <form @submit.prevent="saveProfile" class="space-y-4">
+            <div>
+              <label class="block text-xs text-gray-400 mb-1">登录用户名</label>
+              <input v-model="profile.username" required class="w-full kuma-input">
+            </div>
+            <div>
+              <label class="block text-xs text-gray-400 mb-1">绑定邮箱 (支持使用邮箱直接登录)</label>
+              <input v-model="profile.email" type="email" required class="w-full kuma-input">
+            </div>
+            <div>
+              <label class="block text-xs text-gray-400 mb-1">修改新密码 (不修改请留空)</label>
+              <input v-model="profile.new_password" type="password" placeholder="若留空则保持原密码不变" minlength="6" class="w-full kuma-input">
+            </div>
+            <button type="submit" class="py-2.5 kuma-btn-primary w-full text-xs">保存个人资料</button>
+          </form>
+        </div>
+
+        <!-- Tab 5: 同步日志 -->
+        <div v-if="currentTab === 'logs'" class="kuma-card p-6">
+          <div class="flex justify-between items-center mb-4 pb-2 border-b border-gray-800">
+            <h3 class="text-sm font-semibold text-white">同步任务执行追踪</h3>
+            <span class="text-xs text-gray-400">调度周期: 每 15 分钟</span>
+          </div>
+          <div class="bg-gray-950 p-3 rounded-lg font-mono text-xs h-96 overflow-y-auto space-y-3 border border-gray-800">
+            <div v-for="l in logs" :key="l.id" class="border-b border-gray-800/80 pb-2">
+              <div class="flex justify-between text-gray-400">
+                <span>[{{ l.timestamp }}]</span>
+                <span :class="l.status==='SUCCESS' ? 'text-emerald-400' : 'text-red-400'" class="font-bold">[{{ l.status }}]</span>
+              </div>
+              <pre class="mt-1 text-gray-300 whitespace-pre-wrap">{{ l.details }}</pre>
+            </div>
+            <div v-if="logs.length === 0" class="text-center text-gray-600 py-12">暂无历史同步记录</div>
+          </div>
+        </div>
+
+      </main>
+
+      <!-- 新增节点 Dialog -->
+      <div v-if="showNodeModal" class="fixed inset-0 bg-black/75 flex items-center justify-center p-4 z-50">
+        <div class="kuma-card p-6 w-full max-w-lg bg-[#111827] border border-gray-700">
+          <div class="flex justify-between items-center pb-3 border-b border-gray-800 mb-4">
+            <h3 class="text-base font-semibold text-white">部署新 CDP 节点</h3>
+            <button @click="showNodeModal = false" class="text-gray-400 hover:text-white">✕</button>
+          </div>
+          <form @submit.prevent="createNode" class="space-y-3.5">
+            <div>
+              <label class="block text-xs text-gray-400 mb-1">节点名称</label>
+              <input v-model="newNode.name" required placeholder="例如: 欧洲节点-01" class="w-full kuma-input">
+            </div>
+            <div class="grid grid-cols-2 gap-3">
+              <div>
+                <label class="block text-xs text-gray-400 mb-1">SSH Host</label>
+                <input v-model="newNode.ssh_host" required placeholder="192.168.1.100" class="w-full kuma-input font-mono">
+              </div>
+              <div>
+                <label class="block text-xs text-gray-400 mb-1">SSH Port</label>
+                <input v-model="newNode.ssh_port" type="number" placeholder="22" class="w-full kuma-input font-mono">
+              </div>
+            </div>
+            <div>
+              <label class="block text-xs text-gray-400 mb-1">SSH 用户名</label>
+              <input v-model="newNode.ssh_user" required placeholder="root" class="w-full kuma-input font-mono">
+            </div>
+            <div>
+              <label class="block text-xs text-gray-400 mb-1">选择 SSH 证书 (选填)</label>
+              <select v-model="newNode.ssh_key_filename" class="w-full kuma-input font-mono">
+                <option value="">使用账号密码登录 (无私钥证书)</option>
+                <option v-for="k in keys" :key="k.filename" :value="k.filename">🔑 {{ k.filename }}</option>
+              </select>
+            </div>
+            <div v-if="!newNode.ssh_key_filename">
+              <label class="block text-xs text-gray-400 mb-1">SSH 密码</label>
+              <input v-model="newNode.ssh_password" type="password" placeholder="••••••••" class="w-full kuma-input">
+            </div>
+            <div class="grid grid-cols-2 gap-3">
+              <div>
+                <label class="block text-xs text-gray-400 mb-1">远程 CDP 端口</label>
+                <input v-model="newNode.remote_cdp_port" type="number" placeholder="9222" class="w-full kuma-input font-mono">
+              </div>
+              <div>
+                <label class="block text-xs text-gray-400 mb-1">本地隧道绑定端口</label>
+                <input v-model="newNode.local_bind_port" type="number" required placeholder="19222" class="w-full kuma-input font-mono text-blue-400">
+              </div>
+            </div>
+            <div class="flex justify-end gap-3 pt-3 border-t border-gray-800">
+              <button type="button" @click="showNodeModal = false" class="px-4 py-2 kuma-btn-secondary text-xs">取消</button>
+              <button type="submit" class="px-5 py-2 kuma-btn-primary text-xs">保存并部署</button>
             </div>
           </form>
         </div>
