@@ -7,9 +7,9 @@ const props = defineProps({
 })
 const emit = defineEmits(['update-status'])
 
-// 通知配置状态模型
+// 配置数据
 const notif = reactive({
-  // 左侧：仅 SMTP 服务器配置
+  // 左侧：SMTP 服务器基础参数
   smtp_host: 'smtp.yeah.net',
   smtp_port: '465',
   smtp_ssl: true,
@@ -18,11 +18,11 @@ const notif = reactive({
   smtp_pass: '',
   smtp_status: 'untested',
 
-  // 右侧：推送通道 1 (Email)
-  email_notify_enabled: true,
+  // 右侧通道 1：邮件推送开关与接收邮箱
+  email_notify_enabled: false,
   email_notify_to: '',
 
-  // 右侧：推送通道 2 (Server酱)
+  // 右侧通道 2：Server酱微信推送开关与 SendKey
   serverchan_enabled: false,
   serverchan_key: ''
 })
@@ -39,6 +39,7 @@ const loadSettings = async () => {
   }
 }
 
+// 保存左侧 SMTP
 const saveSmtpServer = async () => {
   const res = await props.api('/api/notifications/settings', {
     method: 'POST',
@@ -53,11 +54,12 @@ const saveSmtpServer = async () => {
     })
   })
   if (res.ok) {
-    props.showToast('SMTP 服务器配置已保存', 'success')
+    props.showToast('SMTP 发信服务器参数已保存', 'success')
     emit('update-status')
   }
 }
 
+// 保存右侧 邮件推送设置
 const saveEmailChannel = async () => {
   const res = await props.api('/api/notifications/settings', {
     method: 'POST',
@@ -68,11 +70,12 @@ const saveEmailChannel = async () => {
     })
   })
   if (res.ok) {
-    props.showToast('邮件推送通道设置已保存', 'success')
+    props.showToast('邮件告警通道已更新', 'success')
     emit('update-status')
   }
 }
 
+// 保存右侧 Server酱设置
 const saveServerChanChannel = async () => {
   const res = await props.api('/api/notifications/settings', {
     method: 'POST',
@@ -83,11 +86,12 @@ const saveServerChanChannel = async () => {
     })
   })
   if (res.ok) {
-    props.showToast('Server酱微信通道设置已保存', 'success')
+    props.showToast('Server酱微信通道已更新', 'success')
     emit('update-status')
   }
 }
 
+// 测试邮件外发
 const testEmail = async () => {
   if (isTestingEmail.value) return
   isTestingEmail.value = true
@@ -104,13 +108,14 @@ const testEmail = async () => {
       emit('update-status')
     } else {
       notif.smtp_status = 'error'
-      props.showToast(data.detail || '发信失败', 'error')
+      props.showToast(data.detail || '发信受阻', 'error')
     }
   } finally {
     isTestingEmail.value = false
   }
 }
 
+// 测试 Server酱推送
 const testServerChan = async () => {
   if (isTestingServerChan.value) return
   isTestingServerChan.value = true
@@ -132,7 +137,7 @@ onMounted(() => {
 <template>
   <div class="grid-2col-fluid">
     
-    <!-- ==================== 左侧：仅 SMTP 服务器参数配置 ==================== -->
+    <!-- ==================== 左侧：仅 SMTP 服务器配置 (内容宽度自适应) ==================== -->
     <div class="content-full-card">
       <div class="smtp-title-header">
         <div class="smtp-icon-box">📧</div>
@@ -151,53 +156,52 @@ onMounted(() => {
         <span class="status-txt">
           SMTP 状态:
           <span v-if="notif.smtp_status === 'ready'" style="color:#34d399; font-weight:bold;">就绪 (发信正常)</span>
-          <span v-else-if="notif.smtp_status === 'error'" style="color:#f87171; font-weight:bold;">异常 (请检查配置)</span>
+          <span v-else-if="notif.smtp_status === 'error'" style="color:#f87171; font-weight:bold;">异常 (发信受阻)</span>
           <span v-else style="color:#94a3b8;">待测试</span>
         </span>
       </div>
 
       <div class="form-v-stack" style="margin-top:16px;">
-        <div>
+        <div class="form-field-block">
           <label class="form-label">SMTP 服务器地址</label>
-          <input v-model="notif.smtp_host" placeholder="smtp.yeah.net" class="cdp-input">
+          <input v-model="notif.smtp_host" placeholder="smtp.yeah.net" class="cdp-input cdp-w-normal">
         </div>
 
-        <!-- 70% 宽度的复合行：端口 + 发件人显示名称 -->
-        <div class="row-flex-gap-70">
-          <div style="flex:1;">
+        <!-- 组合行：端口紧凑自适应 (120px) + 发件人显示名称 (240px) -->
+        <div class="row-flex-gap">
+          <div class="form-field-block">
             <label class="form-label">端口</label>
-            <input v-model="notif.smtp_port" placeholder="465" class="cdp-input font-cyan-mono" style="width:100% !important;">
+            <input v-model="notif.smtp_port" placeholder="465" class="cdp-input cdp-w-port font-cyan-mono">
           </div>
-          <div style="flex:1;">
+          <div class="form-field-block">
             <label class="form-label">发件人显示名称</label>
-            <input v-model="notif.smtp_sender_name" placeholder="CDP 节点中心" class="cdp-input" style="width:100% !important;">
+            <input v-model="notif.smtp_sender_name" placeholder="CDP 节点中心" class="cdp-input cdp-w-medium">
           </div>
         </div>
 
-        <div>
+        <div class="form-field-block">
           <label class="form-label">发信邮箱账号</label>
-          <input v-model="notif.smtp_user" placeholder="perrywu@yeah.net" class="cdp-input font-cyan-mono">
+          <input v-model="notif.smtp_user" placeholder="perrywu@yeah.net" class="cdp-input cdp-w-normal font-cyan-mono">
         </div>
 
-        <div>
+        <div class="form-field-block">
           <label class="form-label">邮箱授权码 / 密码</label>
-          <input v-model="notif.smtp_pass" type="password" placeholder="•••••• (留空保持原密码)" class="cdp-input">
+          <input v-model="notif.smtp_pass" type="password" placeholder="•••••• (留空保持原密码)" class="cdp-input cdp-w-normal">
         </div>
 
-        <div style="display:flex; align-items:center; gap:8px;">
+        <div style="display:flex; align-items:center; gap:8px; margin-top:2px;">
           <input type="checkbox" v-model="notif.smtp_ssl" id="ssl_box" class="check-box-blue">
           <label for="ssl_box" style="font-size:12px; color:#cbd5e1; cursor:pointer;">启用 SSL 安全加密</label>
         </div>
 
-        <!-- 独立测试发信区 (宽度严格 70%) -->
+        <!-- 独立测试发信区 -->
         <div class="smtp-test-dashed-area">
-          <input v-model="testEmailTarget" placeholder="接收测试邮箱 (test@example.com)" class="cdp-input" style="flex:1; width:auto;">
+          <input v-model="testEmailTarget" placeholder="接收测试邮箱 (test@example.com)" class="cdp-input cdp-w-normal">
           <button @click="testEmail" :disabled="isTestingEmail" class="btn-gray-test">
             {{ isTestingEmail ? '正在投递...' : '发信测试' }}
           </button>
         </div>
 
-        <!-- 操作按钮：自适应宽度，不占满 -->
         <div style="margin-top:6px;">
           <button @click="saveSmtpServer" class="btn-primary-gradient">
             保存 SMTP 参数
@@ -206,7 +210,7 @@ onMounted(() => {
       </div>
     </div>
 
-    <!-- ==================== 右侧：推送通知列表 (目前 2 项：Email 与 Server酱) ==================== -->
+    <!-- ==================== 右侧：推送通知列表 (开启时才展示相关配置) ==================== -->
     <div class="content-full-card">
       <div class="smtp-title-header">
         <div class="smtp-icon-box" style="background:#0e3b5e; border-color:#0284c7;">🔔</div>
@@ -218,7 +222,7 @@ onMounted(() => {
 
       <div class="notify-channels-container">
         
-        <!-- 通道 1: 📧 邮件告警推送 -->
+        <!-- 通道 1: 📧 邮件告警推送 (开启时才展示设置) -->
         <div class="channel-card-item">
           <div class="channel-card-header">
             <div style="display:flex; align-items:center; gap:8px;">
@@ -231,15 +235,16 @@ onMounted(() => {
             </div>
             
             <div style="display:flex; align-items:center; gap:6px;">
-              <input type="checkbox" v-model="notif.email_notify_enabled" id="email_toggle" class="check-box-blue">
-              <label for="email_toggle" style="font-size:12px; color:#cbd5e1; cursor:pointer;">开启邮件推送</label>
+              <input type="checkbox" v-model="notif.email_notify_enabled" id="email_toggle" class="check-box-blue" @change="saveEmailChannel">
+              <label for="email_toggle" style="font-size:12px; color:#cbd5e1; cursor:pointer;">开启推送</label>
             </div>
           </div>
 
-          <div class="form-v-stack" style="margin-top:10px;">
-            <div>
+          <!-- 仅在开启推送时才显示出对应相关设置 -->
+          <div v-if="notif.email_notify_enabled" class="channel-expand-content">
+            <div class="form-field-block">
               <label class="form-label">接收预警邮箱</label>
-              <input v-model="notif.email_notify_to" placeholder="admin@domain.com (留空默认发至发信邮箱)" class="cdp-input font-cyan-mono">
+              <input v-model="notif.email_notify_to" placeholder="admin@domain.com (留空默认发至发信邮箱)" class="cdp-input cdp-w-normal font-cyan-mono">
               <p class="form-field-hint">故障发生时系统将通过左侧 SMTP 发信引擎投递预警邮件到此地址。</p>
             </div>
 
@@ -254,7 +259,7 @@ onMounted(() => {
           </div>
         </div>
 
-        <!-- 通道 2: 📱 Server酱微信公众号实时推送 -->
+        <!-- 通道 2: 📱 Server酱微信实时推送 (开启时才展示设置) -->
         <div class="channel-card-item">
           <div class="channel-card-header">
             <div style="display:flex; align-items:center; gap:8px;">
@@ -267,16 +272,17 @@ onMounted(() => {
             </div>
 
             <div style="display:flex; align-items:center; gap:6px;">
-              <input type="checkbox" v-model="notif.serverchan_enabled" id="serverchan_toggle" class="check-box-blue">
-              <label for="serverchan_toggle" style="font-size:12px; color:#cbd5e1; cursor:pointer;">开启微信推送</label>
+              <input type="checkbox" v-model="notif.serverchan_enabled" id="serverchan_toggle" class="check-box-blue" @change="saveServerChanChannel">
+              <label for="serverchan_toggle" style="font-size:12px; color:#cbd5e1; cursor:pointer;">开启推送</label>
             </div>
           </div>
 
-          <div class="form-v-stack" style="margin-top:10px;">
-            <div>
+          <!-- 仅在开启推送时才显示出对应相关设置 -->
+          <div v-if="notif.serverchan_enabled" class="channel-expand-content">
+            <div class="form-field-block">
               <label class="form-label">Server酱 SendKey</label>
-              <input v-model="notif.serverchan_key" placeholder="SCTxxxxxxxxxxxxxxxx" class="cdp-input font-cyan-mono">
-              <p class="form-field-hint">在 sct.ftqq.com 申请的 SendKey。用于手机微信即时弹窗预警。</p>
+              <input v-model="notif.serverchan_key" placeholder="SCTxxxxxxxxxxxxxxxx" class="cdp-input cdp-w-key font-cyan-mono">
+              <p class="form-field-hint">在 sct.ftqq.com 申请的 SendKey。用于微信公众号实时弹窗预警。</p>
             </div>
 
             <div class="channel-action-row">
@@ -297,69 +303,11 @@ onMounted(() => {
 </template>
 
 <style scoped>
-/* 右侧推送通知列表专用卡片样式 */
-.notify-channels-container {
-  display: flex;
-  flex-direction: column;
-  gap: 16px;
-  margin-top: 14px;
-}
-
-.channel-card-item {
-  background-color: #09122a;
-  border: 1px solid #172554;
-  border-radius: 8px;
-  padding: 16px;
-  transition: border-color 0.2s;
-}
-
-.channel-card-item:hover {
-  border-color: #1e3a8a;
-}
-
+/* 针对该模块的专属微调 */
 .channel-card-header {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  padding-bottom: 12px;
-  border-bottom: 1px solid #131e3d;
-}
-
-.channel-title {
-  font-size: 13px;
-  font-weight: bold;
-  color: #ffffff;
-  margin-right: 8px;
-}
-
-.badge-channel-on {
-  font-size: 11px;
-  padding: 1px 6px;
-  border-radius: 4px;
-  background: rgba(16, 185, 129, 0.15);
-  color: #34d399;
-  border: 1px solid rgba(16, 185, 129, 0.3);
-}
-
-.badge-channel-off {
-  font-size: 11px;
-  padding: 1px 6px;
-  border-radius: 4px;
-  background: rgba(100, 116, 139, 0.15);
-  color: #94a3b8;
-  border: 1px solid rgba(100, 116, 139, 0.3);
-}
-
-.channel-action-row {
-  display: flex;
-  gap: 10px;
-  align-items: center;
-  margin-top: 8px;
-}
-
-.form-field-hint {
-  font-size: 11px;
-  color: #64748b;
-  margin-top: 5px;
+  padding-bottom: 4px;
 }
 </style>

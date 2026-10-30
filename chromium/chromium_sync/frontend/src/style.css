@@ -13,6 +13,15 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 
+/* 覆盖浏览器自动填充（Autofill）的白色刺眼背景 */
+input:-webkit-autofill,
+input:-webkit-autofill:hover,
+input:-webkit-autofill:focus {
+  -webkit-text-fill-color: #ffffff !important;
+  -webkit-box-shadow: 0 0 0px 1000px #0f1c3f inset !important;
+  transition: background-color 5000s ease-in-out 0s !important;
+}
+
 .cdp-app-viewport {
   min-height: 100vh;
   width: 100%;
@@ -21,7 +30,7 @@ body {
   box-sizing: border-box;
 }
 
-/* 浮动全局 Toast 提示条 */
+/* 全局 Toast 浮动提示 */
 .global-toast-bar {
   position: fixed;
   top: 20px;
@@ -80,14 +89,24 @@ body {
 .brand-cyan  { font-weight: 800; font-size: 16px; color: #00f0ff; letter-spacing: 1px; }
 
 .login-form-stack { display: flex; flex-direction: column; gap: 16px; }
-.form-row { display: flex; flex-direction: column; gap: 6px; }
-.form-label { font-size: 12px; color: #94a3b8; }
 
-/* 核心输入框规范：严格应用 70% 黄金宽度，自适应，有最小与最大限制 */
+/* 表单字段块与标签解耦：上下分离，间距舒适，拒绝挤在一排 */
+.form-field-block {
+  display: flex;
+  flex-direction: column;
+  gap: 7px; /* 文字与输入框的标准间距 */
+  margin-bottom: 4px;
+}
+
+.form-label {
+  font-size: 12px;
+  color: #94a3b8;
+  font-weight: 500;
+  line-height: 1.4;
+}
+
+/* ==================== 输入框根据内容自适应宽度体系 ==================== */
 .cdp-input {
-  width: 70% !important;
-  min-width: 260px !important;
-  max-width: 520px !important;
   box-sizing: border-box;
   background-color: #0f1c3f;
   border: 1px solid #1e3a8a;
@@ -98,30 +117,45 @@ body {
   outline: none;
   transition: all 0.2s;
 }
-@media (max-width: 640px) {
-  .cdp-input {
-    width: 100% !important;
-    min-width: 100% !important;
-  }
-}
+
 .cdp-input:focus {
   border-color: #00f0ff;
   box-shadow: 0 0 8px rgba(0, 240, 255, 0.35);
 }
 
-/* 70% 宽度的组合双列行 (如端口 + 显示名称) */
-.row-flex-gap-70 {
-  display: flex;
-  gap: 12px;
-  width: 70% !important;
-  min-width: 260px !important;
-  max-width: 520px !important;
+/* 端口等短数字字段 */
+.cdp-w-port {
+  width: 120px !important;
+  min-width: 90px !important;
 }
+
+/* 发件人名称等中等字段 */
+.cdp-w-medium {
+  width: 240px !important;
+  min-width: 180px !important;
+}
+
+/* 服务器地址、邮箱等常规字段 (适配内容，拒绝 100% 满屏拉扯) */
+.cdp-w-normal {
+  width: 100%;
+  max-width: 420px;
+  min-width: 220px;
+}
+
+/* SendKey、API 密钥等长密钥字段 */
+.cdp-w-key {
+  width: 100%;
+  max-width: 480px;
+  min-width: 240px;
+}
+
 @media (max-width: 640px) {
-  .row-flex-gap-70 {
+  .cdp-w-normal,
+  .cdp-w-key,
+  .cdp-w-medium,
+  .cdp-w-port {
     width: 100% !important;
-    min-width: 100% !important;
-    flex-direction: column;
+    max-width: 100% !important;
   }
 }
 
@@ -140,13 +174,13 @@ body {
   flex-shrink: 0;
 }
 
-/* 核心按钮规范：自然尺寸，禁止 100% 满屏占满拉伸 */
+/* 按钮自然尺寸：彻底告别 100% 满屏占满拉伸 */
 .btn-primary-gradient {
   background: linear-gradient(135deg, #0284c7, #2563eb);
   color: #ffffff;
   border: none;
   border-radius: 6px;
-  padding: 7px 18px;
+  padding: 7px 20px;
   font-size: 12px;
   font-weight: 600;
   cursor: pointer;
@@ -206,7 +240,7 @@ body {
 }
 .btn-logout:hover { border-color: #9ca3af; color: #ffffff; }
 
-/* 3. 全屏流式自适应主容器 (100% 满宽铺满，彻底消除两侧黑框死角) */
+/* 3. 全屏流式自适应主容器 */
 .main-fluid-canvas {
   width: 100% !important;
   max-width: 100% !important;
@@ -290,7 +324,7 @@ body {
   white-space: nowrap;
 }
 
-/* 5. 主内容卡片容器 (100% 满宽排版) */
+/* 5. 主内容卡片容器 */
 .content-full-card {
   width: 100%;
   background-color: #0b132b;
@@ -337,7 +371,7 @@ body {
 .cell-main-name { font-weight: bold; color: #ffffff; font-size: 13px; }
 .cell-sub-desc  { font-size: 11px; color: #64748b; font-family: monospace; margin-top: 3px; }
 
-/* 状态胶囊 */
+/* 状态徽章 */
 .status-active {
   background-color: rgba(6, 78, 59, 0.85);
   border: 1px solid #059669;
@@ -409,20 +443,20 @@ body {
 .btn-purple { background-color: #7c3aed; }
 .btn-trash  { background-color: #991b1b; }
 
-/* 双列对称流式栅格 */
+/* 双列对称栅格 */
 .grid-2col-fluid {
   display: grid;
   grid-template-columns: repeat(2, 1fr);
   gap: 20px;
   width: 100%;
 }
-@media (max-width: 960px) {
+@media (max-width: 1050px) {
   .grid-2col-fluid { grid-template-columns: 1fr; }
 }
 
 .card-inner-h3 { font-size: 14px; font-weight: bold; color: #fff; }
-.row-flex-gap { display: flex; gap: 12px; }
-.form-v-stack { display: flex; flex-direction: column; gap: 14px; }
+.row-flex-gap { display: flex; gap: 14px; flex-wrap: wrap; }
+.form-v-stack { display: flex; flex-direction: column; gap: 12px; }
 
 .info-banner-blue {
   background: #09122a;
@@ -509,10 +543,7 @@ body {
   display: flex; align-items: center; gap: 6px;
   background: #09122a; border: 1px solid #172554;
   padding: 8px 12px; border-radius: 6px; font-size: 12px;
-  width: 70% !important; min-width: 260px !important; max-width: 520px !important;
-}
-@media (max-width: 640px) {
-  .smtp-status-indicator { width: 100% !important; min-width: 100% !important; }
+  width: 100%; max-width: 420px;
 }
 
 .dot-green { color: #34d399; font-size: 14px; }
@@ -524,17 +555,90 @@ body {
   margin-top: 10px; padding-top: 14px;
   border-top: 1px dashed #1e3a8a;
   display: flex; gap: 10px; align-items: center;
-  width: 70% !important; min-width: 260px !important; max-width: 520px !important;
-}
-@media (max-width: 640px) {
-  .smtp-test-dashed-area { width: 100% !important; min-width: 100% !important; }
+  flex-wrap: wrap;
 }
 
 .btn-gray-test {
   background: #1e293b; color: #e2e8f0; border: 1px solid #334155;
   border-radius: 6px; padding: 7px 16px; font-size: 12px; font-weight: 500;
   cursor: pointer; white-space: nowrap; transition: all 0.2s;
-  height: 34px; width: auto !important;
+  height: 35px; width: auto !important;
 }
 .btn-gray-test:hover { background: #334155; color: #ffffff; }
 .check-box-blue { width: 16px; height: 16px; accent-color: #2563eb; cursor: pointer; }
+
+/* 右侧推送通知列表专用卡片样式 */
+.notify-channels-container {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  margin-top: 14px;
+}
+
+.channel-card-item {
+  background-color: #09122a;
+  border: 1px solid #172554;
+  border-radius: 8px;
+  padding: 16px;
+  transition: border-color 0.2s;
+}
+
+.channel-card-item:hover {
+  border-color: #1e3a8a;
+}
+
+.channel-card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding-bottom: 4px;
+}
+
+.channel-title {
+  font-size: 13px;
+  font-weight: bold;
+  color: #ffffff;
+  margin-right: 8px;
+}
+
+.badge-channel-on {
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: rgba(16, 185, 129, 0.15);
+  color: #34d399;
+  border: 1px solid rgba(16, 185, 129, 0.3);
+}
+
+.badge-channel-off {
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: rgba(100, 116, 139, 0.15);
+  color: #94a3b8;
+  border: 1px solid rgba(100, 116, 139, 0.3);
+}
+
+/* 展开区域样式 */
+.channel-expand-content {
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid #131e3d;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.channel-action-row {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  margin-top: 6px;
+}
+
+.form-field-hint {
+  font-size: 11px;
+  color: #64748b;
+  margin-top: 3px;
+  line-height: 1.5;
+}
