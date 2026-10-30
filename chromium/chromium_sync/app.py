@@ -1,4 +1,5 @@
 import os
+import sys
 import time
 import json
 import uuid
@@ -10,12 +11,17 @@ import smtplib
 import logging
 import asyncio
 import subprocess
+import ipaddress
+from datetime import datetime, timedelta, timezone
 from email.mime.text import MIMEText
 from email.header import Header
 from urllib.parse import urlparse, urlunparse
 from typing import Optional, List, Dict
-from datetime import datetime, timedelta
 
+from cryptography import x509
+from cryptography.x509.oid import NameOID
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
 import bcrypt
 import httpx
 import websockets
@@ -27,9 +33,11 @@ from fastapi.responses import JSONResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+# 日志输出配置
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("CDP_Sync")
 
+# 核心路径常量（固定在 /data 与 /certs）
 DATA_DIR = "/data"
 KEYS_DIR = os.path.join(DATA_DIR, "keys")
 DB_PATH = os.path.join(DATA_DIR, "app.db")
@@ -42,14 +50,15 @@ os.makedirs(CERTS_DIR, exist_ok=True)
 
 INIT_PASSWORD = os.getenv("ADMIN_INIT_PASS", "Admin@123456")
 
-# 引入 ChromiumSync 模块
+# ==================== 1. 原生直接导入 ChromiumSync ====================
 ChromiumSync = None
 try:
     from chromium_sync import ChromiumSync
-    logger.info("成功载入 chromium_sync 核心模块！")
+    logger.info("已成功载入 chromium_sync 核心模块！")
 except Exception as e:
     logger.warning(f"外部 ChromiumSync 模块未激活 ({e})，启用内置 WebSocket 探测引擎。")
 
+# ==================== 2. 原生 bcrypt 安全密码处理 ====================
 def hash_password(password: str) -> str:
     pwd_bytes = password.encode('utf-8')[:72]
     return bcrypt.hashpw(pwd_bytes, bcrypt.gensalt()).decode('utf-8')
@@ -61,11 +70,73 @@ def verify_password(password: str, hashed: str) -> bool:
     except Exception:
         return False
 
-# ==================== 1. 数据库与通知设置初始化 ====================
+# ==================== 3. 纯 Python 原生生成 10 年期自签 SSL 证书 ====================
+def generate_self_signed_cert(cert_file: str, key_file: str):
+    """使用 cryptography 纯内存生成，带标准 SAN 扩展，不依赖任何命令行"""
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    subject = issuer = x509.Name([
+        x509.NameAttribute(NameOID.COUNTRY_NAME, "CN"),
+        x509.NameAttribute(NameOID.ORGANIZATION_NAME, "ChromiumSync"),
+        x509.NameAttribute(NameOID.COMMON_NAME, "localhost"),
+    ])
+    now = datetime.now(timezone.utc)
+    cert = (
+        x509.CertificateBuilder()
+        .subject_name(subject)
+        .issuer_name(issuer)
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now)
+        .not_valid_after(now + timedelta(days=3650))
+        .add_extension(
+            x509.SubjectAlternativeName([
+                x509.DNSName("localhost"),
+                x509.IPAddress(ipaddress.IPv4Address("127.0.0.1")),
+                x509.IPAddress(ipaddress.IPv6Address("::1")),
+            ]),
+            critical=False,
+        )
+        .sign(key, hashes.SHA256())
+    )
+
+    with open(key_file, "wb") as f:
+        f.write(key.private_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PrivateFormat.TraditionalOpenSSL,
+            encryption_algorithm=serialization.NoEncryption(),
+        ))
+    os.chmod(key_file, 0o600)
+
+    with open(cert_file, "wb") as f:
+        f.write(cert.public_bytes(serialization.Encoding.PEM))
+
+def ensure_ssl_certificates():
+    global SSL_CERT_FILE, SSL_KEY_FILE
+
+    has_cert = os.path.exists(SSL_CERT_FILE) and os.path.getsize(SSL_CERT_FILE) > 0
+    has_key = os.path.exists(SSL_KEY_FILE) and os.path.getsize(SSL_KEY_FILE) > 0
+
+    if not (has_cert and has_key):
+        logger.warning("未检测到有效证书，正在通过原生引擎生成 10 年期自签名 SSL 证书...")
+        try:
+            os.makedirs(CERTS_DIR, exist_ok=True)
+            generate_self_signed_cert(SSL_CERT_FILE, SSL_KEY_FILE)
+            logger.info(f"自签名证书已成功保存至: {CERTS_DIR}")
+        except Exception as e:
+            logger.warning(f"目录 {CERTS_DIR} 写入受限 ({e})，正在自动容灾写入 /data/certs ...")
+            fallback_dir = os.path.join(DATA_DIR, "certs")
+            os.makedirs(fallback_dir, exist_ok=True)
+            SSL_CERT_FILE = os.path.join(fallback_dir, "fullchain.pem")
+            SSL_KEY_FILE = os.path.join(fallback_dir, "privkey.pem")
+            generate_self_signed_cert(SSL_CERT_FILE, SSL_KEY_FILE)
+            logger.info(f"自签名证书已成功降级生成于: {fallback_dir}")
+    else:
+        logger.info(f"已成功加载已有证书: {SSL_CERT_FILE}")
+
+# ==================== 4. 数据库与通知设置初始化 ====================
 def init_db_and_jwt():
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
-    # 节点表
     cur.execute('''CREATE TABLE IF NOT EXISTS nodes (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         name TEXT NOT NULL,
@@ -82,7 +153,6 @@ def init_db_and_jwt():
         last_sync TEXT
     )''')
 
-    # 热迁移补充列
     try:
         cur.execute("ALTER TABLE nodes ADD COLUMN cookie_count INTEGER DEFAULT 0")
     except Exception:
@@ -96,7 +166,6 @@ def init_db_and_jwt():
         details TEXT
     )''')
 
-    # 初始化管理员账号信息 (用户名与邮箱)
     defaults = {
         'admin_username': 'admin',
         'admin_email': 'admin@wimotek.com',
@@ -139,7 +208,7 @@ def set_setting(key: str, value: str):
 
 JWT_SECRET = get_setting('jwt_secret')
 
-# ==================== 2. 通知系统 (Email SMTP & Server酱) ====================
+# ==================== 5. 通知渠道服务 (Email SMTP & Server酱) ====================
 def send_email_notification(title: str, content: str) -> bool:
     host = get_setting('smtp_host')
     port = int(get_setting('smtp_port') or '465')
@@ -190,19 +259,19 @@ async def dispatch_notification(title: str, content: str):
     send_email_notification(title, content)
     await send_serverchan_notification(title, content)
 
-# ==================== 3. 核心修复：重写 WebSocket 端口与 Cookie 探针 ====================
+# ==================== 6. CDP 端口重写与实时 Cookie 探针 ====================
 async def get_cdp_ws_url(local_port: int) -> str:
     url = f"http://127.0.0.1:{local_port}/json/version"
     async with httpx.AsyncClient(timeout=4.0) as client:
         res = await client.get(url)
         raw_ws = res.json()["webSocketDebuggerUrl"]
-        # 核心关键：将远程机器报告的 9222 重写替换为本地真实映射端口 local_port
+        # 核心修复：远程机器返回的 9222 需强制替换为本地映射端口 local_port
         parsed = urlparse(raw_ws)
         corrected_ws = urlunparse(parsed._replace(netloc=f"127.0.0.1:{local_port}"))
         return corrected_ws
 
 async def probe_node_cookies(local_port: int) -> int:
-    """实时探针：探测指定端口节点上的实际 Cookie 数量"""
+    """实时探针：探测指定本地映射端口节点上的实际 Cookie 数量"""
     try:
         ws_url = await get_cdp_ws_url(local_port)
         async with websockets.connect(ws_url, timeout=5.0) as ws:
@@ -215,7 +284,7 @@ async def probe_node_cookies(local_port: int) -> int:
         logger.warning(f"探测本地端口 {local_port} Cookie 失败: {e}")
         return 0
 
-# ==================== 4. SSH 隧道管理 (联动 Cookie 自动嗅探) ====================
+# ==================== 7. SSH 隧道管理 (联动 Cookie 自动嗅探) ====================
 class TunnelManager:
     def __init__(self):
         self.tunnels: Dict[int, SSHTunnelForwarder] = {}
@@ -246,7 +315,7 @@ class TunnelManager:
             self._update_node_status(node_id, "connected")
             logger.info(f"节点 [{node['name']}] SSH 穿透成功 -> 本地端口 {node['local_bind_port']}")
 
-            # 隧道连通后，异步延迟 1 秒等待网桥稳定并自动探查 Cookie 数
+            # 隧道建立后，延迟 1.5 秒自动进行一次 Cookie 探针嗅探
             asyncio.create_task(self._auto_probe(node))
             return True, "Connected"
         except Exception as e:
@@ -280,7 +349,7 @@ class TunnelManager:
 
 tunnel_mgr = TunnelManager()
 
-# ==================== 5. 同步调度主任务 ====================
+# ==================== 8. 同步调度主任务 ====================
 async def execute_sync_task():
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
@@ -298,11 +367,9 @@ async def execute_sync_task():
     log_detail = []
 
     try:
-        # A. 探测源节点的 Cookie 数量
         source_count = await probe_node_cookies(source['local_bind_port'])
-        log_detail.append(f"源节点 [{source['name']}] 读取到 {source_count} 个 Cookies")
+        log_detail.append(f"源节点 [{source['name']}] 捕获到 {source_count} 个 Cookies")
 
-        # B. 调度同步模块
         if ChromiumSync is not None:
             for target in targets:
                 try:
@@ -317,7 +384,6 @@ async def execute_sync_task():
                         timeout=0
                     )
                     await asyncio.to_thread(syncer.run)
-                    # 探测目标写入后的新数量
                     target_count = await probe_node_cookies(target['local_bind_port'])
                     log_detail.append(f"-> 节点 [{target['name']}] 同步完成，当前 Cookie: {target_count}")
                 except Exception as ex:
@@ -327,7 +393,6 @@ async def execute_sync_task():
         status = "FAILED"
         log_detail.append(f"同步流程中断: {str(e)}")
 
-    # 记录同步日志并刷新节点 Cookie 统计
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
     cur.execute("INSERT INTO sync_logs (timestamp, status, details) VALUES (?, ?, ?)",
@@ -336,31 +401,10 @@ async def execute_sync_task():
     conn.commit()
     conn.close()
 
-    # 告警触发
     if status == "FAILED":
         await dispatch_notification("Cookie 同步失败预警", f"时间: {sync_time}\n详情:\n" + "\n".join(log_detail))
 
-# ==================== 6. SSL 证书自签名 ====================
-def ensure_ssl_certificates():
-    has_cert = os.path.exists(SSL_CERT_FILE) and os.path.getsize(SSL_CERT_FILE) > 0
-    has_key = os.path.exists(SSL_KEY_FILE) and os.path.getsize(SSL_KEY_FILE) > 0
-
-    if not (has_cert and has_key):
-        logger.warning("未检测到有效证书，自动签发 10 年期自签名 SSL 证书...")
-        try:
-            cmd = [
-                "openssl", "req", "-x509", "-nodes", "-days", "3650",
-                "-newkey", "rsa:2048",
-                "-keyout", SSL_KEY_FILE,
-                "-out", SSL_CERT_FILE,
-                "-subj", "/C=CN/ST=Global/L=CDP/O=ChromiumSync/CN=localhost"
-            ]
-            subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            os.chmod(SSL_KEY_FILE, 0o600)
-        except Exception as e:
-            logger.error(f"生成自签证书失败: {e}")
-
-# ==================== 7. API 路由与鉴权 ====================
+# ==================== 9. API 路由与鉴权 ====================
 CAPTCHA_STORE = {}
 LOGIN_ATTEMPTS = {}
 app = FastAPI(title="CDP Hub Manager")
@@ -384,9 +428,8 @@ def get_captcha():
     </svg>'''
     return {"token": token, "svg": svg}
 
-# 支持 用户名 OR 电子邮箱 + 密码登入
 class LoginDTO(BaseModel):
-    account: str  # 可以是 username 也可以是 email
+    account: str
     password: str
     captcha_token: str
     captcha_answer: str
@@ -411,7 +454,6 @@ def login(data: LoginDTO, req: Request):
 
     return {"token": jwt.encode({"sub": admin_user, "exp": datetime.utcnow() + timedelta(days=7)}, JWT_SECRET, algorithm="HS256")}
 
-# 个人与安全资料
 @app.get("/api/profile")
 def get_profile(user: dict = Depends(verify_token)):
     return {
@@ -429,7 +471,6 @@ def update_profile(data: dict, user: dict = Depends(verify_token)):
         set_setting("admin_password", hash_password(data["new_password"]))
     return {"message": "个人安全设置已更新"}
 
-# 通知配置获取与保存
 @app.get("/api/notifications/settings")
 def get_notification_settings(user: dict = Depends(verify_token)):
     return {
@@ -468,7 +509,6 @@ async def test_serverchan(user: dict = Depends(verify_token)):
         raise HTTPException(status_code=500, detail="Server酱推送失败，请检查 SendKey 是否填写无误")
     return {"message": "Server酱微信推送触发成功"}
 
-# 节点 CRUD 与手动探测 Cookie
 @app.get("/api/nodes")
 def list_nodes(user: dict = Depends(verify_token)):
     conn = sqlite3.connect(DB_PATH)
@@ -504,7 +544,6 @@ def delete_node(node_id: int, user: dict = Depends(verify_token)):
 
 @app.post("/api/nodes/{node_id}/probe")
 async def probe_node(node_id: int, user: dict = Depends(verify_token)):
-    """主动探测刷新节点 Cookie"""
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     cur = conn.cursor()
@@ -593,7 +632,14 @@ if os.path.exists("dist"):
     def serve_spa(full_path: str):
         return FileResponse("dist/index.html")
 
+# ==================== 10. 服务入口 ====================
 if __name__ == "__main__":
     ensure_ssl_certificates()
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8443, ssl_certfile=SSL_CERT_FILE, ssl_keyfile=SSL_KEY_FILE)
+    uvicorn.run(
+        app,
+        host="0.0.0.0",
+        port=8443,
+        ssl_certfile=SSL_CERT_FILE,
+        ssl_keyfile=SSL_KEY_FILE
+    )
