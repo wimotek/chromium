@@ -11,7 +11,7 @@ const notif = reactive({
   smtp_host: 'smtp.yeah.net',
   smtp_port: '465',
   smtp_ssl: true,
-  smtp_sender_name: 'Xray 节点中心',
+  smtp_sender_name: 'CDP 节点中心',
   smtp_user: '',
   smtp_pass: '',
   smtp_status: 'untested',
@@ -38,7 +38,7 @@ const saveSettings = async () => {
     body: JSON.stringify(notif)
   })
   if (res.ok) {
-    props.showToast('发信服务器配置已保存', 'success')
+    props.showToast('发信参数已保存', 'success')
     emit('update-status')
   }
 }
@@ -191,37 +191,3 @@ onMounted(() => {
     </div>
   </div>
 </template>
-
-<style scoped>
-.smtp-title-header { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
-.smtp-icon-box {
-  width: 32px; height: 32px; border-radius: 6px;
-  background: #1e3a8a; border: 1px solid #3b82f6;
-  display: flex; align-items: center; justify-content: center; font-size: 16px;
-}
-.smtp-title-text { font-size: 15px; font-weight: bold; color: #ffffff; }
-.smtp-sub-text { font-size: 11px; color: #64748b; margin-top: 2px; }
-
-.smtp-status-indicator {
-  display: flex; align-items: center; gap: 6px;
-  background: #09122a; border: 1px solid #172554;
-  padding: 8px 12px; border-radius: 6px; font-size: 12px;
-}
-.dot-green { color: #34d399; font-size: 14px; }
-.dot-red   { color: #f87171; font-size: 14px; font-weight: bold; }
-.dot-gray  { color: #64748b; font-size: 14px; }
-.status-txt { color: #cbd5e1; }
-
-.smtp-test-dashed-area {
-  margin-top: 10px; padding-top: 14px;
-  border-top: 1px dashed #1e3a8a;
-  display: flex; gap: 10px; align-items: center;
-}
-.btn-gray-test {
-  background: #1e293b; color: #e2e8f0; border: 1px solid #334155;
-  border-radius: 6px; padding: 7px 14px; font-size: 12px; font-weight: 500;
-  cursor: pointer; white-space: nowrap; transition: all 0.2s;
-}
-.btn-gray-test:hover { background: #334155; color: #ffffff; }
-.check-box-blue { width: 15px; height: 15px; accent-color: #2563eb; }
-</style>

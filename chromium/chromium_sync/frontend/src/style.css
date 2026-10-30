@@ -12,3 +12,487 @@ body {
   min-height: 100vh;
   -webkit-font-smoothing: antialiased;
 }
+
+/* 视口全屏容器 */
+.cdp-app-viewport {
+  min-height: 100vh;
+  width: 100%;
+  background-color: #060b17;
+  color: #f8fafc;
+  box-sizing: border-box;
+}
+
+/* 浮动全局 Toast 提示条 */
+.global-toast-bar {
+  position: fixed;
+  top: 20px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 100000;
+  padding: 8px 18px;
+  border-radius: 6px;
+  font-size: 13px;
+  font-weight: 500;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.5);
+  animation: fadeInToast 0.2s ease;
+}
+.toast-ok { background: #064e3b; color: #34d399; border: 1px solid #059669; }
+.toast-err { background: #450a0a; color: #f87171; border: 1px solid #dc2626; }
+
+@keyframes fadeInToast {
+  from { opacity: 0; transform: translate(-50%, -10px); }
+  to { opacity: 1; transform: translate(-50%, 0); }
+}
+
+/* 1. 登录窗口：绝对垂直水平死锁居中 */
+.login-screen-center {
+  min-height: 100vh;
+  width: 100vw;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  background-color: #060b17;
+  padding: 20px;
+  box-sizing: border-box;
+}
+
+.login-card-navy {
+  width: 420px;
+  max-width: 95vw;
+  background-color: #0b132b;
+  border: 1px solid #172554;
+  border-radius: 14px;
+  padding: 32px;
+  box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.7);
+  box-sizing: border-box;
+}
+
+.login-brand-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding-bottom: 16px;
+  margin-bottom: 24px;
+  border-bottom: 1px solid #172554;
+}
+
+.bolt-symbol { color: #f59e0b; font-size: 19px; font-weight: bold; }
+.brand-white { font-weight: 800; font-size: 16px; color: #ffffff; letter-spacing: 1px; }
+.brand-cyan  { font-weight: 800; font-size: 16px; color: #00f0ff; letter-spacing: 1px; }
+
+.login-form-stack { display: flex; flex-direction: column; gap: 16px; }
+.form-row { display: flex; flex-direction: column; gap: 6px; }
+.form-label { font-size: 12px; color: #94a3b8; }
+
+.cdp-input {
+  width: 100%;
+  box-sizing: border-box;
+  background-color: #0f1c3f;
+  border: 1px solid #1e3a8a;
+  color: #ffffff;
+  border-radius: 6px;
+  padding: 8px 12px;
+  font-size: 13px;
+  outline: none;
+  transition: all 0.2s;
+}
+.cdp-input:focus {
+  border-color: #00f0ff;
+  box-shadow: 0 0 8px rgba(0, 240, 255, 0.35);
+}
+
+.captcha-row { display: flex; gap: 10px; align-items: center; }
+.captcha-box {
+  width: 120px;
+  height: 38px;
+  background: #09122a;
+  border: 1px solid #172554;
+  border-radius: 6px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  overflow: hidden;
+  flex-shrink: 0;
+}
+
+.btn-primary-gradient {
+  background: linear-gradient(135deg, #0284c7, #2563eb);
+  color: #ffffff;
+  border: none;
+  border-radius: 6px;
+  padding: 6px 14px;
+  font-size: 12px;
+  font-weight: bold;
+  cursor: pointer;
+  transition: opacity 0.2s, transform 0.15s;
+}
+.btn-primary-gradient:hover { opacity: 0.9; transform: translateY(-1px); }
+
+/* 2. 顶栏 (通顶流式铺满) */
+.dashboard-fluid-layout {
+  min-height: 100vh;
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+}
+
+.header-full-bar {
+  height: 60px;
+  width: 100%;
+  padding: 0 32px;
+  background-color: #060b17;
+  border-bottom: 1px solid #111c38;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  box-sizing: border-box;
+}
+
+.header-left { display: flex; align-items: center; gap: 8px; }
+.header-right { display: flex; align-items: center; gap: 12px; }
+
+.badge-admin {
+  background-color: #dc2626;
+  color: #ffffff;
+  font-size: 11px;
+  font-weight: bold;
+  padding: 2px 8px;
+  border-radius: 4px;
+  letter-spacing: 0.5px;
+}
+
+.username-label { font-size: 13px; font-weight: 600; color: #ffffff; }
+
+.btn-logout {
+  background: transparent;
+  border: 1px solid #4b5563;
+  color: #d1d5db;
+  padding: 2px 10px;
+  border-radius: 4px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.btn-logout:hover { border-color: #9ca3af; color: #ffffff; }
+
+/* 3. 全屏流式自适应主容器 (100% 满宽，消除固定宽度瓶颈) */
+.main-fluid-canvas {
+  width: 100% !important;
+  max-width: 100% !important;
+  flex: 1;
+  padding: 20px 32px;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+/* 4. 核心 4 个大卡片横排平铺 */
+.top-cards-row-4 {
+  display: grid !important;
+  grid-template-columns: repeat(4, 1fr) !important;
+  gap: 16px !important;
+  width: 100%;
+  box-sizing: border-box;
+}
+
+@media (max-width: 1200px) {
+  .top-cards-row-4 { grid-template-columns: repeat(2, 1fr) !important; }
+}
+@media (max-width: 680px) {
+  .top-cards-row-4 { grid-template-columns: 1fr !important; }
+}
+
+.kpi-card {
+  background-color: #0b132b;
+  border: 1px solid #172554;
+  border-radius: 12px;
+  padding: 16px 20px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  box-sizing: border-box;
+}
+
+.kpi-card:hover {
+  background-color: #0d1736;
+  border-color: #1e3a8a;
+  transform: translateY(-2px);
+}
+
+.kpi-card-active {
+  border-color: #00f0ff !important;
+  box-shadow: 0 0 14px rgba(0, 240, 255, 0.35) !important;
+}
+
+.kpi-left { display: flex; align-items: center; gap: 14px; }
+.icon-avatar {
+  width: 38px;
+  height: 38px;
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 18px;
+  flex-shrink: 0;
+}
+
+.avatar-purple { background: rgba(88, 28, 135, 0.4); border: 1px solid #7e22ce; }
+.avatar-cyan   { background: rgba(14, 59, 94, 0.4); border: 1px solid #0284c7; }
+.avatar-pink   { background: rgba(131, 24, 67, 0.4); border: 1px solid #db2777; }
+.avatar-indigo { background: rgba(49, 46, 129, 0.4); border: 1px solid #4f46e5; }
+
+.kpi-info { display: flex; flex-direction: column; gap: 3px; }
+.kpi-title { font-size: 13px; font-weight: bold; color: #ffffff; }
+.kpi-desc  { font-size: 11px; color: #64748b; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 260px; }
+
+.pill-badge {
+  background-color: #0f1f42;
+  border: 1px solid #1d4ed8;
+  color: #38bdf8;
+  border-radius: 9999px;
+  padding: 3px 12px;
+  font-size: 11px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+/* 5. 主内容卡片容器 (100% 满宽排版) */
+.content-full-card {
+  width: 100%;
+  background-color: #0b132b;
+  border: 1px solid #172554;
+  border-radius: 14px;
+  padding: 20px;
+  box-sizing: border-box;
+}
+
+.table-header-bar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding-bottom: 16px;
+  border-bottom: 1px solid #172554;
+  margin-bottom: 16px;
+}
+
+.table-title { display: flex; align-items: center; gap: 8px; }
+.icon-duo-users { font-size: 18px; color: #a855f7; }
+.table-title h2 { font-size: 15px; font-weight: bold; color: #ffffff; }
+
+.table-responsive { width: 100%; overflow-x: auto; }
+.cdp-fluid-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.cdp-fluid-table th {
+  color: #64748b;
+  font-weight: 500;
+  padding: 12px 14px;
+  border-bottom: 1px solid #172554;
+  text-align: left;
+}
+
+.cdp-fluid-table td {
+  padding: 14px;
+  border-bottom: 1px solid #131e3d;
+  vertical-align: middle;
+}
+
+.cell-main-name { font-weight: bold; color: #ffffff; font-size: 13px; }
+.cell-sub-desc  { font-size: 11px; color: #64748b; font-family: monospace; margin-top: 3px; }
+
+/* 状态胶囊 */
+.status-active {
+  background-color: rgba(6, 78, 59, 0.85);
+  border: 1px solid #059669;
+  color: #34d399;
+  border-radius: 9999px;
+  padding: 2px 10px;
+  font-size: 11px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.status-standby {
+  background-color: rgba(69, 26, 3, 0.8);
+  border: 1px solid #d97706;
+  color: #fbbf24;
+  border-radius: 9999px;
+  padding: 2px 10px;
+  font-size: 11px;
+}
+.status-error {
+  background-color: rgba(69, 10, 10, 0.8);
+  border: 1px solid #dc2626;
+  color: #f87171;
+  border-radius: 9999px;
+  padding: 2px 10px;
+  font-size: 11px;
+}
+
+.font-cyan-mono { color: #00f0ff; font-family: monospace; font-weight: bold; }
+
+.cookie-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background-color: #0f1f42;
+  border: 1px solid #1d4ed8;
+  padding: 2px 8px;
+  border-radius: 4px;
+  color: #fcd34d;
+  font-weight: bold;
+}
+.link-probe { background: none; border: none; color: #38bdf8; cursor: pointer; text-decoration: underline; font-size: 10px; margin-left: 4px; }
+
+.tag-plan-blue { background-color: #1e40af; color: #93c5fd; border-radius: 4px; padding: 2px 8px; font-size: 11px; }
+.tag-plan-indigo { background-color: #312e81; color: #c7d2fe; border-radius: 4px; padding: 2px 8px; font-size: 11px; }
+
+.btn-qrcode {
+  background-color: #0284c7;
+  color: #ffffff;
+  border: none;
+  border-radius: 4px;
+  padding: 3px 10px;
+  font-size: 11px;
+  font-weight: bold;
+}
+.btn-set-source {
+  background-color: #1e293b;
+  color: #94a3b8;
+  border: 1px solid #334155;
+  border-radius: 4px;
+  padding: 3px 8px;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.btn-group-row { display: flex; gap: 6px; justify-content: flex-end; }
+.btn-micro { border: none; border-radius: 4px; padding: 4px 8px; font-size: 11px; font-weight: bold; color: #ffffff; cursor: pointer; }
+.btn-orange { background-color: #d97706; }
+.btn-purple { background-color: #7c3aed; }
+.btn-trash  { background-color: #991b1b; }
+
+/* 双列对称流式栅格 */
+.grid-2col-fluid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 20px;
+  width: 100%;
+}
+@media (max-width: 960px) {
+  .grid-2col-fluid { grid-template-columns: 1fr; }
+}
+
+.card-inner-h3 { font-size: 14px; font-weight: bold; color: #fff; }
+.row-flex-gap { display: flex; gap: 12px; }
+.form-v-stack { display: flex; flex-direction: column; gap: 14px; }
+
+.info-banner-blue {
+  background: #09122a;
+  border: 1px solid #172554;
+  border-radius: 8px;
+  padding: 14px;
+  font-size: 12px;
+  color: #cbd5e1;
+  line-height: 1.8;
+}
+
+.console-box {
+  background: #060b17;
+  border: 1px solid #172554;
+  border-radius: 8px;
+  padding: 14px;
+  font-family: monospace;
+  font-size: 12px;
+  height: 320px;
+  overflow-y: auto;
+}
+.console-item { border-bottom: 1px solid #111c38; padding-bottom: 8px; margin-bottom: 8px; }
+.console-meta { display: flex; justify-content: space-between; font-size: 11px; color: #64748b; }
+.console-pre  { margin-top: 4px; color: #e2e8f0; white-space: pre-wrap; }
+
+.keys-list { list-style: none; padding: 0; margin: 0; }
+.key-row { display: flex; justify-content: space-between; padding: 10px 0; border-bottom: 1px solid #172554; font-size: 12px; }
+
+/* 弹窗遮罩 */
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.8);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  z-index: 9999;
+}
+.modal-card {
+  width: 520px;
+  max-width: 95vw;
+  background-color: #0b132b;
+  border: 1px solid #1e3a8a;
+  border-radius: 12px;
+  padding: 24px;
+  box-shadow: 0 20px 40px rgba(0, 0, 0, 0.8);
+}
+.modal-title-bar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding-bottom: 12px;
+  border-bottom: 1px solid #172554;
+}
+
+.radio-pill-card {
+  flex: 1;
+  padding: 10px;
+  border-radius: 6px;
+  border: 1px solid #172554;
+  text-align: center;
+  cursor: pointer;
+  font-size: 12px;
+  color: #94a3b8;
+}
+.radio-pill-active {
+  border-color: #00f0ff !important;
+  background: #0f1f42 !important;
+  color: #38bdf8 !important;
+}
+
+/* ==================== SMTP 发信配置专属样式 (1:1 复刻截图) ==================== */
+.smtp-title-header { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
+.smtp-icon-box {
+  width: 32px; height: 32px; border-radius: 6px;
+  background: #1e3a8a; border: 1px solid #3b82f6;
+  display: flex; align-items: center; justify-content: center; font-size: 16px;
+}
+.smtp-title-text { font-size: 15px; font-weight: bold; color: #ffffff; }
+.smtp-sub-text { font-size: 11px; color: #64748b; margin-top: 2px; }
+
+.smtp-status-indicator {
+  display: flex; align-items: center; gap: 6px;
+  background: #09122a; border: 1px solid #172554;
+  padding: 8px 12px; border-radius: 6px; font-size: 12px;
+}
+.dot-green { color: #34d399; font-size: 14px; }
+.dot-red   { color: #f87171; font-size: 14px; font-weight: bold; }
+.dot-gray  { color: #64748b; font-size: 14px; }
+.status-txt { color: #cbd5e1; }
+
+.smtp-test-dashed-area {
+  margin-top: 10px; padding-top: 14px;
+  border-top: 1px dashed #1e3a8a;
+  display: flex; gap: 10px; align-items: center;
+}
+.btn-gray-test {
+  background: #1e293b; color: #e2e8f0; border: 1px solid #334155;
+  border-radius: 6px; padding: 7px 14px; font-size: 12px; font-weight: 500;
+  cursor: pointer; white-space: nowrap; transition: all 0.2s;
+}
+.btn-gray-test:hover { background: #334155; color: #ffffff; }
+.check-box-blue { width: 15px; height: 15px; accent-color: #2563eb; }

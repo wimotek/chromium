@@ -22,6 +22,7 @@ const totalCookies = computed(() => nodes.value.reduce((acc, n) => acc + (n.cook
 const notifStatus = ref({ smtp_status: 'untested', serverchan_enabled: false })
 const profile = reactive({ username: '' })
 
+// 纯用户名 + 密码登录
 const loginForm = reactive({
   username: '',
   password: '',
@@ -183,7 +184,7 @@ onMounted(() => {
                 <div class="kpi-desc">SMTP 邮件发信、Server酱微信实时推送、故障秒级告警</div>
               </div>
             </div>
-            <div class="pill-badge">{{ notifStatus.smtp_status === 'ready' ? '邮件正常' : (notifStatus.serverchan_enabled ? '微信已启' : '未就绪') }}</div>
+            <div class="pill-badge">{{ notifStatus.smtp_status === 'ready' ? '邮件就绪' : (notifStatus.serverchan_enabled ? '微信已启' : '未就绪') }}</div>
           </div>
 
           <div @click="activeNav = 'settings'" :class="['kpi-card', activeNav === 'settings' ? 'kpi-card-active' : '']">
@@ -194,7 +195,7 @@ onMounted(() => {
                 <div class="kpi-desc">Agent 对外接口 Key、SSH 密钥金库与管理员密码设置</div>
               </div>
             </div>
-            <div class="pill-badge">配置就绪</div>
+            <div class="pill-badge">配置中心</div>
           </div>
         </div>
 
