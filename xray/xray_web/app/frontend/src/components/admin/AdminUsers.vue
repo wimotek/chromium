@@ -30,14 +30,29 @@
               </span>
             </td>
             <td>
-              <div style="white-space: nowrap;">{{ u.used_mb }} / {{ u.traffic_limit_mb === 0 ? '♾️ 不限' : u.traffic_limit_mb + ' MB' }}</div>
+              <div style="white-space: nowrap;">
+                {{ u.used_mb }} / {{ u.traffic_limit_mb === 0 ? '♾️ 不限' : u.traffic_limit_mb + ' MB' }}
+              </div>
               <div class="table-progress"><div class="table-glow" :style="{ width: calcProgress(u.used_mb, u.traffic_limit_mb) + '%' }"></div></div>
             </td>
             <td style="white-space: nowrap;">{{ (u.expire_date && u.expire_date.startsWith('2099')) ? '♾️ 永久有效' : u.expire_date }}</td>
+
+            <!-- 核心优化：准确识别月度重置、永久无限、不限流量 -->
             <td>
-              <span v-if="u.is_monthly === 1" class="badge badge-monthly">每月{{ u.reset_day }}号重置</span>
-              <span v-else class="text-muted" style="font-size: 11px;">普通固定</span>
+              <span v-if="u.is_monthly === 1" class="badge badge-monthly">
+                🔄 每月{{ u.reset_day }}号重置
+              </span>
+              <span v-else-if="u.traffic_limit_mb === 0 && u.expire_date && u.expire_date.startsWith('2099')" class="badge badge-ready" style="font-weight: 700;">
+                👑 永久无限
+              </span>
+              <span v-else-if="u.traffic_limit_mb === 0" class="badge badge-ready">
+                ♾️ 不限流量
+              </span>
+              <span v-else class="text-muted" style="font-size: 11px;">
+                普通固定
+              </span>
             </td>
+
             <td style="white-space: nowrap;">
               <button class="btn-sm btn-action" @click="openUserCredModal(u)">📱 凭证/二维码</button>
             </td>

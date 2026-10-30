@@ -33,11 +33,9 @@ from fastapi.responses import JSONResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-# 日志输出配置
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("CDP_Sync")
 
-# 核心路径常量（固定在 /data 与 /certs）
 DATA_DIR = "/data"
 KEYS_DIR = os.path.join(DATA_DIR, "keys")
 DB_PATH = os.path.join(DATA_DIR, "app.db")
@@ -50,15 +48,14 @@ os.makedirs(CERTS_DIR, exist_ok=True)
 
 INIT_PASSWORD = os.getenv("ADMIN_INIT_PASS", "Admin@123456")
 
-# ==================== 1. 原生直接导入 ChromiumSync ====================
+# 引入 ChromiumSync 核心模块
 ChromiumSync = None
 try:
     from chromium_sync import ChromiumSync
-    logger.info("已成功载入 chromium_sync 核心模块！")
+    logger.info("已成功加载 chromium_sync 核心模块！")
 except Exception as e:
     logger.warning(f"外部 ChromiumSync 模块未激活 ({e})，启用内置 WebSocket 探测引擎。")
 
-# ==================== 2. 原生 bcrypt 安全密码处理 ====================
 def hash_password(password: str) -> str:
     pwd_bytes = password.encode('utf-8')[:72]
     return bcrypt.hashpw(pwd_bytes, bcrypt.gensalt()).decode('utf-8')
@@ -70,9 +67,8 @@ def verify_password(password: str, hashed: str) -> bool:
     except Exception:
         return False
 
-# ==================== 3. 纯 Python 原生生成 10 年期自签 SSL 证书 ====================
+# ==================== 1. 证书与环境初始化 ====================
 def generate_self_signed_cert(cert_file: str, key_file: str):
-    """使用 cryptography 纯内存生成，带标准 SAN 扩展，不依赖任何命令行"""
     key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
     subject = issuer = x509.Name([
         x509.NameAttribute(NameOID.COUNTRY_NAME, "CN"),
@@ -117,11 +113,11 @@ def ensure_ssl_certificates():
     has_key = os.path.exists(SSL_KEY_FILE) and os.path.getsize(SSL_KEY_FILE) > 0
 
     if not (has_cert and has_key):
-        logger.warning("未检测到有效证书，正在通过原生引擎生成 10 年期自签名 SSL 证书...")
+        logger.warning("未检测到有效证书，正在通过原生引擎生成自签名 SSL 证书...")
         try:
             os.makedirs(CERTS_DIR, exist_ok=True)
             generate_self_signed_cert(SSL_CERT_FILE, SSL_KEY_FILE)
-            logger.info(f"自签名证书已成功保存至: {CERTS_DIR}")
+            logger.info(f"自签名证书已保存至: {CERTS_DIR}")
         except Exception as e:
             logger.warning(f"目录 {CERTS_DIR} 写入受限 ({e})，正在自动容灾写入 /data/certs ...")
             fallback_dir = os.path.join(DATA_DIR, "certs")
@@ -130,10 +126,8 @@ def ensure_ssl_certificates():
             SSL_KEY_FILE = os.path.join(fallback_dir, "privkey.pem")
             generate_self_signed_cert(SSL_CERT_FILE, SSL_KEY_FILE)
             logger.info(f"自签名证书已成功降级生成于: {fallback_dir}")
-    else:
-        logger.info(f"已成功加载已有证书: {SSL_CERT_FILE}")
 
-# ==================== 4. 数据库与通知设置初始化 ====================
+# ==================== 2. 数据库与本地节点热迁移 ====================
 def init_db_and_jwt():
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
@@ -141,22 +135,25 @@ def init_db_and_jwt():
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         name TEXT NOT NULL,
         is_source INTEGER DEFAULT 0,
-        ssh_host TEXT NOT NULL,
+        is_local INTEGER DEFAULT 0,
+        ssh_host TEXT DEFAULT '',
         ssh_port INTEGER DEFAULT 22,
-        ssh_user TEXT NOT NULL,
-        ssh_key_filename TEXT,
-        ssh_password TEXT,
+        ssh_user TEXT DEFAULT '',
+        ssh_key_filename TEXT DEFAULT '',
+        ssh_password TEXT DEFAULT '',
         remote_cdp_port INTEGER DEFAULT 9222,
-        local_bind_port INTEGER UNIQUE NOT NULL,
+        local_bind_port INTEGER NOT NULL,
         cookie_count INTEGER DEFAULT 0,
         status TEXT DEFAULT 'stopped',
         last_sync TEXT
     )''')
 
-    try:
-        cur.execute("ALTER TABLE nodes ADD COLUMN cookie_count INTEGER DEFAULT 0")
-    except Exception:
-        pass
+    # 为现有表热迁移 is_local 和 cookie_count
+    for col, col_type in [("is_local", "INTEGER DEFAULT 0"), ("cookie_count", "INTEGER DEFAULT 0")]:
+        try:
+            cur.execute(f"ALTER TABLE nodes ADD COLUMN {col} {col_type}")
+        except Exception:
+            pass
 
     cur.execute('''CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)''')
     cur.execute('''CREATE TABLE IF NOT EXISTS sync_logs (
@@ -208,7 +205,7 @@ def set_setting(key: str, value: str):
 
 JWT_SECRET = get_setting('jwt_secret')
 
-# ==================== 5. 通知渠道服务 (Email SMTP & Server酱) ====================
+# ==================== 3. 通知系统 ====================
 def send_email_notification(title: str, content: str) -> bool:
     host = get_setting('smtp_host')
     port = int(get_setting('smtp_port') or '465')
@@ -259,32 +256,40 @@ async def dispatch_notification(title: str, content: str):
     send_email_notification(title, content)
     await send_serverchan_notification(title, content)
 
-# ==================== 6. CDP 端口重写与实时 Cookie 探针 ====================
+# ==================== 4. 增强型 CDP WebSocket 探针与 Cookie 读写 ====================
 async def get_cdp_ws_url(local_port: int) -> str:
     url = f"http://127.0.0.1:{local_port}/json/version"
-    async with httpx.AsyncClient(timeout=4.0) as client:
+    async with httpx.AsyncClient(timeout=3.0) as client:
         res = await client.get(url)
         raw_ws = res.json()["webSocketDebuggerUrl"]
-        # 核心修复：远程机器返回的 9222 需强制替换为本地映射端口 local_port
         parsed = urlparse(raw_ws)
+        # 强制替换为本地直连/隧道端口
         corrected_ws = urlunparse(parsed._replace(netloc=f"127.0.0.1:{local_port}"))
         return corrected_ws
 
+async def fetch_cookies_native(local_port: int) -> List[dict]:
+    ws_url = await get_cdp_ws_url(local_port)
+    async with websockets.connect(ws_url, timeout=5.0) as ws:
+        await ws.send(json.dumps({"id": 1, "method": "Storage.getCookies"}))
+        resp = await asyncio.wait_for(ws.recv(), timeout=5.0)
+        data = json.loads(resp)
+        return data.get("result", {}).get("cookies", [])
+
+async def inject_cookies_native(local_port: int, cookies: List[dict]):
+    ws_url = await get_cdp_ws_url(local_port)
+    async with websockets.connect(ws_url, timeout=5.0) as ws:
+        await ws.send(json.dumps({"id": 2, "method": "Network.setCookies", "params": {"cookies": cookies}}))
+        await asyncio.wait_for(ws.recv(), timeout=5.0)
+
 async def probe_node_cookies(local_port: int) -> int:
-    """实时探针：探测指定本地映射端口节点上的实际 Cookie 数量"""
     try:
-        ws_url = await get_cdp_ws_url(local_port)
-        async with websockets.connect(ws_url, timeout=5.0) as ws:
-            await ws.send(json.dumps({"id": 1, "method": "Storage.getCookies"}))
-            resp = await asyncio.wait_for(ws.recv(), timeout=5.0)
-            data = json.loads(resp)
-            cookies = data.get("result", {}).get("cookies", [])
-            return len(cookies)
+        cookies = await fetch_cookies_native(local_port)
+        return len(cookies)
     except Exception as e:
-        logger.warning(f"探测本地端口 {local_port} Cookie 失败: {e}")
+        logger.debug(f"探测端口 {local_port} Cookie 失败: {e}")
         return 0
 
-# ==================== 7. SSH 隧道管理 (联动 Cookie 自动嗅探) ====================
+# ==================== 5. SSH 隧道管理 (本地直连节点自动豁免) ====================
 class TunnelManager:
     def __init__(self):
         self.tunnels: Dict[int, SSHTunnelForwarder] = {}
@@ -293,6 +298,23 @@ class TunnelManager:
         node_id = node['id']
         self.stop_tunnel(node_id)
 
+        # 本地直连节点：直接探测其本地 CDP 接口健康状态，无需 SSH
+        if node.get('is_local') == 1:
+            try:
+                # 访问本地 CDP 端口检测连通性
+                res = httpx.get(f"http://127.0.0.1:{node['local_bind_port']}/json/version", timeout=2.0)
+                if res.status_code == 200:
+                    self._update_node_status(node_id, "connected")
+                    asyncio.create_task(self._auto_probe(node))
+                    return True, "Local Direct Connected"
+                else:
+                    self._update_node_status(node_id, "error: not cdp")
+                    return False, "Not a CDP service"
+            except Exception as e:
+                self._update_node_status(node_id, "error: connection refused")
+                return False, f"本地CDP未运行或拒绝连接: {e}"
+
+        # 远程节点：启动 SSH 隧道
         ssh_kwargs = {
             "ssh_address_or_host": (node['ssh_host'], int(node['ssh_port'])),
             "ssh_username": node['ssh_user'],
@@ -313,9 +335,8 @@ class TunnelManager:
             tunnel.start()
             self.tunnels[node_id] = tunnel
             self._update_node_status(node_id, "connected")
-            logger.info(f"节点 [{node['name']}] SSH 穿透成功 -> 本地端口 {node['local_bind_port']}")
+            logger.info(f"节点 [{node['name']}] SSH 隧道启动成功 -> 映射端口 {node['local_bind_port']}")
 
-            # 隧道建立后，延迟 1.5 秒自动进行一次 Cookie 探针嗅探
             asyncio.create_task(self._auto_probe(node))
             return True, "Connected"
         except Exception as e:
@@ -323,7 +344,7 @@ class TunnelManager:
             return False, str(e)
 
     async def _auto_probe(self, node: dict):
-        await asyncio.sleep(1.5)
+        await asyncio.sleep(1.2)
         count = await probe_node_cookies(node['local_bind_port'])
         conn = sqlite3.connect(DB_PATH)
         cur = conn.cursor()
@@ -349,7 +370,7 @@ class TunnelManager:
 
 tunnel_mgr = TunnelManager()
 
-# ==================== 8. 同步调度主任务 ====================
+# ==================== 6. 同步调度引擎 (兼容本地/远程混部) ====================
 async def execute_sync_task():
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
@@ -367,27 +388,40 @@ async def execute_sync_task():
     log_detail = []
 
     try:
-        source_count = await probe_node_cookies(source['local_bind_port'])
-        log_detail.append(f"源节点 [{source['name']}] 捕获到 {source_count} 个 Cookies")
+        # 获取源节点 Cookie
+        cookies = await fetch_cookies_native(source['local_bind_port'])
+        source_count = len(cookies)
+        log_detail.append(f"源节点 [{source['name']}] 提取到 {source_count} 个 Cookies")
 
-        if ChromiumSync is not None:
-            for target in targets:
-                try:
-                    remote_ssh = f"{target['ssh_user']}@{target['ssh_host']}"
-                    syncer = ChromiumSync(
-                        remote_ssh=remote_ssh,
-                        remote_ssh_port=int(target['ssh_port']),
-                        local_cdp_port=source['local_bind_port'],
-                        remote_cdp_port=int(target['remote_cdp_port']),
-                        remote_tunnel_port=int(target['remote_cdp_port']),
-                        direction="auto",
-                        timeout=0
-                    )
-                    await asyncio.to_thread(syncer.run)
+        for target in targets:
+            try:
+                # 场景 A: 目标是本地节点，直接通过原生 WebSocket 注入，完全不走 SSH
+                if target.get('is_local') == 1:
+                    await inject_cookies_native(target['local_bind_port'], cookies)
                     target_count = await probe_node_cookies(target['local_bind_port'])
-                    log_detail.append(f"-> 节点 [{target['name']}] 同步完成，当前 Cookie: {target_count}")
-                except Exception as ex:
-                    log_detail.append(f"-> 节点 [{target['name']}] 同步异常: {str(ex)}")
+                    log_detail.append(f"-> 本地直连节点 [{target['name']}] 注入成功，当前 Cookies: {target_count}")
+                # 场景 B: 目标是远程节点
+                else:
+                    if ChromiumSync is not None:
+                        remote_ssh = f"{target['ssh_user']}@{target['ssh_host']}"
+                        syncer = ChromiumSync(
+                            remote_ssh=remote_ssh,
+                            remote_ssh_port=int(target['ssh_port']),
+                            local_cdp_port=source['local_bind_port'],
+                            remote_cdp_port=int(target['remote_cdp_port']),
+                            remote_tunnel_port=int(target['remote_cdp_port']),
+                            direction="auto",
+                            timeout=0
+                        )
+                        await asyncio.to_thread(syncer.run)
+                    else:
+                        await inject_cookies_native(target['local_bind_port'], cookies)
+
+                    target_count = await probe_node_cookies(target['local_bind_port'])
+                    log_detail.append(f"-> 远程节点 [{target['name']}] 同步完成，当前 Cookies: {target_count}")
+            except Exception as ex:
+                log_detail.append(f"-> 节点 [{target['name']}] 同步异常: {str(ex)}")
+
         status = "SUCCESS"
     except Exception as e:
         status = "FAILED"
@@ -402,12 +436,11 @@ async def execute_sync_task():
     conn.close()
 
     if status == "FAILED":
-        await dispatch_notification("Cookie 同步失败预警", f"时间: {sync_time}\n详情:\n" + "\n".join(log_detail))
+        await dispatch_notification("Cookie 同步告警", f"时间: {sync_time}\n详情:\n" + "\n".join(log_detail))
 
-# ==================== 9. API 路由与鉴权 ====================
+# ==================== 7. API 路由 ====================
 CAPTCHA_STORE = {}
-LOGIN_ATTEMPTS = {}
-app = FastAPI(title="CDP Hub Manager")
+app = FastAPI(title="X-CDP Hub")
 
 def verify_token(authorization: Optional[str] = ReqHeader(None)):
     if not authorization or not authorization.startswith("Bearer "):
@@ -423,8 +456,8 @@ def get_captcha():
     token = str(uuid.uuid4())
     CAPTCHA_STORE[token] = {"ans": a + b, "exp": time.time() + 180}
     svg = f'''<svg xmlns="http://www.w3.org/2000/svg" width="120" height="38" viewBox="0 0 120 38">
-        <rect width="100%" height="100%" fill="#1f2937" rx="6"/>
-        <text x="20" y="25" font-family="system-ui" font-size="17" font-weight="bold" fill="#60a5fa">{a} + {b} = ?</text>
+        <rect width="100%" height="100%" fill="#262626" rx="4"/>
+        <text x="18" y="25" font-family="-apple-system, system-ui" font-size="16" font-weight="bold" fill="#1677ff">{a} + {b} = ?</text>
     </svg>'''
     return {"token": token, "svg": svg}
 
@@ -436,7 +469,6 @@ class LoginDTO(BaseModel):
 
 @app.post("/api/login")
 def login(data: LoginDTO, req: Request):
-    ip = req.client.host
     cap = CAPTCHA_STORE.get(data.captcha_token)
     if not cap or time.time() > cap["exp"] or str(cap["ans"]) != data.captcha_answer.strip():
         raise HTTPException(status_code=400, detail="验证码错误或已失效")
@@ -469,7 +501,7 @@ def update_profile(data: dict, user: dict = Depends(verify_token)):
         set_setting("admin_email", data["email"].strip())
     if data.get("new_password"):
         set_setting("admin_password", hash_password(data["new_password"]))
-    return {"message": "个人安全设置已更新"}
+    return {"message": "个人配置更新成功"}
 
 @app.get("/api/notifications/settings")
 def get_notification_settings(user: dict = Depends(verify_token)):
@@ -497,16 +529,16 @@ def save_notification_settings(data: dict, user: dict = Depends(verify_token)):
 
 @app.post("/api/notifications/test-email")
 def test_email(user: dict = Depends(verify_token)):
-    ok = send_email_notification("测试邮件", "这是一封来自 CDP Sync 系统的测试通知邮件，表明 SMTP 发信功能配置正常。")
+    ok = send_email_notification("测试邮件", "这是一封来自 CDP Sync 系统的测试邮件，SMTP 配置一切正常。")
     if not ok:
-        raise HTTPException(status_code=500, detail="邮件发送失败，请检查 SMTP 配置及密码授权码")
-    return {"message": "测试邮件已成功发出，请检查收件箱"}
+        raise HTTPException(status_code=500, detail="邮件发送失败，请检查 SMTP 账号密码或端口")
+    return {"message": "测试邮件已成功发出"}
 
 @app.post("/api/notifications/test-serverchan")
 async def test_serverchan(user: dict = Depends(verify_token)):
-    ok = await send_serverchan_notification("CDP 测试推送", "Server酱微信通道通讯正常。")
+    ok = await send_serverchan_notification("CDP 测试推送", "Server酱微信通道运行正常。")
     if not ok:
-        raise HTTPException(status_code=500, detail="Server酱推送失败，请检查 SendKey 是否填写无误")
+        raise HTTPException(status_code=500, detail="Server酱推送失败，请检查 SendKey")
     return {"message": "Server酱微信推送触发成功"}
 
 @app.get("/api/nodes")
@@ -521,16 +553,29 @@ def list_nodes(user: dict = Depends(verify_token)):
 
 @app.post("/api/nodes")
 def create_node(data: dict, user: dict = Depends(verify_token)):
+    is_local = 1 if data.get('is_local') else 0
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
-    cur.execute('''INSERT INTO nodes (name, is_source, ssh_host, ssh_port, ssh_user, ssh_key_filename, ssh_password, remote_cdp_port, local_bind_port, cookie_count)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0)''',
-                (data['name'], 1 if data.get('is_source') else 0, data['ssh_host'], data.get('ssh_port', 22),
-                 data['ssh_user'], data.get('ssh_key_filename'), data.get('ssh_password'),
-                 data.get('remote_cdp_port', 9222), data['local_bind_port']))
+    cur.execute('''INSERT INTO nodes (
+        name, is_source, is_local, ssh_host, ssh_port, ssh_user, ssh_key_filename,
+        ssh_password, remote_cdp_port, local_bind_port, cookie_count, status
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)''',
+    (
+        data['name'],
+        1 if data.get('is_source') else 0,
+        is_local,
+        "" if is_local else data.get('ssh_host', ''),
+        22 if is_local else data.get('ssh_port', 22),
+        "" if is_local else data.get('ssh_user', ''),
+        "" if is_local else data.get('ssh_key_filename', ''),
+        "" if is_local else data.get('ssh_password', ''),
+        9222 if is_local else data.get('remote_cdp_port', 9222),
+        data['local_bind_port'],
+        "connected" if is_local else "stopped"
+    ))
     conn.commit()
     conn.close()
-    return {"message": "节点配置已写入"}
+    return {"message": "节点配置已保存"}
 
 @app.delete("/api/nodes/{node_id}")
 def delete_node(node_id: int, user: dict = Depends(verify_token)):
@@ -567,6 +612,11 @@ def toggle_tunnel(node_id: int, user: dict = Depends(verify_token)):
     cur.execute("SELECT * FROM nodes WHERE id=?", (node_id,))
     node = dict(cur.fetchone())
     conn.close()
+
+    if node.get('is_local') == 1:
+        # 本地直连节点：测试本地端口健康状态
+        ok, msg = tunnel_mgr.start_tunnel(node)
+        return {"status": "connected" if ok else "stopped"}
 
     if node_id in tunnel_mgr.tunnels:
         tunnel_mgr.stop_tunnel(node_id)
@@ -610,7 +660,7 @@ def delete_key(filename: str, user: dict = Depends(verify_token)):
 @app.post("/api/sync/trigger")
 async def trigger_sync(user: dict = Depends(verify_token)):
     await execute_sync_task()
-    return {"message": "同步指令下发完成"}
+    return {"message": "同步指令已下发"}
 
 @app.get("/api/sync/logs")
 def get_logs(user: dict = Depends(verify_token)):
@@ -632,14 +682,7 @@ if os.path.exists("dist"):
     def serve_spa(full_path: str):
         return FileResponse("dist/index.html")
 
-# ==================== 10. 服务入口 ====================
 if __name__ == "__main__":
     ensure_ssl_certificates()
     import uvicorn
-    uvicorn.run(
-        app,
-        host="0.0.0.0",
-        port=8443,
-        ssl_certfile=SSL_CERT_FILE,
-        ssl_keyfile=SSL_KEY_FILE
-    )
+    uvicorn.run(app, host="0.0.0.0", port=8443, ssl_certfile=SSL_CERT_FILE, ssl_keyfile=SSL_KEY_FILE)
