@@ -156,7 +156,7 @@ def ensure_ssl_certificates():
             SSL_KEY_FILE = os.path.join(fallback_dir, "privkey.pem")
             generate_self_signed_cert(SSL_CERT_FILE, SSL_KEY_FILE)
 
-# ==================== 2. 数据库扩展与热迁移 ====================
+# ==================== 2. 数据库扩展与热迁移 (新增 direct_host) ====================
 def init_db_and_jwt():
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
@@ -165,6 +165,7 @@ def init_db_and_jwt():
         name TEXT NOT NULL,
         is_source INTEGER DEFAULT 0,
         is_local INTEGER DEFAULT 0,
+        direct_host TEXT DEFAULT '127.0.0.1',
         ssh_host TEXT DEFAULT '',
         ssh_port INTEGER DEFAULT 22,
         ssh_user TEXT DEFAULT '',
@@ -198,7 +199,9 @@ def init_db_and_jwt():
         details TEXT
     )''')
 
+    # 热迁移补充 direct_host 等列
     for col, col_type in [
+        ("direct_host", "TEXT DEFAULT '127.0.0.1'"),
         ("auto_tunnel", "INTEGER DEFAULT 1"),
         ("cookie_count", "INTEGER DEFAULT 0")
     ]:
@@ -322,7 +325,7 @@ async def dispatch_notification(title: str, content: str):
     send_email_notification(title, content)
     await send_serverchan_notification(title, content)
 
-# ==================== 4. 域名过滤与差量指纹计算 ====================
+# ==================== 4. 域名过滤、差量计算与 CDP 读写 (支持指定 host) ====================
 def filter_cookies_by_domains(cookies: List[dict], include_domains: List[str], exclude_domains: List[str]) -> tuple[List[dict], int]:
     if not include_domains and not exclude_domains:
         return cookies, 0
@@ -377,9 +380,19 @@ def smart_merge_cookies(all_cookie_lists: List[List[dict]]) -> List[dict]:
                             merged_pool[key] = c
     return list(merged_pool.values())
 
-async def resolve_cdp_endpoint(local_port: int) -> tuple[str, str]:
-    candidate_hosts = ["127.0.0.1", "host.docker.internal", "172.17.0.1"]
-    async with httpx.AsyncClient(timeout=2.0) as client:
+async def resolve_cdp_endpoint(local_port: int, target_host: str = "127.0.0.1") -> tuple[str, str]:
+    """
+    智能定位 CDP 端点：
+    若 target_host 是 127.0.0.1 / localhost，则按顺序探测 127.0.0.1 -> host.docker.internal -> 172.17.0.1 (适配容器访问宿主机)
+    若填写了特定 IP 或域名（如 192.168.1.100 或 cdp.lan），则直接以该主机为准
+    """
+    host_clean = target_host.strip() if target_host else "127.0.0.1"
+    if host_clean in ["127.0.0.1", "localhost"]:
+        candidate_hosts = ["127.0.0.1", "host.docker.internal", "172.17.0.1"]
+    else:
+        candidate_hosts = [host_clean]
+
+    async with httpx.AsyncClient(timeout=2.5) as client:
         for host in candidate_hosts:
             try:
                 url = f"http://{host}:{local_port}/json/version"
@@ -391,19 +404,20 @@ async def resolve_cdp_endpoint(local_port: int) -> tuple[str, str]:
                     return host, corrected_ws
             except Exception:
                 continue
-    raise ConnectionRefusedError(f"无法连通端口 {local_port} 的 CDP 服务")
+    raise ConnectionRefusedError(f"无法连通主机 {host_clean}:{local_port} 的 CDP 调试服务")
 
-async def fetch_cookies_native(local_port: int) -> List[dict]:
+async def fetch_cookies_native(local_port: int, target_host: str = "127.0.0.1") -> List[dict]:
+    """提取 Cookies (支持自定义 IP / 域名)"""
     if ChromiumSync is not None and hasattr(ChromiumSync, 'get_cookies'):
         try:
             fn = getattr(ChromiumSync, 'get_cookies')
             if inspect.iscoroutinefunction(fn):
-                return await fn(port=local_port, host="127.0.0.1")
-            return await asyncio.to_thread(fn, port=local_port, host="127.0.0.1")
+                return await fn(port=local_port, host=target_host)
+            return await asyncio.to_thread(fn, port=local_port, host=target_host)
         except Exception as e:
             logger.debug(f"ChromiumSync.get_cookies 调用异常，回退内置提取器: {e}")
 
-    host, ws_url = await resolve_cdp_endpoint(local_port)
+    host, ws_url = await resolve_cdp_endpoint(local_port, target_host)
     async with websockets.connect(ws_url, timeout=5.0) as ws:
         await ws.send(json.dumps({"id": 1, "method": "Storage.getCookies"}))
         resp = await asyncio.wait_for(ws.recv(), timeout=5.0)
@@ -412,6 +426,7 @@ async def fetch_cookies_native(local_port: int) -> List[dict]:
         if cookies:
             return cookies
 
+        # 回退 Network 域
         await ws.send(json.dumps({"id": 2, "method": "Network.enable"}))
         await ws.recv()
         await ws.send(json.dumps({"id": 3, "method": "Network.getAllCookies"}))
@@ -419,26 +434,27 @@ async def fetch_cookies_native(local_port: int) -> List[dict]:
         data2 = json.loads(resp2)
         return data2.get("result", {}).get("cookies", [])
 
-async def inject_cookies_native(local_port: int, cookies: List[dict]):
+async def inject_cookies_native(local_port: int, cookies: List[dict], target_host: str = "127.0.0.1"):
+    """写入 Cookies (支持自定义 IP / 域名)"""
     if ChromiumSync is not None and hasattr(ChromiumSync, 'set_cookies'):
         try:
             fn = getattr(ChromiumSync, 'set_cookies')
             if inspect.iscoroutinefunction(fn):
-                await fn(cookies=cookies, port=local_port, host="127.0.0.1")
+                await fn(cookies=cookies, port=local_port, host=target_host)
                 return
-            await asyncio.to_thread(fn, cookies=cookies, port=local_port, host="127.0.0.1")
+            await asyncio.to_thread(fn, cookies=cookies, port=local_port, host=target_host)
             return
         except Exception as e:
             logger.debug(f"ChromiumSync.set_cookies 调用异常，回退内置写入器: {e}")
 
-    host, ws_url = await resolve_cdp_endpoint(local_port)
+    host, ws_url = await resolve_cdp_endpoint(local_port, target_host)
     async with websockets.connect(ws_url, timeout=6.0) as ws:
         await ws.send(json.dumps({"id": 1, "method": "Network.setCookies", "params": {"cookies": cookies}}))
         await asyncio.wait_for(ws.recv(), timeout=6.0)
 
-async def probe_node_cookies(local_port: int) -> tuple[int, str]:
+async def probe_node_cookies(local_port: int, target_host: str = "127.0.0.1") -> tuple[int, str]:
     try:
-        cookies = await fetch_cookies_native(local_port)
+        cookies = await fetch_cookies_native(local_port, target_host)
         return len(cookies), "OK"
     except ConnectionRefusedError as ce:
         return 0, str(ce)
@@ -454,19 +470,22 @@ class TunnelManager:
         node_id = node['id']
         self.stop_tunnel(node_id)
 
+        # 直连节点：直接探测其目标 IP/域名 与端口的健康状态
         if node.get('is_local') == 1:
+            direct_host = node.get('direct_host') or '127.0.0.1'
             try:
-                count, msg = await probe_node_cookies(node['local_bind_port'])
+                count, msg = await probe_node_cookies(node['local_bind_port'], direct_host)
                 if msg == "OK":
                     self._update_node_status(node_id, "connected", count)
-                    return True, f"连通正常，嗅探到 {count} 条 Cookies"
+                    return True, f"直连成功 ({direct_host}:{node['local_bind_port']})，捕获到 {count} 条 Cookies"
                 else:
                     self._update_node_status(node_id, "error: refused", 0)
-                    return False, f"本地CDP未响应: {msg}"
+                    return False, f"CDP 未响应 ({direct_host}:{node['local_bind_port']}): {msg}"
             except Exception as e:
                 self._update_node_status(node_id, "error: offline", 0)
                 return False, f"连接异常: {e}"
 
+        # 远程 SSH 节点
         ssh_kwargs = {
             "ssh_address_or_host": (node['ssh_host'], int(node['ssh_port'])),
             "ssh_username": node['ssh_user'],
@@ -490,7 +509,7 @@ class TunnelManager:
             logger.info(f"节点 [{node['name']}] SSH 隧道启动成功 -> 映射端口 {node['local_bind_port']}")
 
             await asyncio.sleep(1.0)
-            count, _ = await probe_node_cookies(node['local_bind_port'])
+            count, _ = await probe_node_cookies(node['local_bind_port'], "127.0.0.1")
             self._update_node_status(node_id, "connected", count)
             return True, f"穿透成功，探测到 {count} 条 Cookies"
         except Exception as e:
@@ -519,7 +538,7 @@ class TunnelManager:
 tunnel_mgr = TunnelManager()
 
 async def tunnel_watchdog_loop():
-    logger.info("启动 SSH 隧道守护看门狗：自动穿透并维持节点在线...")
+    logger.info("启动守护看门狗：维持直连与 SSH 隧道在线...")
     while True:
         try:
             conn = sqlite3.connect(DB_PATH)
@@ -533,7 +552,8 @@ async def tunnel_watchdog_loop():
                 if node.get('auto_tunnel', 1) == 1:
                     is_running = False
                     if node['is_local'] == 1:
-                        c, msg = await probe_node_cookies(node['local_bind_port'])
+                        target_h = node.get('direct_host') or '127.0.0.1'
+                        c, msg = await probe_node_cookies(node['local_bind_port'], target_h)
                         is_running = (msg == "OK")
                     else:
                         is_running = (node['id'] in tunnel_mgr.tunnels and tunnel_mgr.tunnels[node['id']].is_active)
@@ -544,7 +564,7 @@ async def tunnel_watchdog_loop():
             logger.debug(f"看门狗巡检异常: {e}")
         await asyncio.sleep(30)
 
-# ==================== 6. 同步调度引擎 (结合 ChromiumSync 模块) ====================
+# ==================== 6. 同步调度引擎 ====================
 async def run_chromium_sync_instance(source_node: dict, target_node: dict, include_domains: List[str], exclude_domains: List[str], diff_enabled: bool) -> dict:
     if ChromiumSync is None:
         raise ImportError("未安装 wimotek-chromium-sync 模块")
@@ -620,13 +640,16 @@ async def execute_sync_task(custom_source_id: Optional[int] = None, custom_targe
 
     log_detail.append(f"📋 规则审计：差量检测=[{'开启' if diff_enabled else '关闭'}] | 白名单=[{len(include_domains)}项] | 黑名单=[{len(exclude_domains)}项]")
 
-    # 场景 A: 默认首选【智能全局最新值合并 (Smart Merge)】
+    # 场景 A: 智能全局最新值合并 (Smart Merge)
     if not custom_source_id and sync_mode == "smart_merge":
         source_node_desc = "🌟 全网智能汇聚"
         try:
             log_detail.append("🚀 触发【智能全局最新值合并 (Smart Merge)】：并发嗅探所有节点...")
             
-            fetch_tasks = [fetch_cookies_native(n['local_bind_port']) for n in nodes]
+            fetch_tasks = [
+                fetch_cookies_native(n['local_bind_port'], n.get('direct_host', '127.0.0.1') if n['is_local'] else "127.0.0.1")
+                for n in nodes
+            ]
             fetched_results = await asyncio.gather(*fetch_tasks, return_exceptions=True)
             
             valid_cookie_lists = []
@@ -646,17 +669,18 @@ async def execute_sync_task(custom_source_id: Optional[int] = None, custom_targe
             log_detail.append(f"✨ 智能裁决融合完成：生成全网黄金凭据池 (共 {cookie_count_metric} 条唯一最新 Cookies)")
 
             async def _push_golden(node):
+                target_h = node.get('direct_host', '127.0.0.1') if node['is_local'] else "127.0.0.1"
                 try:
                     if diff_enabled:
-                        curr_c = await fetch_cookies_native(node['local_bind_port'])
+                        curr_c = await fetch_cookies_native(node['local_bind_port'], target_h)
                         diff_cookies, skipped = compute_cookie_diff(curr_c, golden_pool)
                         if diff_cookies:
-                            await inject_cookies_native(node['local_bind_port'], diff_cookies)
-                        c_cnt, _ = await probe_node_cookies(node['local_bind_port'])
+                            await inject_cookies_native(node['local_bind_port'], diff_cookies, target_h)
+                        c_cnt, _ = await probe_node_cookies(node['local_bind_port'], target_h)
                         action_desc = f"差量注入 {len(diff_cookies)} 条更新项 (跳过 {skipped} 个无变化项)"
                     else:
-                        await inject_cookies_native(node['local_bind_port'], golden_pool)
-                        c_cnt, _ = await probe_node_cookies(node['local_bind_port'])
+                        await inject_cookies_native(node['local_bind_port'], golden_pool, target_h)
+                        c_cnt, _ = await probe_node_cookies(node['local_bind_port'], target_h)
                         action_desc = f"全量写入 {len(golden_pool)} 条凭据"
 
                     conn = sqlite3.connect(DB_PATH)
@@ -676,7 +700,7 @@ async def execute_sync_task(custom_source_id: Optional[int] = None, custom_targe
             status = "FAILED"
             log_detail.append(f"智能合并调度中断: {e}")
 
-    # 场景 B: 传统指定主节点单向广播 (Master-Worker / 定向)
+    # 场景 B: 主从定向广播
     else:
         source = None
         if custom_source_id:
@@ -692,7 +716,8 @@ async def execute_sync_task(custom_source_id: Optional[int] = None, custom_targe
             logger.warning("未配置或无法找到源节点，跳过主从分发。")
             return
 
-        source_node_desc = f"{source['name']} ({'本地' if source['is_local'] else source['ssh_host']})"
+        source_host_display = source.get('direct_host', '127.0.0.1') if source['is_local'] else source['ssh_host']
+        source_node_desc = f"{source['name']} ({'直连:' + source_host_display if source['is_local'] else source_host_display})"
 
         targets = []
         if custom_target_ids is not None:
@@ -707,31 +732,33 @@ async def execute_sync_task(custom_source_id: Optional[int] = None, custom_targe
         target_nodes_desc = ", ".join([t['name'] for t in targets]) if targets else "无分发目标"
 
         try:
-            raw_cookies = await fetch_cookies_native(source['local_bind_port'])
+            source_h = source.get('direct_host', '127.0.0.1') if source['is_local'] else "127.0.0.1"
+            raw_cookies = await fetch_cookies_native(source['local_bind_port'], source_h)
             cookies, dropped = filter_cookies_by_domains(raw_cookies, include_domains, exclude_domains)
             cookie_count_metric = len(cookies)
             drop_info = f" (已过滤 {dropped} 个黑名单/非白名单项)" if dropped > 0 else ""
             log_detail.append(f"主从广播：从源节点 [{source['name']}] 捕获到 {cookie_count_metric} 个有效 Cookies{drop_info}")
 
             for target in targets:
+                target_h = target.get('direct_host', '127.0.0.1') if target['is_local'] else "127.0.0.1"
                 try:
                     if ChromiumSync is not None and not target['is_local']:
                         sync_res = await run_chromium_sync_instance(source, target, include_domains, exclude_domains, diff_enabled)
-                        target_count, _ = await probe_node_cookies(target['local_bind_port'])
+                        target_count, _ = await probe_node_cookies(target['local_bind_port'], target_h)
                         msg = sync_res.get("message", "OK") if isinstance(sync_res, dict) else sync_res
                         log_detail.append(f"-> 目标节点 [{target['name']}] 模块同步完成 ({msg})，现存: {target_count}")
                     else:
                         if diff_enabled:
-                            curr_c = await fetch_cookies_native(target['local_bind_port'])
+                            curr_c = await fetch_cookies_native(target['local_bind_port'], target_h)
                             diff_c, skipped = compute_cookie_diff(curr_c, cookies)
                             if diff_c:
-                                await inject_cookies_native(target['local_bind_port'], diff_c)
+                                await inject_cookies_native(target['local_bind_port'], diff_c, target_h)
                             act = f"差量注入 {len(diff_c)} 条 (跳过 {skipped} 个无变化项)"
                         else:
-                            await inject_cookies_native(target['local_bind_port'], cookies)
+                            await inject_cookies_native(target['local_bind_port'], cookies, target_h)
                             act = f"全量写入 {len(cookies)} 条"
 
-                        target_count, _ = await probe_node_cookies(target['local_bind_port'])
+                        target_count, _ = await probe_node_cookies(target['local_bind_port'], target_h)
                         log_detail.append(f"-> 目标节点 [{target['name']}] 写入完成 ({act})，现存: {target_count}")
                 except Exception as ex:
                     log_detail.append(f"-> 目标节点 [{target['name']}] 写入异常: {ex}")
@@ -867,7 +894,7 @@ def update_profile(data: dict, user: dict = Depends(verify_token)):
         set_setting("api_key", 'cdp_' + secrets.token_urlsafe(24))
     return {"message": "配置更新成功"}
 
-# 节点管理
+# 节点管理 (支持 direct_host)
 @app.get("/api/nodes")
 def list_nodes(user: dict = Depends(verify_token)):
     conn = sqlite3.connect(DB_PATH)
@@ -881,14 +908,16 @@ def list_nodes(user: dict = Depends(verify_token)):
 @app.post("/api/nodes")
 def create_node(data: dict, user: dict = Depends(verify_token)):
     is_local = 1 if data.get('is_local') else 0
+    direct_h = (data.get('direct_host') or '127.0.0.1').strip()
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
     cur.execute('''INSERT INTO nodes (
-        name, is_source, is_local, ssh_host, ssh_port, ssh_user, ssh_key_filename,
+        name, is_source, is_local, direct_host, ssh_host, ssh_port, ssh_user, ssh_key_filename,
         ssh_password, remote_cdp_port, local_bind_port, cookie_count, auto_tunnel, status
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 1, 'stopped')''',
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 1, 'stopped')''',
     (
         data['name'], 1 if data.get('is_source') else 0, is_local,
+        direct_h if is_local else '127.0.0.1',
         "" if is_local else data.get('ssh_host', ''),
         22 if is_local else data.get('ssh_port', 22),
         "" if is_local else data.get('ssh_user', ''),
@@ -904,14 +933,16 @@ def create_node(data: dict, user: dict = Depends(verify_token)):
 @app.put("/api/nodes/{node_id}")
 async def update_node(node_id: int, data: dict, user: dict = Depends(verify_token)):
     is_local = 1 if data.get('is_local') else 0
+    direct_h = (data.get('direct_host') or '127.0.0.1').strip()
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
     cur.execute('''UPDATE nodes SET 
-        name=?, is_local=?, ssh_host=?, ssh_port=?, ssh_user=?, 
+        name=?, is_local=?, direct_host=?, ssh_host=?, ssh_port=?, ssh_user=?, 
         ssh_key_filename=?, ssh_password=?, remote_cdp_port=?, local_bind_port=?
         WHERE id=?''',
     (
         data['name'], is_local,
+        direct_h if is_local else '127.0.0.1',
         "" if is_local else data.get('ssh_host', ''),
         22 if is_local else data.get('ssh_port', 22),
         "" if is_local else data.get('ssh_user', ''),
@@ -932,7 +963,7 @@ async def update_node(node_id: int, data: dict, user: dict = Depends(verify_toke
     conn.close()
     await tunnel_mgr.start_tunnel(updated_node)
 
-    return {"message": "节点配置已更新并重新载入穿透通道"}
+    return {"message": "节点配置已更新并重新载入连接"}
 
 @app.delete("/api/nodes/{node_id}")
 def delete_node(node_id: int, user: dict = Depends(verify_token)):
@@ -959,7 +990,8 @@ async def get_node_cookie_details(node_id: int, user: dict = Depends(verify_toke
 
     now_ts = time.time()
     try:
-        raw_cookies = await fetch_cookies_native(node['local_bind_port'])
+        target_h = node.get('direct_host', '127.0.0.1') if node['is_local'] else "127.0.0.1"
+        raw_cookies = await fetch_cookies_native(node['local_bind_port'], target_h)
         analyzed = []
         valid_count = 0
         session_count = 0
@@ -1019,7 +1051,8 @@ async def probe_node(node_id: int, user: dict = Depends(verify_token)):
     node = dict(cur.fetchone())
     conn.close()
 
-    count, msg = await probe_node_cookies(node['local_bind_port'])
+    target_h = node.get('direct_host', '127.0.0.1') if node['is_local'] else "127.0.0.1"
+    count, msg = await probe_node_cookies(node['local_bind_port'], target_h)
     new_status = "connected" if msg == "OK" else "error: refused"
 
     conn = sqlite3.connect(DB_PATH)
@@ -1029,7 +1062,7 @@ async def probe_node(node_id: int, user: dict = Depends(verify_token)):
     conn.close()
 
     if msg != "OK":
-        raise HTTPException(status_code=502, detail=f"探针未就绪: {msg}")
+        raise HTTPException(status_code=502, detail=f"探针未就绪 ({target_h}:{node['local_bind_port']}): {msg}")
     return {"cookie_count": count, "message": f"探测成功: 捕获到 {count} 条 Cookies"}
 
 @app.post("/api/nodes/{node_id}/toggle-tunnel")
@@ -1050,7 +1083,6 @@ async def toggle_tunnel(node_id: int, user: dict = Depends(verify_token)):
         raise HTTPException(status_code=500, detail=msg)
     return {"status": "connected", "message": msg}
 
-# 默认源双击切换接口
 @app.post("/api/nodes/{node_id}/toggle-source")
 def toggle_source(node_id: int, user: dict = Depends(verify_token)):
     conn = sqlite3.connect(DB_PATH)
@@ -1081,7 +1113,7 @@ def toggle_source(node_id: int, user: dict = Depends(verify_token)):
 def set_source_compat(node_id: int, user: dict = Depends(verify_token)):
     return toggle_source(node_id, user)
 
-# 密钥存储库 (支持备注与添加时间)
+# 密钥存储库
 @app.get("/api/ssh-keys")
 def list_keys(user: dict = Depends(verify_token)):
     conn = sqlite3.connect(DB_PATH)
@@ -1174,14 +1206,17 @@ def delete_key(filename: str, user: dict = Depends(verify_token)):
     conn.close()
     return {"message": "证书已销毁"}
 
-# 同步中心调度与设置
+# 同步中心设置
 @app.get("/api/sync/settings")
 def get_sync_settings(user: dict = Depends(verify_token)):
     return {
         "sync_interval_minutes": int(get_setting("sync_interval_minutes", "15")),
         "sync_mode": get_setting("sync_mode", "smart_merge"),
         "sync_source_id": int(get_setting("sync_source_id", "0")),
-        "sync_target_ids": json.loads(get_setting("sync_target_ids", "[]"))
+        "sync_target_ids": json.loads(get_setting("sync_target_ids", "[]")),
+        "sync_diff_enabled": get_setting("sync_diff_enabled", "1") == "1",
+        "sync_include_domains": get_setting("sync_include_domains", ""),
+        "sync_exclude_domains": get_setting("sync_exclude_domains", "doubleclick.net,google-analytics.com")
     }
 
 @app.post("/api/sync/settings")
@@ -1196,6 +1231,12 @@ def save_sync_settings(data: dict, user: dict = Depends(verify_token)):
         set_setting("sync_source_id", str(data["sync_source_id"]))
     if "sync_target_ids" in data:
         set_setting("sync_target_ids", json.dumps(data["sync_target_ids"]))
+    if "sync_diff_enabled" in data:
+        set_setting("sync_diff_enabled", "1" if data["sync_diff_enabled"] else "0")
+    if "sync_include_domains" in data:
+        set_setting("sync_include_domains", data["sync_include_domains"].strip())
+    if "sync_exclude_domains" in data:
+        set_setting("sync_exclude_domains", data["sync_exclude_domains"].strip())
     return {"message": "同步策略配置已生效"}
 
 # 全局 Cookie 策略路由 (白名单/黑名单/差量检测)
@@ -1294,7 +1335,7 @@ async def test_serverchan(user: dict = Depends(verify_token)):
         raise HTTPException(status_code=500, detail="Server酱推送失败，请检查 SendKey")
     return {"message": "Server酱微信测试推送成功"}
 
-# 外部 Agent 开放 API
+# 外部 Agent 开放 API (适配 direct_host)
 @app.get("/api/v1/nodes", summary="获取所有在线 CDP 节点列表")
 def external_list_nodes(auth: dict = Depends(verify_agent_access)):
     conn = sqlite3.connect(DB_PATH)
@@ -1306,14 +1347,17 @@ def external_list_nodes(auth: dict = Depends(verify_agent_access)):
 
     online_nodes = []
     for r in rows:
+        direct_h = r.get("direct_host") or "127.0.0.1"
+        target_endpoint = f"http://{direct_h}:{r['local_bind_port']}" if r["is_local"] else f"http://127.0.0.1:{r['local_bind_port']}"
         online_nodes.append({
             "id": r["id"],
             "name": r["name"],
             "is_source": bool(r["is_source"]),
             "is_local": bool(r["is_local"]),
+            "direct_host": direct_h if r["is_local"] else None,
             "status": r["status"],
             "local_port": r["local_bind_port"],
-            "cdp_http_endpoint": f"http://127.0.0.1:{r['local_bind_port']}",
+            "cdp_http_endpoint": target_endpoint,
             "cookie_count": r["cookie_count"],
             "last_sync": r["last_sync"],
             "cookies_export_url": f"/api/v1/nodes/{r['id']}/cookies"
@@ -1339,7 +1383,8 @@ async def external_get_cookies(node_id: int, auth: dict = Depends(verify_agent_a
     node = dict(row)
 
     try:
-        cookies = await fetch_cookies_native(node['local_bind_port'])
+        target_h = node.get('direct_host', '127.0.0.1') if node['is_local'] else "127.0.0.1"
+        cookies = await fetch_cookies_native(node['local_bind_port'], target_h)
         return {
             "code": 200,
             "node_id": node_id,

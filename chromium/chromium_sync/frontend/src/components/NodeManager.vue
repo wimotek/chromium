@@ -20,6 +20,7 @@ const isLoadingCookies = ref(false)
 const nodeForm = reactive({
   name: '',
   is_local: true,
+  direct_host: '127.0.0.1', // 默认 127.0.0.1，支持局域网 IP 或内部域名
   ssh_host: '',
   ssh_port: 22,
   ssh_user: 'root',
@@ -45,6 +46,7 @@ const openCreateModal = () => {
   Object.assign(nodeForm, {
     name: '',
     is_local: true,
+    direct_host: '127.0.0.1',
     ssh_host: '',
     ssh_port: 22,
     ssh_user: 'root',
@@ -62,6 +64,7 @@ const openEditModal = (node) => {
   Object.assign(nodeForm, {
     name: node.name,
     is_local: Boolean(node.is_local),
+    direct_host: node.direct_host || '127.0.0.1',
     ssh_host: node.ssh_host,
     ssh_port: node.ssh_port,
     ssh_user: node.ssh_user,
@@ -125,7 +128,6 @@ const toggleTunnel = async (node) => {
   loadNodes()
 }
 
-// 核心改进：点击设置默认源，再次点击取消默认源
 const toggleSource = async (id) => {
   const res = await props.api(`/api/nodes/${id}/toggle-source`, { method: 'POST' })
   const data = await res.json()
@@ -165,11 +167,11 @@ onMounted(() => {
           <tr>
             <th style="width: 20%;">节点名称 / 接入目标</th>
             <th style="width: 10%;">连通状态</th>
-            <th style="width: 12%;">本地调试端口</th>
+            <th style="width: 16%;">直连 / 映射调试端点</th>
             <th style="width: 16%;">实时 Cookie (点击查看透视)</th>
             <th style="width: 12%;">接入类型</th>
-            <th style="width: 12%;">同步角色</th>
-            <th style="width: 18%; text-align: right;">治理操作</th>
+            <th style="width: 10%;">同步角色</th>
+            <th style="width: 16%; text-align: right;">治理操作</th>
           </tr>
         </thead>
         <tbody>
@@ -177,7 +179,7 @@ onMounted(() => {
             <td>
               <div class="cell-main-name">{{ node.name }}</div>
               <div class="cell-sub-desc">
-                {{ node.is_local ? '127.0.0.1 (本机回环)' : `${node.ssh_user}@${node.ssh_host}:${node.ssh_port}` }}
+                {{ node.is_local ? `直连主机: ${node.direct_host || '127.0.0.1'}` : `${node.ssh_user}@${node.ssh_host}:${node.ssh_port}` }}
               </div>
             </td>
 
@@ -187,7 +189,10 @@ onMounted(() => {
               <span v-else class="status-error" :title="node.status">✕ 异常</span>
             </td>
 
-            <td class="font-cyan-mono">127.0.0.1:{{ node.local_bind_port }}</td>
+            <!-- 端点地址展示 -->
+            <td class="font-cyan-mono">
+              {{ node.is_local ? (node.direct_host || '127.0.0.1') : '127.0.0.1' }}:{{ node.local_bind_port }}
+            </td>
 
             <td>
               <div class="cookie-badge" @click="viewCookieDetails(node)" style="cursor:pointer;" title="点击查看 Cookie 详细过期信息">
@@ -197,18 +202,17 @@ onMounted(() => {
             </td>
 
             <td>
-              <span v-if="node.is_local" class="tag-plan-blue">普通固定 (本地)</span>
+              <span v-if="node.is_local" class="tag-plan-blue">免SSH直连 ({{ node.direct_host || '127.0.0.1' }})</span>
               <span v-else class="tag-plan-indigo">SSH 穿透 (远程)</span>
             </td>
 
-            <!-- 核心改进：再次点击取消默认源 -->
             <td>
               <button 
                 v-if="node.is_source" 
                 @click="toggleSource(node.id)" 
                 class="btn-qrcode" 
                 style="background: #0284c7; cursor: pointer;"
-                title="已是默认源，再次点击可取消"
+                title="已是默认源，点击可取消"
               >
                 ★ 默认源 (点击取消)
               </button>
@@ -237,7 +241,7 @@ onMounted(() => {
       </table>
     </div>
 
-    <!-- 弹窗 1：新增 / 编辑节点 -->
+    <!-- 弹窗：新增 / 编辑节点 -->
     <div v-if="showNodeModal" class="modal-backdrop">
       <div class="modal-card">
         <div class="modal-title-bar">
@@ -253,7 +257,7 @@ onMounted(() => {
             <div class="row-flex-gap">
               <label :class="['radio-pill-card', nodeForm.is_local ? 'radio-pill-active' : '']">
                 <input type="radio" v-model="nodeForm.is_local" :value="true" style="display:none;">
-                <span>💻 本地直连 (免SSH)</span>
+                <span>💻 本地/局域网直连 (免SSH)</span>
               </label>
               <label :class="['radio-pill-card', !nodeForm.is_local ? 'radio-pill-active' : '']">
                 <input type="radio" v-model="nodeForm.is_local" :value="false" style="display:none;">
@@ -264,19 +268,27 @@ onMounted(() => {
 
           <div class="form-field-block">
             <label class="form-label">节点名称</label>
-            <input v-model="nodeForm.name" required placeholder="如: 本机 Chrome 01" class="cdp-input cdp-w-normal">
+            <input v-model="nodeForm.name" required placeholder="如: 宿主机 Chrome 01 / 局域网节点" class="cdp-input cdp-w-normal">
           </div>
 
-          <!-- 本地节点专用输入 -->
+          <!-- 本地/局域网直连专用输入 (支持 IP 与域名，默认 127.0.0.1) -->
           <div v-if="nodeForm.is_local" style="background:#09122a; padding:12px; border-radius:6px; border:1px solid #172554;">
-            <div class="form-field-block">
-              <label class="form-label">本地 CDP 调试端口 (默认 9222)</label>
-              <input v-model="nodeForm.local_bind_port" type="number" required placeholder="9222" class="cdp-input cdp-w-port font-cyan-mono">
+            <div class="row-flex-gap">
+              <div class="form-field-block" style="flex:1;">
+                <label class="form-label">直连 IP 地址 / 域名 (默认 127.0.0.1)</label>
+                <input v-model="nodeForm.direct_host" required placeholder="127.0.0.1 或 cdp.lan" class="cdp-input font-cyan-mono" style="width:100% !important;">
+              </div>
+              <div class="form-field-block">
+                <label class="form-label">CDP 调试端口 (默认 9222)</label>
+                <input v-model="nodeForm.local_bind_port" type="number" required placeholder="9222" class="cdp-input cdp-w-port font-cyan-mono">
+              </div>
             </div>
-            <p style="font-size:11px; color:#64748b; margin-top:6px;">接入本机 Chromium 调试接口，开机守护引擎将自动进行网关直连探测。</p>
+            <p style="font-size:11px; color:#64748b; margin-top:6px;">
+              支持填写 <code>127.0.0.1</code>、局域网 IP（如 <code>192.168.1.100</code>）或 Docker 内部域名（如 <code>chrome</code>），无需 SSH 密钥。
+            </p>
           </div>
 
-          <!-- 远程节点输入 -->
+          <!-- 远程 SSH 节点输入 -->
           <div v-else class="form-v-stack">
             <div class="row-flex-gap">
               <div class="form-field-block" style="flex:1;">
@@ -327,7 +339,7 @@ onMounted(() => {
       </div>
     </div>
 
-    <!-- 弹窗 2：宽幅 Cookie 生命周期透视 (96vw 超宽排开，杜绝换行) -->
+    <!-- 弹窗 2：宽幅 Cookie 生命周期透视 (96vw) -->
     <div v-if="showCookieModal" class="modal-backdrop">
       <div class="modal-card cookie-modal-wide">
         <div class="modal-title-bar">
