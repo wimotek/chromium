@@ -2,13 +2,13 @@
 # -*- coding: utf-8 -*-
 """
 Chromium Cluster Session & Cookie Synchronizer
-现代多节点 Chromium 会话同步调度器
+现代多节点 Chromium 会话同步与连接池调度引擎
 - 支持 1对1 与 1对多集群拓扑
-- 本地节点直接直连免密免隧道，远程节点支持 SSH 密钥内容(PEM)/路径与密码
-- 同步策略: merge (全节点 Cookie/Storage 智能融合并保留最新有效期) 与 sync (单源节点向多目标广播)
-- 零外部数据库依赖：内置轻量静态探针工具与 1 行代码快速读写 Cookie
-- 结构化执行结果返回 (包含 status, transferred_count, duration, details 等指标)
-- 原生支持 async/await 异步协程 (run_async) 与同步阻塞 (run)
+- 域名过滤机制 (include_domains / exclude_domains) 剔除广告/统计垃圾 Cookie
+- 会话级连接池复用 (支持 async with / with 上下文管理器，避免频繁握手)
+- Cookie 指纹差量比对 (Diff / Delta Sync，避免重复落盘，保护从节点磁盘 IO)
+- 本地节点直接直连免密免隧道，远程节点支持 SSH 私钥内容(PEM)/路径与密码
+- 结构化指标返回与轻量静态探针工具
 """
 
 import asyncio
@@ -22,12 +22,104 @@ import tempfile
 import time
 import urllib.request
 from dataclasses import dataclass, field, asdict
-from typing import Dict, List, Optional, Union, Any, TYPE_CHECKING
+from typing import Dict, List, Optional, Union, Any, Tuple, TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from playwright.async_api import BrowserContext
+    from playwright.async_api import BrowserContext, Playwright, Browser
 else:
     BrowserContext = Any
+    Playwright = Any
+    Browser = Any
+
+
+# =============================================================================
+# 域名过滤与指纹计算辅助函数
+# =============================================================================
+
+def is_domain_match(cookie_domain: str, pattern: str) -> bool:
+    """
+    严格判定 Cookie 域名是否匹配规则。
+    例如:
+      '.mail.google.com' 与 'google.com' -> True
+      'google.com' 与 '.google.com' -> True
+      'doubleclick.net' 与 'doubleclick.net' -> True
+      'notgoogle.com' 与 'google.com' -> False
+    """
+    c_dom = cookie_domain.lstrip(".").lower()
+    p_dom = pattern.lstrip(".").lower()
+    return c_dom == p_dom or c_dom.endswith("." + p_dom)
+
+
+def filter_cookie_by_domain(
+    cookie: dict,
+    include_domains: Optional[List[str]] = None,
+    exclude_domains: Optional[List[str]] = None
+) -> bool:
+    """按白名单与黑名单过滤单条 Cookie"""
+    domain = cookie.get("domain", "")
+    if not domain:
+        return True
+
+    # 1. 黑名单过滤：命中任何排除项立即丢弃
+    if exclude_domains:
+        for ex in exclude_domains:
+            if is_domain_match(domain, ex):
+                return False
+
+    # 2. 白名单过滤：若开启白名单，必须至少命中一项
+    if include_domains:
+        matched = False
+        for inc in include_domains:
+            if is_domain_match(domain, inc):
+                matched = True
+                break
+        if not matched:
+            return False
+
+    return True
+
+
+def filter_cookies(
+    cookies: List[dict],
+    include_domains: Optional[List[str]] = None,
+    exclude_domains: Optional[List[str]] = None
+) -> List[dict]:
+    """批量过滤 Cookie 列表"""
+    if not include_domains and not exclude_domains:
+        return cookies
+    return [c for c in cookies if filter_cookie_by_domain(c, include_domains, exclude_domains)]
+
+
+def get_cookie_fingerprint(c: dict) -> Tuple[str, str, str, str]:
+    """获取 Cookie 核心指纹 (name, domain, path, value)"""
+    return (
+        c.get("name", ""),
+        c.get("domain", "").lstrip(".").lower(),
+        c.get("path", "/"),
+        c.get("value", "")
+    )
+
+
+def compute_cookie_delta(
+    incoming_cookies: List[dict],
+    existing_cookies: List[dict]
+) -> Tuple[List[dict], int]:
+    """
+    计算 Cookie 指纹变更差量 (Diff)：
+    返回: (需要实际写入的新增/变更 Cookie 列表, 无需写入的相同跳过条数)
+    """
+    existing_fps = {get_cookie_fingerprint(c) for c in existing_cookies}
+    delta = []
+    skipped = 0
+
+    for c in incoming_cookies:
+        fp = get_cookie_fingerprint(c)
+        if fp in existing_fps:
+            skipped += 1
+        else:
+            delta.append(c)
+
+    return delta, skipped
 
 
 @dataclass
@@ -70,7 +162,6 @@ class NodeConfig:
         key_input = self.ssh_key or self.ssh_key_path or self.ssh_key_data
         if key_input:
             key_str = key_input.strip()
-            # 判定为私钥文本内容 (包含 BEGIN 标头或多行密钥)
             if "-----BEGIN" in key_str or "\n" in key_str:
                 self.ssh_key_data = key_str
             else:
@@ -78,7 +169,6 @@ class NodeConfig:
                 if os.path.exists(expanded):
                     self.ssh_key_path = expanded
                 else:
-                    # 如果传入的是不存在的单行字符，兼容作为潜在的 key_path 或 key_data
                     self.ssh_key_path = expanded
 
     @property
@@ -88,15 +178,20 @@ class NodeConfig:
         return f"http://127.0.0.1:{self.tunnel_port}"
 
 
-def merge_cookies(cookies_lists: List[List[dict]]) -> List[dict]:
+def merge_cookies(
+    cookies_lists: List[List[dict]],
+    include_domains: Optional[List[str]] = None,
+    exclude_domains: Optional[List[str]] = None
+) -> List[dict]:
     """
     合并各节点 Cookie，针对同一 Cookie 保留有效期最新 (expires 最长) 的记录。
-    Cookie 唯一标识: (name, domain.lower(), path)
+    自动应用白名单与黑名单过滤。
     """
     merged_map: Dict[tuple, dict] = {}
 
     for cookies in cookies_lists:
-        for c in cookies:
+        filtered = filter_cookies(cookies, include_domains, exclude_domains)
+        for c in filtered:
             name = c.get("name", "")
             domain = c.get("domain", "").lstrip(".").lower()
             path = c.get("path", "/")
@@ -115,10 +210,8 @@ def merge_cookies(cookies_lists: List[List[dict]]) -> List[dict]:
                 if curr_exp > exist_exp:
                     should_replace = True
             elif curr_exp > 0 and exist_exp <= 0:
-                # 持久凭据优先于临时会话凭据
                 should_replace = True
             elif curr_exp <= 0 and exist_exp <= 0:
-                # 均为会话凭据时，优先保留较完整/非空值
                 val_curr = str(c.get("value", ""))
                 val_exist = str(existing.get("value", ""))
                 if val_curr and not val_exist:
@@ -167,7 +260,6 @@ class SshTunnelSession:
         target_local_port = self.node.tunnel_port
         target_url = f"http://127.0.0.1:{target_local_port}"
 
-        # 检查是否已存在可用的隧道
         if self._is_port_in_use(target_local_port):
             if self._is_cdp_ready(target_url):
                 logging.info(f"[*] 节点 [{self.node.name}] 本地端口 {target_local_port} 已通畅，复用现有连接。")
@@ -192,7 +284,6 @@ class SshTunnelSession:
 
         env = os.environ.copy()
 
-        # 1. 私钥内容 (PEM String) 处理
         if self.node.ssh_key_data:
             fd, tmp_path = tempfile.mkstemp(prefix="ssh_key_")
             with open(tmp_path, "w") as f:
@@ -206,7 +297,6 @@ class SshTunnelSession:
             if os.path.exists(expanded_key):
                 ssh_cmd.extend(["-i", expanded_key])
 
-        # 2. 密码认证处理
         if self.node.ssh_password:
             if shutil.which("sshpass"):
                 ssh_cmd = ["sshpass", "-p", self.node.ssh_password] + ssh_cmd
@@ -273,7 +363,7 @@ class SshTunnelSession:
 
 class ChromiumSync:
     """
-    现代多节点 Chromium 会话同步管理器
+    现代多节点 Chromium 会话同步与连接池调度管理器
     """
     def __init__(
         self,
@@ -281,6 +371,9 @@ class ChromiumSync:
         mode: str = "sync",                     # "sync" (单源广播) 或 "merge" (全节点合并最新)
         source: Optional[str] = None,           # sync 模式下的源节点 ID (默认第一个节点)
         targets: Optional[List[str]] = None,    # sync 模式下的目标节点 ID 列表 (默认其余全部在线节点)
+        include_domains: Optional[List[str]] = None, # 域名白名单过滤 (如 ['.google.com', '.github.com'])
+        exclude_domains: Optional[List[str]] = None, # 域名黑名单过滤 (如 ['doubleclick.net', 'google-analytics.com'])
+        diff: bool = True,                      # 是否开启 Cookie 指纹差量写入 (避免无变更频繁刷盘)
         ssh_key: Optional[str] = None,          # 集群通用私钥 (路径 或 PEM String)
         ssh_password: Optional[str] = None,     # 集群通用 SSH 密码
         auto_close_tunnel: bool = False,
@@ -295,6 +388,9 @@ class ChromiumSync:
 
         self.source = source
         self.targets = targets or []
+        self.include_domains = include_domains
+        self.exclude_domains = exclude_domains
+        self.diff = diff
         self.auto_close_tunnel = auto_close_tunnel
 
         log_level = logging.INFO if verbose else logging.WARNING
@@ -307,7 +403,6 @@ class ChromiumSync:
 
         for item in nodes:
             cfg = item if isinstance(item, NodeConfig) else NodeConfig(**item)
-            # 若节点未单独配置私钥或密码，继承集群通用设置
             if not cfg.is_local:
                 if not cfg.ssh_key and not cfg.ssh_key_path and not cfg.ssh_key_data and ssh_key:
                     cfg.ssh_key = ssh_key
@@ -327,13 +422,105 @@ class ChromiumSync:
 
         self.tunnels: Dict[str, SshTunnelSession] = {}
 
+        # 连接池模式状态
+        self._pool_active: bool = False
+        self._pool_playwright: Optional[Any] = None
+        self._pooled_browsers: Dict[str, Any] = {}
+        self._pooled_contexts: Dict[str, BrowserContext] = {}
+
+    # =========================================================================
+    # 会话级连接池复用 (Connection Pooling 上下文管理器)
+    # =========================================================================
+
+    async def __aenter__(self):
+        """异步上下文管理器入口：拉起隧道并预热持久 WebSocket CDP 连接池"""
+        try:
+            from playwright.async_api import async_playwright
+        except ImportError:
+            raise RuntimeError("[-] 未安装 playwright 模块，请先运行: pip install playwright && playwright install chromium")
+
+        logging.info("[*] 正在启动会话级连接池 (Connection Pooling)...")
+        self._start_all_tunnels()
+        self._pool_playwright = await async_playwright().start()
+        self._pooled_browsers = {}
+        self._pooled_contexts = {}
+
+        for node in self.nodes:
+            cdp_url = node.cdp_url
+            try:
+                b = await self._pool_playwright.chromium.connect_over_cdp(cdp_url)
+                ctx = b.contexts[0] if b.contexts else await b.new_context()
+                self._pooled_browsers[node.id] = b
+                self._pooled_contexts[node.id] = ctx
+            except Exception as e:
+                logging.warning(f"[-] 连接池预连接节点 [{node.name}] 失败: {e}")
+
+        self._pool_active = True
+        logging.info(f"[+] 连接池已就绪: 已接入 {len(self._pooled_contexts)} 个常驻节点连接。")
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        """异步上下文管理器出口：安全释放连接池与隧道"""
+        logging.info("[*] 正在关闭会话级连接池...")
+        for b in self._pooled_browsers.values():
+            try:
+                await b.close()
+            except Exception:
+                pass
+        self._pooled_browsers.clear()
+        self._pooled_contexts.clear()
+
+        if self._pool_playwright:
+            try:
+                await self._pool_playwright.stop()
+            except Exception:
+                pass
+            self._pool_playwright = None
+
+        self._pool_active = False
+        self._stop_all_tunnels(force=True)
+        logging.info("[+] 会话级连接池已安全释放。")
+
+    def __enter__(self):
+        """同步上下文管理器入口"""
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+
+        if loop and loop.is_running():
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                return pool.submit(asyncio.run, self.__aenter__()).result()
+        else:
+            return asyncio.run(self.__aenter__())
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """同步上下文管理器出口"""
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+
+        if loop and loop.is_running():
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                return pool.submit(asyncio.run, self.__aexit__(exc_type, exc_val, exc_tb)).result()
+        else:
+            return asyncio.run(self.__aexit__(exc_type, exc_val, exc_tb))
+
     # =========================================================================
     # 静态探针与工具方法 (轻量级无需实例化 ChromiumSync)
     # =========================================================================
 
     @staticmethod
-    async def get_cookies_async(port: int = 9222, host: str = "127.0.0.1") -> List[dict]:
-        """[静态异步工具] 直接连通指定 CDP 端口获取 Cookie 列表"""
+    async def get_cookies_async(
+        port: int = 9222,
+        host: str = "127.0.0.1",
+        include_domains: Optional[List[str]] = None,
+        exclude_domains: Optional[List[str]] = None
+    ) -> List[dict]:
+        """[静态异步工具] 直接连通指定 CDP 端口获取 Cookie 列表 (支持域名过滤)"""
         try:
             from playwright.async_api import async_playwright
         except ImportError:
@@ -345,21 +532,29 @@ class ChromiumSync:
             ctx = browser.contexts[0] if browser.contexts else await browser.new_context()
             cookies = await ctx.cookies()
             await browser.close()
-            return cookies
+            return filter_cookies(cookies, include_domains, exclude_domains)
 
     @staticmethod
-    def get_cookies_from_host(port: int = 9222, host: str = "127.0.0.1") -> List[dict]:
+    def get_cookies_from_host(
+        port: int = 9222,
+        host: str = "127.0.0.1",
+        include_domains: Optional[List[str]] = None,
+        exclude_domains: Optional[List[str]] = None
+    ) -> List[dict]:
         """[静态同步工具] 直接连通指定 CDP 端口获取 Cookie 列表"""
-        return asyncio.run(ChromiumSync.get_cookies_async(port=port, host=host))
+        return asyncio.run(ChromiumSync.get_cookies_async(
+            port=port, host=host, include_domains=include_domains, exclude_domains=exclude_domains
+        ))
 
     @staticmethod
     async def set_cookies_async(
         cookies: List[dict],
         port: int = 9222,
         host: str = "127.0.0.1",
-        reload: bool = True
+        reload: bool = True,
+        diff: bool = True
     ) -> bool:
-        """[静态异步工具] 向指定 CDP 端口写入 Cookie 并可选择热重载"""
+        """[静态异步工具] 向指定 CDP 端口写入 Cookie (支持指纹差量 Diff 过滤与热刷新)"""
         try:
             from playwright.async_api import async_playwright
         except ImportError:
@@ -369,8 +564,17 @@ class ChromiumSync:
         async with async_playwright() as p:
             browser = await p.chromium.connect_over_cdp(cdp_url)
             ctx = browser.contexts[0] if browser.contexts else await browser.new_context()
-            if cookies:
-                await ctx.add_cookies(cookies)
+
+            target_cookies = cookies
+            if diff:
+                existing = await ctx.cookies()
+                target_cookies, skipped = compute_cookie_delta(cookies, existing)
+                if not target_cookies:
+                    await browser.close()
+                    return True
+
+            if target_cookies:
+                await ctx.add_cookies(target_cookies)
             if reload and ctx.pages:
                 try:
                     await ctx.pages[0].reload()
@@ -384,10 +588,13 @@ class ChromiumSync:
         cookies: List[dict],
         port: int = 9222,
         host: str = "127.0.0.1",
-        reload: bool = True
+        reload: bool = True,
+        diff: bool = True
     ) -> bool:
-        """[静态同步工具] 向指定 CDP 端口写入 Cookie 并热重载"""
-        return asyncio.run(ChromiumSync.set_cookies_async(cookies, port=port, host=host, reload=reload))
+        """[静态同步工具] 向指定 CDP 端口写入 Cookie"""
+        return asyncio.run(ChromiumSync.set_cookies_async(
+            cookies, port=port, host=host, reload=reload, diff=diff
+        ))
 
     @staticmethod
     async def probe_async(port: int = 9222, host: str = "127.0.0.1") -> dict:
@@ -457,7 +664,9 @@ class ChromiumSync:
         self.tunnels.clear()
 
     async def _fetch_node_data(self, browser_ctx: BrowserContext, node: NodeConfig) -> dict:
-        cookies = await browser_ctx.cookies()
+        raw_cookies = await browser_ctx.cookies()
+        # 域过滤
+        cookies = filter_cookies(raw_cookies, self.include_domains, self.exclude_domains)
         storage_state = await browser_ctx.storage_state()
 
         page_info = "无打开页面"
@@ -481,6 +690,7 @@ class ChromiumSync:
             "cdp_url": node.cdp_url,
             "online": True,
             "cookie_count": len(cookies),
+            "raw_cookie_count": len(raw_cookies),
             "cookies": cookies,
             "page_info": page_info,
             "page_title": page_title,
@@ -491,6 +701,27 @@ class ChromiumSync:
 
     async def inspect_async(self) -> Dict[str, dict]:
         """异步获取所有节点的完整状态与 Cookie 数据"""
+        # 如果当前在连接池上下文中，复用已有连接
+        if self._pool_active:
+            results: Dict[str, dict] = {}
+            for node in self.nodes:
+                ctx = self._pooled_contexts.get(node.id)
+                if ctx:
+                    results[node.id] = await self._fetch_node_data(ctx, node)
+                else:
+                    results[node.id] = {
+                        "id": node.id,
+                        "name": node.name,
+                        "is_local": node.is_local,
+                        "cdp_url": node.cdp_url,
+                        "online": False,
+                        "cookie_count": 0,
+                        "cookies": [],
+                        "page_info": "离线"
+                    }
+            return results
+
+        # 独立运行模式
         self._start_all_tunnels()
         results: Dict[str, dict] = {}
 
@@ -531,7 +762,7 @@ class ChromiumSync:
         return results
 
     def inspect(self) -> Dict[str, dict]:
-        """同步获取所有节点完整状态与 Cookie 数据 (供代码直接调用)"""
+        """同步获取所有节点完整状态与 Cookie 数据"""
         return asyncio.run(self.inspect_async())
 
     def _get_instance_cookies(self, node_id: Optional[str] = None) -> Union[List[dict], Dict[str, List[dict]]]:
@@ -550,20 +781,27 @@ class ChromiumSync:
             node_id = kwargs.get("node_id") if "node_id" in kwargs else (args[0] if args else None)
             return self._get_instance_cookies(node_id)
         else:
-            # 作为类静态方法调用时
             port = args[0] if args else kwargs.get("port", 9222)
             host = args[1] if len(args) > 1 else kwargs.get("host", "127.0.0.1")
-            return ChromiumSync.get_cookies_from_host(port=port, host=host)
+            inc = kwargs.get("include_domains")
+            exc = kwargs.get("exclude_domains")
+            return ChromiumSync.get_cookies_from_host(port=port, host=host, include_domains=inc, exclude_domains=exc)
 
     def get_summary_table(self, report: Optional[Dict[str, dict]] = None) -> str:
         """生成格式化节点状态 ASCII 摘要表"""
         if report is None:
             report = self.inspect()
 
+        filter_note = ""
+        if self.include_domains:
+            filter_note += f" [白名单: {', '.join(self.include_domains)}]"
+        if self.exclude_domains:
+            filter_note += f" [黑名单: {', '.join(self.exclude_domains)}]"
+
         lines = [
-            "\n" + "=" * 90,
-            f"{'节点 ID':<10} | {'节点名称':<14} | {'类型':<10} | {'CDP端口/映射':<12} | {'Cookie数':<10} | {'当前页面状态'}",
-            "-" * 90
+            "\n" + "=" * 92,
+            f"{'节点 ID':<10} | {'节点名称':<14} | {'类型':<10} | {'CDP端口/映射':<12} | {'Cookie有效数':<12} | {'当前页面状态'}",
+            "-" * 92
         ]
 
         for nid, data in report.items():
@@ -571,11 +809,15 @@ class ChromiumSync:
             port_str = data.get("cdp_url", "").split(":")[-1]
             status_cookie = f"{data.get('cookie_count', 0)} 条" if data.get("online") else "离线"
             page_text = data.get("page_info", "未知")
-            if len(page_text) > 32:
-                page_text = page_text[:29] + "..."
-            lines.append(f"{nid:<10} | {data.get('name', nid):<14} | {ntype:<10} | {port_str:<12} | {status_cookie:<10} | {page_text}")
+            if len(page_text) > 30:
+                page_text = page_text[:27] + "..."
+            lines.append(f"{nid:<10} | {data.get('name', nid):<14} | {ntype:<10} | {port_str:<12} | {status_cookie:<12} | {page_text}")
 
-        lines.append("=" * 90 + "\n")
+        if filter_note:
+            lines.append("-" * 92)
+            lines.append(f"过滤规则:{filter_note}")
+
+        lines.append("=" * 92 + "\n")
         return "\n".join(lines)
 
     async def _apply_cookies_and_storage(
@@ -584,16 +826,39 @@ class ChromiumSync:
         target_node: NodeConfig,
         cookies: List[dict],
         storage_state: Optional[dict] = None
-    ):
-        if cookies:
-            await target_ctx.add_cookies(cookies)
+    ) -> Tuple[int, int]:
+        """
+        向目标节点写入 Cookie 与 LocalStorage
+        返回值: (实际写入的新增/变更数量, 跳过的相同数量)
+        """
+        actual_written = len(cookies)
+        diff_skipped = 0
 
+        # Cookie 指纹差量比对
+        if self.diff:
+            existing_cookies = await target_ctx.cookies()
+            delta_cookies, diff_skipped = compute_cookie_delta(cookies, existing_cookies)
+            actual_written = len(delta_cookies)
+            if delta_cookies:
+                await target_ctx.add_cookies(delta_cookies)
+                logging.info(
+                    f" -> 节点 [{target_node.name}] 差量写入: 更新 {actual_written} 条, 跳过一致凭据 {diff_skipped} 条"
+                )
+            else:
+                logging.info(f" -> 节点 [{target_node.name}] 指纹比对完全一致 (跳过 {diff_skipped} 条)，免刷盘。")
+        else:
+            if cookies:
+                await target_ctx.add_cookies(cookies)
+
+        # 写入 LocalStorage
+        has_storage_changes = False
         if target_ctx.pages and storage_state:
             p = target_ctx.pages[0]
             for origin in storage_state.get("origins", []):
                 origin_url = origin.get("origin", "")
                 items = origin.get("localStorage", [])
                 if items:
+                    has_storage_changes = True
                     if p.url.startswith("about:") and origin_url:
                         try:
                             await p.goto(origin_url)
@@ -610,11 +875,16 @@ class ChromiumSync:
                         )
                     except Exception:
                         pass
+
+        # 仅在实际写入了 Cookie 或 LocalStorage 变更时热重载
+        if (actual_written > 0 or has_storage_changes) and target_ctx.pages:
             try:
-                await p.reload()
+                await target_ctx.pages[0].reload()
                 logging.info(f" -> 节点 [{target_node.name}] 页面热刷新成功！")
             except Exception:
                 pass
+
+        return actual_written, diff_skipped
 
     async def run_async(
         self,
@@ -624,8 +894,8 @@ class ChromiumSync:
     ) -> Dict[str, Any]:
         """
         [原生异步执行入口]
-        返回结构化执行结果字典 (包含 status, transferred_count, duration, details 等指标)，
-        上层 Web 控制台可直接捕获使用。
+        返回结构化执行结果字典 (包含 status, transferred_count, diff_skipped_count, duration 等指标)。
+        在 async with 连接池上下文内自动复用连接，避免重复握手。
         """
         start_time = time.time()
         active_mode = (mode or self.mode).lower()
@@ -640,6 +910,7 @@ class ChromiumSync:
                 "status": "failed",
                 "mode": active_mode,
                 "transferred_count": 0,
+                "diff_skipped_count": 0,
                 "source_total": 0,
                 "target_total": 0,
                 "nodes_synced": [],
@@ -648,128 +919,74 @@ class ChromiumSync:
                 "error": "playwright not installed"
             }
 
-        self._start_all_tunnels()
+        is_pooled = self._pool_active
+        if not is_pooled:
+            self._start_all_tunnels()
+
         try:
-            async with async_playwright() as p:
-                browsers: Dict[str, Any] = {}
-                contexts: Dict[str, BrowserContext] = {}
-                nodes_data: Dict[str, dict] = {}
+            browsers: Dict[str, Any] = {}
+            contexts: Dict[str, BrowserContext] = {}
+            nodes_data: Dict[str, dict] = {}
 
+            if is_pooled:
+                contexts = self._pooled_contexts
                 for node in self.nodes:
-                    cdp_url = node.cdp_url
-                    try:
-                        b = await p.chromium.connect_over_cdp(cdp_url)
-                        ctx = b.contexts[0] if b.contexts else await b.new_context()
-                        browsers[node.id] = b
-                        contexts[node.id] = ctx
-                        nodes_data[node.id] = await self._fetch_node_data(ctx, node)
-                    except Exception as e:
-                        logging.error(f"[-] 连接节点 [{node.name}] 失败 ({cdp_url}): {e}")
+                    if node.id in contexts:
+                        nodes_data[node.id] = await self._fetch_node_data(contexts[node.id], node)
+            else:
+                async with async_playwright() as p:
+                    for node in self.nodes:
+                        cdp_url = node.cdp_url
+                        try:
+                            b = await p.chromium.connect_over_cdp(cdp_url)
+                            ctx = b.contexts[0] if b.contexts else await b.new_context()
+                            browsers[node.id] = b
+                            contexts[node.id] = ctx
+                            nodes_data[node.id] = await self._fetch_node_data(ctx, node)
+                        except Exception as e:
+                            logging.error(f"[-] 连接节点 [{node.name}] 失败 ({cdp_url}): {e}")
 
-                if not contexts:
-                    elapsed = round(time.time() - start_time, 2)
-                    return {
-                        "status": "failed",
-                        "mode": active_mode,
-                        "transferred_count": 0,
-                        "source_total": 0,
-                        "target_total": 0,
-                        "nodes_synced": [],
-                        "duration": elapsed,
-                        "details": "无可用在线节点，同步终止",
-                        "error": "No available online nodes"
-                    }
+                    if not contexts:
+                        elapsed = round(time.time() - start_time, 2)
+                        return {
+                            "status": "failed",
+                            "mode": active_mode,
+                            "transferred_count": 0,
+                            "diff_skipped_count": 0,
+                            "source_total": 0,
+                            "target_total": 0,
+                            "nodes_synced": [],
+                            "duration": elapsed,
+                            "details": "无可用在线节点，同步终止",
+                            "error": "No available online nodes"
+                        }
 
-                print(self.get_summary_table(nodes_data))
-
-                if active_mode == "merge":
-                    logging.info("[*] 正在执行全节点 Cookie 智能 Merge (合并最新有效凭据)...")
-                    all_cookies = [data["cookies"] for data in nodes_data.values() if data.get("cookies")]
-                    source_total = sum(len(c) for c in all_cookies)
-                    merged = merge_cookies(all_cookies)
-                    logging.info(f" -> 汇总融合完成: 共生成 {len(merged)} 条最新有效 Cookie")
-
-                    combined_storage = {"origins": []}
-                    origin_map = {}
-                    for data in nodes_data.values():
-                        for orig in data.get("storage_state", {}).get("origins", []):
-                            ourl = orig.get("origin")
-                            if ourl not in origin_map:
-                                origin_map[ourl] = []
-                            origin_map[ourl].extend(orig.get("localStorage", []))
-                    for ourl, items in origin_map.items():
-                        combined_storage["origins"].append({"origin": ourl, "localStorage": items})
-
-                    dest_nodes = [n for n in self.nodes if n.id in contexts]
-                    if active_targets:
-                        dest_nodes = [n for n in dest_nodes if n.id in active_targets]
-
-                    for dest in dest_nodes:
-                        logging.info(f"[*] 注入合并凭据至节点: [{dest.name}]")
-                        await self._apply_cookies_and_storage(
-                            contexts[dest.id],
-                            dest,
-                            merged,
-                            combined_storage
-                        )
-
+                    res = await self._execute_sync_flow(
+                        active_mode, active_source, active_targets, contexts, nodes_data, start_time
+                    )
                     for b in browsers.values():
                         await b.close()
+                    return res
 
-                    elapsed = round(time.time() - start_time, 2)
-                    return {
-                        "status": "success",
-                        "mode": "merge",
-                        "transferred_count": len(merged),
-                        "source_total": source_total,
-                        "target_total": len(merged),
-                        "nodes_synced": [n.id for n in dest_nodes],
-                        "duration": elapsed,
-                        "details": f"全节点 Merge 成功: 融合 {len(merged)} 条最新凭证至 {[n.name for n in dest_nodes]}",
-                        "error": None
-                    }
+            # 连接池模式下执行核心逻辑
+            if not contexts:
+                elapsed = round(time.time() - start_time, 2)
+                return {
+                    "status": "failed",
+                    "mode": active_mode,
+                    "transferred_count": 0,
+                    "diff_skipped_count": 0,
+                    "source_total": 0,
+                    "target_total": 0,
+                    "nodes_synced": [],
+                    "duration": elapsed,
+                    "details": "连接池中无可用在线节点",
+                    "error": "No available online nodes in pool"
+                }
 
-                elif active_mode == "sync":
-                    if not active_source:
-                        active_source = self.nodes[0].id
-                    if active_source not in contexts:
-                        raise RuntimeError(f"[-] 指定的源节点 [{active_source}] 未在线！")
-
-                    src_data = nodes_data[active_source]
-                    src_cookies = src_data["cookies"]
-                    src_storage = src_data["storage_state"]
-
-                    dest_nodes = [n for n in self.nodes if n.id != active_source and n.id in contexts]
-                    if active_targets:
-                        dest_nodes = [n for n in dest_nodes if n.id in active_targets]
-
-                    logging.info(f"[*] 正在执行单源广播同步: [{src_data['name']}] -> {[n.name for n in dest_nodes]}")
-                    logging.info(f" -> 源凭证量: {len(src_cookies)} 条 Cookie")
-
-                    for dest in dest_nodes:
-                        logging.info(f"[*] 正在推送凭证至目标节点: [{dest.name}]")
-                        await self._apply_cookies_and_storage(
-                            contexts[dest.id],
-                            dest,
-                            src_cookies,
-                            src_storage
-                        )
-
-                    for b in browsers.values():
-                        await b.close()
-
-                    elapsed = round(time.time() - start_time, 2)
-                    return {
-                        "status": "success",
-                        "mode": "sync",
-                        "transferred_count": len(src_cookies),
-                        "source_total": len(src_cookies),
-                        "target_total": len(src_cookies),
-                        "nodes_synced": [n.id for n in dest_nodes],
-                        "duration": elapsed,
-                        "details": f"单源同步成功: [{src_data['name']}] 推送 {len(src_cookies)} 条凭据至 {[n.name for n in dest_nodes]}",
-                        "error": None
-                    }
+            return await self._execute_sync_flow(
+                active_mode, active_source, active_targets, contexts, nodes_data, start_time
+            )
 
         except Exception as e:
             elapsed = round(time.time() - start_time, 2)
@@ -778,6 +995,7 @@ class ChromiumSync:
                 "status": "failed",
                 "mode": active_mode,
                 "transferred_count": 0,
+                "diff_skipped_count": 0,
                 "source_total": 0,
                 "target_total": 0,
                 "nodes_synced": [],
@@ -786,7 +1004,116 @@ class ChromiumSync:
                 "error": str(e)
             }
         finally:
-            self._stop_all_tunnels()
+            if not is_pooled:
+                self._stop_all_tunnels()
+
+    async def _execute_sync_flow(
+        self,
+        active_mode: str,
+        active_source: Optional[str],
+        active_targets: Optional[List[str]],
+        contexts: Dict[str, BrowserContext],
+        nodes_data: Dict[str, dict],
+        start_time: float
+    ) -> Dict[str, Any]:
+        """内部执行流"""
+        print(self.get_summary_table(nodes_data))
+        total_transferred = 0
+        total_skipped = 0
+
+        if active_mode == "merge":
+            logging.info("[*] 正在执行全节点 Cookie 智能 Merge (合并最新有效凭据)...")
+            all_cookies = [data["cookies"] for data in nodes_data.values() if data.get("cookies")]
+            source_total = sum(len(c) for c in all_cookies)
+            merged = merge_cookies(all_cookies, self.include_domains, self.exclude_domains)
+            logging.info(f" -> 汇总融合完成: 共生成 {len(merged)} 条最新有效 Cookie")
+
+            combined_storage = {"origins": []}
+            origin_map = {}
+            for data in nodes_data.values():
+                for orig in data.get("storage_state", {}).get("origins", []):
+                    ourl = orig.get("origin")
+                    if ourl not in origin_map:
+                        origin_map[ourl] = []
+                    origin_map[ourl].extend(orig.get("localStorage", []))
+            for ourl, items in origin_map.items():
+                combined_storage["origins"].append({"origin": ourl, "localStorage": items})
+
+            dest_nodes = [n for n in self.nodes if n.id in contexts]
+            if active_targets:
+                dest_nodes = [n for n in dest_nodes if n.id in active_targets]
+
+            for dest in dest_nodes:
+                logging.info(f"[*] 注入合并凭据至节点: [{dest.name}]")
+                w, s = await self._apply_cookies_and_storage(
+                    contexts[dest.id],
+                    dest,
+                    merged,
+                    combined_storage
+                )
+                total_transferred += w
+                total_skipped += s
+
+            elapsed = round(time.time() - start_time, 2)
+            return {
+                "status": "success",
+                "mode": "merge",
+                "transferred_count": total_transferred,
+                "diff_skipped_count": total_skipped,
+                "source_total": source_total,
+                "target_total": len(merged),
+                "nodes_synced": [n.id for n in dest_nodes],
+                "duration": elapsed,
+                "details": f"全节点 Merge 成功: 融合并向 {[n.name for n in dest_nodes]} 写入 {total_transferred} 条凭证 (跳过一致指纹 {total_skipped} 条)",
+                "error": None
+            }
+
+        elif active_mode == "sync":
+            if not active_source:
+                active_source = self.nodes[0].id
+            if active_source not in contexts:
+                raise RuntimeError(f"[-] 指定的源节点 [{active_source}] 未在线！")
+
+            src_data = nodes_data[active_source]
+            src_cookies = src_data["cookies"]
+            src_storage = src_data["storage_state"]
+
+            dest_nodes = [n for n in self.nodes if n.id != active_source and n.id in contexts]
+            if active_targets:
+                dest_nodes = [n for n in dest_nodes if n.id in active_targets]
+
+            logging.info(f"[*] 正在执行单源广播同步: [{src_data['name']}] -> {[n.name for n in dest_nodes]}")
+            logging.info(f" -> 源有效凭证量: {len(src_cookies)} 条 Cookie")
+
+            for dest in dest_nodes:
+                logging.info(f"[*] 正在推送凭证至目标节点: [{dest.name}]")
+                w, s = await self._apply_cookies_and_storage(
+                    contexts[dest.id],
+                    dest,
+                    src_cookies,
+                    src_storage
+                )
+                total_transferred += w
+                total_skipped += s
+
+            elapsed = round(time.time() - start_time, 2)
+            return {
+                "status": "success",
+                "mode": "sync",
+                "transferred_count": total_transferred,
+                "diff_skipped_count": total_skipped,
+                "source_total": len(src_cookies),
+                "target_total": len(src_cookies),
+                "nodes_synced": [n.id for n in dest_nodes],
+                "duration": elapsed,
+                "details": f"单源同步成功: [{src_data['name']}] 写入 {total_transferred} 条凭据至 {[n.name for n in dest_nodes]} (跳过一致指纹 {total_skipped} 条)",
+                "error": None
+            }
+
+        return {
+            "status": "failed",
+            "error": f"Unknown mode {active_mode}"
+        }
 
     def run(
         self,
@@ -794,10 +1121,7 @@ class ChromiumSync:
         source: Optional[str] = None,
         targets: Optional[List[str]] = None
     ) -> Dict[str, Any]:
-        """
-        [同步运行入口 (开箱即用)]
-        返回执行结果字典，兼容同步后端与脚本自动化。
-        """
+        """[同步运行入口 (开箱即用)]"""
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
@@ -812,3 +1136,7 @@ class ChromiumSync:
                 ).result()
         else:
             return asyncio.run(self.run_async(mode=mode, source=source, targets=targets))
+
+    # 快捷别名
+    sync = run
+    sync_async = run_async

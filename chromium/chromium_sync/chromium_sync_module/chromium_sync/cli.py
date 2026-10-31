@@ -72,23 +72,20 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 使用示例:
-  # 1. 快速查看节点状态与 Cookie 数量 (ASCII 表格)
+  # 1. 过滤仅同步指定业务域名 (如 google, twitter, github)
+  chromium-sync --config cluster.json --include-domains google.com twitter.com github.com --mode merge
+
+  # 2. 排除广告/统计类无关域名 (如 doubleclick, google-analytics)
+  chromium-sync --config cluster.json --exclude-domains doubleclick.net google-analytics.com --mode merge
+
+  # 3. 快速查看过滤后的节点状态与 Cookie 数量 (ASCII 表格)
   chromium-sync --node id=local,port=9222 --node id=kr2,ssh=root@kr2.wimotek.com,port=9222,key=~/.ssh/id_rsa --status
 
-  # 2. 导出节点状态与 Cookie 详情为 JSON (便于程序直接提取 Cookie 列表)
+  # 4. 导出节点状态与 Cookie 详情为 JSON (便于程序直接提取 Cookie 列表)
   chromium-sync --config cluster.json --status --json
 
-  # 3. 全节点 Cookie 智能 Merge (合并所有节点并保留最新有效期)
+  # 5. 全节点 Cookie 智能 Merge (合并所有节点并保留最新有效期，默认启用指纹差量 Diff)
   chromium-sync --config cluster.json --mode merge
-
-  # 4. 指定单源节点广播同步并输出结构化指标 JSON
-  chromium-sync --config cluster.json --mode sync --source local --json
-
-  # 5. 极简命令行多节点直接同步
-  chromium-sync \\
-    --node id=local,port=9223 \\
-    --node id=kr2,ssh=root@kr2.wimotek.com,port=9222,key=~/.ssh/id_rsa \\
-    --mode merge
         """
     )
 
@@ -100,6 +97,15 @@ def main():
     # 全局默认 SSH 凭据
     parser.add_argument("--ssh-key", help="集群默认 SSH 私钥 (支持私钥文件绝对路径 或 私钥 PEM 文本内容)")
     parser.add_argument("--ssh-password", help="集群默认 SSH 连接密码")
+
+    # 域名过滤机制
+    parser.add_argument("--include-domains", nargs="*", default=None,
+                        help="域名白名单过滤列表 (如: google.com twitter.com github.com)")
+    parser.add_argument("--exclude-domains", nargs="*", default=None,
+                        help="域名黑名单过滤列表 (如: doubleclick.net google-analytics.com)")
+
+    # 差量写入策略
+    parser.add_argument("--no-diff", action="store_true", help="禁用指纹差量检测，强制全量覆写目标节点 Cookie")
 
     # 同步模式
     parser.add_argument("--mode", choices=["sync", "merge"], default="sync",
@@ -143,6 +149,9 @@ def main():
         mode=args.mode,
         source=args.source,
         targets=args.targets,
+        include_domains=args.include_domains,
+        exclude_domains=args.exclude_domains,
+        diff=(not args.no_diff),
         ssh_key=args.ssh_key,
         ssh_password=args.ssh_password,
         auto_close_tunnel=args.auto_close,
