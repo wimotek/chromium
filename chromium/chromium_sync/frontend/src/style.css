@@ -1,4 +1,4 @@
-/* 全局基础重置与背景设定 */
+/* ==================== 1. 全局基础重置与暗黑背景 ==================== */
 * {
   box-sizing: border-box;
   margin: 0;
@@ -41,7 +41,7 @@ input:-webkit-autofill:focus {
   border-radius: 6px;
   font-size: 13px;
   font-weight: 500;
-  box-shadow: 0 4px 12px rgba(0,0,0,0.5);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.5);
   animation: fadeInToast 0.2s ease;
 }
 .toast-ok { background: #064e3b; color: #34d399; border: 1px solid #059669; }
@@ -52,7 +52,7 @@ input:-webkit-autofill:focus {
   to { opacity: 1; transform: translate(-50%, 0); }
 }
 
-/* 1. 登录窗口：绝对死锁垂直水平居中 */
+/* ==================== 2. 登录窗口 (绝对垂直水平死锁居中) ==================== */
 .login-screen-center {
   min-height: 100vh;
   width: 100vw;
@@ -90,11 +90,28 @@ input:-webkit-autofill:focus {
 
 .login-form-stack { display: flex; flex-direction: column; gap: 16px; }
 
-/* 字段块与标签分离 */
+.form-row { display: flex; flex-direction: column; gap: 6px; }
+
+.captcha-row { display: flex; gap: 10px; align-items: center; width: 100%; }
+.captcha-box {
+  width: 120px;
+  height: 38px;
+  background: #09122a;
+  border: 1px solid #172554;
+  border-radius: 6px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  overflow: hidden;
+  flex-shrink: 0;
+}
+
+/* ==================== 3. 表单字段块、自适应输入框与按钮 ==================== */
 .form-field-block {
   display: flex;
   flex-direction: column;
-  gap: 7px;
+  gap: 7px; /* 标题与输入框的舒适呼吸间距 */
   margin-bottom: 4px;
 }
 
@@ -105,7 +122,7 @@ input:-webkit-autofill:focus {
   line-height: 1.4;
 }
 
-/* 输入框自适应体系 */
+/* 语义化自适应输入框体系 (根据内容自适应，告别一刀切) */
 .cdp-input {
   box-sizing: border-box;
   background-color: #0f1c3f;
@@ -123,34 +140,43 @@ input:-webkit-autofill:focus {
   box-shadow: 0 0 8px rgba(0, 240, 255, 0.35);
 }
 
-.cdp-w-port   { width: 120px !important; min-width: 90px !important; }
-.cdp-w-medium { width: 240px !important; min-width: 180px !important; }
-.cdp-w-normal { width: 100%; max-width: 420px; min-width: 220px; }
-.cdp-w-key    { width: 100%; max-width: 480px; min-width: 240px; }
+/* 短端口数字输入 (4-5位数字紧凑呈现) */
+.cdp-w-port {
+  width: 120px !important;
+  min-width: 90px !important;
+}
+
+/* 中等长度输入框 (发件人名称等) */
+.cdp-w-medium {
+  width: 240px !important;
+  min-width: 180px !important;
+}
+
+/* 常规长度输入框 (主机地址、邮箱等，宽度舒适，绝不粗暴拉伸 100%) */
+.cdp-w-normal {
+  width: 100%;
+  max-width: 420px;
+  min-width: 220px;
+}
+
+/* 长密钥字段 (SendKey、API Key) */
+.cdp-w-key {
+  width: 100%;
+  max-width: 480px;
+  min-width: 240px;
+}
 
 @media (max-width: 640px) {
-  .cdp-w-normal, .cdp-w-key, .cdp-w-medium, .cdp-w-port {
+  .cdp-w-normal,
+  .cdp-w-key,
+  .cdp-w-medium,
+  .cdp-w-port {
     width: 100% !important;
     max-width: 100% !important;
   }
 }
 
-.captcha-row { display: flex; gap: 10px; align-items: center; width: 100%; }
-.captcha-box {
-  width: 120px;
-  height: 38px;
-  background: #09122a;
-  border: 1px solid #172554;
-  border-radius: 6px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  cursor: pointer;
-  overflow: hidden;
-  flex-shrink: 0;
-}
-
-/* 按钮尺寸收敛：禁止 100% 满屏占满拉伸 */
+/* 按钮尺寸收敛：绝对禁止 100% 满屏占满拉伸，优雅紧凑 */
 .btn-primary-gradient {
   background: linear-gradient(135deg, #0284c7, #2563eb);
   color: #ffffff;
@@ -170,7 +196,7 @@ input:-webkit-autofill:focus {
 }
 .btn-primary-gradient:hover { opacity: 0.9; transform: translateY(-1px); }
 
-/* 2. 顶栏 (通顶流式铺满) */
+/* ==================== 4. 顶栏 (通顶流式铺满) ==================== */
 .dashboard-fluid-layout {
   min-height: 100vh;
   width: 100%;
@@ -216,7 +242,7 @@ input:-webkit-autofill:focus {
 }
 .btn-logout:hover { border-color: #9ca3af; color: #ffffff; }
 
-/* 3. 全屏流式自适应主容器 */
+/* ==================== 5. 全屏流式主容器与 4 个顶置横排大卡片 ==================== */
 .main-fluid-canvas {
   width: 100% !important;
   max-width: 100% !important;
@@ -228,7 +254,6 @@ input:-webkit-autofill:focus {
   gap: 20px;
 }
 
-/* 4. 核心 4 个大卡片横排平铺 */
 .top-cards-row-4 {
   display: grid !important;
   grid-template-columns: repeat(4, 1fr) !important;
@@ -300,7 +325,7 @@ input:-webkit-autofill:focus {
   white-space: nowrap;
 }
 
-/* 5. 主内容卡片容器 */
+/* ==================== 6. 主内容卡片与全屏流式表格 ==================== */
 .content-full-card {
   width: 100%;
   background-color: #0b132b;
@@ -347,7 +372,7 @@ input:-webkit-autofill:focus {
 .cell-main-name { font-weight: bold; color: #ffffff; font-size: 13px; }
 .cell-sub-desc  { font-size: 11px; color: #64748b; font-family: monospace; margin-top: 3px; }
 
-/* 状态徽章 */
+/* 状态胶囊 */
 .status-active {
   background-color: rgba(6, 78, 59, 0.85);
   border: 1px solid #059669;
@@ -510,12 +535,15 @@ input:-webkit-autofill:focus {
   color: #38bdf8 !important;
 }
 
-/* ==================== 核心解决：Cookie 详情宽幅透视弹窗 (严禁折行) ==================== */
+/* ==================== 7. Cookie 详情宽幅 96vw 全屏自适应抽屉 (严禁断行) ==================== */
 .cookie-modal-wide {
-  width: 1240px !important;
-  max-width: 96vw !important;
+  width: 96vw !important;
+  max-width: 98vw !important;
+  min-width: 90vw !important;
+  max-height: 85vh !important;
   display: flex;
   flex-direction: column;
+  padding: 20px 24px !important;
 }
 
 .cookie-stat-row {
@@ -538,13 +566,13 @@ input:-webkit-autofill:focus {
   width: 100%;
   overflow-x: auto;
   overflow-y: auto;
-  max-height: 400px; /* 严控高度，杜绝过高失调 */
+  max-height: 480px; /* 舒适的滚动视窗高度 */
   border: 1px solid #172554;
   border-radius: 6px;
   background-color: #060b17;
 }
 
-/* 核心：整表绝对禁止换行折行 */
+/* 整表绝对禁止换行折行，列宽按比例舒展 */
 .cookie-full-table {
   width: 100%;
   border-collapse: collapse;
@@ -556,7 +584,7 @@ input:-webkit-autofill:focus {
   background-color: #09122a;
   color: #94a3b8;
   font-weight: 600;
-  padding: 10px 14px;
+  padding: 10px 16px;
   border-bottom: 1px solid #172554;
   white-space: nowrap !important;
   position: sticky;
@@ -566,13 +594,12 @@ input:-webkit-autofill:focus {
 }
 
 .cookie-full-table td {
-  padding: 9px 14px;
+  padding: 10px 16px;
   border-bottom: 1px solid #111c38;
   white-space: nowrap !important;
   vertical-align: middle;
 }
 
-/* 状态徽章 */
 .badge-status-valid {
   background-color: rgba(6, 78, 59, 0.85);
   border: 1px solid #059669;
@@ -617,7 +644,7 @@ input:-webkit-autofill:focus {
   font-family: monospace;
 }
 
-/* ==================== SMTP 发信配置专属样式 (1:1 复刻截图) ==================== */
+/* ==================== 8. SMTP 发信配置专属样式 (1:1 复刻截图) ==================== */
 .smtp-title-header { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
 .smtp-icon-box {
   width: 32px; height: 32px; border-radius: 6px;
@@ -655,7 +682,7 @@ input:-webkit-autofill:focus {
 .btn-gray-test:hover { background: #334155; color: #ffffff; }
 .check-box-blue { width: 16px; height: 16px; accent-color: #2563eb; cursor: pointer; }
 
-/* 右侧推送通知列表专用卡片样式 */
+/* ==================== 9. 右侧推送通知列表专用卡片样式 ==================== */
 .notify-channels-container {
   display: flex;
   flex-direction: column;
@@ -707,7 +734,6 @@ input:-webkit-autofill:focus {
   border: 1px solid rgba(100, 116, 139, 0.3);
 }
 
-/* 展开区域样式 */
 .channel-expand-content {
   margin-top: 14px;
   padding-top: 12px;
