@@ -14,12 +14,15 @@ const isSyncing = ref(false)
 const showLogModal = ref(false)
 const selectedLogDetail = ref('')
 
-// 同步策略配置 (首选 smart_merge)
+// 同步策略配置 (首选 smart_merge + 新增黑白名单与差量检测)
 const syncConfig = reactive({
   sync_interval_minutes: 15,
   sync_mode: 'smart_merge',
   sync_source_id: 0,
-  sync_target_ids: []
+  sync_target_ids: [],
+  sync_diff_enabled: true,
+  sync_include_domains: '',
+  sync_exclude_domains: 'doubleclick.net,google-analytics.com'
 })
 
 // 主从模式下：待添加的目标节点 ID
@@ -31,12 +34,10 @@ const manualTargetMode = ref('all') // 'all' | 'custom'
 const manualTargetIds = ref([])
 const selectedTargetToAdd = ref('')
 
-// 主从模式候选目标：排除源节点
 const scheduleCandidateTargets = computed(() => {
   return nodes.value.filter(n => n.id !== syncConfig.sync_source_id)
 })
 
-// 即时同步候选目标：排除临时源节点
 const candidateTargets = computed(() => {
   return nodes.value.filter(n => n.id !== manualSourceId.value)
 })
@@ -60,7 +61,7 @@ const loadData = async () => {
   }
 }
 
-// ---------------- 主从模式目标选择交互 ----------------
+// 主从目标选择
 const addScheduleTarget = () => {
   const id = parseInt(selectedScheduleTargetToAdd.value)
   if (id && !syncConfig.sync_target_ids.includes(id)) {
@@ -82,7 +83,7 @@ const clearAllScheduleTargets = () => {
   syncConfig.sync_target_ids = []
 }
 
-// ---------------- 即时定向目标选择交互 ----------------
+// 即时定向同步目标选择
 const addTargetToManual = () => {
   const id = parseInt(selectedTargetToAdd.value)
   if (id && !manualTargetIds.value.includes(id)) {
@@ -110,7 +111,7 @@ const saveSyncPolicy = async () => {
     body: JSON.stringify(syncConfig)
   })
   if (res.ok) {
-    props.showToast('同步策略与定时周期已生效', 'success')
+    props.showToast('同步策略、差量检测与黑白名单配置已生效', 'success')
   }
 }
 
@@ -174,9 +175,9 @@ onMounted(() => {
     <!-- 策略配置双列栅格 -->
     <div class="grid-2col-fluid" style="margin-bottom:20px;">
       
-      <!-- 左列：调度策略配置 -->
+      <!-- 左列：调度策略、差量检测与黑白名单 -->
       <div style="background:#09122a; border:1px solid #172554; border-radius:8px; padding:16px;">
-        <h3 class="card-inner-h3" style="margin-bottom:12px;">⚙️ 自动化调度策略</h3>
+        <h3 class="card-inner-h3" style="margin-bottom:12px;">⚙️ 自动化调度策略与规则配置</h3>
         <div class="form-v-stack">
           <div class="form-field-block">
             <label class="form-label">定时调度周期 (分钟)</label>
@@ -186,11 +187,37 @@ onMounted(() => {
             </div>
           </div>
 
+          <!-- 差量同步检测开关 -->
+          <div style="background:#060b17; border:1px solid #1e3a8a; border-radius:6px; padding:10px;">
+            <div style="display:flex; align-items:center; gap:8px;">
+              <input type="checkbox" v-model="syncConfig.sync_diff_enabled" id="diff_toggle" class="check-box-blue">
+              <label for="diff_toggle" style="font-size:12px; color:#38bdf8; font-weight:bold; cursor:pointer;">
+                启用 Cookie 指纹变更差量检测 (Diff / Delta Sync)
+              </label>
+            </div>
+            <p style="font-size:11px; color:#64748b; margin-top:4px;">
+              仅对值、有效期发生实质变更的凭证执行下发，跳过完全一致的项，避免全量重复刷盘。
+            </p>
+          </div>
+
+          <!-- 域名白名单与黑名单配置 -->
+          <div class="form-field-block">
+            <label class="form-label">域名白名单 (Include Domains，选填)</label>
+            <input v-model="syncConfig.sync_include_domains" placeholder="例如: google.com, twitter.com, github.com (留空同步全部)" class="cdp-input cdp-w-normal font-cyan-mono">
+            <p class="form-field-hint">仅同步指定域名的凭证，多个域名用英文逗号分隔；留空表示不过滤。</p>
+          </div>
+
+          <div class="form-field-block">
+            <label class="form-label">域名黑名单 (Exclude Domains，选填)</label>
+            <input v-model="syncConfig.sync_exclude_domains" placeholder="例如: doubleclick.net, google-analytics.com" class="cdp-input cdp-w-normal font-cyan-mono">
+            <p class="form-field-hint">自动剔除广告、数据统计类垃圾 Cookie，防止污染目标浏览器。</p>
+          </div>
+
           <div class="form-field-block">
             <label class="form-label">同步模式规则 (默认首选智能合并)</label>
             <div class="form-v-stack" style="gap:10px;">
               
-              <!-- 选项 1: 智能合并 -->
+              <!-- 模式 1: 智能合并 -->
               <label :class="['sync-mode-card', syncConfig.sync_mode === 'smart_merge' ? 'sync-mode-active' : '']">
                 <input type="radio" v-model="syncConfig.sync_mode" value="smart_merge" style="display:none;">
                 <div style="display:flex; justify-content:space-between; align-items:center;">
@@ -202,21 +229,21 @@ onMounted(() => {
                 </p>
               </label>
 
-              <!-- 选项 2: 主从定向模式 (已彻底改造为下拉添加与一键 ALL 全选) -->
+              <!-- 模式 2: 主从定向模式 -->
               <label :class="['sync-mode-card', syncConfig.sync_mode === 'master_worker' ? 'sync-mode-active' : '']">
                 <input type="radio" v-model="syncConfig.sync_mode" value="master_worker" style="display:none;">
                 <div style="display:flex; justify-content:space-between; align-items:center;">
                   <span style="font-weight:bold; color:#cbd5e1;">📌 指定主节点单向广播 (Master-Worker)</span>
                 </div>
                 <p class="sync-mode-desc">
-                  指定固定的 Master 节点，将其凭据单向覆盖至指定的从属目标节点队列。
+                  指定固定的 Master 节点，将其凭证单向覆盖至指定的从属目标节点队列。
                 </p>
               </label>
 
             </div>
           </div>
 
-          <!-- 主从模式下的目标节点选择 (支持海量节点管理) -->
+          <!-- 主从模式下的目标节点选择 -->
           <div v-if="syncConfig.sync_mode === 'master_worker'" class="form-v-stack" style="background:#060b17; padding:14px; border-radius:6px; border:1px solid #1e3a8a;">
             <div>
               <label class="form-label">指定固定源节点 (Master)</label>
@@ -250,7 +277,7 @@ onMounted(() => {
                 </button>
               </div>
 
-              <!-- 已选目标胶囊列表 -->
+              <!-- 已选目标胶囊 -->
               <div style="display:flex; gap:8px; flex-wrap:wrap; min-height:28px; align-items:center;">
                 <span v-for="tid in syncConfig.sync_target_ids" :key="tid" class="target-chip">
                   {{ nodes.find(n => n.id === tid)?.name || tid }}
@@ -342,7 +369,7 @@ onMounted(() => {
       </div>
     </div>
 
-    <!-- ==================== 审计列表：高规格结构化数据表格 ==================== -->
+    <!-- 结构化审计流水表格 -->
     <div style="margin-top:24px;">
       <div class="table-header-bar" style="border-bottom:none; margin-bottom:8px; padding-bottom:0;">
         <div class="table-title">
@@ -367,12 +394,10 @@ onMounted(() => {
           </thead>
           <tbody>
             <tr v-for="l in logs" :key="l.id">
-              <!-- 时间戳 -->
               <td class="font-cyan-mono" style="color:#94a3b8;">{{ l.timestamp }}</td>
 
-              <!-- 源节点 -->
               <td>
-                <span v-if="l.source_node.includes('智能')" class="badge-recommend" style="font-size:11px;">
+                <span v-if="l.source_node && l.source_node.includes('智能')" class="badge-recommend" style="font-size:11px;">
                   {{ l.source_node }}
                 </span>
                 <span v-else class="cell-main-name" style="font-size:12px;">
@@ -380,30 +405,25 @@ onMounted(() => {
                 </span>
               </td>
 
-              <!-- 分发目标 -->
               <td style="color:#cbd5e1; max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" :title="l.target_nodes">
                 {{ l.target_nodes || '---' }}
               </td>
 
-              <!-- Cookie 数量 -->
               <td>
                 <span class="cookie-badge" style="font-size:11px; padding:1px 6px;">
                   🍪 {{ l.cookie_count || 0 }} 条
                 </span>
               </td>
 
-              <!-- 执行耗时 -->
               <td class="font-cyan-mono" style="color:#38bdf8; font-weight:bold;">
                 ⏱️ {{ l.duration || '0.00s' }}
               </td>
 
-              <!-- 状态 -->
               <td style="text-align: center;">
                 <span v-if="l.status==='SUCCESS'" class="status-active" style="padding:1px 8px; font-size:11px;">● 成功</span>
                 <span v-else class="status-error" style="padding:1px 8px; font-size:11px;">✕ 失败</span>
               </td>
 
-              <!-- 查看详情按钮 -->
               <td style="text-align: right; padding-right: 18px;">
                 <button @click="viewLogDetail(l.details)" class="btn-gray-test" style="height:26px; padding:2px 10px; font-size:11px;">
                   查看详情
@@ -418,7 +438,7 @@ onMounted(() => {
       </div>
     </div>
 
-    <!-- 日志详情查看弹窗 -->
+    <!-- 日志详情弹窗 -->
     <div v-if="showLogModal" class="modal-backdrop">
       <div class="modal-card" style="width: 720px; max-width: 95vw;">
         <div class="modal-title-bar">
