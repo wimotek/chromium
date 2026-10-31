@@ -13,7 +13,6 @@ const showNodeModal = ref(false)
 const isEditMode = ref(false)
 const editingNodeId = ref(null)
 
-// Cookie 深度透视抽屉状态
 const showCookieModal = ref(false)
 const cookieDetails = ref({ node_name: '', total: 0, valid_count: 0, session_count: 0, expired_count: 0, cookies: [] })
 const isLoadingCookies = ref(false)
@@ -88,7 +87,6 @@ const submitNodeForm = async () => {
   loadNodes()
 }
 
-// 打开 Cookie 深度透视弹窗
 const viewCookieDetails = async (node) => {
   isLoadingCookies.value = true
   showCookieModal.value = true
@@ -127,9 +125,11 @@ const toggleTunnel = async (node) => {
   loadNodes()
 }
 
-const setSource = async (id) => {
-  await props.api(`/api/nodes/${id}/set-source`, { method: 'POST' })
-  props.showToast('已设为全网同步源节点', 'success')
+// 核心改进：点击设置默认源，再次点击取消默认源
+const toggleSource = async (id) => {
+  const res = await props.api(`/api/nodes/${id}/toggle-source`, { method: 'POST' })
+  const data = await res.json()
+  props.showToast(data.message, 'success')
   loadNodes()
 }
 
@@ -168,8 +168,8 @@ onMounted(() => {
             <th style="width: 12%;">本地调试端口</th>
             <th style="width: 16%;">实时 Cookie (点击查看透视)</th>
             <th style="width: 12%;">接入类型</th>
-            <th style="width: 10%;">同步角色</th>
-            <th style="width: 20%; text-align: right;">治理操作</th>
+            <th style="width: 12%;">同步角色</th>
+            <th style="width: 18%; text-align: right;">治理操作</th>
           </tr>
         </thead>
         <tbody>
@@ -190,7 +190,6 @@ onMounted(() => {
             <td class="font-cyan-mono">127.0.0.1:{{ node.local_bind_port }}</td>
 
             <td>
-              <!-- 点击弹出宽幅生命周期透视表 -->
               <div class="cookie-badge" @click="viewCookieDetails(node)" style="cursor:pointer;" title="点击查看 Cookie 详细过期信息">
                 <span>🍪 {{ node.cookie_count || 0 }} 条</span>
                 <span style="font-size:10px; color:#38bdf8; text-decoration:underline; margin-left:4px;">详情</span>
@@ -202,9 +201,25 @@ onMounted(() => {
               <span v-else class="tag-plan-indigo">SSH 穿透 (远程)</span>
             </td>
 
+            <!-- 核心改进：再次点击取消默认源 -->
             <td>
-              <button v-if="node.is_source" class="btn-qrcode">★ 默认源</button>
-              <button v-else @click="setSource(node.id)" class="btn-set-source">设为源</button>
+              <button 
+                v-if="node.is_source" 
+                @click="toggleSource(node.id)" 
+                class="btn-qrcode" 
+                style="background: #0284c7; cursor: pointer;"
+                title="已是默认源，再次点击可取消"
+              >
+                ★ 默认源 (点击取消)
+              </button>
+              <button 
+                v-else 
+                @click="toggleSource(node.id)" 
+                class="btn-set-source"
+                title="点击设为全网默认源"
+              >
+                设为源
+              </button>
             </td>
 
             <td style="text-align: right;">
@@ -312,7 +327,7 @@ onMounted(() => {
       </div>
     </div>
 
-    <!-- 弹窗 2：宽幅 Cookie 生命周期透视 (完全禁止断行换行) -->
+    <!-- 弹窗 2：宽幅 Cookie 生命周期透视 (96vw 超宽排开，杜绝换行) -->
     <div v-if="showCookieModal" class="modal-backdrop">
       <div class="modal-card cookie-modal-wide">
         <div class="modal-title-bar">
@@ -326,7 +341,6 @@ onMounted(() => {
         </div>
 
         <div style="margin-top:12px;">
-          <!-- 紧凑横向统计摘要 -->
           <div class="cookie-stat-row">
             <span class="cookie-stat-badge">总数: <b style="color:#f8fafc;">{{ cookieDetails.total }}</b></span>
             <span class="cookie-stat-badge" style="border-color:#059669; color:#34d399;">有效持久: <b>{{ cookieDetails.valid_count }}</b></span>
@@ -334,7 +348,6 @@ onMounted(() => {
             <span class="cookie-stat-badge" style="border-color:#dc2626; color:#f87171;">已过期: <b>{{ cookieDetails.expired_count }}</b></span>
           </div>
 
-          <!-- 宽幅不折行表格容器 -->
           <div class="cookie-table-container">
             <table class="cookie-full-table">
               <thead>

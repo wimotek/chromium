@@ -42,7 +42,7 @@ from fastapi import (
     Header as ReqHeader,
     UploadFile,
     File,
-    Form,  # 修复 NameError
+    Form,
     Request,
     Query,
     Security
@@ -87,7 +87,7 @@ try:
     from chromium_sync import ChromiumSync
     logger.info("已成功加载 chromium_sync 核心模块！")
 except Exception as e:
-    logger.warning(f"外部 ChromiumSync 模块未激活 ({e})，将启用内置 CDP 探测与同步引擎。")
+    logger.warning(f"外部 ChromiumSync 模块未激活 ({e})，启用内置高并发 WebSocket 探测与合并引擎。")
 
 def hash_password(password: str) -> str:
     pwd_bytes = password.encode('utf-8')[:72]
@@ -145,7 +145,7 @@ def ensure_ssl_certificates():
     has_key = os.path.exists(SSL_KEY_FILE) and os.path.getsize(SSL_KEY_FILE) > 0
 
     if not (has_cert and has_key):
-        logger.warning("未检测到有效证书，正在生成 10 年期自签 SSL 证书...")
+        logger.warning("未检测到有效证书，正在生成自签 SSL 证书...")
         try:
             os.makedirs(CERTS_DIR, exist_ok=True)
             generate_self_signed_cert(SSL_CERT_FILE, SSL_KEY_FILE)
@@ -156,7 +156,7 @@ def ensure_ssl_certificates():
             SSL_KEY_FILE = os.path.join(fallback_dir, "privkey.pem")
             generate_self_signed_cert(SSL_CERT_FILE, SSL_KEY_FILE)
 
-# ==================== 2. 数据库扩展与热迁移 ====================
+# ==================== 2. 数据库与设置初始化 ====================
 def init_db_and_jwt():
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
@@ -216,8 +216,9 @@ def init_db_and_jwt():
         'email_notify_to': '',
         'serverchan_enabled': '0',
         'serverchan_key': '',
+        # 同步中心：默认首选 smart_merge
         'sync_interval_minutes': '15',
-        'sync_mode': 'auto_all',
+        'sync_mode': 'smart_merge',
         'sync_source_id': '0',
         'sync_target_ids': '[]'
     }
@@ -301,7 +302,33 @@ async def dispatch_notification(title: str, content: str):
     send_email_notification(title, content)
     await send_serverchan_notification(title, content)
 
-# ==================== 4. CDP 探针与 Cookie 读写/分析 ====================
+# ==================== 4. 智能 Cookie 最新值消歧与合并算法 ====================
+def smart_merge_cookies(all_cookie_lists: List[List[dict]]) -> List[dict]:
+    """
+    智能多节点 Cookie 最新值合并算法：
+    1. 不同域名的 Cookie 自动取并集，彼此互补；
+    2. 同名 Cookie 发生冲突时，通过 expires 顺延时间与凭证长短裁决最新值。
+    """
+    merged_pool: Dict[tuple, dict] = {}
+    for cookies in all_cookie_lists:
+        for c in cookies:
+            key = (c.get('name'), c.get('domain'), c.get('path', '/'))
+            if key not in merged_pool:
+                merged_pool[key] = c
+            else:
+                existing = merged_pool[key]
+                if existing.get('value') != c.get('value'):
+                    exp_existing = existing.get('expires', -1)
+                    exp_new = c.get('expires', -1)
+                    # 规则 1: 比较过期时间（被服务端最新刷新的有效 Token 通常顺延了 Expiration）
+                    if exp_new > exp_existing:
+                        merged_pool[key] = c
+                    # 规则 2: 同为 session 或过期时间相同，保留较长凭据
+                    elif exp_new == exp_existing:
+                        if len(str(c.get('value', ''))) >= len(str(existing.get('value', ''))):
+                            merged_pool[key] = c
+    return list(merged_pool.values())
+
 async def resolve_cdp_endpoint(local_port: int) -> tuple[str, str]:
     candidate_hosts = ["127.0.0.1", "host.docker.internal", "172.17.0.1"]
     async with httpx.AsyncClient(timeout=2.0) as client:
@@ -328,6 +355,7 @@ async def fetch_cookies_native(local_port: int) -> List[dict]:
         if cookies:
             return cookies
 
+        # 回退 Network 域
         await ws.send(json.dumps({"id": 2, "method": "Network.enable"}))
         await ws.recv()
         await ws.send(json.dumps({"id": 3, "method": "Network.getAllCookies"}))
@@ -423,7 +451,6 @@ class TunnelManager:
 
 tunnel_mgr = TunnelManager()
 
-# 后台看门狗巡检协程
 async def tunnel_watchdog_loop():
     logger.info("启动 SSH 隧道守护看门狗：自动穿透并维持节点在线...")
     while True:
@@ -450,7 +477,7 @@ async def tunnel_watchdog_loop():
             logger.debug(f"看门狗巡检异常: {e}")
         await asyncio.sleep(30)
 
-# ==================== 6. 同步调度引擎 ====================
+# ==================== 6. 同步调度引擎 (首选：智能最新值合并) ====================
 async def execute_sync_task(custom_source_id: Optional[int] = None, custom_target_ids: Optional[List[int]] = None):
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
@@ -462,64 +489,105 @@ async def execute_sync_task(custom_source_id: Optional[int] = None, custom_targe
     if not nodes:
         return
 
-    source = None
-    if custom_source_id:
-        source = next((n for n in nodes if n["id"] == custom_source_id), None)
-    if not source:
-        rule_source_id = int(get_setting("sync_source_id", "0"))
-        if rule_source_id > 0:
-            source = next((n for n in nodes if n["id"] == rule_source_id), None)
-        if not source:
-            source = next((n for n in nodes if n["is_source"] == 1), None)
-
-    if not source:
-        logger.warning("未配置或无法找到同步源节点，跳过调度。")
-        return
-
-    targets = []
-    if custom_target_ids is not None:
-        targets = [n for n in nodes if n["id"] in custom_target_ids and n["id"] != source["id"]]
-    else:
-        sync_mode = get_setting("sync_mode", "auto_all")
-        if sync_mode == "custom_targets":
-            target_ids_cfg = json.loads(get_setting("sync_target_ids", "[]"))
-            targets = [n for n in nodes if n["id"] in target_ids_cfg and n["id"] != source["id"]]
-        else:
-            targets = [n for n in nodes if n["id"] != source["id"]]
-
     sync_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     log_detail = []
+    sync_mode = get_setting("sync_mode", "smart_merge")
 
-    try:
-        cookies = await fetch_cookies_native(source['local_bind_port'])
-        source_count = len(cookies)
-        log_detail.append(f"源节点 [{source['name']}] 捕获到 {source_count} 个 Cookies")
+    # 场景 A: 默认首选【智能全局最新值合并 (Smart Merge)】
+    if not custom_source_id and sync_mode == "smart_merge":
+        try:
+            log_detail.append("🚀 触发【智能全局最新值合并 (Smart Merge)】模式：并发嗅探所有节点...")
+            
+            fetch_tasks = [fetch_cookies_native(n['local_bind_port']) for n in nodes]
+            fetched_results = await asyncio.gather(*fetch_tasks, return_exceptions=True)
+            
+            valid_cookie_lists = []
+            for idx, res in enumerate(fetched_results):
+                n_name = nodes[idx]['name']
+                if isinstance(res, list):
+                    valid_cookie_lists.append(res)
+                    log_detail.append(f"• 节点 [{n_name}] 贡献 {len(res)} 条凭据")
+                else:
+                    log_detail.append(f"• 节点 [{n_name}] 暂时无法连接 ({res})")
 
-        for target in targets:
-            try:
-                await inject_cookies_native(target['local_bind_port'], cookies)
-                target_count, _ = await probe_node_cookies(target['local_bind_port'])
-                log_detail.append(f"-> 目标节点 [{target['name']}] 同步完成，当前 Cookies: {target_count}")
-            except Exception as ex:
-                log_detail.append(f"-> 目标节点 [{target['name']}] 同步异常: {str(ex)}")
+            golden_pool = smart_merge_cookies(valid_cookie_lists)
+            total_merged = len(golden_pool)
+            log_detail.append(f"✨ 智能裁决融合完成：生成全网黄金凭据池 (共 {total_merged} 条唯一最新 Cookies)")
 
-        status = "SUCCESS"
-    except Exception as e:
-        status = "FAILED"
-        log_detail.append(f"同步执行中断: {str(e)}")
+            async def _push_golden(node):
+                try:
+                    await inject_cookies_native(node['local_bind_port'], golden_pool)
+                    c_cnt, _ = await probe_node_cookies(node['local_bind_port'])
+                    conn = sqlite3.connect(DB_PATH)
+                    cur = conn.cursor()
+                    cur.execute("UPDATE nodes SET cookie_count=?, last_sync=? WHERE id=?", (c_cnt, sync_time, node['id']))
+                    conn.commit()
+                    conn.close()
+                    return f"-> 节点 [{node['name']}] 注入对齐成功 (现存 {c_cnt} 条)"
+                except Exception as ex:
+                    return f"-> 节点 [{node['name']}] 回写异常: {ex}"
+
+            push_tasks = [_push_golden(n) for n in nodes]
+            push_results = await asyncio.gather(*push_tasks)
+            log_detail.extend(push_results)
+            status = "SUCCESS"
+        except Exception as e:
+            status = "FAILED"
+            log_detail.append(f"智能合并调度中断: {e}")
+
+    # 场景 B: 传统指定主节点单向广播 (Master-Worker / 定向)
+    else:
+        source = None
+        if custom_source_id:
+            source = next((n for n in nodes if n["id"] == custom_source_id), None)
+        if not source:
+            rule_source_id = int(get_setting("sync_source_id", "0"))
+            if rule_source_id > 0:
+                source = next((n for n in nodes if n["id"] == rule_source_id), None)
+            if not source:
+                source = next((n for n in nodes if n["is_source"] == 1), None)
+
+        if not source:
+            logger.warning("未配置或无法找到源节点，跳过主从分发。")
+            return
+
+        targets = []
+        if custom_target_ids is not None:
+            targets = [n for n in nodes if n["id"] in custom_target_ids and n["id"] != source["id"]]
+        else:
+            target_ids_cfg = json.loads(get_setting("sync_target_ids", "[]"))
+            if target_ids_cfg:
+                targets = [n for n in nodes if n["id"] in target_ids_cfg and n["id"] != source["id"]]
+            else:
+                targets = [n for n in nodes if n["id"] != source["id"]]
+
+        try:
+            cookies = await fetch_cookies_native(source['local_bind_port'])
+            log_detail.append(f"主从广播：从源节点 [{source['name']}] 捕获到 {len(cookies)} 个 Cookies")
+
+            for target in targets:
+                try:
+                    await inject_cookies_native(target['local_bind_port'], cookies)
+                    target_count, _ = await probe_node_cookies(target['local_bind_port'])
+                    log_detail.append(f"-> 目标节点 [{target['name']}] 写入完成，现存 Cookies: {target_count}")
+                except Exception as ex:
+                    log_detail.append(f"-> 目标节点 [{target['name']}] 写入异常: {ex}")
+            status = "SUCCESS"
+        except Exception as e:
+            status = "FAILED"
+            log_detail.append(f"主从分发中断: {e}")
 
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
     cur.execute("INSERT INTO sync_logs (timestamp, status, details) VALUES (?, ?, ?)",
                 (sync_time, status, "\n".join(log_detail)))
-    cur.execute("UPDATE nodes SET last_sync=? WHERE id=?", (sync_time, source['id']))
     conn.commit()
     conn.close()
 
     if status == "FAILED":
         await dispatch_notification("Cookie 同步告警", f"时间: {sync_time}\n详情:\n" + "\n".join(log_detail))
 
-# ==================== 7. 定时调度器与动态重置 ====================
+# ==================== 7. 定时调度器 ====================
 scheduler = BackgroundScheduler()
 
 def reschedule_sync_job(minutes: int):
@@ -536,16 +604,13 @@ def reschedule_sync_job(minutes: int):
     except Exception as e:
         logger.error(f"更新定时调度异常: {e}")
 
-# ==================== 8. 现代 Lifespan 生命周期管理 (消除 on_event 警告) ====================
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # 服务启动初始化
     minutes = int(get_setting("sync_interval_minutes", "15"))
     scheduler.start()
     reschedule_sync_job(minutes)
     watchdog_task = asyncio.create_task(tunnel_watchdog_loop())
     yield
-    # 优雅停机
     try:
         watchdog_task.cancel()
         scheduler.shutdown(wait=False)
@@ -818,17 +883,38 @@ async def toggle_tunnel(node_id: int, user: dict = Depends(verify_token)):
         raise HTTPException(status_code=500, detail=msg)
     return {"status": "connected", "message": msg}
 
-@app.post("/api/nodes/{node_id}/set-source")
-def set_source(node_id: int, user: dict = Depends(verify_token)):
+# 支持双击切换开关 (可设置默认源，再次点击可取消)
+@app.post("/api/nodes/{node_id}/toggle-source")
+def toggle_source(node_id: int, user: dict = Depends(verify_token)):
     conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
     cur = conn.cursor()
-    cur.execute("UPDATE nodes SET is_source = 0")
-    cur.execute("UPDATE nodes SET is_source = 1 WHERE id=?", (node_id,))
+    cur.execute("SELECT is_source FROM nodes WHERE id=?", (node_id,))
+    row = cur.fetchone()
+    if not row:
+        conn.close()
+        raise HTTPException(status_code=404, detail="节点不存在")
+    
+    curr = row["is_source"]
+    if curr == 1:
+        cur.execute("UPDATE nodes SET is_source = 0 WHERE id=?", (node_id,))
+        msg = "已取消该节点的默认源状态"
+        is_src = 0
+    else:
+        cur.execute("UPDATE nodes SET is_source = 0")
+        cur.execute("UPDATE nodes SET is_source = 1 WHERE id=?", (node_id,))
+        msg = "已设为全网默认源节点"
+        is_src = 1
+
     conn.commit()
     conn.close()
-    return {"message": "源节点已设定"}
+    return {"message": msg, "is_source": is_src}
 
-# 密钥存储库
+@app.post("/api/nodes/{node_id}/set-source")
+def set_source_compat(node_id: int, user: dict = Depends(verify_token)):
+    return toggle_source(node_id, user)
+
+# 密钥存储库 (支持备注与添加时间)
 @app.get("/api/ssh-keys")
 def list_keys(user: dict = Depends(verify_token)):
     conn = sqlite3.connect(DB_PATH)
@@ -894,12 +980,12 @@ def delete_key(filename: str, user: dict = Depends(verify_token)):
     conn.close()
     return {"message": "证书已销毁"}
 
-# 同步中心设置与调度
+# 同步中心调度与设置
 @app.get("/api/sync/settings")
 def get_sync_settings(user: dict = Depends(verify_token)):
     return {
         "sync_interval_minutes": int(get_setting("sync_interval_minutes", "15")),
-        "sync_mode": get_setting("sync_mode", "auto_all"),
+        "sync_mode": get_setting("sync_mode", "smart_merge"),
         "sync_source_id": int(get_setting("sync_source_id", "0")),
         "sync_target_ids": json.loads(get_setting("sync_target_ids", "[]"))
     }
@@ -1052,7 +1138,7 @@ async def external_trigger_sync(auth: dict = Depends(verify_agent_access)):
     await execute_sync_task()
     return {"code": 200, "message": "全网 Cookie 同步任务已触发"}
 
-# 静态资源挂载与根路径兜底
+# 静态托管
 if DIST_DIR:
     assets_dir = os.path.join(DIST_DIR, "assets")
     if os.path.exists(assets_dir):

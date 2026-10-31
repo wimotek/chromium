@@ -10,10 +10,9 @@ const logs = ref([])
 const nodes = ref([])
 const isSyncing = ref(false)
 
-// 同步策略配置
 const syncConfig = reactive({
   sync_interval_minutes: 15,
-  sync_mode: 'auto_all', // 'auto_all' | 'custom_targets'
+  sync_mode: 'smart_merge', // 默认首选 smart_merge
   sync_source_id: 0,
   sync_target_ids: []
 })
@@ -24,7 +23,7 @@ const manualTargetMode = ref('all') // 'all' (广播全网) | 'custom' (指定�
 const manualTargetIds = ref([])
 const selectedTargetToAdd = ref('')
 
-// 可选候选目标节点（排除当前选中的源节点）
+// 候选目标：排除当前选中的源节点
 const candidateTargets = computed(() => {
   return nodes.value.filter(n => n.id !== manualSourceId.value)
 })
@@ -39,12 +38,16 @@ const loadData = async () => {
   logs.value = await lRes.json()
   nodes.value = await nRes.json()
 
-  if (syncConfig.sync_source_id === 0 && nodes.value.length > 0) {
-    const src = nodes.value.find(n => n.is_source === 1) || nodes.value[0]
-    syncConfig.sync_source_id = src.id
-    manualSourceId.value = src.id
+  // 核心容错：若无默认源，自适应兜底
+  const defaultSrcNode = nodes.value.find(n => n.is_source === 1)
+  if (defaultSrcNode) {
+    manualSourceId.value = defaultSrcNode.id
+    if (syncConfig.sync_source_id === 0) syncConfig.sync_source_id = defaultSrcNode.id
+  } else if (nodes.value.length > 0) {
+    // 没有默认源节点时，自动选取列表第 1 个作为抓取源，绝不留白
+    manualSourceId.value = nodes.value[0].id
   } else {
-    manualSourceId.value = syncConfig.sync_source_id
+    manualSourceId.value = 0
   }
 }
 
@@ -55,11 +58,10 @@ const saveSyncPolicy = async () => {
     body: JSON.stringify(syncConfig)
   })
   if (res.ok) {
-    props.showToast('同步策略与周期配置已生效', 'success')
+    props.showToast('同步策略与定时周期已生效', 'success')
   }
 }
 
-// 添加目标节点到勾选队列
 const addTargetToManual = () => {
   const id = parseInt(selectedTargetToAdd.value)
   if (id && !manualTargetIds.value.includes(id)) {
@@ -68,22 +70,29 @@ const addTargetToManual = () => {
   selectedTargetToAdd.value = ''
 }
 
-// 从勾选队列移除节点
 const removeManualTarget = (id) => {
   manualTargetIds.value = manualTargetIds.value.filter(x => x !== id)
 }
 
-// 触发即时同步 (支持一对多)
-const triggerCustomSync = async () => {
+const triggerSync = async (isManualDirected = false) => {
   if (isSyncing.value) return
+
+  // 容错校验：若执行定向同步，必须有有效的源节点
+  if (isManualDirected) {
+    if (!manualSourceId.value || manualSourceId.value === 0) {
+      props.showToast('请先选择一个抓取凭证的源节点！', 'error')
+      return
+    }
+  }
+
   isSyncing.value = true
   try {
     const payload = {}
-    if (manualSourceId.value > 0) payload.source_id = manualSourceId.value
-    
-    // 如果选择自定义模式且指定了目标节点
-    if (manualTargetMode.value === 'custom' && manualTargetIds.value.length > 0) {
-      payload.target_ids = manualTargetIds.value
+    if (isManualDirected) {
+      payload.source_id = manualSourceId.value
+      if (manualTargetMode.value === 'custom' && manualTargetIds.value.length > 0) {
+        payload.target_ids = manualTargetIds.value
+      }
     }
 
     const res = await props.api('/api/sync/trigger', {
@@ -94,7 +103,6 @@ const triggerCustomSync = async () => {
     const data = await res.json()
     props.showToast(data.message, 'success')
 
-    // 刷新日志
     const lRes = await props.api('/api/sync/logs')
     logs.value = await lRes.json()
   } finally {
@@ -114,51 +122,70 @@ onMounted(() => {
         <span class="icon-duo-users" style="color:#38bdf8;">🌐</span>
         <h2>全网 Cookie 自动同步与集群调度治理</h2>
       </div>
-      <button @click="triggerCustomSync" :disabled="isSyncing" class="btn-primary-gradient">
+      <button @click="triggerSync(false)" :disabled="isSyncing" class="btn-primary-gradient">
         {{ isSyncing ? '同步执行中...' : '⚡ 立即执行同步' }}
       </button>
     </div>
 
-    <!-- 策略配置双列栅格 -->
+    <!-- 策略配置双列布局 -->
     <div class="grid-2col-fluid" style="margin-bottom:20px;">
       
-      <!-- 左列: 定时调度自动化策略 -->
+      <!-- 左列：调度策略配置 (智能合并首选) -->
       <div style="background:#09122a; border:1px solid #172554; border-radius:8px; padding:16px;">
-        <h3 class="card-inner-h3" style="margin-bottom:12px;">⚙️ 自动化定时分发规则</h3>
+        <h3 class="card-inner-h3" style="margin-bottom:12px;">⚙️ 自动化调度策略</h3>
         <div class="form-v-stack">
           <div class="form-field-block">
             <label class="form-label">定时调度周期 (分钟)</label>
             <div style="display:flex; align-items:center; gap:8px;">
               <input v-model="syncConfig.sync_interval_minutes" type="number" min="1" class="cdp-input cdp-w-port font-cyan-mono">
-              <span style="font-size:12px; color:#94a3b8;">分钟/次</span>
+              <span style="font-size:12px; color:#94a3b8;">分钟 / 次</span>
             </div>
           </div>
 
           <div class="form-field-block">
-            <label class="form-label">自动同步分发模式</label>
-            <div class="row-flex-gap">
-              <label :class="['radio-pill-card', syncConfig.sync_mode === 'auto_all' ? 'radio-pill-active' : '']">
-                <input type="radio" v-model="syncConfig.sync_mode" value="auto_all" style="display:none;">
-                <span>全网自动同步 (默认源 -> 所有在线节点)</span>
+            <label class="form-label">同步模式规则 (默认首选智能合并)</label>
+            <div class="form-v-stack" style="gap:10px;">
+              
+              <!-- 选项 1: 智能合并 (无需依赖默认源) -->
+              <label :class="['sync-mode-card', syncConfig.sync_mode === 'smart_merge' ? 'sync-mode-active' : '']">
+                <input type="radio" v-model="syncConfig.sync_mode" value="smart_merge" style="display:none;">
+                <div style="display:flex; justify-content:space-between; align-items:center;">
+                  <span style="font-weight:bold; color:#38bdf8;">🌟 智能全局最新值合并 (Smart Merge)</span>
+                  <span class="badge-recommend">推荐默认</span>
+                </div>
+                <p class="sync-mode-desc">
+                  自动收集各节点 Cookie 取并集；不同站点互相补齐，同名凭证比对有效期最新值自动对齐，<b>无需依赖任何固定源节点</b>。
+                </p>
               </label>
-              <label :class="['radio-pill-card', syncConfig.sync_mode === 'custom_targets' ? 'radio-pill-active' : '']">
-                <input type="radio" v-model="syncConfig.sync_mode" value="custom_targets" style="display:none;">
-                <span>固定源节点一对多同步</span>
+
+              <!-- 选项 2: 主从定向模式 -->
+              <label :class="['sync-mode-card', syncConfig.sync_mode === 'master_worker' ? 'sync-mode-active' : '']">
+                <input type="radio" v-model="syncConfig.sync_mode" value="master_worker" style="display:none;">
+                <div style="display:flex; justify-content:space-between; align-items:center;">
+                  <span style="font-weight:bold; color:#cbd5e1;">📌 指定主节点单向广播 (Master-Worker)</span>
+                </div>
+                <p class="sync-mode-desc">
+                  指定固定的 Master 节点，将其凭证单向覆盖至指定的从属目标节点。
+                </p>
               </label>
+
             </div>
           </div>
 
-          <!-- 指定源与多目标配置 -->
-          <div v-if="syncConfig.sync_mode === 'custom_targets'" class="form-v-stack" style="background:#060b17; padding:12px; border-radius:6px; border:1px solid #1e3a8a;">
+          <!-- 主从模式下的参数输入 -->
+          <div v-if="syncConfig.sync_mode === 'master_worker'" class="form-v-stack" style="background:#060b17; padding:12px; border-radius:6px; border:1px solid #1e3a8a;">
             <div>
-              <label class="form-label">固定源节点</label>
+              <label class="form-label">指定固定源节点 (Master)</label>
               <select v-model="syncConfig.sync_source_id" class="cdp-input cdp-w-normal font-cyan-mono">
-                <option v-for="n in nodes" :key="n.id" :value="n.id">{{ n.name }} ({{ n.is_local ? '本地' : n.ssh_host }})</option>
+                <option :value="0">-- 未指定固定源 (请选择) --</option>
+                <option v-for="n in nodes" :key="n.id" :value="n.id">
+                  {{ n.is_source ? '★ [默认源] ' : '' }}{{ n.name }} ({{ n.is_local ? '本地' : n.ssh_host }})
+                </option>
               </select>
             </div>
 
             <div>
-              <label class="form-label">勾选同步目标节点 (一对多)</label>
+              <label class="form-label">分发目标节点 (勾选)</label>
               <div style="display:flex; gap:12px; flex-wrap:wrap; margin-top:6px;">
                 <label v-for="n in nodes.filter(x => x.id !== syncConfig.sync_source_id)" :key="n.id" style="display:flex; align-items:center; gap:6px; font-size:12px; color:#cbd5e1; cursor:pointer;">
                   <input type="checkbox" :value="n.id" v-model="syncConfig.sync_target_ids" class="check-box-blue">
@@ -174,21 +201,23 @@ onMounted(() => {
         </div>
       </div>
 
-      <!-- 右列: 即时定向同步执行器 (输入控件完全可见、可控) -->
+      <!-- 右列：即时定向同步执行器 (防空白自适应) -->
       <div style="background:#09122a; border:1px solid #172554; border-radius:8px; padding:16px;">
-        <h3 class="card-inner-h3" style="margin-bottom:6px;">🎯 即时定向同步 (按需一对多执行)</h3>
-        <p style="font-size:11px; color:#64748b; margin-bottom:12px;">抓取指定源节点凭证，并在本轮下发给指定的单个或多个目标节点。</p>
+        <h3 class="card-inner-h3" style="margin-bottom:6px;">🎯 即时定向同步 (按需临时执行)</h3>
+        <p style="font-size:11px; color:#64748b; margin-bottom:12px;">临时指定任意源节点，并将凭证批量推送到指定的单个或多个目标节点。</p>
         
         <div class="form-v-stack">
-          <!-- 选择源节点 -->
+          <!-- 选择源节点：包含占位提示与星标指示 -->
           <div class="form-field-block">
             <label class="form-label">选择抓取凭据的源节点 (Source)</label>
             <select v-model="manualSourceId" class="cdp-input cdp-w-normal font-cyan-mono">
-              <option v-for="n in nodes" :key="n.id" :value="n.id">{{ n.name }} (当前: {{ n.cookie_count }} 条)</option>
+              <option :value="0">-- 请选择抓取源节点 --</option>
+              <option v-for="n in nodes" :key="n.id" :value="n.id">
+                {{ n.is_source ? '★ [默认源] ' : '' }}{{ n.name }} (当前: {{ n.cookie_count }} 条)
+              </option>
             </select>
           </div>
 
-          <!-- 选择目标模式 -->
           <div class="form-field-block">
             <label class="form-label">分发目标范围</label>
             <div style="display:flex; gap:10px; margin-bottom:8px;">
@@ -202,11 +231,11 @@ onMounted(() => {
               </label>
             </div>
 
-            <!-- 自定义目标节点选择器：输入框 + 下拉选择 + 标签删除 -->
+            <!-- 自定义目标添加控件 -->
             <div v-if="manualTargetMode === 'custom'" style="background:#060b17; border:1px solid #172554; border-radius:6px; padding:10px;">
               <div style="display:flex; gap:8px; align-items:center; margin-bottom:8px;">
                 <select v-model="selectedTargetToAdd" class="cdp-input font-cyan-mono" style="width: auto; min-width: 220px;">
-                  <option value="">-- 选择要加入的目标节点 --</option>
+                  <option value="">-- 选择加入的目标节点 --</option>
                   <option v-for="n in candidateTargets.filter(x => !manualTargetIds.includes(x.id))" :key="n.id" :value="n.id">
                     + {{ n.name }} ({{ n.is_local ? '本地' : n.ssh_host }})
                   </option>
@@ -216,7 +245,6 @@ onMounted(() => {
                 </button>
               </div>
 
-              <!-- 已选节点标签展示 -->
               <div style="display:flex; gap:8px; flex-wrap:wrap; min-height:28px; align-items:center;">
                 <span v-for="tid in manualTargetIds" :key="tid" class="target-chip">
                   {{ nodes.find(n => n.id === tid)?.name || tid }}
@@ -233,7 +261,7 @@ onMounted(() => {
           </div>
 
           <div style="margin-top:6px;">
-            <button @click="triggerCustomSync" :disabled="isSyncing" class="btn-primary-gradient">
+            <button @click="triggerSync(true)" :disabled="isSyncing" class="btn-primary-gradient">
               {{ isSyncing ? '同步中...' : '立即下发定向同步任务' }}
             </button>
           </div>
@@ -259,6 +287,41 @@ onMounted(() => {
 </template>
 
 <style scoped>
+.sync-mode-card {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  background: #060b17;
+  border: 1px solid #172554;
+  border-radius: 6px;
+  padding: 10px 14px;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+.sync-mode-card:hover {
+  border-color: #1e3a8a;
+}
+.sync-mode-active {
+  border-color: #00f0ff !important;
+  background: #091a38 !important;
+}
+
+.sync-mode-desc {
+  font-size: 11px;
+  color: #64748b;
+  line-height: 1.5;
+  margin: 0;
+}
+
+.badge-recommend {
+  background: rgba(14, 165, 233, 0.2);
+  border: 1px solid #0284c7;
+  color: #38bdf8;
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 4px;
+}
+
 .target-chip {
   background: #0e3b5e;
   border: 1px solid #0284c7;
