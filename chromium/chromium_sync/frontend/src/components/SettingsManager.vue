@@ -13,6 +13,7 @@ const profile = reactive({
   api_key: ''
 })
 const keys = ref([])
+const uploadRemark = ref('')
 
 const loadData = async () => {
   const [pRes, kRes] = await Promise.all([
@@ -52,9 +53,24 @@ const uploadKey = async (e) => {
   if (!file) return
   const fd = new FormData()
   fd.append('file', file)
+  fd.append('remark', uploadRemark.value)
   await props.api('/api/ssh-keys', { method: 'POST', body: fd })
   props.showToast(`证书 ${file.filename} 上传完成`, 'success')
+  uploadRemark.value = ''
   loadData()
+}
+
+const updateRemark = async (k) => {
+  const newRemark = prompt('请输入新备注：', k.remark)
+  if (newRemark !== null) {
+    await props.api(`/api/ssh-keys/${k.filename}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ remark: newRemark })
+    })
+    props.showToast('备注已更新', 'success')
+    loadData()
+  }
 }
 
 const deleteKey = async (name) => {
@@ -76,7 +92,6 @@ onMounted(() => {
     <div class="content-full-card">
       <h3 class="card-inner-h3" style="margin-bottom:16px;">👤 管理员账号与外部接入 API</h3>
       
-      <!-- 70% 宽度的 API Key 展示卡片 -->
       <div style="background:#09122a; border:1px solid #172554; border-radius:8px; padding:12px; margin-bottom:16px; width:70%; min-width:260px; max-width:520px;">
         <div style="display:flex; justify-content:space-between; align-items:center;">
           <span style="font-size:12px; color:#38bdf8; font-weight:bold;">外部 Agent / 爬虫调用 Key</span>
@@ -91,13 +106,13 @@ onMounted(() => {
       </div>
 
       <form @submit.prevent="saveProfile" class="form-v-stack">
-        <div>
+        <div class="form-field-block">
           <label class="form-label">管理员登录账号</label>
-          <input v-model="profile.username" required class="cdp-input">
+          <input v-model="profile.username" required class="cdp-input cdp-w-normal">
         </div>
-        <div>
+        <div class="form-field-block">
           <label class="form-label">重置访问密码 (留空则不修改)</label>
-          <input v-model="profile.new_password" type="password" placeholder="至少 6 位安全字符" minlength="6" class="cdp-input">
+          <input v-model="profile.new_password" type="password" placeholder="至少 6 位安全字符" minlength="6" class="cdp-input cdp-w-normal">
         </div>
         <div>
           <button type="submit" class="btn-primary-gradient">保存账号修改</button>
@@ -105,22 +120,46 @@ onMounted(() => {
       </form>
     </div>
 
-    <!-- SSH 密钥金库 -->
+    <!-- SSH 密钥存储库 (支持备注与添加时间) -->
     <div class="content-full-card">
       <div class="table-header-bar">
         <h3 class="card-inner-h3">🔑 SSH 密钥存储库</h3>
         <span style="font-size:12px; color:#64748b;">{{ keys.length }} 个凭据</span>
       </div>
-      <div style="margin-bottom: 12px;">
+
+      <div style="display:flex; gap:10px; margin-bottom:14px; align-items:center; flex-wrap:wrap;">
+        <input v-model="uploadRemark" placeholder="上传前填写备注 (选填)" class="cdp-input cdp-w-medium" style="height:32px;">
         <input type="file" @change="uploadKey" style="font-size:12px; color:#94a3b8;">
       </div>
-      <ul class="keys-list">
-        <li v-for="k in keys" :key="k.filename" class="key-row">
-          <span style="font-family:monospace;">🔑 {{ k.filename }} ({{ k.size }} Bytes)</span>
-          <button @click="deleteKey(k.filename)" class="link-probe" style="color:#f87171;">销毁</button>
-        </li>
-        <li v-if="keys.length === 0" style="text-align:center; color:#64748b; padding:20px;">暂无私钥证书</li>
-      </ul>
+
+      <div class="table-responsive">
+        <table class="cdp-fluid-table" style="font-size:11px;">
+          <thead>
+            <tr>
+              <th>密钥文件名</th>
+              <th>备注</th>
+              <th>添加时间</th>
+              <th>大小</th>
+              <th style="text-align:right;">操作</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="k in keys" :key="k.filename">
+              <td class="font-cyan-mono">🔑 {{ k.filename }}</td>
+              <td style="color:#cbd5e1;">{{ k.remark || '---' }}</td>
+              <td style="color:#64748b;">{{ k.created_at }}</td>
+              <td style="color:#64748b;">{{ k.size }} B</td>
+              <td style="text-align:right; space-x:2;">
+                <button @click="updateRemark(k)" class="link-probe" style="margin-right:8px;">编辑备注</button>
+                <button @click="deleteKey(k.filename)" class="link-probe" style="color:#f87171;">销毁</button>
+              </td>
+            </tr>
+            <tr v-if="keys.length === 0">
+              <td colspan="5" style="text-align:center; color:#64748b; padding:20px;">暂无私钥证书</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
     </div>
   </div>
 </template>

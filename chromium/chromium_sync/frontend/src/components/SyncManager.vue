@@ -1,5 +1,5 @@
 <script setup>
-import { ref, onMounted } from 'vue'
+import { ref, reactive, onMounted } from 'vue'
 
 const props = defineProps({
   api: Function,
@@ -7,28 +7,77 @@ const props = defineProps({
 })
 
 const logs = ref([])
+const nodes = ref([])
 const isSyncing = ref(false)
 
-const loadLogs = async () => {
-  const res = await props.api('/api/sync/logs')
-  if (res.ok) logs.value = await res.json()
+// 同步设置
+const syncConfig = reactive({
+  sync_interval_minutes: 15,
+  sync_mode: 'auto_all', // 'auto_all' | 'custom_targets'
+  sync_source_id: 0,
+  sync_target_ids: []
+})
+
+// 定向即时同步选择器
+const manualSourceId = ref(0)
+const manualTargetIds = ref([])
+
+const loadData = async () => {
+  const [sRes, lRes, nRes] = await Promise.all([
+    props.api('/api/sync/settings'),
+    props.api('/api/sync/logs'),
+    props.api('/api/nodes')
+  ])
+  Object.assign(syncConfig, await sRes.json())
+  logs.value = await lRes.json()
+  nodes.value = await nRes.json()
+
+  if (syncConfig.sync_source_id === 0 && nodes.value.length > 0) {
+    const src = nodes.value.find(n => n.is_source === 1) || nodes.value[0]
+    syncConfig.sync_source_id = src.id
+    manualSourceId.value = src.id
+  } else {
+    manualSourceId.value = syncConfig.sync_source_id
+  }
 }
 
-const triggerSync = async () => {
+const saveSyncPolicy = async () => {
+  const res = await props.api('/api/sync/settings', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(syncConfig)
+  })
+  if (res.ok) {
+    props.showToast('同步策略与周期设置已更新生效', 'success')
+  }
+}
+
+// 触发即时定向同步 (一对多)
+const triggerCustomSync = async () => {
   if (isSyncing.value) return
   isSyncing.value = true
   try {
-    const res = await props.api('/api/sync/trigger', { method: 'POST' })
+    const payload = {}
+    if (manualSourceId.value > 0) payload.source_id = manualSourceId.value
+    if (manualTargetIds.value.length > 0) payload.target_ids = manualTargetIds.value
+
+    const res = await props.api('/api/sync/trigger', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    })
     const data = await res.json()
     props.showToast(data.message, 'success')
-    loadLogs()
+    // 刷新日志
+    const lRes = await props.api('/api/sync/logs')
+    logs.value = await lRes.json()
   } finally {
     isSyncing.value = false
   }
 }
 
 onMounted(() => {
-  loadLogs()
+  loadData()
 })
 </script>
 
@@ -39,16 +88,98 @@ onMounted(() => {
         <span class="icon-duo-users" style="color:#38bdf8;">🌐</span>
         <h2>全网 Cookie 自动同步与集群调度治理</h2>
       </div>
-      <button @click="triggerSync" :disabled="isSyncing" class="btn-primary-gradient">
-        {{ isSyncing ? '同步调度中...' : '⚡ 立即触发同步' }}
+      <button @click="triggerCustomSync" :disabled="isSyncing" class="btn-primary-gradient">
+        {{ isSyncing ? '同步执行中...' : '⚡ 立即执行同步' }}
       </button>
     </div>
 
-    <div class="info-banner-blue">
-      <p>• 定时执行策略：后台常驻引擎每 <span style="color:#00f0ff; font-weight:bold;">15 分钟</span> 自动从默认源节点抓取最新全量 Cookies 并极速注入所有活跃目标节点。</p>
-      <p>• 本地加速机制：本地直连节点跳过 SSH 隧道，直接通过 CDP WebSocket 内存注入，耗时近乎零开销。</p>
+    <!-- 策略配置网格 -->
+    <div class="grid-2col-fluid" style="margin-bottom:20px;">
+      <!-- 策略 1: 周期与模式设置 -->
+      <div style="background:#09122a; border:1px solid #172554; border-radius:8px; padding:16px;">
+        <h3 class="card-inner-h3" style="margin-bottom:12px;">⚙️ 自动化调度策略</h3>
+        <div class="form-v-stack">
+          <div class="form-field-block">
+            <label class="form-label">定时调度周期 (分钟)</label>
+            <div style="display:flex; align-items:center; gap:8px;">
+              <input v-model="syncConfig.sync_interval_minutes" type="number" min="1" class="cdp-input cdp-w-port font-cyan-mono">
+              <span style="font-size:12px; color:#94a3b8;">分钟/次</span>
+            </div>
+          </div>
+
+          <div class="form-field-block">
+            <label class="form-label">同步策略模式</label>
+            <div class="row-flex-gap">
+              <label :class="['radio-pill-card', syncConfig.sync_mode === 'auto_all' ? 'radio-pill-active' : '']">
+                <input type="radio" v-model="syncConfig.sync_mode" value="auto_all" style="display:none;">
+                <span>全网自动同步 (默认源 -> 所有在线节点)</span>
+              </label>
+              <label :class="['radio-pill-card', syncConfig.sync_mode === 'custom_targets' ? 'radio-pill-active' : '']">
+                <input type="radio" v-model="syncConfig.sync_mode" value="custom_targets" style="display:none;">
+                <span>指定源节点一对多同步</span>
+              </label>
+            </div>
+          </div>
+
+          <!-- 指定源与多目标配置 -->
+          <div v-if="syncConfig.sync_mode === 'custom_targets'" class="form-v-stack" style="background:#060b17; padding:12px; border-radius:6px; border:1px solid #1e3a8a;">
+            <div>
+              <label class="form-label">指定固定源节点</label>
+              <select v-model="syncConfig.sync_source_id" class="cdp-input cdp-w-normal font-cyan-mono">
+                <option v-for="n in nodes" :key="n.id" :value="n.id">{{ n.name }} ({{ n.is_local ? '本地' : n.ssh_host }})</option>
+              </select>
+            </div>
+
+            <div>
+              <label class="form-label">勾选同步目标节点 (一对多)</label>
+              <div style="display:flex; gap:12px; flex-wrap:wrap; margin-top:4px;">
+                <label v-for="n in nodes.filter(x => x.id !== syncConfig.sync_source_id)" :key="n.id" style="display:flex; align-items:center; gap:6px; font-size:12px; color:#cbd5e1; cursor:pointer;">
+                  <input type="checkbox" :value="n.id" v-model="syncConfig.sync_target_ids" class="check-box-blue">
+                  <span>{{ n.name }}</span>
+                </label>
+              </div>
+            </div>
+          </div>
+
+          <div>
+            <button @click="saveSyncPolicy" class="btn-primary-gradient">保存调度策略</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- 策略 2: 即时定向同步执行器 -->
+      <div style="background:#09122a; border:1px solid #172554; border-radius:8px; padding:16px;">
+        <h3 class="card-inner-h3" style="margin-bottom:12px;">🎯 即时定向同步 (按需一对多执行)</h3>
+        <p style="font-size:11px; color:#64748b; margin-bottom:12px;">临时指定任意源节点，并将凭据批量推送到特定的目标节点。</p>
+        
+        <div class="form-v-stack">
+          <div class="form-field-block">
+            <label class="form-label">选择抓取凭证的源节点</label>
+            <select v-model="manualSourceId" class="cdp-input cdp-w-normal font-cyan-mono">
+              <option v-for="n in nodes" :key="n.id" :value="n.id">{{ n.name }} (当前 Cookie: {{ n.cookie_count }})</option>
+            </select>
+          </div>
+
+          <div class="form-field-block">
+            <label class="form-label">选择注入凭据的目标节点 (留空则下发全网)</label>
+            <div style="display:flex; gap:12px; flex-wrap:wrap; margin-top:4px;">
+              <label v-for="n in nodes.filter(x => x.id !== manualSourceId)" :key="n.id" style="display:flex; align-items:center; gap:6px; font-size:12px; color:#cbd5e1; cursor:pointer;">
+                <input type="checkbox" :value="n.id" v-model="manualTargetIds" class="check-box-blue">
+                <span>{{ n.name }}</span>
+              </label>
+            </div>
+          </div>
+
+          <div>
+            <button @click="triggerCustomSync" :disabled="isSyncing" class="btn-primary-gradient">
+              {{ isSyncing ? '同步中...' : '立即下发定向同步' }}
+            </button>
+          </div>
+        </div>
+      </div>
     </div>
 
+    <!-- 审计追踪事件日志 -->
     <div style="margin-top:20px;">
       <h3 style="font-size:13px; font-weight:bold; color:#cbd5e1; margin-bottom:8px;">调度审计追踪事件：</h3>
       <div class="console-box">
