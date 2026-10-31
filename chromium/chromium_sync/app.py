@@ -13,12 +13,14 @@ import asyncio
 import subprocess
 import ipaddress
 import warnings
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from email.mime.text import MIMEText
 from email.header import Header
 from urllib.parse import urlparse, urlunparse
 from typing import Optional, List, Dict
 
+# 消除 Paramiko 与 Cryptography 的 TripleDES 废弃警告日志
 from cryptography.utils import CryptographyDeprecationWarning
 warnings.filterwarnings("ignore", category=CryptographyDeprecationWarning)
 warnings.filterwarnings("ignore", module="paramiko")
@@ -33,7 +35,18 @@ import websockets
 import jwt
 from sshtunnel import SSHTunnelForwarder
 from apscheduler.schedulers.background import BackgroundScheduler
-from fastapi import FastAPI, HTTPException, Depends, Header as ReqHeader, UploadFile, File, Request, Query, Security
+from fastapi import (
+    FastAPI,
+    HTTPException,
+    Depends,
+    Header as ReqHeader,
+    UploadFile,
+    File,
+    Form,  # 修复 NameError
+    Request,
+    Query,
+    Security
+)
 from fastapi.security.api_key import APIKeyHeader, APIKeyQuery
 from fastapi.responses import JSONResponse, FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
@@ -165,7 +178,6 @@ def init_db_and_jwt():
         last_sync TEXT
     )''')
 
-    # SSH 密钥库备注与创建时间表
     cur.execute('''CREATE TABLE IF NOT EXISTS ssh_keys (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         filename TEXT UNIQUE NOT NULL,
@@ -182,7 +194,6 @@ def init_db_and_jwt():
         details TEXT
     )''')
 
-    # 为现有表平滑补充字段
     for col, col_type in [("auto_tunnel", "INTEGER DEFAULT 1"), ("cookie_count", "INTEGER DEFAULT 0")]:
         try:
             cur.execute(f"ALTER TABLE nodes ADD COLUMN {col} {col_type}")
@@ -205,9 +216,8 @@ def init_db_and_jwt():
         'email_notify_to': '',
         'serverchan_enabled': '0',
         'serverchan_key': '',
-        # 同步中心设置
         'sync_interval_minutes': '15',
-        'sync_mode': 'auto_all', # 'auto_all' (默认源全网推送) | 'custom_targets' (指定源一对多)
+        'sync_mode': 'auto_all',
         'sync_source_id': '0',
         'sync_target_ids': '[]'
     }
@@ -318,7 +328,6 @@ async def fetch_cookies_native(local_port: int) -> List[dict]:
         if cookies:
             return cookies
 
-        # 回退 Network.getAllCookies
         await ws.send(json.dumps({"id": 2, "method": "Network.enable"}))
         await ws.recv()
         await ws.send(json.dumps({"id": 3, "method": "Network.getAllCookies"}))
@@ -414,7 +423,7 @@ class TunnelManager:
 
 tunnel_mgr = TunnelManager()
 
-# 后台看门狗：启动自愈并每 30 秒保活穿透
+# 后台看门狗巡检协程
 async def tunnel_watchdog_loop():
     logger.info("启动 SSH 隧道守护看门狗：自动穿透并维持节点在线...")
     while True:
@@ -427,7 +436,6 @@ async def tunnel_watchdog_loop():
             conn.close()
 
             for node in nodes:
-                # 默认穿透开启（auto_tunnel=1）
                 if node.get('auto_tunnel', 1) == 1:
                     is_running = False
                     if node['is_local'] == 1:
@@ -442,7 +450,7 @@ async def tunnel_watchdog_loop():
             logger.debug(f"看门狗巡检异常: {e}")
         await asyncio.sleep(30)
 
-# ==================== 6. 同步调度引擎 (支持指定源一对多/单向同步) ====================
+# ==================== 6. 同步调度引擎 ====================
 async def execute_sync_task(custom_source_id: Optional[int] = None, custom_target_ids: Optional[List[int]] = None):
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
@@ -454,12 +462,10 @@ async def execute_sync_task(custom_source_id: Optional[int] = None, custom_targe
     if not nodes:
         return
 
-    # 判定源节点
     source = None
     if custom_source_id:
         source = next((n for n in nodes if n["id"] == custom_source_id), None)
     if not source:
-        # 读取数据库设定的全局规则源节点
         rule_source_id = int(get_setting("sync_source_id", "0"))
         if rule_source_id > 0:
             source = next((n for n in nodes if n["id"] == rule_source_id), None)
@@ -470,7 +476,6 @@ async def execute_sync_task(custom_source_id: Optional[int] = None, custom_targe
         logger.warning("未配置或无法找到同步源节点，跳过调度。")
         return
 
-    # 判定目标节点列表 (一对多)
     targets = []
     if custom_target_ids is not None:
         targets = [n for n in nodes if n["id"] in custom_target_ids and n["id"] != source["id"]]
@@ -480,22 +485,18 @@ async def execute_sync_task(custom_source_id: Optional[int] = None, custom_targe
             target_ids_cfg = json.loads(get_setting("sync_target_ids", "[]"))
             targets = [n for n in nodes if n["id"] in target_ids_cfg and n["id"] != source["id"]]
         else:
-            # 模式 A: 自动同步全网其他节点 (Auto All)
             targets = [n for n in nodes if n["id"] != source["id"]]
 
     sync_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     log_detail = []
 
     try:
-        # 从源节点提取全量 Cookies
         cookies = await fetch_cookies_native(source['local_bind_port'])
         source_count = len(cookies)
         log_detail.append(f"源节点 [{source['name']}] 捕获到 {source_count} 个 Cookies")
 
-        # 遍历目标节点进行一对多极速下发
         for target in targets:
             try:
-                # 无论是本地直连还是已稳定穿透的远程节点，统一走本地映射端口极速注入
                 await inject_cookies_native(target['local_bind_port'], cookies)
                 target_count, _ = await probe_node_cookies(target['local_bind_port'])
                 log_detail.append(f"-> 目标节点 [{target['name']}] 同步完成，当前 Cookies: {target_count}")
@@ -535,9 +536,28 @@ def reschedule_sync_job(minutes: int):
     except Exception as e:
         logger.error(f"更新定时调度异常: {e}")
 
-# ==================== 8. FastAPI API 路由 ====================
-CAPTCHA_STORE = {}
-app = FastAPI(title="CDP Cluster Hub")
+# ==================== 8. 现代 Lifespan 生命周期管理 (消除 on_event 警告) ====================
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # 服务启动初始化
+    minutes = int(get_setting("sync_interval_minutes", "15"))
+    scheduler.start()
+    reschedule_sync_job(minutes)
+    watchdog_task = asyncio.create_task(tunnel_watchdog_loop())
+    yield
+    # 优雅停机
+    try:
+        watchdog_task.cancel()
+        scheduler.shutdown(wait=False)
+        for t in list(tunnel_mgr.tunnels.values()):
+            try:
+                t.stop()
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+app = FastAPI(title="CDP Cluster Hub", lifespan=lifespan)
 
 api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 api_key_query = APIKeyQuery(name="api_key", auto_error=False)
@@ -564,15 +584,6 @@ def verify_agent_access(
         except Exception:
             pass
     raise HTTPException(status_code=403, detail="未授权调用: 请在 Header 提供 X-API-Key 或 ?api_key=")
-
-@app.on_event("startup")
-async def app_startup_event():
-    # 启动定时调度
-    minutes = int(get_setting("sync_interval_minutes", "15"))
-    scheduler.start()
-    reschedule_sync_job(minutes)
-    # 启动看门狗后台保活任务
-    asyncio.create_task(tunnel_watchdog_loop())
 
 @app.get("/api/captcha")
 def get_captcha():
@@ -624,7 +635,7 @@ def update_profile(data: dict, user: dict = Depends(verify_token)):
         set_setting("api_key", 'cdp_' + secrets.token_urlsafe(24))
     return {"message": "配置更新成功"}
 
-# ----------------- 节点管理 (增/删/改/查/Cookie失效分析) -----------------
+# 节点管理
 @app.get("/api/nodes")
 def list_nodes(user: dict = Depends(verify_token)):
     conn = sqlite3.connect(DB_PATH)
@@ -660,7 +671,6 @@ def create_node(data: dict, user: dict = Depends(verify_token)):
 
 @app.put("/api/nodes/{node_id}")
 async def update_node(node_id: int, data: dict, user: dict = Depends(verify_token)):
-    """修改节点配置"""
     is_local = 1 if data.get('is_local') else 0
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
@@ -682,7 +692,6 @@ async def update_node(node_id: int, data: dict, user: dict = Depends(verify_toke
     conn.commit()
     conn.close()
 
-    # 重新加载该节点的穿透隧道
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     cur = conn.cursor()
@@ -705,7 +714,6 @@ def delete_node(node_id: int, user: dict = Depends(verify_token)):
 
 @app.get("/api/nodes/{node_id}/cookie-details")
 async def get_node_cookie_details(node_id: int, user: dict = Depends(verify_token)):
-    """提取节点的 Cookie 详情，并进行全量失效时间与会话凭证分析"""
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     cur = conn.cursor()
@@ -820,7 +828,7 @@ def set_source(node_id: int, user: dict = Depends(verify_token)):
     conn.close()
     return {"message": "源节点已设定"}
 
-# ----------------- 密钥存储库 (支持备注与创建时间) -----------------
+# 密钥存储库
 @app.get("/api/ssh-keys")
 def list_keys(user: dict = Depends(verify_token)):
     conn = sqlite3.connect(DB_PATH)
@@ -831,7 +839,6 @@ def list_keys(user: dict = Depends(verify_token)):
     conn.close()
 
     result = []
-    # 结合文件系统与数据库元数据
     for fn in os.listdir(KEYS_DIR):
         fp = os.path.join(KEYS_DIR, fn)
         if os.path.isfile(fp):
@@ -887,7 +894,7 @@ def delete_key(filename: str, user: dict = Depends(verify_token)):
     conn.close()
     return {"message": "证书已销毁"}
 
-# ----------------- 同步中心设置与调度 (一对多与定向执行) -----------------
+# 同步中心设置与调度
 @app.get("/api/sync/settings")
 def get_sync_settings(user: dict = Depends(verify_token)):
     return {
@@ -930,7 +937,7 @@ def get_logs(user: dict = Depends(verify_token)):
     conn.close()
     return logs
 
-# ----------------- 告警设置 -----------------
+# 告警设置
 @app.get("/api/notifications/settings")
 def get_notification_settings(user: dict = Depends(verify_token)):
     return {
@@ -984,7 +991,7 @@ async def test_serverchan(user: dict = Depends(verify_token)):
         raise HTTPException(status_code=500, detail="Server酱推送失败，请检查 SendKey")
     return {"message": "Server酱微信测试推送成功"}
 
-# ----------------- 外部 Agent 开放 API -----------------
+# 外部 Agent 开放 API
 @app.get("/api/v1/nodes", summary="获取所有在线 CDP 节点列表")
 def external_list_nodes(auth: dict = Depends(verify_agent_access)):
     conn = sqlite3.connect(DB_PATH)
@@ -1045,7 +1052,7 @@ async def external_trigger_sync(auth: dict = Depends(verify_agent_access)):
     await execute_sync_task()
     return {"code": 200, "message": "全网 Cookie 同步任务已触发"}
 
-# 静态资源挂载
+# 静态资源挂载与根路径兜底
 if DIST_DIR:
     assets_dir = os.path.join(DIST_DIR, "assets")
     if os.path.exists(assets_dir):
@@ -1061,6 +1068,10 @@ if DIST_DIR:
         if full_path and os.path.exists(target_file) and os.path.isfile(target_file):
             return FileResponse(target_file)
         return FileResponse(os.path.join(DIST_DIR, "index.html"))
+else:
+    @app.get("/")
+    async def fallback_error():
+        return HTMLResponse("<h3>❌ 前端静态资源尚未生成，请检查前端打包。</h3>", status_code=500)
 
 if __name__ == "__main__":
     ensure_ssl_certificates()
