@@ -5,365 +5,297 @@ const props = defineProps({
   api: Function,
   showToast: Function
 })
-const emit = defineEmits(['update-nodes'])
+const emit = defineEmits(['update-status'])
 
-const nodes = ref([])
-const keys = ref([])
-const showNodeModal = ref(false)
-const isEditMode = ref(false)
-const editingNodeId = ref(null)
+// 配置数据
+const notif = reactive({
+  // 左侧：SMTP 服务器基础参数
+  smtp_host: 'smtp.yeah.net',
+  smtp_port: '465',
+  smtp_ssl: true,
+  smtp_sender_name: 'CDP 节点中心',
+  smtp_user: '',
+  smtp_pass: '',
+  smtp_status: 'untested',
 
-// Cookie 失效详情抽屉
-const showCookieModal = ref(false)
-const cookieDetails = ref({ node_name: '', total: 0, valid_count: 0, session_count: 0, expired_count: 0, cookies: [] })
-const isLoadingCookies = ref(false)
+  // 右侧通道 1：邮件推送开关与接收邮箱
+  email_notify_enabled: false,
+  email_notify_to: '',
 
-const nodeForm = reactive({
-  name: '',
-  is_local: true,
-  ssh_host: '',
-  ssh_port: 22,
-  ssh_user: 'root',
-  ssh_key_filename: '',
-  ssh_password: '',
-  remote_cdp_port: 9222,
-  local_bind_port: 9222
+  // 右侧通道 2：Server酱微信推送开关与 SendKey
+  serverchan_enabled: false,
+  serverchan_key: ''
 })
 
-const loadNodes = async () => {
-  const [nRes, kRes] = await Promise.all([
-    props.api('/api/nodes'),
-    props.api('/api/ssh-keys')
-  ])
-  nodes.value = await nRes.json()
-  keys.value = await kRes.json()
-  emit('update-nodes')
+const testEmailTarget = ref('')
+const isTestingEmail = ref(false)
+const isTestingServerChan = ref(false)
+
+const loadSettings = async () => {
+  const res = await props.api('/api/notifications/settings')
+  if (res.ok) {
+    const data = await res.json()
+    Object.assign(notif, data)
+  }
 }
 
-const openCreateModal = () => {
-  isEditMode.value = false
-  editingNodeId.value = null
-  Object.assign(nodeForm, {
-    name: '',
-    is_local: true,
-    ssh_host: '',
-    ssh_port: 22,
-    ssh_user: 'root',
-    ssh_key_filename: '',
-    ssh_password: '',
-    remote_cdp_port: 9222,
-    local_bind_port: 9222 + nodes.value.length
-  })
-  showNodeModal.value = true
-}
-
-const openEditModal = (node) => {
-  isEditMode.value = true
-  editingNodeId.value = node.id
-  Object.assign(nodeForm, {
-    name: node.name,
-    is_local: Boolean(node.is_local),
-    ssh_host: node.ssh_host,
-    ssh_port: node.ssh_port,
-    ssh_user: node.ssh_user,
-    ssh_key_filename: node.ssh_key_filename,
-    ssh_password: node.ssh_password,
-    remote_cdp_port: node.remote_cdp_port,
-    local_bind_port: node.local_bind_port
-  })
-  showNodeModal.value = true
-}
-
-const submitNodeForm = async () => {
-  const url = isEditMode.value ? `/api/nodes/${editingNodeId.value}` : '/api/nodes'
-  const method = isEditMode.value ? 'PUT' : 'POST'
-  const res = await props.api(url, {
-    method,
+// 保存左侧 SMTP
+const saveSmtpServer = async () => {
+  const res = await props.api('/api/notifications/settings', {
+    method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(nodeForm)
+    body: JSON.stringify({
+      smtp_host: notif.smtp_host,
+      smtp_port: notif.smtp_port,
+      smtp_ssl: notif.smtp_ssl,
+      smtp_sender_name: notif.smtp_sender_name,
+      smtp_user: notif.smtp_user,
+      smtp_pass: notif.smtp_pass
+    })
   })
-  const data = await res.json()
-  showNodeModal.value = false
-  props.showToast(data.message, 'success')
-  loadNodes()
+  if (res.ok) {
+    props.showToast('SMTP 发信服务器参数已保存', 'success')
+    emit('update-status')
+  }
 }
 
-const viewCookieDetails = async (node) => {
-  isLoadingCookies.value = true
-  showCookieModal.value = true
+// 保存右侧 邮件推送设置
+const saveEmailChannel = async () => {
+  const res = await props.api('/api/notifications/settings', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      email_notify_enabled: notif.email_notify_enabled,
+      email_notify_to: notif.email_notify_to
+    })
+  })
+  if (res.ok) {
+    props.showToast('邮件告警通道已更新', 'success')
+    emit('update-status')
+  }
+}
+
+// 保存右侧 Server酱设置
+const saveServerChanChannel = async () => {
+  const res = await props.api('/api/notifications/settings', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      serverchan_enabled: notif.serverchan_enabled,
+      serverchan_key: notif.serverchan_key
+    })
+  })
+  if (res.ok) {
+    props.showToast('Server酱微信通道已更新', 'success')
+    emit('update-status')
+  }
+}
+
+// 测试邮件外发
+const testEmail = async () => {
+  if (isTestingEmail.value) return
+  isTestingEmail.value = true
   try {
-    const res = await props.api(`/api/nodes/${node.id}/cookie-details`)
+    const res = await props.api('/api/notifications/test-email', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ test_email: testEmailTarget.value || notif.email_notify_to })
+    })
+    const data = await res.json()
     if (res.ok) {
-      cookieDetails.value = await res.json()
+      notif.smtp_status = 'ready'
+      props.showToast(data.message, 'success')
+      emit('update-status')
     } else {
-      const err = await res.json()
-      props.showToast(err.detail || '读取 Cookie 详情受阻', 'error')
-      showCookieModal.value = false
+      notif.smtp_status = 'error'
+      props.showToast(data.detail || '发信受阻', 'error')
     }
   } finally {
-    isLoadingCookies.value = false
+    isTestingEmail.value = false
   }
 }
 
-const probeNode = async (node) => {
-  const res = await props.api(`/api/nodes/${node.id}/probe`, { method: 'POST' })
-  const data = await res.json()
-  if (res.ok) {
-    node.cookie_count = data.cookie_count
-    node.status = 'connected'
-    props.showToast(data.message, 'success')
-  } else {
-    node.status = 'error: refused'
-    props.showToast(data.detail || '探针未就绪', 'error')
-  }
-}
-
-const toggleTunnel = async (node) => {
-  const res = await props.api(`/api/nodes/${node.id}/toggle-tunnel`, { method: 'POST' })
-  const data = await res.json()
-  if (res.ok) props.showToast(data.message, 'success')
-  else props.showToast(data.detail || '操作异常', 'error')
-  loadNodes()
-}
-
-const setSource = async (id) => {
-  await props.api(`/api/nodes/${id}/set-source`, { method: 'POST' })
-  props.showToast('已设为全网同步源节点', 'success')
-  loadNodes()
-}
-
-const deleteNode = async (id) => {
-  if (confirm('确认销毁该 CDP 节点的接入配置？')) {
-    await props.api(`/api/nodes/${id}`, { method: 'DELETE' })
-    props.showToast('节点已移除', 'success')
-    loadNodes()
+// 测试 Server酱推送
+const testServerChan = async () => {
+  if (isTestingServerChan.value) return
+  isTestingServerChan.value = true
+  try {
+    const res = await props.api('/api/notifications/test-serverchan', { method: 'POST' })
+    const data = await res.json()
+    if (res.ok) props.showToast(data.message, 'success')
+    else props.showToast(data.detail || '推送失败', 'error')
+  } finally {
+    isTestingServerChan.value = false
   }
 }
 
 onMounted(() => {
-  loadNodes()
+  loadSettings()
 })
 </script>
 
 <template>
-  <div class="content-full-card">
-    <div class="table-header-bar">
-      <div class="table-title">
-        <span class="icon-duo-users">👥</span>
-        <h2>CDP 节点实例治理列表</h2>
+  <div class="grid-2col-fluid">
+    
+    <!-- ==================== 左侧：仅 SMTP 服务器配置 (内容宽度自适应) ==================== -->
+    <div class="content-full-card">
+      <div class="smtp-title-header">
+        <div class="smtp-icon-box">📧</div>
+        <div>
+          <h3 class="smtp-title-text">SMTP 发信服务器参数配置</h3>
+          <p class="smtp-sub-text">基础外发引擎，为系统所有邮件通道提供发信支撑</p>
+        </div>
       </div>
-      <div style="display:flex; gap:10px;">
-        <button @click="openCreateModal" class="btn-primary-gradient">+ 新增接入节点</button>
-        <button @click="loadNodes" class="btn-primary-gradient">🔄 刷新列表</button>
+
+      <!-- 动态状态指示灯 -->
+      <div class="smtp-status-indicator">
+        <span v-if="notif.smtp_status === 'ready'" class="dot-green">●</span>
+        <span v-else-if="notif.smtp_status === 'error'" class="dot-red">✕</span>
+        <span v-else class="dot-gray">○</span>
+
+        <span class="status-txt">
+          SMTP 状态:
+          <span v-if="notif.smtp_status === 'ready'" style="color:#34d399; font-weight:bold;">就绪 (发信正常)</span>
+          <span v-else-if="notif.smtp_status === 'error'" style="color:#f87171; font-weight:bold;">异常 (发信受阻)</span>
+          <span v-else style="color:#94a3b8;">待测试</span>
+        </span>
       </div>
-    </div>
 
-    <div class="table-responsive">
-      <table class="cdp-fluid-table">
-        <thead>
-          <tr>
-            <th style="width: 20%;">节点名称 / 接入目标</th>
-            <th style="width: 10%;">连通状态</th>
-            <th style="width: 12%;">本地调试端口</th>
-            <th style="width: 16%;">实时 Cookie (点击查看失效分析)</th>
-            <th style="width: 12%;">接入类型</th>
-            <th style="width: 10%;">同步角色</th>
-            <th style="width: 20%; text-align: right;">治理操作</th>
-          </tr>
-        </thead>
-        <tbody>
-          <tr v-for="node in nodes" :key="node.id">
-            <td>
-              <div class="cell-main-name">{{ node.name }}</div>
-              <div class="cell-sub-desc">
-                {{ node.is_local ? '127.0.0.1 (本机回环)' : `${node.ssh_user}@${node.ssh_host}:${node.ssh_port}` }}
-              </div>
-            </td>
-
-            <td>
-              <span v-if="node.status === 'connected'" class="status-active">● 活跃</span>
-              <span v-else-if="node.status === 'stopped'" class="status-standby">○ 离线</span>
-              <span v-else class="status-error" :title="node.status">✕ 异常</span>
-            </td>
-
-            <td class="font-cyan-mono">127.0.0.1:{{ node.local_bind_port }}</td>
-
-            <td>
-              <!-- 点击 Cookie 胶囊，查看失效与健康度详情 -->
-              <div class="cookie-badge" @click="viewCookieDetails(node)" style="cursor:pointer;" title="点击查看 Cookie 详细过期信息">
-                <span>🍪 {{ node.cookie_count || 0 }} 条</span>
-                <span style="font-size:10px; color:#38bdf8; text-decoration:underline; margin-left:4px;">详情</span>
-              </div>
-            </td>
-
-            <td>
-              <span v-if="node.is_local" class="tag-plan-blue">普通固定 (本地)</span>
-              <span v-else class="tag-plan-indigo">SSH 穿透 (远程)</span>
-            </td>
-
-            <td>
-              <button v-if="node.is_source" class="btn-qrcode">★ 默认源</button>
-              <button v-else @click="setSource(node.id)" class="btn-set-source">设为源</button>
-            </td>
-
-            <td style="text-align: right;">
-              <div class="btn-group-row">
-                <button @click="toggleTunnel(node)" class="btn-micro btn-orange">
-                  🔑 {{ node.is_local ? '测试连通' : (node.status === 'connected' ? '断开' : '穿透') }}
-                </button>
-                <button @click="probeNode(node)" class="btn-micro btn-purple">🔀 探针</button>
-                <button @click="openEditModal(node)" class="btn-micro" style="background:#2563eb;">✏️ 修改</button>
-                <button @click="deleteNode(node.id)" class="btn-micro btn-trash">🗑️</button>
-              </div>
-            </td>
-          </tr>
-        </tbody>
-      </table>
-    </div>
-
-    <!-- 弹窗 1：新增 / 编辑节点 -->
-    <div v-if="showNodeModal" class="modal-backdrop">
-      <div class="modal-card">
-        <div class="modal-title-bar">
-          <h3 style="font-size:14px; font-weight:bold; color:#fff;">
-            {{ isEditMode ? '修改 CDP 实例配置' : '接入新 CDP 实例节点' }}
-          </h3>
-          <button @click="showNodeModal = false" style="background:none; border:none; color:#94a3b8; font-size:16px; cursor:pointer;">✕</button>
+      <div class="form-v-stack" style="margin-top:16px;">
+        <div class="form-field-block">
+          <label class="form-label">SMTP 服务器地址</label>
+          <input v-model="notif.smtp_host" placeholder="smtp.yeah.net" class="cdp-input cdp-w-normal">
         </div>
 
-        <form @submit.prevent="submitNodeForm" class="form-v-stack" style="margin-top:14px;">
+        <!-- 组合行：端口紧凑自适应 (120px) + 发件人显示名称 (240px) -->
+        <div class="row-flex-gap">
           <div class="form-field-block">
-            <label class="form-label">接入类型</label>
-            <div class="row-flex-gap">
-              <label :class="['radio-pill-card', nodeForm.is_local ? 'radio-pill-active' : '']">
-                <input type="radio" v-model="nodeForm.is_local" :value="true" style="display:none;">
-                <span>💻 本地直连 (免SSH)</span>
-              </label>
-              <label :class="['radio-pill-card', !nodeForm.is_local ? 'radio-pill-active' : '']">
-                <input type="radio" v-model="nodeForm.is_local" :value="false" style="display:none;">
-                <span>🌐 远程 SSH 穿透</span>
-              </label>
-            </div>
+            <label class="form-label">端口</label>
+            <input v-model="notif.smtp_port" placeholder="465" class="cdp-input cdp-w-port font-cyan-mono">
           </div>
-
           <div class="form-field-block">
-            <label class="form-label">节点名称</label>
-            <input v-model="nodeForm.name" required placeholder="如: 本机 Chrome 01" class="cdp-input cdp-w-normal">
+            <label class="form-label">发件人显示名称</label>
+            <input v-model="notif.smtp_sender_name" placeholder="CDP 节点中心" class="cdp-input cdp-w-medium">
           </div>
+        </div>
 
-          <!-- 本地节点专用输入 -->
-          <div v-if="nodeForm.is_local" style="background:#09122a; padding:12px; border-radius:6px; border:1px solid #172554;">
-            <div class="form-field-block">
-              <label class="form-label">本地 CDP 调试端口 (默认 9222)</label>
-              <input v-model="nodeForm.local_bind_port" type="number" required placeholder="9222" class="cdp-input cdp-w-port font-cyan-mono">
-            </div>
-            <p style="font-size:11px; color:#64748b; margin-top:6px;">接入本机 Chromium 调试接口，开机守护引擎将自动进行网关直连探测。</p>
-          </div>
+        <div class="form-field-block">
+          <label class="form-label">发信邮箱账号</label>
+          <input v-model="notif.smtp_user" placeholder="perrywu@yeah.net" class="cdp-input cdp-w-normal font-cyan-mono">
+        </div>
 
-          <!-- 远程节点输入 -->
-          <div v-else class="form-v-stack">
-            <div class="row-flex-gap">
-              <div class="form-field-block" style="flex:1;">
-                <label class="form-label">SSH 主机 / IP</label>
-                <input v-model="nodeForm.ssh_host" required placeholder="192.168.1.100" class="cdp-input font-cyan-mono" style="width:100% !important;">
-              </div>
-              <div class="form-field-block">
-                <label class="form-label">SSH 端口</label>
-                <input v-model="nodeForm.ssh_port" type="number" placeholder="22" class="cdp-input cdp-w-port font-cyan-mono">
-              </div>
-            </div>
+        <div class="form-field-block">
+          <label class="form-label">邮箱授权码 / 密码</label>
+          <input v-model="notif.smtp_pass" type="password" placeholder="•••••• (留空保持原密码)" class="cdp-input cdp-w-normal">
+        </div>
 
-            <div class="form-field-block">
-              <label class="form-label">SSH 用户名</label>
-              <input v-model="nodeForm.ssh_user" required placeholder="root" class="cdp-input cdp-w-normal font-cyan-mono">
-            </div>
+        <div style="display:flex; align-items:center; gap:8px; margin-top:2px;">
+          <input type="checkbox" v-model="notif.smtp_ssl" id="ssl_box" class="check-box-blue">
+          <label for="ssl_box" style="font-size:12px; color:#cbd5e1; cursor:pointer;">启用 SSL 安全加密</label>
+        </div>
 
-            <div class="form-field-block">
-              <label class="form-label">绑定 SSH 证书 (选填)</label>
-              <select v-model="nodeForm.ssh_key_filename" class="cdp-input cdp-w-normal font-cyan-mono">
-                <option value="">密码认证 (不选择私钥)</option>
-                <option v-for="k in keys" :key="k.filename" :value="k.filename">🔑 {{ k.filename }} {{ k.remark ? `(${k.remark})` : '' }}</option>
-              </select>
-            </div>
+        <!-- 独立测试发信区 -->
+        <div class="smtp-test-dashed-area">
+          <input v-model="testEmailTarget" placeholder="接收测试邮箱 (test@example.com)" class="cdp-input cdp-w-normal">
+          <button @click="testEmail" :disabled="isTestingEmail" class="btn-gray-test">
+            {{ isTestingEmail ? '正在投递...' : '发信测试' }}
+          </button>
+        </div>
 
-            <div v-if="!nodeForm.ssh_key_filename" class="form-field-block">
-              <label class="form-label">SSH 密码</label>
-              <input v-model="nodeForm.ssh_password" type="password" placeholder="••••••••" class="cdp-input cdp-w-normal">
-            </div>
-
-            <div class="row-flex-gap">
-              <div class="form-field-block" style="flex:1;">
-                <label class="form-label">远程 CDP 端口</label>
-                <input v-model="nodeForm.remote_cdp_port" type="number" placeholder="9222" class="cdp-input font-cyan-mono" style="width:100% !important;">
-              </div>
-              <div class="form-field-block" style="flex:1;">
-                <label class="form-label">本地穿透映射端口</label>
-                <input v-model="nodeForm.local_bind_port" type="number" required placeholder="19222" class="cdp-input font-cyan-mono" style="width:100% !important;">
-              </div>
-            </div>
-          </div>
-
-          <div style="display:flex; justify-content:flex-end; gap:8px; margin-top:16px;">
-            <button type="button" @click="showNodeModal = false" class="btn-gray-test">取消</button>
-            <button type="submit" class="btn-primary-gradient">保存配置</button>
-          </div>
-        </form>
+        <div style="margin-top:6px;">
+          <button @click="saveSmtpServer" class="btn-primary-gradient">
+            保存 SMTP 参数
+          </button>
+        </div>
       </div>
     </div>
 
-    <!-- 弹窗 2：Cookie 失效生命周期透视抽屉 -->
-    <div v-if="showCookieModal" class="modal-backdrop">
-      <div class="modal-card" style="width: 820px; max-width: 95vw;">
-        <div class="modal-title-bar">
-          <div style="display:flex; align-items:center; gap:8px;">
-            <span style="font-size:16px;">🍪</span>
-            <h3 style="font-size:14px; font-weight:bold; color:#fff;">
-              节点 [{{ cookieDetails.node_name }}] Cookie 失效与生命周期透视
-            </h3>
+    <!-- ==================== 右侧：推送通知列表 (开启时才展示相关配置) ==================== -->
+    <div class="content-full-card">
+      <div class="smtp-title-header">
+        <div class="smtp-icon-box" style="background:#0e3b5e; border-color:#0284c7;">🔔</div>
+        <div>
+          <h3 class="smtp-title-text">告警推送通知列表 (2项可选)</h3>
+          <p class="smtp-sub-text">当集群节点离线、探针故障或 Cookie 同步异常时触发通知</p>
+        </div>
+      </div>
+
+      <div class="notify-channels-container">
+        
+        <!-- 通道 1: 📧 邮件告警推送 (开启时才展示设置) -->
+        <div class="channel-card-item">
+          <div class="channel-card-header">
+            <div style="display:flex; align-items:center; gap:8px;">
+              <span style="font-size:18px;">📧</span>
+              <div>
+                <span class="channel-title">邮件告警推送通道 (Email)</span>
+                <span v-if="notif.email_notify_enabled" class="badge-channel-on">● 已启用</span>
+                <span v-else class="badge-channel-off">○ 未启用</span>
+              </div>
+            </div>
+            
+            <div style="display:flex; align-items:center; gap:6px;">
+              <input type="checkbox" v-model="notif.email_notify_enabled" id="email_toggle" class="check-box-blue" @change="saveEmailChannel">
+              <label for="email_toggle" style="font-size:12px; color:#cbd5e1; cursor:pointer;">开启推送</label>
+            </div>
           </div>
-          <button @click="showCookieModal = false" style="background:none; border:none; color:#94a3b8; font-size:16px; cursor:pointer;">✕</button>
+
+          <!-- 仅在开启推送时才显示出对应相关设置 -->
+          <div v-if="notif.email_notify_enabled" class="channel-expand-content">
+            <div class="form-field-block">
+              <label class="form-label">接收预警邮箱</label>
+              <input v-model="notif.email_notify_to" placeholder="admin@domain.com (留空默认发至发信邮箱)" class="cdp-input cdp-w-normal font-cyan-mono">
+              <p class="form-field-hint">故障发生时系统将通过左侧 SMTP 发信引擎投递预警邮件到此地址。</p>
+            </div>
+
+            <div class="channel-action-row">
+              <button @click="saveEmailChannel" class="btn-primary-gradient">
+                保存邮件推送设置
+              </button>
+              <button @click="testEmail" :disabled="isTestingEmail" class="btn-gray-test">
+                {{ isTestingEmail ? '测试中...' : '发送测试邮件' }}
+              </button>
+            </div>
+          </div>
         </div>
 
-        <div style="margin-top:12px;">
-          <!-- 统计摘要行 -->
-          <div style="display:flex; gap:12px; margin-bottom:14px;">
-            <span class="cookie-stat-badge">总数: <b>{{ cookieDetails.total }}</b></span>
-            <span class="cookie-stat-badge" style="border-color:#059669; color:#34d399;">有效持久: <b>{{ cookieDetails.valid_count }}</b></span>
-            <span class="cookie-stat-badge" style="border-color:#3b82f6; color:#60a5fa;">会话凭据: <b>{{ cookieDetails.session_count }}</b></span>
-            <span class="cookie-stat-badge" style="border-color:#dc2626; color:#f87171;">已过期: <b>{{ cookieDetails.expired_count }}</b></span>
+        <!-- 通道 2: 📱 Server酱微信实时推送 (开启时才展示设置) -->
+        <div class="channel-card-item">
+          <div class="channel-card-header">
+            <div style="display:flex; align-items:center; gap:8px;">
+              <span style="font-size:18px;">📱</span>
+              <div>
+                <span class="channel-title">Server酱微信服务号推送 (WeChat)</span>
+                <span v-if="notif.serverchan_enabled" class="badge-channel-on">● 已启用</span>
+                <span v-else class="badge-channel-off">○ 未启用</span>
+              </div>
+            </div>
+
+            <div style="display:flex; align-items:center; gap:6px;">
+              <input type="checkbox" v-model="notif.serverchan_enabled" id="serverchan_toggle" class="check-box-blue" @change="saveServerChanChannel">
+              <label for="serverchan_toggle" style="font-size:12px; color:#cbd5e1; cursor:pointer;">开启推送</label>
+            </div>
           </div>
 
-          <div style="max-height: 440px; overflow-y: auto; border: 1px solid #172554; border-radius: 6px;">
-            <table class="cdp-fluid-table" style="font-size:11px;">
-              <thead>
-                <tr>
-                  <th>Cookie 名称</th>
-                  <th>域名</th>
-                  <th>脱敏值</th>
-                  <th>生命周期状态</th>
-                  <th>到期描述</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr v-for="c in cookieDetails.cookies" :key="c.name + c.domain">
-                  <td class="cell-main-name font-cyan-mono">{{ c.name }}</td>
-                  <td class="font-cyan-mono">{{ c.domain }}</td>
-                  <td style="color:#94a3b8; font-family:monospace;" :title="c.value_full">{{ c.value_masked }}</td>
-                  <td>
-                    <span v-if="c.status === 'valid'" class="status-active" style="font-size:10px; padding:1px 6px;">有效</span>
-                    <span v-else-if="c.status === 'session'" class="tag-plan-blue" style="font-size:10px; padding:1px 6px;">会话</span>
-                    <span v-else class="status-error" style="font-size:10px; padding:1px 6px;">已失效</span>
-                  </td>
-                  <td style="color:#cbd5e1;">{{ c.expires_desc }}</td>
-                </tr>
-              </tbody>
-            </table>
-          </div>
+          <!-- 仅在开启推送时才显示出对应相关设置 -->
+          <div v-if="notif.serverchan_enabled" class="channel-expand-content">
+            <div class="form-field-block">
+              <label class="form-label">Server酱 SendKey</label>
+              <input v-model="notif.serverchan_key" placeholder="SCTxxxxxxxxxxxxxxxx" class="cdp-input cdp-w-key font-cyan-mono">
+              <p class="form-field-hint">在 sct.ftqq.com 申请的 SendKey。用于微信公众号实时弹窗预警。</p>
+            </div>
 
-          <div style="display:flex; justify-content:flex-end; margin-top:14px;">
-            <button @click="showCookieModal = false" class="btn-primary-gradient">关闭</button>
+            <div class="channel-action-row">
+              <button @click="saveServerChanChannel" class="btn-primary-gradient">
+                保存微信推送设置
+              </button>
+              <button @click="testServerChan" :disabled="isTestingServerChan" class="btn-gray-test">
+                {{ isTestingServerChan ? '推送中...' : '发送微信测试' }}
+              </button>
+            </div>
           </div>
         </div>
+
       </div>
     </div>
 
@@ -371,11 +303,11 @@ onMounted(() => {
 </template>
 
 <style scoped>
-.cookie-stat-badge {
-  background: #09122a;
-  border: 1px solid #172554;
-  border-radius: 4px;
-  padding: 4px 10px;
-  font-size: 11px;
+/* 针对该模块的专属微调 */
+.channel-card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding-bottom: 4px;
 }
 </style>

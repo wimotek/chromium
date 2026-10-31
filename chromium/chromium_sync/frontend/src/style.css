@@ -90,11 +90,11 @@ input:-webkit-autofill:focus {
 
 .login-form-stack { display: flex; flex-direction: column; gap: 16px; }
 
-/* 表单字段块与标签解耦：上下分离，间距舒适，拒绝挤在一排 */
+/* 字段块与标签分离 */
 .form-field-block {
   display: flex;
   flex-direction: column;
-  gap: 7px; /* 文字与输入框的标准间距 */
+  gap: 7px;
   margin-bottom: 4px;
 }
 
@@ -105,7 +105,7 @@ input:-webkit-autofill:focus {
   line-height: 1.4;
 }
 
-/* ==================== 输入框根据内容自适应宽度体系 ==================== */
+/* 输入框自适应体系 */
 .cdp-input {
   box-sizing: border-box;
   background-color: #0f1c3f;
@@ -123,37 +123,13 @@ input:-webkit-autofill:focus {
   box-shadow: 0 0 8px rgba(0, 240, 255, 0.35);
 }
 
-/* 端口等短数字字段 */
-.cdp-w-port {
-  width: 120px !important;
-  min-width: 90px !important;
-}
-
-/* 发件人名称等中等字段 */
-.cdp-w-medium {
-  width: 240px !important;
-  min-width: 180px !important;
-}
-
-/* 服务器地址、邮箱等常规字段 (适配内容，拒绝 100% 满屏拉扯) */
-.cdp-w-normal {
-  width: 100%;
-  max-width: 420px;
-  min-width: 220px;
-}
-
-/* SendKey、API 密钥等长密钥字段 */
-.cdp-w-key {
-  width: 100%;
-  max-width: 480px;
-  min-width: 240px;
-}
+.cdp-w-port   { width: 120px !important; min-width: 90px !important; }
+.cdp-w-medium { width: 240px !important; min-width: 180px !important; }
+.cdp-w-normal { width: 100%; max-width: 420px; min-width: 220px; }
+.cdp-w-key    { width: 100%; max-width: 480px; min-width: 240px; }
 
 @media (max-width: 640px) {
-  .cdp-w-normal,
-  .cdp-w-key,
-  .cdp-w-medium,
-  .cdp-w-port {
+  .cdp-w-normal, .cdp-w-key, .cdp-w-medium, .cdp-w-port {
     width: 100% !important;
     max-width: 100% !important;
   }
@@ -174,7 +150,7 @@ input:-webkit-autofill:focus {
   flex-shrink: 0;
 }
 
-/* 按钮自然尺寸：彻底告别 100% 满屏占满拉伸 */
+/* 按钮尺寸收敛：禁止 100% 满屏占满拉伸 */
 .btn-primary-gradient {
   background: linear-gradient(135deg, #0284c7, #2563eb);
   color: #ffffff;
@@ -382,6 +358,7 @@ input:-webkit-autofill:focus {
   display: inline-flex;
   align-items: center;
   gap: 4px;
+  white-space: nowrap;
 }
 .status-standby {
   background-color: rgba(69, 26, 3, 0.8);
@@ -390,6 +367,7 @@ input:-webkit-autofill:focus {
   border-radius: 9999px;
   padding: 2px 10px;
   font-size: 11px;
+  white-space: nowrap;
 }
 .status-error {
   background-color: rgba(69, 10, 10, 0.8);
@@ -398,6 +376,7 @@ input:-webkit-autofill:focus {
   border-radius: 9999px;
   padding: 2px 10px;
   font-size: 11px;
+  white-space: nowrap;
 }
 
 .font-cyan-mono { color: #00f0ff; font-family: monospace; font-weight: bold; }
@@ -412,11 +391,12 @@ input:-webkit-autofill:focus {
   border-radius: 4px;
   color: #fcd34d;
   font-weight: bold;
+  white-space: nowrap;
 }
 .link-probe { background: none; border: none; color: #38bdf8; cursor: pointer; text-decoration: underline; font-size: 10px; margin-left: 4px; }
 
-.tag-plan-blue { background-color: #1e40af; color: #93c5fd; border-radius: 4px; padding: 2px 8px; font-size: 11px; }
-.tag-plan-indigo { background-color: #312e81; color: #c7d2fe; border-radius: 4px; padding: 2px 8px; font-size: 11px; }
+.tag-plan-blue { background-color: #1e40af; color: #93c5fd; border-radius: 4px; padding: 2px 8px; font-size: 11px; white-space: nowrap; }
+.tag-plan-indigo { background-color: #312e81; color: #c7d2fe; border-radius: 4px; padding: 2px 8px; font-size: 11px; white-space: nowrap; }
 
 .btn-qrcode {
   background-color: #0284c7;
@@ -426,6 +406,7 @@ input:-webkit-autofill:focus {
   padding: 3px 10px;
   font-size: 11px;
   font-weight: bold;
+  white-space: nowrap;
 }
 .btn-set-source {
   background-color: #1e293b;
@@ -435,10 +416,11 @@ input:-webkit-autofill:focus {
   padding: 3px 8px;
   font-size: 11px;
   cursor: pointer;
+  white-space: nowrap;
 }
 
 .btn-group-row { display: flex; gap: 6px; justify-content: flex-end; }
-.btn-micro { border: none; border-radius: 4px; padding: 4px 8px; font-size: 11px; font-weight: bold; color: #ffffff; cursor: pointer; }
+.btn-micro { border: none; border-radius: 4px; padding: 4px 8px; font-size: 11px; font-weight: bold; color: #ffffff; cursor: pointer; white-space: nowrap; }
 .btn-orange { background-color: #d97706; }
 .btn-purple { background-color: #7c3aed; }
 .btn-trash  { background-color: #991b1b; }
@@ -489,7 +471,7 @@ input:-webkit-autofill:focus {
 .modal-backdrop {
   position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, 0.8);
+  background: rgba(0, 0, 0, 0.85);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -497,14 +479,13 @@ input:-webkit-autofill:focus {
   z-index: 9999;
 }
 .modal-card {
-  width: 520px;
-  max-width: 95vw;
   background-color: #0b132b;
   border: 1px solid #1e3a8a;
   border-radius: 12px;
-  padding: 24px;
+  padding: 20px 24px;
   box-shadow: 0 20px 40px rgba(0, 0, 0, 0.8);
 }
+
 .modal-title-bar {
   display: flex;
   justify-content: space-between;
@@ -527,6 +508,113 @@ input:-webkit-autofill:focus {
   border-color: #00f0ff !important;
   background: #0f1f42 !important;
   color: #38bdf8 !important;
+}
+
+/* ==================== 核心解决：Cookie 详情宽幅透视弹窗 (严禁折行) ==================== */
+.cookie-modal-wide {
+  width: 1240px !important;
+  max-width: 96vw !important;
+  display: flex;
+  flex-direction: column;
+}
+
+.cookie-stat-row {
+  display: flex;
+  gap: 12px;
+  margin-bottom: 12px;
+  flex-wrap: wrap;
+}
+
+.cookie-stat-badge {
+  background: #09122a;
+  border: 1px solid #172554;
+  border-radius: 4px;
+  padding: 4px 12px;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.cookie-table-container {
+  width: 100%;
+  overflow-x: auto;
+  overflow-y: auto;
+  max-height: 400px; /* 严控高度，杜绝过高失调 */
+  border: 1px solid #172554;
+  border-radius: 6px;
+  background-color: #060b17;
+}
+
+/* 核心：整表绝对禁止换行折行 */
+.cookie-full-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+  white-space: nowrap !important;
+}
+
+.cookie-full-table th {
+  background-color: #09122a;
+  color: #94a3b8;
+  font-weight: 600;
+  padding: 10px 14px;
+  border-bottom: 1px solid #172554;
+  white-space: nowrap !important;
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  text-align: left;
+}
+
+.cookie-full-table td {
+  padding: 9px 14px;
+  border-bottom: 1px solid #111c38;
+  white-space: nowrap !important;
+  vertical-align: middle;
+}
+
+/* 状态徽章 */
+.badge-status-valid {
+  background-color: rgba(6, 78, 59, 0.85);
+  border: 1px solid #059669;
+  color: #34d399;
+  border-radius: 9999px;
+  padding: 2px 8px;
+  font-size: 11px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.badge-status-session {
+  background-color: rgba(30, 64, 175, 0.6);
+  border: 1px solid #3b82f6;
+  color: #93c5fd;
+  border-radius: 9999px;
+  padding: 2px 8px;
+  font-size: 11px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.badge-status-expired {
+  background-color: rgba(127, 29, 29, 0.7);
+  border: 1px solid #ef4444;
+  color: #fca5a5;
+  border-radius: 9999px;
+  padding: 2px 8px;
+  font-size: 11px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.tag-flag {
+  background: #1e293b;
+  border: 1px solid #334155;
+  color: #38bdf8;
+  border-radius: 3px;
+  padding: 1px 5px;
+  font-size: 10px;
+  margin-right: 4px;
+  font-family: monospace;
 }
 
 /* ==================== SMTP 发信配置专属样式 (1:1 复刻截图) ==================== */
