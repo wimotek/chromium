@@ -4,95 +4,179 @@
 [![npm version](https://img.shields.io/npm/v/wimotek-chromium-sync.svg?style=flat-square)](https://www.npmjs.com/package/wimotek-chromium-sync)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg?style=flat-square)](LICENSE)
 
-专为 Chromium / Chrome 设计的通用会话与 Cookie 穿透热同步工具。
+专为 Chromium / Chrome 设计的现代化会话与 Cookie 集群同步调度工具。
 
-支持在本地容器与远程服务器容器之间双向热同步登录凭证（Cookie + LocalStorage），全端口可参数化自定义，内置智能流向识别与带心跳保活的 SSH 隧道自愈管理。
 ---
 
 ## 🌟 核心特性
 
-* 全端口自由定义：本地容器端口、远程实际端口、本地隧道映射端口及 SSH 端口均可自由配置或通过环境变量覆盖。
-* 智能双向流向探测 (auto)：连通后自动探测两端 Cookie 数量与页面状态，支持智能推荐、人工交互确认或全自动执行。
-* 内置心跳保活隧道：内置 ServerAliveInterval=15 与端口占用检测，已存在则自动复用，不存在则自动拉起，绝不产生假死僵尸连接。
-* 无 TTY 环境自适应：在 Linux Crontab 定时任务、无图形后台或 CI 流程中自动回退，不因无键盘输入而崩溃。
-* 双生态支持：同时发布于 PyPI 与 npm，支持 Python 代码导入与命令行跨语言一键执行。
+* **统一节点模型 (1对1 / 1对多集群)**：采用纯粹现代的节点架构，同时支持 1对1 穿透与任意规模的 1对多 节点集群分发。
+* **本地免密直连与全能 SSH 认证**：
+  * **本地节点**：指定本地端口即可直接直连 CDP，免登录、免配置、零 SSH 开销。
+  * **远程节点**：支持自定义 SSH 用户名 (`ssh_user`)、私钥认证 (`ssh_key_path` / `ssh_key_data`) 与密码认证 (`ssh_password`)。
+  * **端口自愈防撞**：自动为各远程节点分配互不冲突的本地隧道映射端口，已存在的活跃隧道自动复用。
+* **两类高效同步策略**：
+  * **`merge` (全节点凭证智能融合)**：汇总所有在线节点的 Cookie，若存在同名/同域/同路径冲突，**无条件保留有效期最新（expires 更长）的记录**，同时融合 LocalStorage 状态并向集群节点广播热刷新。
+  * **`sync` (单源广播同步)**：将指定源节点 (`source`) 的全部会话凭据镜像推送至一个或多个目标节点。
+* **极简调用，免建数据库表**：
+  * 代码层面提供 `get_cookies()`、`inspect()` 与 `get_summary_table()`，**仅需 1 行代码即可获取任何节点或全集群的 Cookie 列表与状态**。
+  * 命令行提供 `--status` (ASCII 表格) 与 `--json` (标准 JSON 格式)，随取随用。
+
+---
 
 ## 📦 安装
 
-Python 环境 (PyPI)
-
+### Python 环境 (PyPI)
 ```bash
 pip install wimotek-chromium-sync
+playwright install chromium
 ```
 
-Node.js 环境 (npm)
-
+### Node.js 环境 (npm)
 ```bash
-npm install wimotek-chromium-sync 
+npm install -g wimotek-chromium-sync
 ```
 
-## 🚀 极简使用示例
+---
 
-### 1. Python 代码调用（仅需 3 行）
+## 🚀 极简使用指南
 
+### 1. Python 代码调用
+
+#### (1) 1 行代码获取节点状态与 Cookie 详情 (无需数据库)
 ```python
 from chromium_sync import ChromiumSync
 
-自由定制两端的所有端口
+syncer = ChromiumSync(nodes=[
+    {"id": "local", "name": "本机容器", "cdp_port": 9222},
+    {"id": "kr2", "name": "韩国节点", "ssh_host": "kr2.wimotek.com", "ssh_user": "root", "ssh_key_path": "~/.ssh/id_rsa", "cdp_port": 9222}
+])
 
-syncer = ChromiumSync( remote_ssh="root@xx.xx.xx", # 远程 SSH 服务器
-remote_ssh_port=22, # SSH 连接端口
-local_cdp_port=16002, # 本地容器的 CDP 端口
-remote_cdp_port=9222, # 远程容器的实际
-CDP 端口 remote_tunnel_port=9222, # 本地用于接收隧道的端口
-direction="auto", # 智能判断: 自动往缺少凭证的一端同步
-timeout=15 # 倒计时等待秒数 (0 为秒执行) )
+# 打印美观的终端状态表格
+print(syncer.get_summary_table())
 
-syncer.run() 
+# 获取指定节点或全集群的 Cookie 明细列表 (无需创建外部数据库表)
+all_cookies = syncer.get_cookies()          # {"local": [...], "kr2": [...]}
+local_cookies = syncer.get_cookies("local") # 获取单个节点的 Cookie 列表
+print(f"本地有效 Cookie 数: {len(local_cookies)}")
 ```
 
-### 2. 命令行使用 (CLI 模式)
+#### (2) 全节点 Cookie 智能 Merge (合并最新有效期)
+```python
+from chromium_sync import ChromiumSync
 
-无论是通过 pip 安装还是 npm 安装，均可直接在终端中敲命令运行：
-
-```bash
-
-查看所有端口与流向选项
-
-chromium-sync --help
-
-自由指定各端口全自动推送 (0 秒等待)
-
-chromium-sync 
---remote-ssh root@xx.xx.xx 
---ssh-port 22 
---local-port 9222 
---tunnel-port 9222 
---direction push 
---timeout 0 
+syncer = ChromiumSync(
+    nodes=[
+        {"id": "local", "cdp_port": 9223},
+        {"id": "kr2", "ssh_host": "kr2.wimotek.com", "ssh_user": "root", "ssh_key_path": "~/.ssh/id_rsa", "cdp_port": 9222},
+        {"id": "sg1", "ssh_host": "sg1.wimotek.com", "ssh_user": "ubuntu", "ssh_password": "YourPassword", "cdp_port": 9222}
+    ],
+    mode="merge"
+)
+syncer.run()
 ```
 
-## ⚙️ 端口与参数对应说明
+#### (3) 单源广播同步 (例如将本机状态推送到所有云端节点)
+```python
+from chromium_sync import ChromiumSync
 
-| 参数名称                 | 命令行选项          | 对应环境变量                      | 默认值                    | 详细说明                 |
-| :------------------- | :------------- | :-------------------------- | :--------------------- | :------------------- |
-| remote\_ssh          | \--remote-ssh  | CHROMIUM\_REMOTE\_SSH       | <root@xx.xx.xx> | 远程 SSH 连接主机          |
-| remote\_ssh\_port    | \--ssh-port    | CHROMIUM\_SSH\_PORT         | 22                     | 远程服务器的 SSH 端口        |
-| local\_cdp\_port     | \--local-port  | CHROMIUM\_LOCAL\_PORT       | 16002                   | 运行在本机的容器 CDP 端口      |
-| remote\_cdp\_port    | \--remote-port | CHROMIUM\_REMOTE\_CDP\_PORT | 9222                   | 运行在远端服务器上的容器实际端口     |
-| remote\_tunnel\_port | \--tunnel-port | CHROMIUM\_TUNNEL\_PORT      | 9222                   | SSH 隧道映射到本机的监听端口     |
-| direction            | \--direction   | CHROMIUM\_DIRECTION         | push                   | 默认同步流向 (push 或 pull 或 auto) |
-| timeout              | \--timeout     | CHROMIUM\_TIMEOUT           | 15                      | 倒计时交互等待秒数，0 为免打扰秒执行  |
-| auto\_close\_tunnel  | \--auto-close  | \-                          | False                  | 任务完成后是否关闭创建的 SSH 隧道  |
+syncer = ChromiumSync(
+    nodes=[
+        {"id": "local", "cdp_port": 9222},
+        {"id": "node_a", "ssh_host": "10.0.0.1", "cdp_port": 9222},
+        {"id": "node_b", "ssh_host": "10.0.0.2", "cdp_port": 9222}
+    ],
+    mode="sync",
+    source="local"
+)
+syncer.run()
+```
 
-## 🤖 自动化与定时任务配置示例
-配合 Linux Crontab，每天凌晨自动将本地维护好的登录态推送到云端远程容器：
+---
+
+### 2. 命令行 (CLI) 快速执行
+
+#### (1) 终端直接传入多个节点 (内联精简语法)
 ```bash
-编辑定时任务
+# 智能合并多节点最新 Cookie
+chromium-sync \
+  --node id=local,port=9223 \
+  --node id=kr2,ssh=root@kr2.wimotek.com,port=9222,key=~/.ssh/id_rsa \
+  --node id=sg1,ssh=ubuntu@sg1.wimotek.com,port=9222,pass=SecretPassword \
+  --mode merge
+```
+
+#### (2) 仅查看状态与 Cookie 统计 (ASCII 报表)
+```bash
+chromium-sync \
+  --node id=local,port=9223 \
+  --node id=kr2,ssh=root@kr2.wimotek.com,port=9222,key=~/.ssh/id_rsa \
+  --status
+```
+输出样例：
+```text
+==========================================================================================
+节点 ID    | 节点名称       | 类型       | CDP端口/映射 | Cookie数   | 当前页面状态
+------------------------------------------------------------------------------------------
+local      | 本地容器       | 本地直连   | 9223         | 42 条      | [Google] https://google.com
+kr2        | 韩国节点       | SSH远程    | 19222        | 38 条      | [GitHub] https://github.com
+==========================================================================================
+```
+
+#### (3) 导出 Cookie 详情为 JSON (便于程序与定时脚本直接提取)
+```bash
+chromium-sync --config cluster.json --status --json > /tmp/cluster_cookies.json
+```
+
+#### (4) 使用 JSON 配置文件运行集群同步
+准备配置文件 `cluster.json`：
+```json
+[
+  { "id": "local", "name": "本地开发机", "cdp_port": 9222 },
+  { "id": "sg1", "name": "新加坡服", "ssh_host": "sg.host.com", "ssh_user": "ubuntu", "ssh_key_path": "~/.ssh/id_rsa", "cdp_port": 9222 },
+  { "id": "kr2", "name": "韩国服", "ssh_host": "kr.host.com", "ssh_user": "root", "ssh_password": "SafePassword123", "cdp_port": 9222 }
+]
+```
+单源广播或合并：
+```bash
+# 合并所有节点最新有效凭据
+chromium-sync --config cluster.json --mode merge
+
+# 本地向所有云端广播
+chromium-sync --config cluster.json --mode sync --source local
+```
+
+---
+
+## ⚙️ 节点配置字段规范 (NodeConfig)
+
+| 字段 | 类型 | 默认值 | 详细说明 |
+| :--- | :--- | :--- | :--- |
+| `id` | str | 必填 | 节点唯一标识符 (例如 `local`, `sg1`, `kr2`) |
+| `name` | str | `id` | 节点显示名称 |
+| `is_local` | bool | 自动识别 | 是否为本地节点 (不填 `ssh_host` 或填回环地址自动为 True，免密直连) |
+| `cdp_host` | str | `127.0.0.1` | 节点 CDP 服务监听的主机地址 |
+| `cdp_port` | int | `9222` | 节点暴露的 CDP 端口 |
+| `ssh_host` | str | `None` | 远程服务器 IP 或主机名 (提供该字段时识别为远程 SSH 节点) |
+| `ssh_port` | int | `22` | 远程服务器 SSH 端口 |
+| `ssh_user` | str | `root` | 远程 SSH 用户名 |
+| `ssh_key_path` | str | `None` | SSH 私钥文件路径 (例如 `~/.ssh/id_rsa`) |
+| `ssh_key_data` | str | `None` | SSH 私钥内容字符串 |
+| `ssh_password` | str | `None` | SSH 登录密码 (无外部依赖纯原生环境自动适配) |
+| `tunnel_port` | int | 自动分配 | 本地用于映射隧道的端口 (集群环境下自动递增分配防冲突) |
+
+---
+
+## 🤖 定时任务配置示例 (Crontab)
+
+配合 Linux Crontab，每天凌晨定时执行全节点凭证智能融合：
+```bash
 crontab -e
-添加此行：每天凌晨 3:00 自动执行同步且不弹任何提示
-0 3 * * * /usr/local/bin/chromium-sync --direction push --timeout 0 --auto-close >> /tmp/chromium_sync.log 2>&1
+# 每天凌晨 3:00 自动融合多节点最新有效凭证并释放隧道
+0 3 * * * /usr/local/bin/chromium-sync --config /etc/chromium/cluster.json --mode merge --auto-close >> /var/log/chromium_sync.log 2>&1
 ```
+
+---
 
 ## 📄 License
 

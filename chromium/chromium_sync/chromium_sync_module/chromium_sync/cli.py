@@ -1,32 +1,156 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+"""
+Chromium Sync CLI (现代多节点调度版)
+"""
 
 import argparse
-from .core import ChromiumSync
+import json
+import os
+import sys
+try:
+    from .core import ChromiumSync, NodeConfig
+except (ImportError, ValueError):
+    from core import ChromiumSync, NodeConfig
+
+
+def parse_node_str(val: str) -> dict:
+    """
+    解析内联节点定义参数:
+    例如:
+      --node id=local,port=9222
+      --node id=kr2,ssh=root@kr2.wimotek.com,port=9222,key=~/.ssh/id_rsa
+      --node id=sg1,ssh=ubuntu@sg1.wimotek.com,port=9222,pass=Secret123
+      --node '{"id": "local", "cdp_port": 9222}'
+    """
+    val = val.strip()
+    if val.startswith("{") and val.endswith("}"):
+        return json.loads(val)
+
+    res = {}
+    for part in val.split(","):
+        if "=" in part:
+            k, v = part.split("=", 1)
+            k = k.strip().lower()
+            v = v.strip()
+            if k in ("port", "cdp_port"):
+                res["cdp_port"] = int(v)
+            elif k in ("ssh_port",):
+                res["ssh_port"] = int(v)
+            elif k in ("tunnel_port",):
+                res["tunnel_port"] = int(v)
+            elif k in ("local", "is_local"):
+                res["is_local"] = v.lower() in ("true", "1", "yes")
+            elif k in ("host", "cdp_host"):
+                res["cdp_host"] = v
+            elif k in ("ssh", "ssh_host"):
+                if "@" in v:
+                    user, host = v.split("@", 1)
+                    res["ssh_user"] = user
+                    res["ssh_host"] = host
+                else:
+                    res["ssh_host"] = v
+            elif k in ("user", "ssh_user"):
+                res["ssh_user"] = v
+            elif k in ("key", "ssh_key", "ssh_key_path"):
+                res["ssh_key_path"] = v
+            elif k in ("pass", "password", "ssh_pass", "ssh_password"):
+                res["ssh_password"] = v
+            elif k in ("id", "name"):
+                res[k] = v
+            else:
+                res[k] = v
+
+    if "id" not in res:
+        res["id"] = res.get("name") or res.get("ssh_host") or "local"
+    return res
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Chromium 一体化会话热同步工具")
-    parser.add_argument("--remote-ssh", default="root@kr2.wimotek.com", help="远程 SSH 地址")
-    parser.add_argument("--ssh-port", type=int, default=22, help="远程 SSH 端口")
-    parser.add_argument("--local-port", type=int, default=9223, help="本地容器 CDP 端口")
-    parser.add_argument("--remote-port", type=int, default=9222, help="远程容器暴露的端口")
-    parser.add_argument("--tunnel-port", type=int, default=9222, help="本地隧道端口")
-    parser.add_argument("--direction", choices=["push", "pull", "auto"], default=None, help="同步方向")
-    parser.add_argument("--timeout", type=int, default=5, help="倒计时秒数 (设为 0 即秒执行)")
-    parser.add_argument("--auto-close", action="store_true", help="任务完成后关闭 SSH 隧道")
+    parser = argparse.ArgumentParser(
+        description="现代多节点 Chromium 会话同步与 Cookie 集群调度工具",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+使用示例:
+  # 1. 快速查看节点状态与 Cookie 数量 (ASCII 表格)
+  chromium-sync --node id=local,port=9222 --node id=kr2,ssh=root@kr2.wimotek.com,port=9222,key=~/.ssh/id_rsa --status
+
+  # 2. 导出节点状态与 Cookie 详情为 JSON (便于程序直接提取 Cookie 列表)
+  chromium-sync --config cluster.json --status --json
+
+  # 3. 全节点 Cookie 智能 Merge (合并所有节点并保留最新有效期)
+  chromium-sync --config cluster.json --mode merge
+
+  # 4. 指定单源节点广播同步到所有其他节点
+  chromium-sync --config cluster.json --mode sync --source local
+
+  # 5. 极简命令行多节点直接同步
+  chromium-sync \\
+    --node id=local,port=9223 \\
+    --node id=kr2,ssh=root@kr2.wimotek.com,port=9222,key=~/.ssh/id_rsa \\
+    --mode merge
+        """
+    )
+
+    # 节点输入方式
+    parser.add_argument("--config", help="集群节点配置文件路径 (JSON 格式)")
+    parser.add_argument("--node", action="append", default=[], help="定义节点 (可多次传入，如 id=local,port=9222)")
+    parser.add_argument("--nodes", help="JSON 数组格式的节点配置字符串")
+
+    # 同步模式
+    parser.add_argument("--mode", choices=["sync", "merge"], default="sync",
+                        help="同步方式: 'merge'(合并所有节点最新Cookie), 'sync'(单源广播同步，默认)")
+    parser.add_argument("--source", default=None, help="sync 模式下的源节点 ID (默认第一个节点)")
+    parser.add_argument("--targets", nargs="*", default=None, help="sync 模式下的目标节点 ID 列表 (默认其余所有节点)")
+
+    # 探测与数据查询
+    parser.add_argument("--status", action="store_true", help="仅探测并输出各节点的 Cookie 数与详情表格，不执行写入")
+    parser.add_argument("--json", action="store_true", help="以 JSON 格式输出节点完整数据与 Cookie 列表")
+
+    # 隧道与连接
+    parser.add_argument("--auto-close", action="store_true", help="任务完成后关闭拉起的 SSH 隧道")
+    parser.add_argument("-v", "--verbose", action="store_true", help="显示详细调试日志")
+
     args = parser.parse_args()
 
+    # 聚合节点配置
+    raw_nodes = []
+    if args.config:
+        if not os.path.exists(args.config):
+            sys.exit(f"[-] 配置文件不存在: {args.config}")
+        with open(args.config, "r", encoding="utf-8") as f:
+            raw_nodes.extend(json.load(f))
+
+    if args.nodes:
+        raw_nodes.extend(json.loads(args.nodes))
+
+    if args.node:
+        for n_str in args.node:
+            raw_nodes.append(parse_node_str(n_str))
+
+    # 默认兜底：若未传入任何节点参数，尝试使用标准默认本地节点
+    if not raw_nodes:
+        raw_nodes = [
+            {"id": "local", "name": "本地容器", "is_local": True, "cdp_port": 9222}
+        ]
+
     syncer = ChromiumSync(
-        remote_ssh=args.remote_ssh,
-        remote_ssh_port=args.ssh_port,
-        local_cdp_port=args.local_port,
-        remote_cdp_port=args.remote_port,
-        remote_tunnel_port=args.tunnel_port,
-        direction=args.direction or "auto",
-        timeout=args.timeout,
-        auto_close_tunnel=args.auto_close
+        nodes=raw_nodes,
+        mode=args.mode,
+        source=args.source,
+        targets=args.targets,
+        auto_close_tunnel=args.auto_close,
+        verbose=args.verbose
     )
+
+    if args.status:
+        report = syncer.inspect()
+        if args.json:
+            print(json.dumps(report, ensure_ascii=False, indent=2))
+        else:
+            print(syncer.get_summary_table(report))
+        return
+
     syncer.run()
 
 

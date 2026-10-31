@@ -81,7 +81,6 @@ os.makedirs(CERTS_DIR, exist_ok=True)
 
 INIT_PASSWORD = os.getenv("ADMIN_INIT_PASS", "Admin@123456")
 
-# 引入外部通用 ChromiumSync 模块
 ChromiumSync = None
 try:
     from chromium_sync import ChromiumSync
@@ -156,7 +155,7 @@ def ensure_ssl_certificates():
             SSL_KEY_FILE = os.path.join(fallback_dir, "privkey.pem")
             generate_self_signed_cert(SSL_CERT_FILE, SSL_KEY_FILE)
 
-# ==================== 2. 数据库与设置初始化 ====================
+# ==================== 2. 数据库与设置初始化 (扩展审计日志字段) ====================
 def init_db_and_jwt():
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
@@ -187,16 +186,37 @@ def init_db_and_jwt():
     )''')
 
     cur.execute('''CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)''')
+    
+    # 结构化审计日志表 (扩展源节点、分发目标、Cookie数量、执行耗时)
     cur.execute('''CREATE TABLE IF NOT EXISTS sync_logs (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         timestamp TEXT,
+        source_node TEXT DEFAULT '',
+        target_nodes TEXT DEFAULT '',
+        cookie_count INTEGER DEFAULT 0,
+        duration TEXT DEFAULT '',
         status TEXT,
         details TEXT
     )''')
 
-    for col, col_type in [("auto_tunnel", "INTEGER DEFAULT 1"), ("cookie_count", "INTEGER DEFAULT 0")]:
+    # 平滑迁移表结构
+    for col, col_type in [
+        ("auto_tunnel", "INTEGER DEFAULT 1"),
+        ("cookie_count", "INTEGER DEFAULT 0")
+    ]:
         try:
             cur.execute(f"ALTER TABLE nodes ADD COLUMN {col} {col_type}")
+        except Exception:
+            pass
+
+    for col, col_type in [
+        ("source_node", "TEXT DEFAULT ''"),
+        ("target_nodes", "TEXT DEFAULT ''"),
+        ("cookie_count", "INTEGER DEFAULT 0"),
+        ("duration", "TEXT DEFAULT ''")
+    ]:
+        try:
+            cur.execute(f"ALTER TABLE sync_logs ADD COLUMN {col} {col_type}")
         except Exception:
             pass
 
@@ -216,7 +236,6 @@ def init_db_and_jwt():
         'email_notify_to': '',
         'serverchan_enabled': '0',
         'serverchan_key': '',
-        # 同步中心：默认首选 smart_merge
         'sync_interval_minutes': '15',
         'sync_mode': 'smart_merge',
         'sync_source_id': '0',
@@ -304,11 +323,6 @@ async def dispatch_notification(title: str, content: str):
 
 # ==================== 4. 智能 Cookie 最新值消歧与合并算法 ====================
 def smart_merge_cookies(all_cookie_lists: List[List[dict]]) -> List[dict]:
-    """
-    智能多节点 Cookie 最新值合并算法：
-    1. 不同域名的 Cookie 自动取并集，彼此互补；
-    2. 同名 Cookie 发生冲突时，通过 expires 顺延时间与凭证长短裁决最新值。
-    """
     merged_pool: Dict[tuple, dict] = {}
     for cookies in all_cookie_lists:
         for c in cookies:
@@ -320,10 +334,8 @@ def smart_merge_cookies(all_cookie_lists: List[List[dict]]) -> List[dict]:
                 if existing.get('value') != c.get('value'):
                     exp_existing = existing.get('expires', -1)
                     exp_new = c.get('expires', -1)
-                    # 规则 1: 比较过期时间（被服务端最新刷新的有效 Token 通常顺延了 Expiration）
                     if exp_new > exp_existing:
                         merged_pool[key] = c
-                    # 规则 2: 同为 session 或过期时间相同，保留较长凭据
                     elif exp_new == exp_existing:
                         if len(str(c.get('value', ''))) >= len(str(existing.get('value', ''))):
                             merged_pool[key] = c
@@ -355,7 +367,6 @@ async def fetch_cookies_native(local_port: int) -> List[dict]:
         if cookies:
             return cookies
 
-        # 回退 Network 域
         await ws.send(json.dumps({"id": 2, "method": "Network.enable"}))
         await ws.recv()
         await ws.send(json.dumps({"id": 3, "method": "Network.getAllCookies"}))
@@ -477,8 +488,9 @@ async def tunnel_watchdog_loop():
             logger.debug(f"看门狗巡检异常: {e}")
         await asyncio.sleep(30)
 
-# ==================== 6. 同步调度引擎 (首选：智能最新值合并) ====================
+# ==================== 6. 同步调度引擎 (高保真审计统计：源/目标/数量/耗时) ====================
 async def execute_sync_task(custom_source_id: Optional[int] = None, custom_target_ids: Optional[List[int]] = None):
+    start_ts = time.time()
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     cur = conn.cursor()
@@ -493,8 +505,13 @@ async def execute_sync_task(custom_source_id: Optional[int] = None, custom_targe
     log_detail = []
     sync_mode = get_setting("sync_mode", "smart_merge")
 
+    source_node_desc = ""
+    target_nodes_desc = ""
+    cookie_count_metric = 0
+
     # 场景 A: 默认首选【智能全局最新值合并 (Smart Merge)】
     if not custom_source_id and sync_mode == "smart_merge":
+        source_node_desc = "🌟 全网智能汇聚"
         try:
             log_detail.append("🚀 触发【智能全局最新值合并 (Smart Merge)】模式：并发嗅探所有节点...")
             
@@ -511,8 +528,9 @@ async def execute_sync_task(custom_source_id: Optional[int] = None, custom_targe
                     log_detail.append(f"• 节点 [{n_name}] 暂时无法连接 ({res})")
 
             golden_pool = smart_merge_cookies(valid_cookie_lists)
-            total_merged = len(golden_pool)
-            log_detail.append(f"✨ 智能裁决融合完成：生成全网黄金凭据池 (共 {total_merged} 条唯一最新 Cookies)")
+            cookie_count_metric = len(golden_pool)
+            target_nodes_desc = f"全网对齐 ({len(nodes)} 个节点)"
+            log_detail.append(f"✨ 智能裁决融合完成：生成全网黄金凭据池 (共 {cookie_count_metric} 条唯一最新 Cookies)")
 
             async def _push_golden(node):
                 try:
@@ -551,6 +569,8 @@ async def execute_sync_task(custom_source_id: Optional[int] = None, custom_targe
             logger.warning("未配置或无法找到源节点，跳过主从分发。")
             return
 
+        source_node_desc = f"{source['name']} ({'本地' if source['is_local'] else source['ssh_host']})"
+
         targets = []
         if custom_target_ids is not None:
             targets = [n for n in nodes if n["id"] in custom_target_ids and n["id"] != source["id"]]
@@ -561,9 +581,12 @@ async def execute_sync_task(custom_source_id: Optional[int] = None, custom_targe
             else:
                 targets = [n for n in nodes if n["id"] != source["id"]]
 
+        target_nodes_desc = ", ".join([t['name'] for t in targets]) if targets else "无分发目标"
+
         try:
             cookies = await fetch_cookies_native(source['local_bind_port'])
-            log_detail.append(f"主从广播：从源节点 [{source['name']}] 捕获到 {len(cookies)} 个 Cookies")
+            cookie_count_metric = len(cookies)
+            log_detail.append(f"主从广播：从源节点 [{source['name']}] 捕获到 {cookie_count_metric} 个 Cookies")
 
             for target in targets:
                 try:
@@ -577,15 +600,20 @@ async def execute_sync_task(custom_source_id: Optional[int] = None, custom_targe
             status = "FAILED"
             log_detail.append(f"主从分发中断: {e}")
 
+    duration_str = f"{time.time() - start_ts:.2f}s"
+
+    # 写入详尽结构化审计日志
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
-    cur.execute("INSERT INTO sync_logs (timestamp, status, details) VALUES (?, ?, ?)",
-                (sync_time, status, "\n".join(log_detail)))
+    cur.execute("""
+        INSERT INTO sync_logs (timestamp, source_node, target_nodes, cookie_count, duration, status, details)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+    """, (sync_time, source_node_desc, target_nodes_desc, cookie_count_metric, duration_str, status, "\n".join(log_detail)))
     conn.commit()
     conn.close()
 
     if status == "FAILED":
-        await dispatch_notification("Cookie 同步告警", f"时间: {sync_time}\n详情:\n" + "\n".join(log_detail))
+        await dispatch_notification("Cookie 同步告警", f"时间: {sync_time} (耗时: {duration_str})\n详情:\n" + "\n".join(log_detail))
 
 # ==================== 7. 定时调度器 ====================
 scheduler = BackgroundScheduler()
@@ -883,7 +911,7 @@ async def toggle_tunnel(node_id: int, user: dict = Depends(verify_token)):
         raise HTTPException(status_code=500, detail=msg)
     return {"status": "connected", "message": msg}
 
-# 支持双击切换开关 (可设置默认源，再次点击可取消)
+# 默认源双击切换接口
 @app.post("/api/nodes/{node_id}/toggle-source")
 def toggle_source(node_id: int, user: dict = Depends(verify_token)):
     conn = sqlite3.connect(DB_PATH)
@@ -914,7 +942,7 @@ def toggle_source(node_id: int, user: dict = Depends(verify_token)):
 def set_source_compat(node_id: int, user: dict = Depends(verify_token)):
     return toggle_source(node_id, user)
 
-# 密钥存储库 (支持备注与添加时间)
+# 密钥存储库
 @app.get("/api/ssh-keys")
 def list_keys(user: dict = Depends(verify_token)):
     conn = sqlite3.connect(DB_PATH)
@@ -1013,12 +1041,17 @@ async def trigger_sync(data: TriggerSyncDTO = TriggerSyncDTO(), user: dict = Dep
     await execute_sync_task(custom_source_id=data.source_id, custom_target_ids=data.target_ids)
     return {"message": "同步任务指令已下发执行"}
 
+# 高保真结构化审计日志接口
 @app.get("/api/sync/logs")
 def get_logs(user: dict = Depends(verify_token)):
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     cur = conn.cursor()
-    cur.execute("SELECT * FROM sync_logs ORDER BY id DESC LIMIT 50")
+    cur.execute("""
+        SELECT id, timestamp, source_node, target_nodes, cookie_count, duration, status, details 
+        FROM sync_logs 
+        ORDER BY id DESC LIMIT 50
+    """)
     logs = [dict(r) for r in cur.fetchall()]
     conn.close()
     return logs

@@ -1,7 +1,8 @@
 """
-Chromium Sync Package
+wimotek-chromium-sync Package
+Universal Chromium Session & Cookie Synchronizer with SSH Tunnel and Cluster Support
 """
-from .core import ChromiumSync
+from .core import ChromiumSync, NodeConfig, merge_cookies
 
-__version__ = "1.0.0"
-__all__ = ["ChromiumSync"]
+__version__ = "1.1.0"
+__all__ = ["ChromiumSync", "NodeConfig", "merge_cookies"]

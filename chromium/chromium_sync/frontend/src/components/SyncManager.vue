@@ -10,20 +10,33 @@ const logs = ref([])
 const nodes = ref([])
 const isSyncing = ref(false)
 
+// 详情弹窗状态
+const showLogModal = ref(false)
+const selectedLogDetail = ref('')
+
+// 同步策略配置 (首选 smart_merge)
 const syncConfig = reactive({
   sync_interval_minutes: 15,
-  sync_mode: 'smart_merge', // 默认首选 smart_merge
+  sync_mode: 'smart_merge',
   sync_source_id: 0,
   sync_target_ids: []
 })
 
-// 即时定向同步
+// 主从模式下：待添加的目标节点 ID
+const selectedScheduleTargetToAdd = ref('')
+
+// 即时定向同步状态
 const manualSourceId = ref(0)
-const manualTargetMode = ref('all') // 'all' (广播全网) | 'custom' (指定特定目标)
+const manualTargetMode = ref('all') // 'all' | 'custom'
 const manualTargetIds = ref([])
 const selectedTargetToAdd = ref('')
 
-// 候选目标：排除当前选中的源节点
+// 主从模式候选目标：排除源节点
+const scheduleCandidateTargets = computed(() => {
+  return nodes.value.filter(n => n.id !== syncConfig.sync_source_id)
+})
+
+// 即时同步候选目标：排除临时源节点
 const candidateTargets = computed(() => {
   return nodes.value.filter(n => n.id !== manualSourceId.value)
 })
@@ -38,17 +51,56 @@ const loadData = async () => {
   logs.value = await lRes.json()
   nodes.value = await nRes.json()
 
-  // 核心容错：若无默认源，自适应兜底
-  const defaultSrcNode = nodes.value.find(n => n.is_source === 1)
-  if (defaultSrcNode) {
-    manualSourceId.value = defaultSrcNode.id
-    if (syncConfig.sync_source_id === 0) syncConfig.sync_source_id = defaultSrcNode.id
+  const defaultSrc = nodes.value.find(n => n.is_source === 1)
+  if (defaultSrc) {
+    manualSourceId.value = defaultSrc.id
+    if (syncConfig.sync_source_id === 0) syncConfig.sync_source_id = defaultSrc.id
   } else if (nodes.value.length > 0) {
-    // 没有默认源节点时，自动选取列表第 1 个作为抓取源，绝不留白
     manualSourceId.value = nodes.value[0].id
-  } else {
-    manualSourceId.value = 0
   }
+}
+
+// ---------------- 主从模式目标选择交互 ----------------
+const addScheduleTarget = () => {
+  const id = parseInt(selectedScheduleTargetToAdd.value)
+  if (id && !syncConfig.sync_target_ids.includes(id)) {
+    syncConfig.sync_target_ids.push(id)
+  }
+  selectedScheduleTargetToAdd.value = ''
+}
+
+const removeScheduleTarget = (id) => {
+  syncConfig.sync_target_ids = syncConfig.sync_target_ids.filter(x => x !== id)
+}
+
+const selectAllScheduleTargets = () => {
+  syncConfig.sync_target_ids = scheduleCandidateTargets.value.map(n => n.id)
+  props.showToast(`已全选当前 ${syncConfig.sync_target_ids.length} 个候选目标`, 'success')
+}
+
+const clearAllScheduleTargets = () => {
+  syncConfig.sync_target_ids = []
+}
+
+// ---------------- 即时定向目标选择交互 ----------------
+const addTargetToManual = () => {
+  const id = parseInt(selectedTargetToAdd.value)
+  if (id && !manualTargetIds.value.includes(id)) {
+    manualTargetIds.value.push(id)
+  }
+  selectedTargetToAdd.value = ''
+}
+
+const removeManualTarget = (id) => {
+  manualTargetIds.value = manualTargetIds.value.filter(x => x !== id)
+}
+
+const selectAllManualTargets = () => {
+  manualTargetIds.value = candidateTargets.value.map(n => n.id)
+}
+
+const clearAllManualTargets = () => {
+  manualTargetIds.value = []
 }
 
 const saveSyncPolicy = async () => {
@@ -62,22 +114,9 @@ const saveSyncPolicy = async () => {
   }
 }
 
-const addTargetToManual = () => {
-  const id = parseInt(selectedTargetToAdd.value)
-  if (id && !manualTargetIds.value.includes(id)) {
-    manualTargetIds.value.push(id)
-  }
-  selectedTargetToAdd.value = ''
-}
-
-const removeManualTarget = (id) => {
-  manualTargetIds.value = manualTargetIds.value.filter(x => x !== id)
-}
-
 const triggerSync = async (isManualDirected = false) => {
   if (isSyncing.value) return
 
-  // 容错校验：若执行定向同步，必须有有效的源节点
   if (isManualDirected) {
     if (!manualSourceId.value || manualSourceId.value === 0) {
       props.showToast('请先选择一个抓取凭证的源节点！', 'error')
@@ -110,6 +149,11 @@ const triggerSync = async (isManualDirected = false) => {
   }
 }
 
+const viewLogDetail = (detail) => {
+  selectedLogDetail.value = detail
+  showLogModal.value = true
+}
+
 onMounted(() => {
   loadData()
 })
@@ -127,10 +171,10 @@ onMounted(() => {
       </button>
     </div>
 
-    <!-- 策略配置双列布局 -->
+    <!-- 策略配置双列栅格 -->
     <div class="grid-2col-fluid" style="margin-bottom:20px;">
       
-      <!-- 左列：调度策略配置 (智能合并首选) -->
+      <!-- 左列：调度策略配置 -->
       <div style="background:#09122a; border:1px solid #172554; border-radius:8px; padding:16px;">
         <h3 class="card-inner-h3" style="margin-bottom:12px;">⚙️ 自动化调度策略</h3>
         <div class="form-v-stack">
@@ -146,7 +190,7 @@ onMounted(() => {
             <label class="form-label">同步模式规则 (默认首选智能合并)</label>
             <div class="form-v-stack" style="gap:10px;">
               
-              <!-- 选项 1: 智能合并 (无需依赖默认源) -->
+              <!-- 选项 1: 智能合并 -->
               <label :class="['sync-mode-card', syncConfig.sync_mode === 'smart_merge' ? 'sync-mode-active' : '']">
                 <input type="radio" v-model="syncConfig.sync_mode" value="smart_merge" style="display:none;">
                 <div style="display:flex; justify-content:space-between; align-items:center;">
@@ -158,22 +202,22 @@ onMounted(() => {
                 </p>
               </label>
 
-              <!-- 选项 2: 主从定向模式 -->
+              <!-- 选项 2: 主从定向模式 (已彻底改造为下拉添加与一键 ALL 全选) -->
               <label :class="['sync-mode-card', syncConfig.sync_mode === 'master_worker' ? 'sync-mode-active' : '']">
                 <input type="radio" v-model="syncConfig.sync_mode" value="master_worker" style="display:none;">
                 <div style="display:flex; justify-content:space-between; align-items:center;">
                   <span style="font-weight:bold; color:#cbd5e1;">📌 指定主节点单向广播 (Master-Worker)</span>
                 </div>
                 <p class="sync-mode-desc">
-                  指定固定的 Master 节点，将其凭证单向覆盖至指定的从属目标节点。
+                  指定固定的 Master 节点，将其凭据单向覆盖至指定的从属目标节点队列。
                 </p>
               </label>
 
             </div>
           </div>
 
-          <!-- 主从模式下的参数输入 -->
-          <div v-if="syncConfig.sync_mode === 'master_worker'" class="form-v-stack" style="background:#060b17; padding:12px; border-radius:6px; border:1px solid #1e3a8a;">
+          <!-- 主从模式下的目标节点选择 (支持海量节点管理) -->
+          <div v-if="syncConfig.sync_mode === 'master_worker'" class="form-v-stack" style="background:#060b17; padding:14px; border-radius:6px; border:1px solid #1e3a8a;">
             <div>
               <label class="form-label">指定固定源节点 (Master)</label>
               <select v-model="syncConfig.sync_source_id" class="cdp-input cdp-w-normal font-cyan-mono">
@@ -184,13 +228,37 @@ onMounted(() => {
               </select>
             </div>
 
-            <div>
-              <label class="form-label">分发目标节点 (勾选)</label>
-              <div style="display:flex; gap:12px; flex-wrap:wrap; margin-top:6px;">
-                <label v-for="n in nodes.filter(x => x.id !== syncConfig.sync_source_id)" :key="n.id" style="display:flex; align-items:center; gap:6px; font-size:12px; color:#cbd5e1; cursor:pointer;">
-                  <input type="checkbox" :value="n.id" v-model="syncConfig.sync_target_ids" class="check-box-blue">
-                  <span>{{ n.name }}</span>
-                </label>
+            <div style="margin-top:6px;">
+              <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">
+                <label class="form-label" style="margin:0;">加入目标节点队列 (一对多)</label>
+                <div style="display:flex; gap:8px;">
+                  <button type="button" @click="selectAllScheduleTargets" class="link-probe" style="font-size:11px;">⚡ ALL 一次全选所有</button>
+                  <button type="button" @click="clearAllScheduleTargets" class="link-probe" style="font-size:11px; color:#f87171;">清空</button>
+                </div>
+              </div>
+
+              <!-- 下拉选择与添加 -->
+              <div style="display:flex; gap:8px; align-items:center; margin-bottom:8px;">
+                <select v-model="selectedScheduleTargetToAdd" class="cdp-input font-cyan-mono" style="width: auto; min-width: 220px;">
+                  <option value="">-- 选择加入的分发目标节点 --</option>
+                  <option v-for="n in scheduleCandidateTargets.filter(x => !syncConfig.sync_target_ids.includes(x.id))" :key="n.id" :value="n.id">
+                    + {{ n.name }} ({{ n.is_local ? '本地' : n.ssh_host }})
+                  </option>
+                </select>
+                <button type="button" @click="addScheduleTarget" class="btn-gray-test" style="height:32px; padding:4px 12px;">
+                  添加目标
+                </button>
+              </div>
+
+              <!-- 已选目标胶囊列表 -->
+              <div style="display:flex; gap:8px; flex-wrap:wrap; min-height:28px; align-items:center;">
+                <span v-for="tid in syncConfig.sync_target_ids" :key="tid" class="target-chip">
+                  {{ nodes.find(n => n.id === tid)?.name || tid }}
+                  <span @click="removeScheduleTarget(tid)" class="chip-del-x">✕</span>
+                </span>
+                <span v-if="syncConfig.sync_target_ids.length === 0" style="font-size:11px; color:#64748b;">
+                  * 尚未添加目标节点，点击“ALL 一次全选”或从下拉菜单添加目标
+                </span>
               </div>
             </div>
           </div>
@@ -201,13 +269,12 @@ onMounted(() => {
         </div>
       </div>
 
-      <!-- 右列：即时定向同步执行器 (防空白自适应) -->
+      <!-- 右列：即时定向同步执行器 -->
       <div style="background:#09122a; border:1px solid #172554; border-radius:8px; padding:16px;">
         <h3 class="card-inner-h3" style="margin-bottom:6px;">🎯 即时定向同步 (按需临时执行)</h3>
         <p style="font-size:11px; color:#64748b; margin-bottom:12px;">临时指定任意源节点，并将凭证批量推送到指定的单个或多个目标节点。</p>
         
         <div class="form-v-stack">
-          <!-- 选择源节点：包含占位提示与星标指示 -->
           <div class="form-field-block">
             <label class="form-label">选择抓取凭据的源节点 (Source)</label>
             <select v-model="manualSourceId" class="cdp-input cdp-w-normal font-cyan-mono">
@@ -233,16 +300,22 @@ onMounted(() => {
 
             <!-- 自定义目标添加控件 -->
             <div v-if="manualTargetMode === 'custom'" style="background:#060b17; border:1px solid #172554; border-radius:6px; padding:10px;">
-              <div style="display:flex; gap:8px; align-items:center; margin-bottom:8px;">
-                <select v-model="selectedTargetToAdd" class="cdp-input font-cyan-mono" style="width: auto; min-width: 220px;">
-                  <option value="">-- 选择加入的目标节点 --</option>
-                  <option v-for="n in candidateTargets.filter(x => !manualTargetIds.includes(x.id))" :key="n.id" :value="n.id">
-                    + {{ n.name }} ({{ n.is_local ? '本地' : n.ssh_host }})
-                  </option>
-                </select>
-                <button type="button" @click="addTargetToManual" class="btn-gray-test" style="height:32px; padding:4px 12px;">
-                  添加目标
-                </button>
+              <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+                <div style="display:flex; gap:8px; align-items:center;">
+                  <select v-model="selectedTargetToAdd" class="cdp-input font-cyan-mono" style="width: auto; min-width: 200px;">
+                    <option value="">-- 选择加入的目标节点 --</option>
+                    <option v-for="n in candidateTargets.filter(x => !manualTargetIds.includes(x.id))" :key="n.id" :value="n.id">
+                      + {{ n.name }} ({{ n.is_local ? '本地' : n.ssh_host }})
+                    </option>
+                  </select>
+                  <button type="button" @click="addTargetToManual" class="btn-gray-test" style="height:32px; padding:4px 12px;">
+                    添加目标
+                  </button>
+                </div>
+                <div style="display:flex; gap:8px;">
+                  <button type="button" @click="selectAllManualTargets" class="link-probe" style="font-size:11px;">⚡ 全选</button>
+                  <button type="button" @click="clearAllManualTargets" class="link-probe" style="font-size:11px; color:#f87171;">清空</button>
+                </div>
               </div>
 
               <div style="display:flex; gap:8px; flex-wrap:wrap; min-height:28px; align-items:center;">
@@ -269,20 +342,98 @@ onMounted(() => {
       </div>
     </div>
 
-    <!-- 调度审计追踪日志 -->
-    <div style="margin-top:20px;">
-      <h3 style="font-size:13px; font-weight:bold; color:#cbd5e1; margin-bottom:8px;">调度审计追踪事件：</h3>
-      <div class="console-box">
-        <div v-for="l in logs" :key="l.id" class="console-item">
-          <div class="console-meta">
-            <span>[{{ l.timestamp }}]</span>
-            <span :style="{ color: l.status==='SUCCESS' ? '#34d399' : '#f87171', fontWeight: 'bold' }">[{{ l.status }}]</span>
-          </div>
-          <pre class="console-pre">{{ l.details }}</pre>
+    <!-- ==================== 审计列表：高规格结构化数据表格 ==================== -->
+    <div style="margin-top:24px;">
+      <div class="table-header-bar" style="border-bottom:none; margin-bottom:8px; padding-bottom:0;">
+        <div class="table-title">
+          <span style="font-size:16px;">📜</span>
+          <h3 class="header-bold-title" style="font-size:14px;">同步任务审计追踪流水</h3>
         </div>
-        <div v-if="logs.length === 0" style="text-align:center; color:#64748b; padding:40px;">暂无调度事件</div>
+        <button @click="loadData" class="link-probe" style="font-size:12px;">刷新审计</button>
+      </div>
+
+      <div class="table-responsive" style="border: 1px solid #172554; border-radius: 8px; background: #060b17;">
+        <table class="cdp-fluid-table" style="font-size:12px;">
+          <thead>
+            <tr>
+              <th style="min-width: 160px;">时间戳</th>
+              <th style="min-width: 140px;">源节点</th>
+              <th style="min-width: 180px;">分发目标</th>
+              <th style="min-width: 110px;">Cookie 数量</th>
+              <th style="min-width: 100px;">执行耗时</th>
+              <th style="min-width: 90px; text-align: center;">状态</th>
+              <th style="min-width: 90px; text-align: right; padding-right: 18px;">日志详情</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="l in logs" :key="l.id">
+              <!-- 时间戳 -->
+              <td class="font-cyan-mono" style="color:#94a3b8;">{{ l.timestamp }}</td>
+
+              <!-- 源节点 -->
+              <td>
+                <span v-if="l.source_node.includes('智能')" class="badge-recommend" style="font-size:11px;">
+                  {{ l.source_node }}
+                </span>
+                <span v-else class="cell-main-name" style="font-size:12px;">
+                  {{ l.source_node || '---' }}
+                </span>
+              </td>
+
+              <!-- 分发目标 -->
+              <td style="color:#cbd5e1; max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" :title="l.target_nodes">
+                {{ l.target_nodes || '---' }}
+              </td>
+
+              <!-- Cookie 数量 -->
+              <td>
+                <span class="cookie-badge" style="font-size:11px; padding:1px 6px;">
+                  🍪 {{ l.cookie_count || 0 }} 条
+                </span>
+              </td>
+
+              <!-- 执行耗时 -->
+              <td class="font-cyan-mono" style="color:#38bdf8; font-weight:bold;">
+                ⏱️ {{ l.duration || '0.00s' }}
+              </td>
+
+              <!-- 状态 -->
+              <td style="text-align: center;">
+                <span v-if="l.status==='SUCCESS'" class="status-active" style="padding:1px 8px; font-size:11px;">● 成功</span>
+                <span v-else class="status-error" style="padding:1px 8px; font-size:11px;">✕ 失败</span>
+              </td>
+
+              <!-- 查看详情按钮 -->
+              <td style="text-align: right; padding-right: 18px;">
+                <button @click="viewLogDetail(l.details)" class="btn-gray-test" style="height:26px; padding:2px 10px; font-size:11px;">
+                  查看详情
+                </button>
+              </td>
+            </tr>
+            <tr v-if="logs.length === 0">
+              <td colspan="7" style="text-align:center; color:#64748b; padding:36px;">暂无同步任务审计流水</td>
+            </tr>
+          </tbody>
+        </table>
       </div>
     </div>
+
+    <!-- 日志详情查看弹窗 -->
+    <div v-if="showLogModal" class="modal-backdrop">
+      <div class="modal-card" style="width: 720px; max-width: 95vw;">
+        <div class="modal-title-bar">
+          <h3 style="font-size:14px; font-weight:bold; color:#fff;">同步执行详细堆栈轨迹</h3>
+          <button @click="showLogModal = false" style="background:none; border:none; color:#94a3b8; font-size:16px; cursor:pointer;">✕</button>
+        </div>
+        <div style="margin-top:12px;">
+          <pre class="console-box" style="height: 380px; margin:0;">{{ selectedLogDetail }}</pre>
+          <div style="display:flex; justify-content:flex-end; margin-top:12px;">
+            <button @click="showLogModal = false" class="btn-primary-gradient">关闭</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
   </div>
 </template>
 
