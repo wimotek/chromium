@@ -81,7 +81,7 @@ os.makedirs(CERTS_DIR, exist_ok=True)
 
 INIT_PASSWORD = os.getenv("ADMIN_INIT_PASS", "Admin@123456")
 
-# 引入已升级的 wimotek-chromium-sync 模块
+# 引入已升级的 wimotek-chromium-sync 核心模块
 ChromiumSync = None
 try:
     from chromium_sync import ChromiumSync
@@ -156,7 +156,7 @@ def ensure_ssl_certificates():
             SSL_KEY_FILE = os.path.join(fallback_dir, "privkey.pem")
             generate_self_signed_cert(SSL_CERT_FILE, SSL_KEY_FILE)
 
-# ==================== 2. 数据库扩展与热迁移 (增量黑白名单与差量字段) ====================
+# ==================== 2. 数据库扩展与热迁移 ====================
 def init_db_and_jwt():
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
@@ -234,7 +234,6 @@ def init_db_and_jwt():
         'email_notify_to': '',
         'serverchan_enabled': '0',
         'serverchan_key': '',
-        # 同步中心设置：新增黑白名单过滤与差量同步
         'sync_interval_minutes': '15',
         'sync_mode': 'smart_merge',
         'sync_source_id': '0',
@@ -325,7 +324,6 @@ async def dispatch_notification(title: str, content: str):
 
 # ==================== 4. 域名过滤与差量指纹计算 ====================
 def filter_cookies_by_domains(cookies: List[dict], include_domains: List[str], exclude_domains: List[str]) -> tuple[List[dict], int]:
-    """根据黑名单和白名单过滤 Cookie，返回 (过滤后的列表, 剔除数量)"""
     if not include_domains and not exclude_domains:
         return cookies, 0
 
@@ -336,10 +334,8 @@ def filter_cookies_by_domains(cookies: List[dict], include_domains: List[str], e
 
     for c in cookies:
         domain = c.get('domain', '').lower().lstrip('.')
-        # 1. 黑名单过滤（若命中黑名单规则直接丢弃）
         if clean_exc and any(exc in domain for exc in clean_exc):
             continue
-        # 2. 白名单过滤（若配置了白名单，必须匹配白名单才保留）
         if clean_inc and not any(inc in domain for inc in clean_inc):
             continue
         filtered.append(c)
@@ -348,7 +344,6 @@ def filter_cookies_by_domains(cookies: List[dict], include_domains: List[str], e
     return filtered, dropped_count
 
 def compute_cookie_diff(current_cookies: List[dict], target_cookies: List[dict]) -> tuple[List[dict], int]:
-    """差量计算：仅提取真正变更或新增的 Cookie，跳过无需变动的项"""
     curr_map = {
         (c.get('name'), c.get('domain'), c.get('path', '/')): c.get('value')
         for c in current_cookies
@@ -399,7 +394,6 @@ async def resolve_cdp_endpoint(local_port: int) -> tuple[str, str]:
     raise ConnectionRefusedError(f"无法连通端口 {local_port} 的 CDP 服务")
 
 async def fetch_cookies_native(local_port: int) -> List[dict]:
-    """优先委派模块静态工具提取，若无则使用内置 CDP 引擎"""
     if ChromiumSync is not None and hasattr(ChromiumSync, 'get_cookies'):
         try:
             fn = getattr(ChromiumSync, 'get_cookies')
@@ -418,7 +412,6 @@ async def fetch_cookies_native(local_port: int) -> List[dict]:
         if cookies:
             return cookies
 
-        # 回退 Network 域
         await ws.send(json.dumps({"id": 2, "method": "Network.enable"}))
         await ws.recv()
         await ws.send(json.dumps({"id": 3, "method": "Network.getAllCookies"}))
@@ -427,7 +420,6 @@ async def fetch_cookies_native(local_port: int) -> List[dict]:
         return data2.get("result", {}).get("cookies", [])
 
 async def inject_cookies_native(local_port: int, cookies: List[dict]):
-    """优先委派模块静态工具写入，若无则使用内置 CDP 引擎"""
     if ChromiumSync is not None and hasattr(ChromiumSync, 'set_cookies'):
         try:
             fn = getattr(ChromiumSync, 'set_cookies')
@@ -552,9 +544,8 @@ async def tunnel_watchdog_loop():
             logger.debug(f"看门狗巡检异常: {e}")
         await asyncio.sleep(30)
 
-# ==================== 6. 同步调度引擎 (结合黑白名单、差量检测与 ChromiumSync) ====================
+# ==================== 6. 同步调度引擎 (结合 ChromiumSync 模块) ====================
 async def run_chromium_sync_instance(source_node: dict, target_node: dict, include_domains: List[str], exclude_domains: List[str], diff_enabled: bool) -> dict:
-    """实例化 wimotek-chromium-sync 执行同步任务"""
     if ChromiumSync is None:
         raise ImportError("未安装 wimotek-chromium-sync 模块")
 
@@ -569,7 +560,6 @@ async def run_chromium_sync_instance(source_node: dict, target_node: dict, inclu
         "timeout": 10
     }
 
-    # 动态匹配新升级的私钥、密码形参
     if target_node.get('ssh_key_filename'):
         key_path = os.path.join(KEYS_DIR, target_node['ssh_key_filename'])
         for k_param in ['ssh_key', 'key_file', 'key_filename', 'pkey']:
@@ -584,7 +574,6 @@ async def run_chromium_sync_instance(source_node: dict, target_node: dict, inclu
                 kwargs[p_param] = target_node['ssh_password']
                 break
 
-    # 动态匹配新升级的黑白名单与差量形参
     if "include_domains" in sig.parameters:
         kwargs["include_domains"] = include_domains
     if "exclude_domains" in sig.parameters:
@@ -644,7 +633,6 @@ async def execute_sync_task(custom_source_id: Optional[int] = None, custom_targe
             for idx, res in enumerate(fetched_results):
                 n_name = nodes[idx]['name']
                 if isinstance(res, list):
-                    # 抓取后即刻进行黑白名单清洗
                     cleaned_c, dropped = filter_cookies_by_domains(res, include_domains, exclude_domains)
                     valid_cookie_lists.append(cleaned_c)
                     drop_info = f" (已过滤 {dropped} 个黑名单/非白名单项)" if dropped > 0 else ""
@@ -657,10 +645,8 @@ async def execute_sync_task(custom_source_id: Optional[int] = None, custom_targe
             target_nodes_desc = f"全网对齐 ({len(nodes)} 个节点)"
             log_detail.append(f"✨ 智能裁决融合完成：生成全网黄金凭据池 (共 {cookie_count_metric} 条唯一最新 Cookies)")
 
-            # 并发写入对齐各节点
             async def _push_golden(node):
                 try:
-                    # 若开启差量检测，先比对当前节点已有 Cookie，仅注入变更项
                     if diff_enabled:
                         curr_c = await fetch_cookies_native(node['local_bind_port'])
                         diff_cookies, skipped = compute_cookie_diff(curr_c, golden_pool)
@@ -1064,6 +1050,7 @@ async def toggle_tunnel(node_id: int, user: dict = Depends(verify_token)):
         raise HTTPException(status_code=500, detail=msg)
     return {"status": "connected", "message": msg}
 
+# 默认源双击切换接口
 @app.post("/api/nodes/{node_id}/toggle-source")
 def toggle_source(node_id: int, user: dict = Depends(verify_token)):
     conn = sqlite3.connect(DB_PATH)
@@ -1094,7 +1081,7 @@ def toggle_source(node_id: int, user: dict = Depends(verify_token)):
 def set_source_compat(node_id: int, user: dict = Depends(verify_token)):
     return toggle_source(node_id, user)
 
-# 密钥存储库
+# 密钥存储库 (支持备注与添加时间)
 @app.get("/api/ssh-keys")
 def list_keys(user: dict = Depends(verify_token)):
     conn = sqlite3.connect(DB_PATH)
@@ -1187,17 +1174,14 @@ def delete_key(filename: str, user: dict = Depends(verify_token)):
     conn.close()
     return {"message": "证书已销毁"}
 
-# 同步中心调度与设置 (支持差量开关、黑白名单)
+# 同步中心调度与设置
 @app.get("/api/sync/settings")
 def get_sync_settings(user: dict = Depends(verify_token)):
     return {
         "sync_interval_minutes": int(get_setting("sync_interval_minutes", "15")),
         "sync_mode": get_setting("sync_mode", "smart_merge"),
         "sync_source_id": int(get_setting("sync_source_id", "0")),
-        "sync_target_ids": json.loads(get_setting("sync_target_ids", "[]")),
-        "sync_diff_enabled": get_setting("sync_diff_enabled", "1") == "1",
-        "sync_include_domains": get_setting("sync_include_domains", ""),
-        "sync_exclude_domains": get_setting("sync_exclude_domains", "doubleclick.net,google-analytics.com")
+        "sync_target_ids": json.loads(get_setting("sync_target_ids", "[]"))
     }
 
 @app.post("/api/sync/settings")
@@ -1212,13 +1196,26 @@ def save_sync_settings(data: dict, user: dict = Depends(verify_token)):
         set_setting("sync_source_id", str(data["sync_source_id"]))
     if "sync_target_ids" in data:
         set_setting("sync_target_ids", json.dumps(data["sync_target_ids"]))
+    return {"message": "同步策略配置已生效"}
+
+# 全局 Cookie 策略路由 (白名单/黑名单/差量检测)
+@app.get("/api/cookie-policy")
+def get_cookie_policy(user: dict = Depends(verify_token)):
+    return {
+        "sync_diff_enabled": get_setting("sync_diff_enabled", "1") == "1",
+        "sync_include_domains": get_setting("sync_include_domains", ""),
+        "sync_exclude_domains": get_setting("sync_exclude_domains", "doubleclick.net,google-analytics.com")
+    }
+
+@app.post("/api/cookie-policy")
+def save_cookie_policy(data: dict, user: dict = Depends(verify_token)):
     if "sync_diff_enabled" in data:
         set_setting("sync_diff_enabled", "1" if data["sync_diff_enabled"] else "0")
     if "sync_include_domains" in data:
         set_setting("sync_include_domains", data["sync_include_domains"].strip())
     if "sync_exclude_domains" in data:
         set_setting("sync_exclude_domains", data["sync_exclude_domains"].strip())
-    return {"message": "同步策略配置已生效"}
+    return {"message": "全局 Cookie 过滤与差量同步策略已保存"}
 
 class TriggerSyncDTO(BaseModel):
     source_id: Optional[int] = None
@@ -1358,7 +1355,7 @@ async def external_trigger_sync(auth: dict = Depends(verify_agent_access)):
     await execute_sync_task()
     return {"code": 200, "message": "全网 Cookie 同步任务已触发"}
 
-# 静态托管
+# 静态资源与 SPA 路由托管
 if DIST_DIR:
     assets_dir = os.path.join(DIST_DIR, "assets")
     if os.path.exists(assets_dir):
