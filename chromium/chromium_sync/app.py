@@ -20,7 +20,7 @@ from email.header import Header
 from urllib.parse import urlparse, urlunparse
 from typing import Optional, List, Dict
 
-# 消除 Paramiko 与 Cryptography 的 TripleDES 废弃警告日志
+# 消除 Paramiko 与 Cryptography 废弃警告
 from cryptography.utils import CryptographyDeprecationWarning
 warnings.filterwarnings("ignore", category=CryptographyDeprecationWarning)
 warnings.filterwarnings("ignore", module="paramiko")
@@ -81,13 +81,13 @@ os.makedirs(CERTS_DIR, exist_ok=True)
 
 INIT_PASSWORD = os.getenv("ADMIN_INIT_PASS", "Admin@123456")
 
-# 引入已发布的 wimotek-chromium-sync (ChromiumSync) 模块
+# ==================== 0. 载入并适配升级后的 wimotek-chromium-sync ====================
 ChromiumSync = None
 try:
     from chromium_sync import ChromiumSync
-    logger.info("已成功加载 wimotek-chromium-sync (ChromiumSync) 核心模块！")
-except Exception as e:
-    logger.warning(f"外部 ChromiumSync 模块未激活 ({e})，将启用内置 CDP 探测与同步引擎。")
+    logger.info("✅ 成功载入升级版 wimotek-chromium-sync (ChromiumSync) 核心模块！")
+except ImportError as e:
+    logger.warning(f"⚠️ 外部 ChromiumSync 模块未激活 ({e})，将启用内置 CDP 探测与同步引擎。")
 
 def hash_password(password: str) -> str:
     pwd_bytes = password.encode('utf-8')[:72]
@@ -316,7 +316,7 @@ async def dispatch_notification(title: str, content: str):
     send_email_notification(title, content)
     await send_serverchan_notification(title, content)
 
-# ==================== 4. 智能 Cookie 最新值合并与 CDP 读写 ====================
+# ==================== 4. 智能合并算法与 CDP 读写委派 ====================
 def smart_merge_cookies(all_cookie_lists: List[List[dict]]) -> List[dict]:
     merged_pool: Dict[tuple, dict] = {}
     for cookies in all_cookie_lists:
@@ -353,6 +353,16 @@ async def resolve_cdp_endpoint(local_port: int) -> tuple[str, str]:
     raise ConnectionRefusedError(f"无法连通端口 {local_port} 的 CDP 服务")
 
 async def fetch_cookies_native(local_port: int) -> List[dict]:
+    """优先委派 ChromiumSync 模块静态方法提取，若无则使用内置 CDP WebSocket"""
+    if ChromiumSync is not None and hasattr(ChromiumSync, 'get_cookies'):
+        try:
+            fn = getattr(ChromiumSync, 'get_cookies')
+            if inspect.iscoroutinefunction(fn):
+                return await fn(port=local_port, host="127.0.0.1")
+            return await asyncio.to_thread(fn, port=local_port, host="127.0.0.1")
+        except Exception as e:
+            logger.debug(f"ChromiumSync.get_cookies 调用异常，回退内置提取器: {e}")
+
     host, ws_url = await resolve_cdp_endpoint(local_port)
     async with websockets.connect(ws_url, timeout=5.0) as ws:
         await ws.send(json.dumps({"id": 1, "method": "Storage.getCookies"}))
@@ -362,7 +372,6 @@ async def fetch_cookies_native(local_port: int) -> List[dict]:
         if cookies:
             return cookies
 
-        # 回退 Network 域
         await ws.send(json.dumps({"id": 2, "method": "Network.enable"}))
         await ws.recv()
         await ws.send(json.dumps({"id": 3, "method": "Network.getAllCookies"}))
@@ -371,6 +380,18 @@ async def fetch_cookies_native(local_port: int) -> List[dict]:
         return data2.get("result", {}).get("cookies", [])
 
 async def inject_cookies_native(local_port: int, cookies: List[dict]):
+    """优先委派 ChromiumSync 模块静态方法写入，若无则使用内置 CDP WebSocket"""
+    if ChromiumSync is not None and hasattr(ChromiumSync, 'set_cookies'):
+        try:
+            fn = getattr(ChromiumSync, 'set_cookies')
+            if inspect.iscoroutinefunction(fn):
+                await fn(cookies=cookies, port=local_port, host="127.0.0.1")
+                return
+            await asyncio.to_thread(fn, cookies=cookies, port=local_port, host="127.0.0.1")
+            return
+        except Exception as e:
+            logger.debug(f"ChromiumSync.set_cookies 调用异常，回退内置注入器: {e}")
+
     host, ws_url = await resolve_cdp_endpoint(local_port)
     async with websockets.connect(ws_url, timeout=6.0) as ws:
         await ws.send(json.dumps({"id": 1, "method": "Network.setCookies", "params": {"cookies": cookies}}))
@@ -385,7 +406,7 @@ async def probe_node_cookies(local_port: int) -> tuple[int, str]:
     except Exception as e:
         return 0, f"探测异常: {str(e)[:35]}"
 
-# ==================== 5. SSH 隧道管理 (默认穿透 + 保活看门狗) ====================
+# ==================== 5. SSH 隧道管理 (默认全量穿透 + 守护看门狗) ====================
 class TunnelManager:
     def __init__(self):
         self.tunnels: Dict[int, SSHTunnelForwarder] = {}
@@ -484,11 +505,11 @@ async def tunnel_watchdog_loop():
             logger.debug(f"看门狗巡检异常: {e}")
         await asyncio.sleep(30)
 
-# ==================== 6. 同步调度引擎 (结合 wimotek-chromium-sync) ====================
-async def run_chromium_sync_instance(source_node: dict, target_node: dict) -> str:
-    """使用 wimotek-chromium-sync 进行对等/定向同步"""
+# ==================== 6. 同步调度引擎 (深度融合 ChromiumSync 实例) ====================
+async def run_chromium_sync_instance(source_node: dict, target_node: dict) -> dict:
+    """使用优化升级后的 wimotek-chromium-sync 执行同步任务"""
     if ChromiumSync is None:
-        raise ImportError("未检测到 ChromiumSync 模块")
+        raise ImportError("未安装 wimotek-chromium-sync 模块")
 
     sig = inspect.signature(ChromiumSync.__init__)
     kwargs = {
@@ -501,7 +522,7 @@ async def run_chromium_sync_instance(source_node: dict, target_node: dict) -> st
         "timeout": 10
     }
 
-    # 动态匹配入参（若模块支持私钥与密码）
+    # 动态匹配模块新升级的密码与私钥形参
     if target_node.get('ssh_key_filename'):
         key_path = os.path.join(KEYS_DIR, target_node['ssh_key_filename'])
         for k_param in ['ssh_key', 'key_file', 'key_filename', 'pkey']:
@@ -509,14 +530,26 @@ async def run_chromium_sync_instance(source_node: dict, target_node: dict) -> st
                 kwargs[k_param] = key_path
                 break
         os.environ["GIT_SSH_COMMAND"] = f"ssh -i {key_path} -o StrictHostKeyChecking=no"
-    elif target_node.get('ssh_password'):
-        if 'ssh_password' in sig.parameters:
-            kwargs['ssh_password'] = target_node['ssh_password']
+
+    if target_node.get('ssh_password'):
+        for p_param in ['ssh_password', 'password']:
+            if p_param in sig.parameters:
+                kwargs[p_param] = target_node['ssh_password']
+                break
 
     filtered = {k: v for k, v in kwargs.items() if k in sig.parameters}
     syncer = ChromiumSync(**filtered)
-    res = await asyncio.to_thread(syncer.run)
-    return str(res) if res else "OK"
+
+    # 优先调用异步运行方法
+    if hasattr(syncer, 'run_async') and inspect.iscoroutinefunction(getattr(syncer, 'run_async')):
+        res = await syncer.run_async()
+    else:
+        res = await asyncio.to_thread(syncer.run)
+
+    # 统一返回值格式
+    if isinstance(res, dict):
+        return res
+    return {"status": "success", "message": str(res) if res else "OK"}
 
 async def execute_sync_task(custom_source_id: Optional[int] = None, custom_target_ids: Optional[List[int]] = None):
     start_ts = time.time()
@@ -582,7 +615,7 @@ async def execute_sync_task(custom_source_id: Optional[int] = None, custom_targe
             status = "FAILED"
             log_detail.append(f"智能合并调度中断: {e}")
 
-    # 场景 B: 主从定向广播模式 (优先调用 ChromiumSync 模块能力)
+    # 场景 B: 主从定向广播模式 (优先调用已升级的 ChromiumSync 模块)
     else:
         source = None
         if custom_source_id:
@@ -620,10 +653,11 @@ async def execute_sync_task(custom_source_id: Optional[int] = None, custom_targe
             for target in targets:
                 try:
                     if ChromiumSync is not None and not target['is_local']:
-                        # 优先借助已重构的 ChromiumSync 模块执行同步
+                        # 调用已升级的 ChromiumSync 模块
                         sync_res = await run_chromium_sync_instance(source, target)
                         target_count, _ = await probe_node_cookies(target['local_bind_port'])
-                        log_detail.append(f"-> 目标节点 [{target['name']}] 模块同步完成 ({sync_res})，现存: {target_count}")
+                        msg = sync_res.get("message", "OK") if isinstance(sync_res, dict) else sync_res
+                        log_detail.append(f"-> 目标节点 [{target['name']}] 模块同步完成 ({msg})，现存: {target_count}")
                     else:
                         await inject_cookies_native(target['local_bind_port'], cookies)
                         target_count, _ = await probe_node_cookies(target['local_bind_port'])
@@ -649,7 +683,7 @@ async def execute_sync_task(custom_source_id: Optional[int] = None, custom_targe
     if status == "FAILED":
         await dispatch_notification("Cookie 同步告警", f"时间: {sync_time} (耗时: {duration_str})\n详情:\n" + "\n".join(log_detail))
 
-# ==================== 7. 定时调度器 ====================
+# ==================== 7. 定时调度器与生命周期 ====================
 scheduler = BackgroundScheduler()
 
 def reschedule_sync_job(minutes: int):
@@ -975,7 +1009,7 @@ def toggle_source(node_id: int, user: dict = Depends(verify_token)):
 def set_source_compat(node_id: int, user: dict = Depends(verify_token)):
     return toggle_source(node_id, user)
 
-# ==================== 密钥存储库 (彻底解决备注修改与自动补录) ====================
+# 密钥存储库
 @app.get("/api/ssh-keys")
 def list_keys(user: dict = Depends(verify_token)):
     conn = sqlite3.connect(DB_PATH)
@@ -998,7 +1032,6 @@ def list_keys(user: dict = Depends(verify_token)):
                     "size": meta.get("size", os.path.getsize(fp))
                 })
             else:
-                # 自动对磁盘孤儿文件建档入库，确保随手可编辑备注
                 c_time = datetime.fromtimestamp(os.path.getctime(fp)).strftime("%Y-%m-%d %H:%M:%S")
                 sz = os.path.getsize(fp)
                 cur.execute("INSERT OR IGNORE INTO ssh_keys (filename, remark, created_at, size) VALUES (?, '', ?, ?)",
@@ -1037,7 +1070,6 @@ async def upload_key(
 
 @app.put("/api/ssh-keys/{filename:path}")
 def update_key_remark(filename: str, data: dict, user: dict = Depends(verify_token)):
-    """支持 Upsert 机制：无论此前是否入库，都能 100% 成功持久化备注"""
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
     cur.execute("SELECT id FROM ssh_keys WHERE filename=?", (filename,))
@@ -1232,7 +1264,7 @@ async def external_trigger_sync(auth: dict = Depends(verify_agent_access)):
     await execute_sync_task()
     return {"code": 200, "message": "全网 Cookie 同步任务已触发"}
 
-# 静态托管
+# 静态资源挂载
 if DIST_DIR:
     assets_dir = os.path.join(DIST_DIR, "assets")
     if os.path.exists(assets_dir):
