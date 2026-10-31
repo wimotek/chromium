@@ -81,12 +81,13 @@ os.makedirs(CERTS_DIR, exist_ok=True)
 
 INIT_PASSWORD = os.getenv("ADMIN_INIT_PASS", "Admin@123456")
 
+# 引入已发布的 wimotek-chromium-sync (ChromiumSync) 模块
 ChromiumSync = None
 try:
     from chromium_sync import ChromiumSync
-    logger.info("已成功加载 chromium_sync 核心模块！")
+    logger.info("已成功加载 wimotek-chromium-sync (ChromiumSync) 核心模块！")
 except Exception as e:
-    logger.warning(f"外部 ChromiumSync 模块未激活 ({e})，启用内置高并发 WebSocket 探测与合并引擎。")
+    logger.warning(f"外部 ChromiumSync 模块未激活 ({e})，将启用内置 CDP 探测与同步引擎。")
 
 def hash_password(password: str) -> str:
     pwd_bytes = password.encode('utf-8')[:72]
@@ -144,7 +145,7 @@ def ensure_ssl_certificates():
     has_key = os.path.exists(SSL_KEY_FILE) and os.path.getsize(SSL_KEY_FILE) > 0
 
     if not (has_cert and has_key):
-        logger.warning("未检测到有效证书，正在生成自签 SSL 证书...")
+        logger.warning("未检测到有效证书，正在生成 10 年期自签 SSL 证书...")
         try:
             os.makedirs(CERTS_DIR, exist_ok=True)
             generate_self_signed_cert(SSL_CERT_FILE, SSL_KEY_FILE)
@@ -155,7 +156,7 @@ def ensure_ssl_certificates():
             SSL_KEY_FILE = os.path.join(fallback_dir, "privkey.pem")
             generate_self_signed_cert(SSL_CERT_FILE, SSL_KEY_FILE)
 
-# ==================== 2. 数据库与设置初始化 (扩展审计日志字段) ====================
+# ==================== 2. 数据库扩展与热迁移 ====================
 def init_db_and_jwt():
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
@@ -186,8 +187,6 @@ def init_db_and_jwt():
     )''')
 
     cur.execute('''CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)''')
-    
-    # 结构化审计日志表 (扩展源节点、分发目标、Cookie数量、执行耗时)
     cur.execute('''CREATE TABLE IF NOT EXISTS sync_logs (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         timestamp TEXT,
@@ -199,11 +198,7 @@ def init_db_and_jwt():
         details TEXT
     )''')
 
-    # 平滑迁移表结构
-    for col, col_type in [
-        ("auto_tunnel", "INTEGER DEFAULT 1"),
-        ("cookie_count", "INTEGER DEFAULT 0")
-    ]:
+    for col, col_type in [("auto_tunnel", "INTEGER DEFAULT 1"), ("cookie_count", "INTEGER DEFAULT 0")]:
         try:
             cur.execute(f"ALTER TABLE nodes ADD COLUMN {col} {col_type}")
         except Exception:
@@ -321,7 +316,7 @@ async def dispatch_notification(title: str, content: str):
     send_email_notification(title, content)
     await send_serverchan_notification(title, content)
 
-# ==================== 4. 智能 Cookie 最新值消歧与合并算法 ====================
+# ==================== 4. 智能 Cookie 最新值合并与 CDP 读写 ====================
 def smart_merge_cookies(all_cookie_lists: List[List[dict]]) -> List[dict]:
     merged_pool: Dict[tuple, dict] = {}
     for cookies in all_cookie_lists:
@@ -367,6 +362,7 @@ async def fetch_cookies_native(local_port: int) -> List[dict]:
         if cookies:
             return cookies
 
+        # 回退 Network 域
         await ws.send(json.dumps({"id": 2, "method": "Network.enable"}))
         await ws.recv()
         await ws.send(json.dumps({"id": 3, "method": "Network.getAllCookies"}))
@@ -488,7 +484,40 @@ async def tunnel_watchdog_loop():
             logger.debug(f"看门狗巡检异常: {e}")
         await asyncio.sleep(30)
 
-# ==================== 6. 同步调度引擎 (高保真审计统计：源/目标/数量/耗时) ====================
+# ==================== 6. 同步调度引擎 (结合 wimotek-chromium-sync) ====================
+async def run_chromium_sync_instance(source_node: dict, target_node: dict) -> str:
+    """使用 wimotek-chromium-sync 进行对等/定向同步"""
+    if ChromiumSync is None:
+        raise ImportError("未检测到 ChromiumSync 模块")
+
+    sig = inspect.signature(ChromiumSync.__init__)
+    kwargs = {
+        "remote_ssh": f"{target_node['ssh_user']}@{target_node['ssh_host']}",
+        "remote_ssh_port": int(target_node['ssh_port']),
+        "local_cdp_port": int(source_node['local_bind_port']),
+        "remote_cdp_port": int(target_node['remote_cdp_port']),
+        "remote_tunnel_port": int(target_node['local_bind_port']),
+        "direction": "push",
+        "timeout": 10
+    }
+
+    # 动态匹配入参（若模块支持私钥与密码）
+    if target_node.get('ssh_key_filename'):
+        key_path = os.path.join(KEYS_DIR, target_node['ssh_key_filename'])
+        for k_param in ['ssh_key', 'key_file', 'key_filename', 'pkey']:
+            if k_param in sig.parameters:
+                kwargs[k_param] = key_path
+                break
+        os.environ["GIT_SSH_COMMAND"] = f"ssh -i {key_path} -o StrictHostKeyChecking=no"
+    elif target_node.get('ssh_password'):
+        if 'ssh_password' in sig.parameters:
+            kwargs['ssh_password'] = target_node['ssh_password']
+
+    filtered = {k: v for k, v in kwargs.items() if k in sig.parameters}
+    syncer = ChromiumSync(**filtered)
+    res = await asyncio.to_thread(syncer.run)
+    return str(res) if res else "OK"
+
 async def execute_sync_task(custom_source_id: Optional[int] = None, custom_target_ids: Optional[List[int]] = None):
     start_ts = time.time()
     conn = sqlite3.connect(DB_PATH)
@@ -553,7 +582,7 @@ async def execute_sync_task(custom_source_id: Optional[int] = None, custom_targe
             status = "FAILED"
             log_detail.append(f"智能合并调度中断: {e}")
 
-    # 场景 B: 传统指定主节点单向广播 (Master-Worker / 定向)
+    # 场景 B: 主从定向广播模式 (优先调用 ChromiumSync 模块能力)
     else:
         source = None
         if custom_source_id:
@@ -590,9 +619,15 @@ async def execute_sync_task(custom_source_id: Optional[int] = None, custom_targe
 
             for target in targets:
                 try:
-                    await inject_cookies_native(target['local_bind_port'], cookies)
-                    target_count, _ = await probe_node_cookies(target['local_bind_port'])
-                    log_detail.append(f"-> 目标节点 [{target['name']}] 写入完成，现存 Cookies: {target_count}")
+                    if ChromiumSync is not None and not target['is_local']:
+                        # 优先借助已重构的 ChromiumSync 模块执行同步
+                        sync_res = await run_chromium_sync_instance(source, target)
+                        target_count, _ = await probe_node_cookies(target['local_bind_port'])
+                        log_detail.append(f"-> 目标节点 [{target['name']}] 模块同步完成 ({sync_res})，现存: {target_count}")
+                    else:
+                        await inject_cookies_native(target['local_bind_port'], cookies)
+                        target_count, _ = await probe_node_cookies(target['local_bind_port'])
+                        log_detail.append(f"-> 目标节点 [{target['name']}] 注入完成，现存 Cookies: {target_count}")
                 except Exception as ex:
                     log_detail.append(f"-> 目标节点 [{target['name']}] 写入异常: {ex}")
             status = "SUCCESS"
@@ -602,7 +637,6 @@ async def execute_sync_task(custom_source_id: Optional[int] = None, custom_targe
 
     duration_str = f"{time.time() - start_ts:.2f}s"
 
-    # 写入详尽结构化审计日志
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
     cur.execute("""
@@ -911,7 +945,6 @@ async def toggle_tunnel(node_id: int, user: dict = Depends(verify_token)):
         raise HTTPException(status_code=500, detail=msg)
     return {"status": "connected", "message": msg}
 
-# 默认源双击切换接口
 @app.post("/api/nodes/{node_id}/toggle-source")
 def toggle_source(node_id: int, user: dict = Depends(verify_token)):
     conn = sqlite3.connect(DB_PATH)
@@ -942,7 +975,7 @@ def toggle_source(node_id: int, user: dict = Depends(verify_token)):
 def set_source_compat(node_id: int, user: dict = Depends(verify_token)):
     return toggle_source(node_id, user)
 
-# 密钥存储库
+# ==================== 密钥存储库 (彻底解决备注修改与自动补录) ====================
 @app.get("/api/ssh-keys")
 def list_keys(user: dict = Depends(verify_token)):
     conn = sqlite3.connect(DB_PATH)
@@ -950,20 +983,35 @@ def list_keys(user: dict = Depends(verify_token)):
     cur = conn.cursor()
     cur.execute("SELECT * FROM ssh_keys ORDER BY id DESC")
     db_keys = {r["filename"]: dict(r) for r in cur.fetchall()}
-    conn.close()
 
     result = []
     for fn in os.listdir(KEYS_DIR):
         fp = os.path.join(KEYS_DIR, fn)
         if os.path.isfile(fp):
-            meta = db_keys.get(fn, {})
-            result.append({
-                "id": meta.get("id"),
-                "filename": fn,
-                "remark": meta.get("remark", ""),
-                "created_at": meta.get("created_at") or datetime.fromtimestamp(os.path.getctime(fp)).strftime("%Y-%m-%d %H:%M:%S"),
-                "size": os.path.getsize(fp)
-            })
+            meta = db_keys.get(fn)
+            if meta:
+                result.append({
+                    "id": meta.get("id"),
+                    "filename": fn,
+                    "remark": meta.get("remark", ""),
+                    "created_at": meta.get("created_at"),
+                    "size": meta.get("size", os.path.getsize(fp))
+                })
+            else:
+                # 自动对磁盘孤儿文件建档入库，确保随手可编辑备注
+                c_time = datetime.fromtimestamp(os.path.getctime(fp)).strftime("%Y-%m-%d %H:%M:%S")
+                sz = os.path.getsize(fp)
+                cur.execute("INSERT OR IGNORE INTO ssh_keys (filename, remark, created_at, size) VALUES (?, '', ?, ?)",
+                            (fn, c_time, sz))
+                conn.commit()
+                result.append({
+                    "id": None,
+                    "filename": fn,
+                    "remark": "",
+                    "created_at": c_time,
+                    "size": sz
+                })
+    conn.close()
     return result
 
 @app.post("/api/ssh-keys")
@@ -982,21 +1030,35 @@ async def upload_key(
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
     cur.execute("INSERT OR REPLACE INTO ssh_keys (filename, remark, created_at, size) VALUES (?, ?, ?, ?)",
-                (file.filename, remark, now_str, len(content)))
+                (file.filename, remark.strip(), now_str, len(content)))
     conn.commit()
     conn.close()
     return {"message": f"证书 {file.filename} 上传完成"}
 
-@app.put("/api/ssh-keys/{filename}")
+@app.put("/api/ssh-keys/{filename:path}")
 def update_key_remark(filename: str, data: dict, user: dict = Depends(verify_token)):
+    """支持 Upsert 机制：无论此前是否入库，都能 100% 成功持久化备注"""
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
-    cur.execute("UPDATE ssh_keys SET remark=? WHERE filename=?", (data.get("remark", ""), filename))
+    cur.execute("SELECT id FROM ssh_keys WHERE filename=?", (filename,))
+    row = cur.fetchone()
+    new_remark = data.get("remark", "").strip()
+
+    fp = os.path.join(KEYS_DIR, filename)
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    file_time = datetime.fromtimestamp(os.path.getctime(fp)).strftime("%Y-%m-%d %H:%M:%S") if os.path.exists(fp) else now_str
+    file_size = os.path.getsize(fp) if os.path.exists(fp) else 0
+
+    if row:
+        cur.execute("UPDATE ssh_keys SET remark=? WHERE filename=?", (new_remark, filename))
+    else:
+        cur.execute("INSERT INTO ssh_keys (filename, remark, created_at, size) VALUES (?, ?, ?, ?)",
+                    (filename, new_remark, file_time, file_size))
     conn.commit()
     conn.close()
-    return {"message": "备注更新成功"}
+    return {"message": "备注更新成功", "remark": new_remark}
 
-@app.delete("/api/ssh-keys/{filename}")
+@app.delete("/api/ssh-keys/{filename:path}")
 def delete_key(filename: str, user: dict = Depends(verify_token)):
     p = os.path.join(KEYS_DIR, filename)
     if os.path.exists(p):
@@ -1041,7 +1103,6 @@ async def trigger_sync(data: TriggerSyncDTO = TriggerSyncDTO(), user: dict = Dep
     await execute_sync_task(custom_source_id=data.source_id, custom_target_ids=data.target_ids)
     return {"message": "同步任务指令已下发执行"}
 
-# 高保真结构化审计日志接口
 @app.get("/api/sync/logs")
 def get_logs(user: dict = Depends(verify_token)):
     conn = sqlite3.connect(DB_PATH)

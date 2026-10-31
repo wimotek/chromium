@@ -54,30 +54,41 @@ const uploadKey = async (e) => {
   const fd = new FormData()
   fd.append('file', file)
   fd.append('remark', uploadRemark.value)
-  await props.api('/api/ssh-keys', { method: 'POST', body: fd })
-  props.showToast(`证书 ${file.filename} 上传完成`, 'success')
-  uploadRemark.value = ''
-  loadData()
+  const res = await props.api('/api/ssh-keys', { method: 'POST', body: fd })
+  if (res.ok) {
+    props.showToast(`证书 ${file.filename} 上传完成`, 'success')
+    uploadRemark.value = ''
+    await loadData()
+  }
 }
 
+// 核心修复：安全转义路径并完成 Upsert 实时刷新
 const updateRemark = async (k) => {
-  const newRemark = prompt('请输入新备注：', k.remark)
+  const newRemark = prompt('请输入新备注信息：', k.remark || '')
   if (newRemark !== null) {
-    await props.api(`/api/ssh-keys/${k.filename}`, {
+    const encodedFilename = encodeURIComponent(k.filename)
+    const res = await props.api(`/api/ssh-keys/${encodedFilename}`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ remark: newRemark })
+      body: JSON.stringify({ remark: newRemark.trim() })
     })
-    props.showToast('备注已更新', 'success')
-    loadData()
+    if (res.ok) {
+      props.showToast('备注已更新', 'success')
+      await loadData()
+    } else {
+      props.showToast('备注更新失败', 'error')
+    }
   }
 }
 
 const deleteKey = async (name) => {
   if (confirm(`确认销毁密钥 [${name}]？`)) {
-    await props.api(`/api/ssh-keys/${name}`, { method: 'DELETE' })
-    props.showToast('证书已销毁', 'success')
-    loadData()
+    const encodedFilename = encodeURIComponent(name)
+    const res = await props.api(`/api/ssh-keys/${encodedFilename}`, { method: 'DELETE' })
+    if (res.ok) {
+      props.showToast('证书已销毁', 'success')
+      await loadData()
+    }
   }
 }
 
@@ -120,7 +131,7 @@ onMounted(() => {
       </form>
     </div>
 
-    <!-- SSH 密钥存储库 (支持备注与添加时间) -->
+    <!-- SSH 密钥存储库 -->
     <div class="content-full-card">
       <div class="table-header-bar">
         <h3 class="card-inner-h3">🔑 SSH 密钥存储库</h3>
@@ -149,7 +160,7 @@ onMounted(() => {
               <td style="color:#cbd5e1;">{{ k.remark || '---' }}</td>
               <td style="color:#64748b;">{{ k.created_at }}</td>
               <td style="color:#64748b;">{{ k.size }} B</td>
-              <td style="text-align:right; space-x:2;">
+              <td style="text-align:right;">
                 <button @click="updateRemark(k)" class="link-probe" style="margin-right:8px;">编辑备注</button>
                 <button @click="deleteKey(k.filename)" class="link-probe" style="color:#f87171;">销毁</button>
               </td>

@@ -4,114 +4,158 @@
 [![npm version](https://img.shields.io/npm/v/wimotek-chromium-sync.svg?style=flat-square)](https://www.npmjs.com/package/wimotek-chromium-sync)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg?style=flat-square)](LICENSE)
 
-专为 Chromium / Chrome 设计的现代化会话与 Cookie 集群同步调度工具。
+专为 Chromium / Chrome 设计的通用会话与 Cookie 集群同步调度工具。支持 1对1 与 1对多集群、本地直连免密、SSH 私钥内容/文件与密码认证、Cookie 有效期智能融合（Merge）以及轻量静态探针。
 
 ---
 
-## 🌟 核心特性
+## 🌟 核心工程特性
 
-* **统一节点模型 (1对1 / 1对多集群)**：采用纯粹现代的节点架构，同时支持 1对1 穿透与任意规模的 1对多 节点集群分发。
-* **本地免密直连与全能 SSH 认证**：
-  * **本地节点**：指定本地端口即可直接直连 CDP，免登录、免配置、零 SSH 开销。
-  * **远程节点**：支持自定义 SSH 用户名 (`ssh_user`)、私钥认证 (`ssh_key_path` / `ssh_key_data`) 与密码认证 (`ssh_password`)。
-  * **端口自愈防撞**：自动为各远程节点分配互不冲突的本地隧道映射端口，已存在的活跃隧道自动复用。
-* **两类高效同步策略**：
-  * **`merge` (全节点凭证智能融合)**：汇总所有在线节点的 Cookie，若存在同名/同域/同路径冲突，**无条件保留有效期最新（expires 更长）的记录**，同时融合 LocalStorage 状态并向集群节点广播热刷新。
-  * **`sync` (单源广播同步)**：将指定源节点 (`source`) 的全部会话凭据镜像推送至一个或多个目标节点。
-* **极简调用，免建数据库表**：
-  * 代码层面提供 `get_cookies()`、`inspect()` 与 `get_summary_table()`，**仅需 1 行代码即可获取任何节点或全集群的 Cookie 列表与状态**。
-  * 命令行提供 `--status` (ASCII 表格) 与 `--json` (标准 JSON 格式)，随取随用。
+1. **统一现代节点模型 (1对1 / 1对多集群)**：
+   * 原生支持任意规模的节点集群管理与多隧道并发映射。
+   * **本地节点免密直连**：配置本地端口即可直接直连 CDP 探针，跳过 SSH 隧道拉起。
+
+2. **原生私钥内容 (PEM String) / 路径与密码认证**：
+   * `ssh_key`: 原生支持**私钥文本内容字符串**（如以 `-----BEGIN` 开头的 PEM 文本）或**私钥文件绝对路径**（如 `~/.ssh/id_rsa`），调用方无需配置繁琐的环境变量中转。
+   * `ssh_password`: 直接支持 SSH 密码认证，支持集群级默认凭证与单节点重载。
+
+3. **结构化执行指标返回 (Structured Return Dict)**：
+   * `syncer.run()` 与 `await syncer.run_async()` 执行后返回标准指标字典，上层 Web 控制台可直接捕获迁移量、源端/目标端存量、耗时及明细，无需额外发送 CDP 探针度量。
+
+4. **双驱动入口：原生异步协程 + 同步阻塞**：
+   * 原生提供 `await syncer.run_async()` 与 `await syncer.inspect_async()`，适配 FastAPI、Tornado、aiohttp 等现代异步服务。
+   * 同步环境直接调用 `syncer.run()`，开箱即用。
+
+5. **暴露轻量静态探针工具方法 (无需实例化集群)**：
+   * 提供单点工具函数：`ChromiumSync.get_cookies(port=9222)`、`ChromiumSync.set_cookies(cookies, port=9222)`、`ChromiumSync.probe(port=9222)`，单点探测仅需 1 行代码。
+
+6. **全节点智能 Merge 算法**：
+   * 汇总所有节点 Cookie，针对冲突项**优先保留有效期最新（expires 更长 / 最新持久凭证）的 Cookie**，并写回热刷新。
 
 ---
 
 ## 📦 安装
 
-### Python 环境 (PyPI)
+### Python (PyPI)
 ```bash
 pip install wimotek-chromium-sync
 playwright install chromium
 ```
 
-### Node.js 环境 (npm)
+### Node.js (npm)
 ```bash
 npm install -g wimotek-chromium-sync
 ```
 
 ---
 
-## 🚀 极简使用指南
+## 🚀 极简开发示例
 
-### 1. Python 代码调用
-
-#### (1) 1 行代码获取节点状态与 Cookie 详情 (无需数据库)
+### 1. 轻量静态探针工具（无需实例化集群）
+单点探测某个节点时，直接 1 行静态调用：
 ```python
 from chromium_sync import ChromiumSync
 
-syncer = ChromiumSync(nodes=[
-    {"id": "local", "name": "本机容器", "cdp_port": 9222},
-    {"id": "kr2", "name": "韩国节点", "ssh_host": "kr2.wimotek.com", "ssh_user": "root", "ssh_key_path": "~/.ssh/id_rsa", "cdp_port": 9222}
-])
+# 1. 单点探测节点在线状态与页面信息
+info = ChromiumSync.probe(port=9222)
+print(info)
+# {'online': True, 'cookie_count': 42, 'page_title': 'GitHub', 'page_url': 'https://github.com', ...}
 
-# 打印美观的终端状态表格
-print(syncer.get_summary_table())
+# 2. 单点直接提取 Cookie 列表
+cookies = ChromiumSync.get_cookies(port=9222)
 
-# 获取指定节点或全集群的 Cookie 明细列表 (无需创建外部数据库表)
-all_cookies = syncer.get_cookies()          # {"local": [...], "kr2": [...]}
-local_cookies = syncer.get_cookies("local") # 获取单个节点的 Cookie 列表
-print(f"本地有效 Cookie 数: {len(local_cookies)}")
-```
-
-#### (2) 全节点 Cookie 智能 Merge (合并最新有效期)
-```python
-from chromium_sync import ChromiumSync
-
-syncer = ChromiumSync(
-    nodes=[
-        {"id": "local", "cdp_port": 9223},
-        {"id": "kr2", "ssh_host": "kr2.wimotek.com", "ssh_user": "root", "ssh_key_path": "~/.ssh/id_rsa", "cdp_port": 9222},
-        {"id": "sg1", "ssh_host": "sg1.wimotek.com", "ssh_user": "ubuntu", "ssh_password": "YourPassword", "cdp_port": 9222}
-    ],
-    mode="merge"
-)
-syncer.run()
-```
-
-#### (3) 单源广播同步 (例如将本机状态推送到所有云端节点)
-```python
-from chromium_sync import ChromiumSync
-
-syncer = ChromiumSync(
-    nodes=[
-        {"id": "local", "cdp_port": 9222},
-        {"id": "node_a", "ssh_host": "10.0.0.1", "cdp_port": 9222},
-        {"id": "node_b", "ssh_host": "10.0.0.2", "cdp_port": 9222}
-    ],
-    mode="sync",
-    source="local"
-)
-syncer.run()
+# 3. 单点直接批量写入 Cookie 并热刷新页面
+ChromiumSync.set_cookies(cookies, port=9223, reload=True)
 ```
 
 ---
 
-### 2. 命令行 (CLI) 快速执行
+### 2. 现代多节点集群同步与结构化返回
 
-#### (1) 终端直接传入多个节点 (内联精简语法)
+#### (1) Python 同步调用 (同步脚本 / Celery 任务)
+```python
+from chromium_sync import ChromiumSync
+
+syncer = ChromiumSync(
+    nodes=[
+        {"id": "local", "name": "本地容器", "cdp_port": 9223},
+        {
+            "id": "kr2",
+            "name": "韩国生产服",
+            "ssh_host": "kr2.wimotek.com",
+            "ssh_user": "root",
+            # 直接支持私钥文本内容 (PEM String) 或文件路径
+            "ssh_key": "-----BEGIN RSA PRIVATE KEY-----\nMIIEowIB...\n-----END RSA PRIVATE KEY-----",
+            "cdp_port": 9222
+        },
+        {
+            "id": "sg1",
+            "name": "新加坡服",
+            "ssh_host": "sg1.wimotek.com",
+            "ssh_user": "ubuntu",
+            # 直接支持密码认证
+            "ssh_password": "YourStrongPassword123",
+            "cdp_port": 9222
+        }
+    ],
+    mode="merge"  # "merge" (合并最新凭据) 或 "sync" (单源广播)
+)
+
+# 执行同步并获取度量指标字典
+result = syncer.run()
+print(result)
+```
+**结构化返回值示例**：
+```python
+{
+    "status": "success",          # "success" | "failed"
+    "mode": "merge",              # 执行模式
+    "transferred_count": 45,      # 实际迁移/融合生成的 Cookie 数量
+    "source_total": 80,           # 源端/融合前凭证总数
+    "target_total": 45,           # 目标端/融合后凭证总数
+    "nodes_synced": ["local", "kr2", "sg1"], # 成功同步的节点列表
+    "duration": 1.25,             # 耗时（秒）
+    "details": "全节点 Merge 成功: 融合 45 条最新凭证至 ['本地容器', '韩国生产服', '新加坡服']",
+    "error": None
+}
+```
+
+#### (2) FastAPI / aiohttp 异步协程原生驱动
+```python
+from fastapi import FastAPI
+from chromium_sync import ChromiumSync
+
+app = FastAPI()
+
+@app.post("/api/sync")
+async def trigger_sync():
+    syncer = ChromiumSync(
+        nodes=[
+            {"id": "local", "cdp_port": 9222},
+            {"id": "cloud", "ssh_host": "remote.host.com", "ssh_key": "~/.ssh/id_rsa", "cdp_port": 9222}
+        ],
+        mode="merge"
+    )
+    # 原生 asyncio 协程，零线程切换开销，高并发性能极佳
+    result = await syncer.run_async()
+    return result
+```
+
+---
+
+### 3. 命令行 CLI 执行
+
+#### (1) 内联语法直接启动多节点 Merge
 ```bash
-# 智能合并多节点最新 Cookie
 chromium-sync \
   --node id=local,port=9223 \
   --node id=kr2,ssh=root@kr2.wimotek.com,port=9222,key=~/.ssh/id_rsa \
-  --node id=sg1,ssh=ubuntu@sg1.wimotek.com,port=9222,pass=SecretPassword \
+  --node id=sg1,ssh=ubuntu@sg1.wimotek.com,port=9222,pass=SecretPass123 \
   --mode merge
 ```
 
-#### (2) 仅查看状态与 Cookie 统计 (ASCII 报表)
+#### (2) 仅查看节点状态与 Cookie 数量 (ASCII 表格)
 ```bash
-chromium-sync \
-  --node id=local,port=9223 \
-  --node id=kr2,ssh=root@kr2.wimotek.com,port=9222,key=~/.ssh/id_rsa \
-  --status
+chromium-sync --config cluster.json --status
 ```
 输出样例：
 ```text
@@ -123,58 +167,32 @@ kr2        | 韩国节点       | SSH远程    | 19222        | 38 条      | [G
 ==========================================================================================
 ```
 
-#### (3) 导出 Cookie 详情为 JSON (便于程序与定时脚本直接提取)
+#### (3) 导出 Cookie 详情或执行结果为 JSON
 ```bash
-chromium-sync --config cluster.json --status --json > /tmp/cluster_cookies.json
-```
+# 1. 导出所有节点及 Cookie 列表为 JSON
+chromium-sync --config cluster.json --status --json > /tmp/cluster_data.json
 
-#### (4) 使用 JSON 配置文件运行集群同步
-准备配置文件 `cluster.json`：
-```json
-[
-  { "id": "local", "name": "本地开发机", "cdp_port": 9222 },
-  { "id": "sg1", "name": "新加坡服", "ssh_host": "sg.host.com", "ssh_user": "ubuntu", "ssh_key_path": "~/.ssh/id_rsa", "cdp_port": 9222 },
-  { "id": "kr2", "name": "韩国服", "ssh_host": "kr.host.com", "ssh_user": "root", "ssh_password": "SafePassword123", "cdp_port": 9222 }
-]
-```
-单源广播或合并：
-```bash
-# 合并所有节点最新有效凭据
-chromium-sync --config cluster.json --mode merge
-
-# 本地向所有云端广播
-chromium-sync --config cluster.json --mode sync --source local
+# 2. 执行同步并将结构化指标以 JSON 打印 (方便 CI/CD 或流水线捕获)
+chromium-sync --config cluster.json --mode merge --json
 ```
 
 ---
 
-## ⚙️ 节点配置字段规范 (NodeConfig)
+## ⚙️ 节点参数配置规范 (NodeConfig)
 
 | 字段 | 类型 | 默认值 | 详细说明 |
 | :--- | :--- | :--- | :--- |
-| `id` | str | 必填 | 节点唯一标识符 (例如 `local`, `sg1`, `kr2`) |
+| `id` | str | 必填 | 节点唯一标识符 (例如 `local`, `kr2`) |
 | `name` | str | `id` | 节点显示名称 |
-| `is_local` | bool | 自动识别 | 是否为本地节点 (不填 `ssh_host` 或填回环地址自动为 True，免密直连) |
+| `is_local` | bool | 自动识别 | 是否为本地节点 (不填 `ssh_host` 或填回环地址自动判定为本地，免密直连) |
 | `cdp_host` | str | `127.0.0.1` | 节点 CDP 服务监听的主机地址 |
 | `cdp_port` | int | `9222` | 节点暴露的 CDP 端口 |
 | `ssh_host` | str | `None` | 远程服务器 IP 或主机名 (提供该字段时识别为远程 SSH 节点) |
 | `ssh_port` | int | `22` | 远程服务器 SSH 端口 |
 | `ssh_user` | str | `root` | 远程 SSH 用户名 |
-| `ssh_key_path` | str | `None` | SSH 私钥文件路径 (例如 `~/.ssh/id_rsa`) |
-| `ssh_key_data` | str | `None` | SSH 私钥内容字符串 |
-| `ssh_password` | str | `None` | SSH 登录密码 (无外部依赖纯原生环境自动适配) |
-| `tunnel_port` | int | 自动分配 | 本地用于映射隧道的端口 (集群环境下自动递增分配防冲突) |
-
----
-
-## 🤖 定时任务配置示例 (Crontab)
-
-配合 Linux Crontab，每天凌晨定时执行全节点凭证智能融合：
-```bash
-crontab -e
-# 每天凌晨 3:00 自动融合多节点最新有效凭证并释放隧道
-0 3 * * * /usr/local/bin/chromium-sync --config /etc/chromium/cluster.json --mode merge --auto-close >> /var/log/chromium_sync.log 2>&1
-```
+| `ssh_key` | str | `None` | **SSH 私钥 (同时支持文件绝对路径 或 私钥 PEM 文本字符串)** |
+| `ssh_password` | str | `None` | SSH 登录密码 (自动适配 `sshpass` 与原生 `SSH_ASKPASS`) |
+| `tunnel_port` | int | 自动分配 | 本地用于映射隧道的端口 (多节点自动分配防冲突) |
 
 ---
 

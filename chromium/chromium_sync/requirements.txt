@@ -10,3 +10,4 @@ httpx==0.27.0
 cryptography>=3.3
 python-multipart==0.0.9
 playwright>=1.40.0
+wimotek-chromium-sync

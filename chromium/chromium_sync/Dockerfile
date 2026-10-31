@@ -26,9 +26,6 @@ RUN pip install --no-cache-dir -r requirements.txt -i https://pypi.tuna.tsinghua
 # 拷贝后端入口
 COPY app.py .
 
-# 直接将包含 __init__.py 的真实包目录拷贝至容器根下
-COPY chromium_sync_module/chromium_sync ./chromium_sync
-
 # 从 Stage 1 拷贝编译好的前端静态资源
 COPY --from=frontend-builder /build/dist ./dist
 

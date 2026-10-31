@@ -53,7 +53,7 @@ def parse_node_str(val: str) -> dict:
             elif k in ("user", "ssh_user"):
                 res["ssh_user"] = v
             elif k in ("key", "ssh_key", "ssh_key_path"):
-                res["ssh_key_path"] = v
+                res["ssh_key"] = v
             elif k in ("pass", "password", "ssh_pass", "ssh_password"):
                 res["ssh_password"] = v
             elif k in ("id", "name"):
@@ -81,8 +81,8 @@ def main():
   # 3. 全节点 Cookie 智能 Merge (合并所有节点并保留最新有效期)
   chromium-sync --config cluster.json --mode merge
 
-  # 4. 指定单源节点广播同步到所有其他节点
-  chromium-sync --config cluster.json --mode sync --source local
+  # 4. 指定单源节点广播同步并输出结构化指标 JSON
+  chromium-sync --config cluster.json --mode sync --source local --json
 
   # 5. 极简命令行多节点直接同步
   chromium-sync \\
@@ -97,6 +97,10 @@ def main():
     parser.add_argument("--node", action="append", default=[], help="定义节点 (可多次传入，如 id=local,port=9222)")
     parser.add_argument("--nodes", help="JSON 数组格式的节点配置字符串")
 
+    # 全局默认 SSH 凭据
+    parser.add_argument("--ssh-key", help="集群默认 SSH 私钥 (支持私钥文件绝对路径 或 私钥 PEM 文本内容)")
+    parser.add_argument("--ssh-password", help="集群默认 SSH 连接密码")
+
     # 同步模式
     parser.add_argument("--mode", choices=["sync", "merge"], default="sync",
                         help="同步方式: 'merge'(合并所有节点最新Cookie), 'sync'(单源广播同步，默认)")
@@ -105,7 +109,7 @@ def main():
 
     # 探测与数据查询
     parser.add_argument("--status", action="store_true", help="仅探测并输出各节点的 Cookie 数与详情表格，不执行写入")
-    parser.add_argument("--json", action="store_true", help="以 JSON 格式输出节点完整数据与 Cookie 列表")
+    parser.add_argument("--json", action="store_true", help="以 JSON 格式输出节点数据或执行结果指标")
 
     # 隧道与连接
     parser.add_argument("--auto-close", action="store_true", help="任务完成后关闭拉起的 SSH 隧道")
@@ -139,6 +143,8 @@ def main():
         mode=args.mode,
         source=args.source,
         targets=args.targets,
+        ssh_key=args.ssh_key,
+        ssh_password=args.ssh_password,
         auto_close_tunnel=args.auto_close,
         verbose=args.verbose
     )
@@ -151,7 +157,9 @@ def main():
             print(syncer.get_summary_table(report))
         return
 
-    syncer.run()
+    result = syncer.run()
+    if args.json:
+        print(json.dumps(result, ensure_ascii=False, indent=2))
 
 
 if __name__ == "__main__":
