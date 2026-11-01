@@ -7,7 +7,6 @@ import qrcode
 import qrcode.image.svg
 from flask import Flask, request, send_from_directory, abort, send_file
 
-# 确保 backend 根路径优先加入 sys.path
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 if CURRENT_DIR not in sys.path:
     sys.path.insert(0, CURRENT_DIR)
@@ -18,7 +17,7 @@ from core.cert_manager import ensure_certificates, CHALLENGE_DIR
 from services.scheduler_service import start_scheduler_thread
 
 # 导入通用路由工具与所有领域蓝图
-from routes import get_node_snis, build_node_link
+from routes import get_node_snis, build_node_link, is_user_allowed_for_node
 from routes.auth import auth_bp
 from routes.user import user_bp
 from routes.node import node_bp
@@ -28,7 +27,6 @@ from routes.system import system_bp
 
 app = Flask(__name__, static_folder='../frontend/dist', static_url_path='/')
 
-# 注册所有业务功能模块蓝图
 app.register_blueprint(auth_bp)
 app.register_blueprint(user_bp)
 app.register_blueprint(node_bp)
@@ -57,7 +55,7 @@ def get_qrcode_svg():
     buf.seek(0)
     return send_file(buf, mimetype='image/svg+xml')
 
-# 聚合多节点订阅
+# 聚合多节点订阅：严格基于节点禁用状态与用户组/用户白名单过滤！
 @app.route('/api/sub', methods=['GET'])
 def get_subscription():
     token = request.args.get('token', '').strip()
@@ -68,17 +66,22 @@ def get_subscription():
     conn = get_db()
     c = conn.cursor()
     c.execute("SELECT * FROM users WHERE uuid=? AND status=1", (token,))
-    user = c.fetchone()
-    if not user:
+    user_row = c.fetchone()
+    if not user_row:
         conn.close()
         abort(403)
 
-    c.execute("SELECT * FROM nodes WHERE status=1 ORDER BY id ASC")
-    nodes = [dict(n) for n in c.fetchall()]
+    user = dict(user_row)
+
+    c.execute("SELECT * FROM nodes ORDER BY id ASC")
+    all_nodes = [dict(n) for n in c.fetchall()]
     conn.close()
 
+    # 权限过滤器：仅提取启用的且用户被允许访问的节点
+    allowed_nodes = [n for n in all_nodes if is_user_allowed_for_node(user, n)]
+
     links = []
-    for n in nodes:
+    for n in allowed_nodes:
         if len(n.get("pbk", "")) == 43:
             snis = get_node_snis(n)
             chosen_sni = forced_sni if (forced_sni and forced_sni in snis) else random.choice(snis)
@@ -89,10 +92,9 @@ def get_subscription():
     b64_sub = base64.b64encode(sub_text.encode('utf-8')).decode('utf-8')
     return b64_sub, 200, {
         "Content-Type": "text/plain; charset=utf-8",
-        "Subscription-Userinfo": f"upload=0; download={int(user['used_mb']*1024*1024)}; total={int(user['traffic_limit_mb']*1024*1024)}; expire={user['expire_date']}"
+        "Subscription-Userinfo": f"upload=0; download={int(user.get('used_mb', 0)*1024*1024)}; total={int(user['traffic_limit_mb']*1024*1024)}; expire={user['expire_date']}"
     }
 
-# 启动后台守护定时线程 (巡检、自动重置与证书自动更新)
 start_scheduler_thread()
 
 if __name__ == '__main__':

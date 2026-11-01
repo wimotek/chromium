@@ -19,7 +19,7 @@ def init_db():
     conn = get_db()
     c = conn.cursor()
 
-    # 1. 用户表
+    # 1. 用户表 (新增 user_group 用户组字段)
     c.execute('''CREATE TABLE IF NOT EXISTS users (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         username TEXT UNIQUE NOT NULL,
@@ -35,10 +35,11 @@ def init_db():
         serverchan_key TEXT DEFAULT '',
         notify_type TEXT DEFAULT 'email',
         is_monthly INTEGER DEFAULT 0,
-        reset_day INTEGER DEFAULT 1
+        reset_day INTEGER DEFAULT 1,
+        user_group TEXT DEFAULT 'default'
     )''')
 
-    # 2. 节点集群表
+    # 2. 节点集群表 (新增 allow_all, allowed_groups, allowed_users 权限字段)
     c.execute('''CREATE TABLE IF NOT EXISTS nodes (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         node_id TEXT UNIQUE NOT NULL,
@@ -53,7 +54,10 @@ def init_db():
         pbk TEXT NOT NULL,
         sid TEXT NOT NULL,
         status INTEGER DEFAULT 1,
-        last_heartbeat TEXT NOT NULL
+        last_heartbeat TEXT NOT NULL,
+        allow_all INTEGER DEFAULT 1,
+        allowed_groups TEXT DEFAULT '',
+        allowed_users TEXT DEFAULT ''
     )''')
 
     # 3. 卡密表
@@ -68,7 +72,7 @@ def init_db():
         is_monthly INTEGER DEFAULT 0
     )''')
 
-    # 4. 验证码、防刷临时表、系统设置与通知日志表
+    # 4. 辅助记录表
     c.execute('''CREATE TABLE IF NOT EXISTS verify_codes (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         email TEXT NOT NULL,
@@ -111,8 +115,16 @@ def init_db():
     try_add_column("ALTER TABLE cards ADD COLUMN is_monthly INTEGER DEFAULT 0")
     try_add_column("ALTER TABLE cards ADD COLUMN used_at TEXT DEFAULT ''")
 
+    # 权限系统拓展列就地热更新
+    try_add_column("ALTER TABLE users ADD COLUMN user_group TEXT DEFAULT 'default'")
+    try_add_column("ALTER TABLE nodes ADD COLUMN allow_all INTEGER DEFAULT 1")
+    try_add_column("ALTER TABLE nodes ADD COLUMN allowed_groups TEXT DEFAULT ''")
+    try_add_column("ALTER TABLE nodes ADD COLUMN allowed_users TEXT DEFAULT ''")
+
+    # 修复旧数据
     try:
-        c.execute("UPDATE cards SET is_monthly=1, used_at='' WHERE is_used=0 AND used_at IN ('1', 1)")
+        c.execute("UPDATE users SET user_group='default' WHERE user_group IS NULL OR user_group=''")
+        c.execute("UPDATE nodes SET allow_all=1 WHERE allow_all IS NULL")
         conn.commit()
     except Exception:
         pass
@@ -122,8 +134,10 @@ def init_db():
         admin_user = os.getenv("ADMIN_USERNAME") or "admin"
         admin_pwd = os.getenv("ADMIN_PASSWORD") or secrets.token_urlsafe(12)
         ten_years = (datetime.datetime.now() + datetime.timedelta(days=3650)).strftime("%Y-%m-%d %H:%M:%S")
-        c.execute("INSERT INTO users (username, password_hash, uuid, email, traffic_limit_mb, used_mb, expire_date, role, status, is_verified) VALUES (?, ?, ?, ?, 1048576, 0, ?, 'admin', 1, 1)",
-                  (admin_user, hash_pwd(admin_pwd), str(uuid.uuid4()), f"{admin_user}@system.local", ten_years))
+        c.execute("""
+            INSERT INTO users (username, password_hash, uuid, email, traffic_limit_mb, used_mb, expire_date, role, status, is_verified, user_group) 
+            VALUES (?, ?, ?, ?, 1048576, 0, ?, 'admin', 1, 1, 'admin')
+        """, (admin_user, hash_pwd(admin_pwd), str(uuid.uuid4()), f"{admin_user}@system.local", ten_years))
         conn.commit()
 
     conn.commit()

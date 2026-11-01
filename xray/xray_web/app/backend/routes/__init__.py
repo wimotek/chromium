@@ -5,12 +5,10 @@ import random
 import datetime
 import calendar
 
-# 确保 backend 根路径优先被 Python 解释器识别
 BACKEND_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if BACKEND_DIR not in sys.path:
     sys.path.insert(0, BACKEND_DIR)
 
-# 核心修正：严格按照分层目录从 core.db 引入
 from core.db import get_db, hash_pwd
 
 def check_admin(u: str, p: str) -> bool:
@@ -22,6 +20,40 @@ def check_admin(u: str, p: str) -> bool:
     r = c.fetchone()
     conn.close()
     return bool(r and r['role'] == 'admin')
+
+# 核心：节点权限判定器 (判断某个用户是否有权限连接或看到该节点)
+def is_user_allowed_for_node(user: dict, node: dict) -> bool:
+    # 1. 节点若被禁用 (status=0)，对任何普通用户彻底关闭且不显示
+    if int(node.get("status", 1)) != 1:
+        return False
+
+    # 2. 若设为“全部用户可用” (allow_all=1)
+    if int(node.get("allow_all", 1)) == 1:
+        return True
+
+    # 3. 检查特定用户组匹配
+    raw_groups = str(node.get("allowed_groups") or "")
+    allowed_groups = [g.strip().lower() for g in re.split(r'[,;\s]+', raw_groups) if g.strip()]
+    u_group = str(user.get("user_group") or "default").strip().lower()
+    if u_group and u_group in allowed_groups:
+        return True
+
+    # 4. 检查特定单个用户匹配 (用户名 或 邮箱)
+    raw_users = str(node.get("allowed_users") or "")
+    allowed_users = [u.strip().lower() for u in re.split(r'[,;\s]+', raw_users) if u.strip()]
+    uname = str(user.get("username") or "").strip().lower()
+    uemail = str(user.get("email") or "").strip().lower()
+
+    if uname and uname in allowed_users:
+        return True
+    if uemail and uemail in allowed_users:
+        return True
+
+    # 5. 管理员账号拥有穿透调试权限
+    if str(user.get("role", "")).lower() == "admin":
+        return True
+
+    return False
 
 def normalize_expire_date(raw_str: str) -> str:
     s = (raw_str or "").strip()

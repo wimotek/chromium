@@ -11,6 +11,7 @@
           <tr>
             <th>用户 / 绑定邮箱</th>
             <th>状态</th>
+            <th>所属用户组</th>
             <th>流量使用 / 总配额</th>
             <th>到期时间</th>
             <th>套餐特性</th>
@@ -29,6 +30,14 @@
                 {{ u.status === 1 ? '🟢 活跃' : '🔴 封禁' }}
               </span>
             </td>
+
+            <!-- 所属用户组徽章显示 -->
+            <td>
+              <span class="badge" :class="u.user_group === 'vip' ? 'badge-vip' : 'badge-group'">
+                🏷️ {{ u.user_group || 'default' }}
+              </span>
+            </td>
+
             <td>
               <div style="white-space: nowrap;">
                 {{ u.used_mb }} / {{ u.traffic_limit_mb === 0 ? '♾️ 不限' : u.traffic_limit_mb + ' MB' }}
@@ -37,7 +46,6 @@
             </td>
             <td style="white-space: nowrap;">{{ (u.expire_date && u.expire_date.startsWith('2099')) ? '♾️ 永久有效' : u.expire_date }}</td>
 
-            <!-- 精确分类展示：永久无限、不限流量、每月重置、普通固定 -->
             <td>
               <span v-if="u.is_monthly === 1" class="badge badge-monthly">
                 🔄 每月{{ u.reset_day }}号重置
@@ -60,7 +68,7 @@
               <div class="action-btn-row">
                 <button class="btn-sm btn-reset" @click="openResetPwdModal(u.username)">🔑 密码</button>
                 <button class="btn-sm btn-cyber-danger" @click="handleAdminResetUserUuid(u.username)">🔄 重置UUID</button>
-                <button class="btn-sm btn-edit" @click="openEditModal(u)">✏️ 配额</button>
+                <button class="btn-sm btn-edit" @click="openEditModal(u)">✏️ 配额/组</button>
                 <button v-if="u.status === 1" class="btn-sm btn-demote" :disabled="u.username === currentUser.username" @click="handleStatusToggle(u.username, 0)">🛑 封禁</button>
                 <button v-else class="btn-sm btn-unban" @click="handleStatusToggle(u.username, 1)">🟢 解封</button>
                 <button class="btn-sm btn-del" :disabled="u.username === currentUser.username" @click="handleDeleteUser(u.username)">🗑️</button>
@@ -77,7 +85,7 @@
         <h3>📱 用户 [{{ targetCredUser.username }}] 的节点凭据与订阅</h3>
         
         <div class="node-field" style="margin-top: 15px;">
-          <label>通用多节点聚合订阅地址 (全客户端批量导入)：</label>
+          <label>通用多节点聚合订阅地址：</label>
           <div class="code-display text-cyan" style="word-break: break-all;">{{ targetCredUser.sub_url }}</div>
           <div class="btn-group" style="margin-top: 8px;">
             <button class="btn-sm btn-action" @click="$emit('copy', targetCredUser.sub_url)">📋 复制订阅地址</button>
@@ -86,7 +94,7 @@
         </div>
 
         <div class="inner-divider">
-          <div class="inner-divider-title">🌐 各集群节点直连线路清单 (共 {{ targetCredUser.node_links ? targetCredUser.node_links.length : 0 }} 个物理节点)</div>
+          <div class="inner-divider-title">🌐 直连线路列表</div>
           <div style="max-height: 240px; overflow-y: auto;">
             <div v-for="nl in targetCredUser.node_links" :key="nl.node_id" style="background: #0b1120; border: 1px solid #1e293b; border-radius: 6px; padding: 10px; margin-bottom: 8px;">
               <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
@@ -96,14 +104,6 @@
                   <button class="btn-sm btn-edit" @click="$emit('open-qr', { link: nl.link, name: nl.name })">二维码</button>
                 </div>
               </div>
-
-              <div v-if="nl.server_names && nl.server_names.length > 1" class="sni-select-wrap" style="margin-bottom: 6px;">
-                <label style="color: #94a3b8; font-size: 11px;">伪装SNI:</label>
-                <select v-model="nl.selected_sni" class="cyber-select" @change="onAdminChangeUserNodeSni(nl)">
-                  <option v-for="s in nl.server_names" :key="s" :value="s">{{ s }}</option>
-                </select>
-              </div>
-
               <div style="font-size: 11px; color: #64748b; font-family: monospace; word-break: break-all;">{{ nl.link }}</div>
             </div>
           </div>
@@ -115,12 +115,31 @@
       </div>
     </div>
 
-    <!-- 弹窗 2：管理员修改用户配额 (集成输入离开焦点自动补齐 23:59:59 与纠偏) -->
+    <!-- 弹窗 2：管理员修改用户配额与所属用户组 -->
     <div v-if="showEditModal" class="modal-backdrop" @click="showEditModal = false">
       <div class="cyber-modal" style="max-width: 480px; text-align: left;" @click.stop>
         <h3>✏️ 调整用户 [{{ editForm.username }}] 属性</h3>
-        
+
+        <!-- 新增：指派所属用户组 -->
         <div class="form-item" style="margin-top: 15px;">
+          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
+            <label style="margin: 0;">所属用户组 (User Group)</label>
+            <div style="display: flex; gap: 6px;">
+              <button class="btn-link-action" @click="editForm.user_group = 'default'">设为 default</button>
+              <button class="btn-link-action" @click="editForm.user_group = 'vip'">设为 VIP</button>
+              <button class="btn-link-action" @click="editForm.user_group = 'pro'">设为 Pro</button>
+            </div>
+          </div>
+          <input
+            v-model="editForm.user_group"
+            type="text"
+            class="cyber-input modal-input"
+            placeholder="如: default, vip, pro, internal"
+          />
+          <span class="input-hint">节点若设置了“按用户组开放”，该组用户将自动获得对相应节点的访问权限</span>
+        </div>
+
+        <div class="form-item">
           <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
             <label style="margin: 0;">总流量限制配额 (MB)</label>
             <button class="btn-link-action" @click="editForm.limit_mb = 0">♾️ 设为不限流量</button>
@@ -137,7 +156,6 @@
               <button class="btn-link-action" @click="editForm.expire_date = '2099-12-31 23:59:59'">♾️ 永久</button>
             </div>
           </div>
-          <!-- 离开焦点 blur 时自动执行时分秒补齐与天数纠偏 -->
           <input
             v-model="editForm.expire_date"
             type="text"
@@ -145,7 +163,7 @@
             placeholder="支持输入 2026.11.30、2026-11-30 等"
             @blur="autoFormatExpireInput"
           />
-          <span class="input-hint">若仅输入日期（如 2026.11.30），系统离开焦点时将自动补全为 23:59:59</span>
+          <span class="input-hint">离开焦点时将自动补全对齐为 23:59:59</span>
         </div>
 
         <div class="form-item">
@@ -197,7 +215,14 @@ const showUserCredModal = ref(false)
 const targetCredUser = ref({})
 
 const showEditModal = ref(false)
-const editForm = reactive({ username: '', limit_mb: 1024, expire_date: '', is_monthly: false, reset_day: 1 })
+const editForm = reactive({
+  username: '',
+  limit_mb: 1024,
+  expire_date: '',
+  is_monthly: false,
+  reset_day: 1,
+  user_group: 'default'
+})
 
 const showResetPwdModal = ref(false)
 const resetTargetUser = ref('')
@@ -213,13 +238,6 @@ const openUserCredModal = (u) => {
   showUserCredModal.value = true
 }
 
-const onAdminChangeUserNodeSni = (nl) => {
-  if (!nl.link || !nl.selected_sni) return
-  nl.link = nl.link.replace(/sni=[^&]+/, `sni=${nl.selected_sni}`)
-  ElMessage.success(`已切换线路伪装 SNI 为: ${nl.selected_sni}`)
-}
-
-// 前端日期智能补全与月份纠偏函数
 const autoFormatExpireInput = () => {
   let s = (editForm.expire_date || '').trim()
   if (!s || s.startsWith('2099')) {
@@ -227,14 +245,12 @@ const autoFormatExpireInput = () => {
     return
   }
 
-  // 统一替换各类分隔符为短横线
   s = s.replace(/[./_年月份]/g, '-').replace(/日/g, '').replace(/\s+/g, ' ').trim()
   const m = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})(?:\s+(\d{1,2}):(\d{1,2})(?::(\d{1,2}))?)?$/)
   if (!m) return
 
   const year = parseInt(m[1], 10)
   const month = Math.max(1, Math.min(12, parseInt(m[2], 10)))
-  // 计算该月真实最大天数 (如 11 月只有 30 天)
   const maxDay = new Date(year, month, 0).getDate()
   const day = Math.max(1, Math.min(maxDay, parseInt(m[3], 10)))
 
@@ -249,7 +265,6 @@ const autoFormatExpireInput = () => {
   editForm.expire_date = `${year}-${pad(month)}-${pad(day)} ${pad(hh)}:${pad(mm)}:${pad(ss)}`
 }
 
-// 快捷顺延天数
 const addDaysToExpire = (days) => {
   let base = new Date()
   if (editForm.expire_date && !editForm.expire_date.startsWith('2099')) {
@@ -264,15 +279,7 @@ const addDaysToExpire = (days) => {
 }
 
 const handleAdminResetUserUuid = async (targetUser) => {
-  const tip =
-    `⚠️ 确定要为用户 [${targetUser}] 重置节点凭证 (UUID) 吗？\n\n` +
-    `【为什么需要重置？】\n` +
-    `解决用户连接凭证泄露、被蹭网或违规盗用问题。\n\n` +
-    `【重置后生效后果】\n` +
-    `旧凭据将立刻断网失效，系统会自动向该用户发送邮件/微信通知其更新订阅。\n\n` +
-    `确认重置？`
-
-  if (!confirm(tip)) return
+  if (!confirm(`⚠️ 确定要为用户 [${targetUser}] 重置节点凭证 (UUID) 吗？旧凭证将立刻失效断网！`)) return
   try {
     const res = await axios.post('/api/admin/users/reset_uuid', {
       admin_user: props.currentUser.username,
@@ -294,6 +301,7 @@ const openEditModal = (u) => {
   editForm.expire_date = u.expire_date
   editForm.is_monthly = u.is_monthly === 1
   editForm.reset_day = u.reset_day || 1
+  editForm.user_group = u.user_group || 'default'
   showEditModal.value = true
 }
 
@@ -307,7 +315,8 @@ const submitUserEdit = async () => {
       limit_mb: editForm.limit_mb,
       expire_date: editForm.expire_date,
       is_monthly: editForm.is_monthly,
-      reset_day: editForm.reset_day
+      reset_day: editForm.reset_day,
+      user_group: editForm.user_group
     })
     if (res.data.code === 200) {
       ElMessage.success(res.data.msg)
@@ -379,3 +388,18 @@ const handleDeleteUser = async (targetUser) => {
   }
 }
 </script>
+
+<style scoped>
+.badge-group {
+  background: rgba(56, 189, 248, 0.15);
+  color: #38bdf8;
+  border: 1px solid rgba(56, 189, 248, 0.3);
+}
+
+.badge-vip {
+  background: linear-gradient(135deg, rgba(245, 158, 11, 0.25), rgba(217, 119, 6, 0.25));
+  color: #fbbf24;
+  border: 1px solid #f59e0b;
+  font-weight: 700;
+}
+</style>

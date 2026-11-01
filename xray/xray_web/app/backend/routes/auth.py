@@ -6,7 +6,7 @@ from config import Config
 from core.db import get_db, hash_pwd, get_setting
 from core.captcha import generate_math_captcha, verify_captcha
 from services.notify_service import send_smtp_email
-from routes import get_node_snis, build_node_link, normalize_expire_date
+from routes import get_node_snis, build_node_link, normalize_expire_date, is_user_allowed_for_node
 
 auth_bp = Blueprint('auth_bp', __name__)
 
@@ -48,19 +48,24 @@ def login():
         conn.close()
         return jsonify({"code": 403, "msg": "当前节点为纯用户端模式，已屏蔽管理员登录"})
 
-    c.execute("SELECT * FROM nodes WHERE status=1 ORDER BY id ASC")
-    node_rows = [dict(n) for n in c.fetchall()]
+    user_dict = dict(user)
+
+    # 核心：根据节点启用状态及权限矩阵过滤
+    c.execute("SELECT * FROM nodes ORDER BY id ASC")
+    all_nodes = [dict(n) for n in c.fetchall()]
     conn.close()
+
+    visible_nodes = [n for n in all_nodes if is_user_allowed_for_node(user_dict, n)]
 
     nodes_data = []
     host_prefix = request.host_url.rstrip('/')
-    sub_url = f"{host_prefix}/api/sub?token={user['uuid']}"
+    sub_url = f"{host_prefix}/api/sub?token={user_dict['uuid']}"
 
-    for n in node_rows:
+    for n in visible_nodes:
         if len(n.get("pbk", "")) == 43:
             snis = get_node_snis(n)
             random_sni = random.choice(snis)
-            link = build_node_link(user['uuid'], n, f"{n['name']}", chosen_sni=random_sni)
+            link = build_node_link(user_dict['uuid'], n, f"{n['name']}", chosen_sni=random_sni)
             nodes_data.append({
                 "id": n["id"],
                 "name": n["name"],
@@ -76,19 +81,20 @@ def login():
     return jsonify({
         "code": 200,
         "data": {
-            "username": user['username'],
-            "email": user['email'],
-            "role": user['role'],
-            "uuid": user['uuid'],
-            "used_mb": round(user['used_mb'], 2),
-            "limit_mb": user['traffic_limit_mb'],
-            "expire_date": user['expire_date'],
-            "is_monthly": user['is_monthly'] or 0,
-            "reset_day": user['reset_day'] or 1,
+            "username": user_dict['username'],
+            "email": user_dict['email'],
+            "role": user_dict['role'],
+            "uuid": user_dict['uuid'],
+            "used_mb": round(user_dict.get('used_mb', 0), 2),
+            "limit_mb": user_dict['traffic_limit_mb'],
+            "expire_date": user_dict['expire_date'],
+            "is_monthly": user_dict['is_monthly'] or 0,
+            "reset_day": user_dict['reset_day'] or 1,
+            "user_group": user_dict.get('user_group', 'default'),
             "sub_url": sub_url,
             "nodes": nodes_data,
-            "notify_type": user['notify_type'] or 'email',
-            "serverchan_key": user['serverchan_key'] or ''
+            "notify_type": user_dict['notify_type'] or 'email',
+            "serverchan_key": user_dict['serverchan_key'] or ''
         }
     })
 
@@ -164,8 +170,8 @@ def register():
 
     try:
         c.execute("""
-            INSERT INTO users (username, password_hash, uuid, email, traffic_limit_mb, used_mb, expire_date, role, status, is_verified, is_monthly, reset_day) 
-            VALUES (?, ?, ?, ?, ?, 0, ?, 'user', 1, 1, 0, 1)
+            INSERT INTO users (username, password_hash, uuid, email, traffic_limit_mb, used_mb, expire_date, role, status, is_verified, is_monthly, reset_day, user_group) 
+            VALUES (?, ?, ?, ?, ?, 0, ?, 'user', 1, 1, 0, 1, 'default')
         """, (u, hash_pwd(p), str(uuid.uuid4()), email, reg_traffic_mb, exp))
         c.execute("DELETE FROM verify_codes WHERE email=?", (email,))
         conn.commit()

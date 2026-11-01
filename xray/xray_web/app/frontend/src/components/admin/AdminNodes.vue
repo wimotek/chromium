@@ -1,146 +1,188 @@
 <template>
   <div class="cyber-card tab-content-card">
     <div class="card-header">
-      <h3>🌐 已接入的远程 xray_core 节点集群</h3>
-      <button class="btn-cyber-refresh" @click="$emit('reload-all')">🔄 刷新节点</button>
+      <div style="display: flex; align-items: center; gap: 8px;">
+        <h3>🌐 节点集群治理与多端调度</h3>
+        <span class="badge badge-ready">{{ adminNodes.length }} 个节点</span>
+      </div>
+      <button class="btn-cyber-refresh" @click="fetchNodes">🔄 刷新节点</button>
     </div>
 
     <div class="table-container">
       <table class="cyber-table">
         <thead>
           <tr>
-            <th>节点别名</th>
-            <th>连接地址与端口</th>
-            <th>伪装域名列表 (ServerNames)</th>
-            <!-- 核心优化：正式将通信凭证列替换为 ShortId (sid) -->
-            <th>ShortId (sid)</th>
-            <th>REALITY 公钥 (PBK)</th>
-            <th style="white-space: nowrap;">心跳在线状态</th>
-            <th>集群操作</th>
+            <th>节点名称 / 物理地址</th>
+            <th>服务状态</th>
+            <th>开放范围策略</th>
+            <th>SNI 伪装域名</th>
+            <th>公钥 (PublicKey)</th>
+            <th>心跳检测时间</th>
+            <th style="width: 280px;">治理操作</th>
           </tr>
         </thead>
         <tbody>
-          <tr v-for="n in adminNodes" :key="n.id">
-            <td><b>{{ n.name }}</b></td>
-            <td style="white-space: nowrap; font-family: monospace;">{{ n.ip }}:{{ n.port }}</td>
-            <td style="font-size: 11px; color: #94a3b8; max-width: 220px; word-break: break-all;">
-              {{ n.server_names || n.sni }}
+          <tr v-for="node in adminNodes" :key="node.id" :class="{ 'node-disabled-row': node.status === 0 }">
+            <td>
+              <div style="font-weight: 700; color: #f8fafc;">{{ node.name }}</div>
+              <div style="font-size: 11px; color: #64748b; font-family: monospace;">{{ node.ip }}:{{ node.port }}</div>
             </td>
-
-            <!-- 展示 ShortId (sid) 及一键复制 -->
-            <td class="font-mono text-cyan" style="font-size: 11px; white-space: nowrap;">
-              {{ n.sid || '未就绪' }}
-              <button v-if="n.sid" class="btn-link-action" style="margin-left: 4px;" @click="$emit('copy', n.sid)">复制</button>
-            </td>
-
-            <td class="font-mono text-green" style="font-size: 11px; white-space: nowrap;">
-              {{ n.pbk ? n.pbk.substring(0, 10) + '...' : '等待回传' }}
-              <button v-if="n.pbk" class="btn-link-action" style="margin-left: 4px;" @click="$emit('copy', n.pbk)">复制</button>
-            </td>
-
-            <!-- 动态真实状态灯：根据真实心跳时效判断在线与下线 -->
-            <td class="status-cell-nowrap">
-              <span v-if="!isNodeOnline(n)" class="badge badge-used">
-                🔴 已下线
+            <!-- 服务状态：启用 vs 禁用 -->
+            <td>
+              <span class="badge" :class="node.status === 1 ? 'badge-ready' : 'badge-disabled'">
+                {{ node.status === 1 ? '🟢 启用服务' : '🛑 已禁用' }}
               </span>
-              <span v-else-if="!n.pbk || (n.last_heartbeat && n.last_heartbeat.includes('等待'))" class="badge badge-monthly">
-                🟡 等待回传
-              </span>
-              <span v-else class="badge badge-ready">
-                🟢 在线
-              </span>
-              <div class="time-sub-text">{{ n.last_heartbeat }}</div>
             </td>
-
+            <!-- 开放范围策略：公开 vs 定向 -->
+            <td>
+              <span v-if="node.status === 0" class="badge badge-disabled">
+                🚫 全局阻断
+              </span>
+              <span v-else-if="node.allow_all === 1" class="badge badge-public">
+                🌐 全体公开
+              </span>
+              <span v-else class="badge badge-restricted" :title="`组: ${node.allowed_groups || '无'} | 人: ${node.allowed_users || '无'}`">
+                🎯 定向限定 ({{ getScopeSummary(node) }})
+              </span>
+            </td>
+            <td>
+              <div style="font-size: 12px; color: #38bdf8;">{{ node.sni }}</div>
+              <div v-if="node.server_names && node.server_names.includes(',')" style="font-size: 10px; color: #94a3b8;">
+                多SNI: {{ node.server_names.split(',').length }} 个
+              </div>
+            </td>
+            <td>
+              <span v-if="node.pbk && node.pbk.length === 43" class="badge badge-ready" title="公钥正常就绪">
+                43位有效
+              </span>
+              <span v-else class="badge badge-used" title="尚未正确回传或格式异常">
+                ⚠️ 异常
+              </span>
+            </td>
+            <td>
+              <div style="font-size: 11px; color: #94a3b8;">{{ node.last_heartbeat }}</div>
+            </td>
             <td>
               <div class="action-btn-row">
-                <button class="btn-sm btn-edit" @click="openNodeConfig(n)">✏️ 配置</button>
-                <button class="btn-sm btn-action" @click="forceResyncNode(n.node_id)">🔄 重置上报</button>
-                <button class="btn-sm btn-del" @click="revokeDeleteNode(n.node_id)">🗑️ 吊销删除</button>
+                <!-- 快捷启用/禁用开关 -->
+                <button
+                  class="btn-sm"
+                  :class="node.status === 1 ? 'btn-toggle-disable' : 'btn-toggle-enable'"
+                  @click="handleToggleStatus(node)"
+                >
+                  {{ node.status === 1 ? '🛑 禁用' : '🟢 启用' }}
+                </button>
+                <button class="btn-sm btn-edit" @click="openEditModal(node)">✏️ 配置/权限</button>
+                <button class="btn-sm btn-reset" @click="handleForceResync(node.node_id)" title="清空公钥让节点重新上报">🔄 重新接纳</button>
+                <button class="btn-sm btn-del" @click="handleRevokeDelete(node.node_id)" title="从集群中删除该节点">🗑️</button>
               </div>
             </td>
           </tr>
           <tr v-if="adminNodes.length === 0">
-            <td colspan="7" style="text-align: center; color: #64748b; padding: 25px;">
-              暂无远程节点接入，请在任意海外服务器执行下方指令拉起 xray_core 节点容器。
+            <td colspan="7" style="text-align: center; color: #64748b; padding: 24px;">
+              集群暂无节点，请在远程节点部署并配置 PANEL_URL 自动接入。
             </td>
           </tr>
         </tbody>
       </table>
     </div>
 
-    <!-- 远程海外 VPS 接入指令 -->
-    <div class="panel-card" style="margin-top: 25px;">
-      <h4 style="margin: 0 0 10px 0; color: #38bdf8;">🖥️ 远程海外 VPS 一键接入指令 (HTTPS 模式)</h4>
-      <p class="card-desc">节点秒级上线，自动推导并向本面板回传真实公钥与网络参数：</p>
-      <div class="node-field">
-        <div class="code-display text-cyan">
-          docker run -d --name xray-node --network host --restart always -e PANEL_URL=https://{{ publicMasterHost }}:3000 -v $(pwd)/data:/data wimotek/xray:core
-        </div>
-      </div>
-      <button class="btn-sm btn-action" @click="$emit('copy', `docker run -d --name xray-node --network host --restart always -e PANEL_URL=https://${publicMasterHost}:3000 -v $(pwd)/data:/data wimotek/xray:core`)">
-        📋 复制接入命令
-      </button>
-    </div>
+    <!-- 弹窗：编辑节点配置与开放范围控制 -->
+    <div v-if="showEditModal" class="modal-backdrop" @click="showEditModal = false">
+      <div class="cyber-modal" style="max-width: 580px; text-align: left;" @click.stop>
+        <h3>✏️ 节点参数与定向权限策略 [{{ editNodeForm.name }}]</h3>
 
-    <!-- 弹窗：管理员在线配置节点全部参数 -->
-    <div v-if="showNodeConfigModal" class="modal-backdrop" @click="showNodeConfigModal = false">
-      <div class="cyber-modal" style="max-width: 520px; text-align: left;" @click.stop>
-        <h3>✏️ 调整节点配置 (双向自动同步)</h3>
-        <p class="modal-tip">修改后，用户订阅与海外节点将在下次轮询时自动同步热更：</p>
-
-        <div class="form-item">
-          <label>节点别名 (Name)</label>
-          <input v-model="nodeEditForm.name" class="cyber-input modal-input" placeholder="例如: 🇭🇰 香港 01 - 极速专线" />
-        </div>
-
-        <div class="form-row-2">
-          <div class="form-item">
-            <label>连接地址 (IP 或专属解析域名)</label>
-            <input v-model="nodeEditForm.ip" class="cyber-input modal-input" placeholder="例如: 140.x.x.x 或 hk.node.com" />
-          </div>
-          <div class="form-item">
-            <label>监听端口 (Port)</label>
-            <input v-model.number="nodeEditForm.port" type="number" class="cyber-input modal-input" placeholder="443" />
-          </div>
-        </div>
-
-        <div class="form-item">
-          <label>伪装回落目标 (Dest)</label>
-          <input v-model="nodeEditForm.dest" class="cyber-input modal-input" placeholder="itunes.apple.com:443" />
-        </div>
-
-        <div class="form-item">
-          <label>伪装域名列表 (ServerNames / 逗号分隔多域名)：</label>
-          <input v-model="nodeEditForm.server_names" class="cyber-input modal-input font-mono" placeholder="itunes.apple.com,swdist.apple.com,apps.apple.com" />
-          <span class="input-hint">可配置多个备选伪装域名（逗号分隔）。前台用户可自由下拉切换，默认随机分配</span>
-        </div>
-
-        <div class="form-row-2">
-          <div class="form-item">
-            <label>ShortId (sid)</label>
-            <input v-model="nodeEditForm.sid" class="cyber-input modal-input" placeholder="8位16进制" />
-          </div>
-          <div class="form-item">
-            <label>节点状态</label>
-            <label class="radio-label" style="margin-top: 10px;">
-              <input type="checkbox" v-model="nodeEditForm.status" /> 节点对全站公开发布
+        <!-- A. 基础服务开关 -->
+        <div class="form-item" style="margin-top: 14px;">
+          <label>节点启用状态</label>
+          <div class="radio-group">
+            <label class="radio-label">
+              <input type="radio" :value="1" v-model.number="editNodeForm.status" /> 🟢 正常启用 (允许客户端接入)
+            </label>
+            <label class="radio-label">
+              <input type="radio" :value="0" v-model.number="editNodeForm.status" /> 🛑 停用禁用 (用户端不可见且切断连接)
             </label>
           </div>
         </div>
 
-        <div class="form-item">
-          <label>节点通信密钥 (NODE_KEY)</label>
-          <div style="display: flex; gap: 8px;">
-            <input v-model="nodeEditForm.node_key" class="cyber-input modal-input font-mono" placeholder="集群通信密钥" />
-            <button class="btn-sm btn-action" style="white-space: nowrap;" @click="generateNewNodeKey">🎲 随机生成</button>
+        <!-- B. 权限开放范围策略 -->
+        <div class="form-item" style="border-top: 1px dashed rgba(255,255,255,0.08); padding-top: 12px;">
+          <label>节点使用权限开放范围</label>
+          <div class="radio-group">
+            <label class="radio-label">
+              <input type="radio" :value="1" v-model.number="editNodeForm.allow_all" /> 🌐 全部用户可用 (公开节点)
+            </label>
+            <label class="radio-label">
+              <input type="radio" :value="0" v-model.number="editNodeForm.allow_all" /> 🎯 定向授权 (仅对指定用户组或特定用户开放)
+            </label>
           </div>
-          <span class="input-hint">点击保存后新密钥将自动下发给远程节点并热更本地文件</span>
         </div>
 
-        <div class="btn-group" style="justify-content: flex-end; margin-top: 15px;">
-          <button class="btn-cyber-action" @click="showNodeConfigModal = false">取消</button>
-          <button class="btn-cyber-success" @click="saveNodeFullConfig">保存并同步</button>
+        <!-- C. 细粒度权限指定 -->
+        <div v-if="editNodeForm.allow_all === 0" class="permission-sub-box">
+          <div class="form-item">
+            <label>允许访问的用户组 (多个用逗号隔开，如: vip, pro, internal)</label>
+            <input
+              v-model="editNodeForm.allowed_groups"
+              type="text"
+              class="cyber-input modal-input"
+              placeholder="例如: vip, svip"
+            />
+            <span class="input-hint">用户所属组与此匹配时可见并可用该节点（未填则不按组匹配）</span>
+          </div>
+
+          <div class="form-item" style="margin-top: 8px;">
+            <label>允许访问的特定用户 (多个用逗号隔开，支持填用户名或邮箱)</label>
+            <input
+              v-model="editNodeForm.allowed_users"
+              type="text"
+              class="cyber-input modal-input"
+              placeholder="例如: alice, bob@qq.com, 460486990@qq.com"
+            />
+            <span class="input-hint">特定白名单用户名单（未填则不按个人匹配）</span>
+          </div>
+        </div>
+
+        <!-- D. 网络与连接参数 -->
+        <div class="form-item" style="border-top: 1px dashed rgba(255,255,255,0.08); padding-top: 12px;">
+          <label>节点对外展示名称</label>
+          <input v-model="editNodeForm.name" type="text" class="cyber-input modal-input" />
+        </div>
+
+        <div style="display: flex; gap: 10px;">
+          <div class="form-item" style="flex: 1;">
+            <label>节点 IP 地址</label>
+            <input v-model="editNodeForm.ip" type="text" class="cyber-input modal-input" />
+          </div>
+          <div class="form-item" style="width: 110px;">
+            <label>监听端口</label>
+            <input v-model.number="editNodeForm.port" type="number" class="cyber-input modal-input" />
+          </div>
+        </div>
+
+        <div class="form-item">
+          <label>伪装目标域名 (dest)</label>
+          <input v-model="editNodeForm.dest" type="text" class="cyber-input modal-input" placeholder="www.microsoft.com:443" />
+        </div>
+
+        <div class="form-item">
+          <label>多 SNI 域名轮换池 (英文逗号隔开)</label>
+          <input v-model="editNodeForm.server_names" type="text" class="cyber-input modal-input" />
+        </div>
+
+        <div class="form-item">
+          <label>ShortId 认证标识</label>
+          <input v-model="editNodeForm.sid" type="text" class="cyber-input modal-input" />
+        </div>
+
+        <div class="form-item">
+          <label>节点通信密钥 (Node Key)</label>
+          <input v-model="editNodeForm.node_key" type="text" class="cyber-input modal-input font-mono" />
+        </div>
+
+        <div class="btn-group" style="justify-content: flex-end; margin-top: 20px;">
+          <button class="btn-cyber-action" @click="showEditModal = false">取消</button>
+          <button class="btn-cyber-success" @click="submitNodeEdit">保存配置与权限</button>
         </div>
       </div>
     </div>
@@ -148,69 +190,118 @@
 </template>
 
 <script setup>
-import { ref, reactive, computed } from 'vue'
+import { ref, reactive, onMounted } from 'vue'
 import axios from 'axios'
 import { ElMessage } from 'element-plus'
 
 const props = defineProps({
-  adminNodes: { type: Array, default: () => [] },
   currentUser: { type: Object, required: true },
   adminPassword: { type: String, required: true }
 })
 
-const emit = defineEmits(['copy', 'reload-all'])
+const emit = defineEmits(['reload-all'])
 
-const showNodeConfigModal = ref(false)
-const nodeEditForm = reactive({ node_id: '', name: '', ip: '', port: 443, dest: '', sni: '', server_names: '', sid: '', node_key: '', status: true })
+const adminNodes = ref([])
+const showEditModal = ref(false)
 
-const publicMasterHost = computed(() => window.location.hostname)
+const editNodeForm = reactive({
+  node_id: '',
+  name: '',
+  ip: '',
+  port: 443,
+  dest: '',
+  sni: '',
+  server_names: '',
+  sid: '',
+  node_key: '',
+  status: 1,
+  allow_all: 1,
+  allowed_groups: '',
+  allowed_users: ''
+})
 
-// 智能判定心跳是否存活：超过 120 秒未收到心跳即判定为已下线
-const isNodeOnline = (n) => {
-  if (!n || n.status === 0 || !n.last_heartbeat) return false
-  if (n.last_heartbeat.includes('下线') || n.last_heartbeat.includes('等待')) return false
+const getScopeSummary = (node) => {
+  const parts = []
+  if (node.allowed_groups) parts.push(`${node.allowed_groups.split(',').length}个组`)
+  if (node.allowed_users) parts.push(`${node.allowed_users.split(',').length}人`)
+  return parts.length ? parts.join('+') : '未指派'
+}
+
+const fetchNodes = async () => {
   try {
-    const hbTime = new Date(n.last_heartbeat.replace(/-/g, '/')).getTime()
-    const now = new Date().getTime()
-    return (now - hbTime) <= 120 * 1000
+    const res = await axios.post('/api/admin/nodes/list', {
+      admin_user: props.currentUser.username,
+      admin_pwd: props.adminPassword
+    })
+    if (res.data.code === 200) {
+      adminNodes.value = res.data.data
+    }
   } catch (_) {
-    return false
+    ElMessage.error('拉取节点列表失败')
   }
 }
 
-const openNodeConfig = (node) => {
-  nodeEditForm.node_id = node.node_id
-  nodeEditForm.name = node.name
-  nodeEditForm.ip = node.ip
-  nodeEditForm.port = node.port
-  nodeEditForm.dest = node.dest || 'itunes.apple.com:443'
-  nodeEditForm.sni = node.sni || 'itunes.apple.com'
-  nodeEditForm.server_names = node.server_names || node.sni || ''
-  nodeEditForm.sid = node.sid
-  nodeEditForm.node_key = node.node_key
-  nodeEditForm.status = node.status === 1
-  showNodeConfigModal.value = true
+onMounted(() => {
+  fetchNodes()
+})
+
+// 快捷单节点启用 / 禁用切换
+const handleToggleStatus = async (node) => {
+  const targetStatus = node.status === 1 ? 0 : 1
+  const actionText = targetStatus === 1 ? '启用' : '禁用'
+  const confirmTip = targetStatus === 0
+    ? `⚠️ 确定要禁用节点 [${node.name}] 吗？\n\n禁用后所有普通用户将无法连接，且在网页和订阅中彻底消失！`
+    : `确定要恢复启用节点 [${node.name}] 吗？`
+
+  if (!confirm(confirmTip)) return
+
+  try {
+    const res = await axios.post('/api/admin/nodes/toggle_status', {
+      admin_user: props.currentUser.username,
+      admin_pwd: props.adminPassword,
+      node_id: node.node_id,
+      status: targetStatus
+    })
+    if (res.data.code === 200) {
+      ElMessage.success(res.data.msg)
+      node.status = targetStatus
+      emit('reload-all')
+    } else {
+      ElMessage.error(res.data.msg)
+    }
+  } catch (_) {
+    ElMessage.error(`${actionText}节点失败`)
+  }
 }
 
-const generateNewNodeKey = () => {
-  const chars = '0123456789abcdef'
-  let key = ''
-  for (let i = 0; i < 32; i++) key += chars.charAt(Math.floor(Math.random() * chars.length))
-  nodeEditForm.node_key = key
-  ElMessage.success('已随机生成新密钥，点击【保存并同步】后生效')
+const openEditModal = (node) => {
+  editNodeForm.node_id = node.node_id
+  editNodeForm.name = node.name
+  editNodeForm.ip = node.ip
+  editNodeForm.port = node.port
+  editNodeForm.dest = node.dest || 'www.microsoft.com:443'
+  editNodeForm.sni = node.sni || 'www.microsoft.com'
+  editNodeForm.server_names = node.server_names || node.sni
+  editNodeForm.sid = node.sid
+  editNodeForm.node_key = node.node_key
+  editNodeForm.status = node.status !== undefined ? node.status : 1
+  editNodeForm.allow_all = node.allow_all !== undefined ? node.allow_all : 1
+  editNodeForm.allowed_groups = node.allowed_groups || ''
+  editNodeForm.allowed_users = node.allowed_users || ''
+  showEditModal.value = true
 }
 
-const saveNodeFullConfig = async () => {
+const submitNodeEdit = async () => {
   try {
     const res = await axios.post('/api/admin/nodes/save_config', {
       admin_user: props.currentUser.username,
       admin_pwd: props.adminPassword,
-      ...nodeEditForm,
-      status: nodeEditForm.status ? 1 : 0
+      ...editNodeForm
     })
     if (res.data.code === 200) {
       ElMessage.success(res.data.msg)
-      showNodeConfigModal.value = false
+      showEditModal.value = false
+      fetchNodes()
       emit('reload-all')
     } else {
       ElMessage.error(res.data.msg)
@@ -220,7 +311,8 @@ const saveNodeFullConfig = async () => {
   }
 }
 
-const forceResyncNode = async (nodeId) => {
+const handleForceResync = async (nodeId) => {
+  if (!confirm(`确定开启对节点 [${nodeId}] 的重新接纳模式吗？`)) return
   try {
     const res = await axios.post('/api/admin/nodes/force_resync', {
       admin_user: props.currentUser.username,
@@ -229,23 +321,15 @@ const forceResyncNode = async (nodeId) => {
     })
     if (res.data.code === 200) {
       ElMessage.success(res.data.msg)
-      emit('reload-all')
+      fetchNodes()
     }
   } catch (_) {
-    ElMessage.error('重置上报失败')
+    ElMessage.error('触发重新接纳失败')
   }
 }
 
-const revokeDeleteNode = async (nodeId) => {
-  const tip =
-    `⚠️ 确定要彻底吊销并删除该节点吗？\n\n` +
-    `【生效后果】主控将彻底注销该节点并拒绝其后续心跳，该节点不会再自动冒出。\n\n` +
-    `【远程 VPS 重新接入方法】\n` +
-    `若日后需要让该 VPS 重新接入，只需在远程机执行：\n` +
-    `rm -f data/node_id.txt data/node_key.txt && docker restart xray-node\n\n` +
-    `是否确认吊销？`
-
-  if (!confirm(tip)) return
+const handleRevokeDelete = async (nodeId) => {
+  if (!confirm(`⚠️ 警告：确定要从集群中吊销并彻底删除该节点吗？`)) return
   try {
     const res = await axios.post('/api/admin/nodes/revoke_delete', {
       admin_user: props.currentUser.username,
@@ -253,11 +337,63 @@ const revokeDeleteNode = async (nodeId) => {
       node_id: nodeId
     })
     if (res.data.code === 200) {
-      ElMessage.success('节点已成功吊销并移除！')
+      ElMessage.success(res.data.msg)
+      fetchNodes()
       emit('reload-all')
     }
   } catch (_) {
-    ElMessage.error('吊销删除失败')
+    ElMessage.error('吊销节点失败')
   }
 }
 </script>
+
+<style scoped>
+.node-disabled-row {
+  opacity: 0.6;
+  background: rgba(239, 68, 68, 0.05);
+}
+
+.badge-disabled {
+  background: rgba(239, 68, 68, 0.2);
+  color: #ef4444;
+  border: 1px solid rgba(239, 68, 68, 0.4);
+}
+
+.badge-public {
+  background: rgba(16, 185, 129, 0.15);
+  color: #10b981;
+  border: 1px solid rgba(16, 185, 129, 0.3);
+}
+
+.badge-restricted {
+  background: rgba(245, 158, 11, 0.15);
+  color: #f59e0b;
+  border: 1px solid rgba(245, 158, 11, 0.3);
+}
+
+.btn-toggle-disable {
+  background: rgba(239, 68, 68, 0.2);
+  color: #f87171;
+  border: 1px solid rgba(239, 68, 68, 0.4);
+}
+.btn-toggle-disable:hover {
+  background: rgba(239, 68, 68, 0.4);
+}
+
+.btn-toggle-enable {
+  background: rgba(16, 185, 129, 0.2);
+  color: #34d399;
+  border: 1px solid rgba(16, 185, 129, 0.4);
+}
+.btn-toggle-enable:hover {
+  background: rgba(16, 185, 129, 0.4);
+}
+
+.permission-sub-box {
+  background: #090d16;
+  border: 1px solid #1e293b;
+  border-radius: 6px;
+  padding: 12px;
+  margin-top: 10px;
+}
+</style>

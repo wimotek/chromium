@@ -21,10 +21,12 @@ def admin_data():
     c.execute("SELECT code, traffic_gb, days, is_used, used_by, created_at, used_at, is_monthly FROM cards ORDER BY rowid DESC LIMIT 200")
     cards = [dict(r) for r in c.fetchall()]
 
-    c.execute("SELECT * FROM nodes WHERE status=1 ORDER BY id ASC")
+    # 返回节点的完整权限字段
+    c.execute("SELECT * FROM nodes ORDER BY id ASC")
     active_nodes = [dict(n) for n in c.fetchall()]
 
-    c.execute("SELECT username, email, traffic_limit_mb, used_mb, expire_date, role, uuid, status, notify_type, is_monthly, reset_day FROM users")
+    # 返回用户的 user_group 属性
+    c.execute("SELECT username, email, traffic_limit_mb, used_mb, expire_date, role, uuid, status, notify_type, is_monthly, reset_day, user_group FROM users")
     raw_users = c.fetchall()
     conn.close()
 
@@ -33,7 +35,7 @@ def admin_data():
     for r in raw_users:
         d = dict(r)
         d['sub_url'] = f"{host_prefix}/api/sub?token={d['uuid']}"
-        d['used_mb'] = round(d['used_mb'], 2)
+        d['used_mb'] = round(d.get('used_mb', 0), 2)
         d['node_links'] = []
         for n in active_nodes:
             if len(n.get("pbk", "")) == 43:
@@ -54,7 +56,165 @@ def admin_data():
                 })
         users.append(d)
 
-    return jsonify({"code": 200, "cards": cards, "users": users})
+    return jsonify({"code": 200, "cards": cards, "users": users, "nodes": active_nodes})
+
+# 核心接口：单独一键切换节点的启用 / 禁用状态
+@admin_bp.route('/api/admin/nodes/toggle_status', methods=['POST'])
+def admin_nodes_toggle_status():
+    data = request.json or {}
+    if not check_admin(data.get('admin_user'), data.get('admin_pwd')): return jsonify({"code": 403, "msg": "无权限"})
+
+    node_id = data.get('node_id')
+    new_status = int(data.get('status', 1))
+
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("UPDATE nodes SET status=? WHERE node_id=?", (new_status, node_id))
+    conn.commit()
+    conn.close()
+
+    status_text = "🟢 启用" if new_status == 1 else "🛑 禁用"
+    tip = f"节点已{status_text}！"
+    tip += "该节点已对所有普通用户屏蔽，且服务端将在下次心跳时切断所有连接。" if new_status == 0 else "该节点已恢复正常服务与展示。"
+
+    return jsonify({"code": 200, "msg": tip})
+
+# 核心接口：保存节点配置与可见开放范围策略 (公开 / 指定用户组 / 指定特定用户)
+@admin_bp.route('/api/admin/nodes/save_config', methods=['POST'])
+def admin_save_node_config():
+    data = request.json or {}
+    if not check_admin(data.get('admin_user'), data.get('admin_pwd')): return jsonify({"code": 403, "msg": "无权限"})
+
+    node_id = data.get('node_id')
+    name = data.get('name', '').strip()
+    ip = data.get('ip', '').strip()
+    port = int(data.get('port', 443))
+    raw_dest = data.get('dest', 'www.microsoft.com:443').strip()
+    raw_server_names = data.get('server_names', '').strip()
+    raw_sni = data.get('sni', 'www.microsoft.com').strip()
+    sid = data.get('sid', '').strip()
+    node_key = data.get('node_key', '').strip()
+    status = int(data.get('status', 1))
+
+    # 权限字段
+    allow_all = int(data.get('allow_all', 1))
+    allowed_groups = data.get('allowed_groups', '').strip()
+    allowed_users = data.get('allowed_users', '').strip()
+
+    dest = raw_dest if ":" in raw_dest else f"{raw_dest}:443"
+
+    snis = []
+    for part in re.split(r'[,;\s]+', raw_server_names or raw_sni):
+        clean = part.strip().split(":")[0]
+        if clean and clean not in snis:
+            snis.append(clean)
+    server_names_str = ",".join(snis)
+    primary_sni = snis[0] if snis else "www.microsoft.com"
+
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("""
+        UPDATE nodes 
+        SET name=?, ip=?, port=?, dest=?, sni=?, server_names=?, sid=?, node_key=?, status=?,
+            allow_all=?, allowed_groups=?, allowed_users=?
+        WHERE node_id=?
+    """, (name, ip, port, dest, primary_sni, server_names_str, sid, node_key, status,
+          allow_all, allowed_groups, allowed_users, node_id))
+    conn.commit()
+    conn.close()
+
+    return jsonify({"code": 200, "msg": "节点配置与访问控制策略已更新！下次心跳时将自动向节点推送最新权限列表。"})
+
+@admin_bp.route('/api/admin/nodes/list', methods=['POST'])
+def admin_list_nodes():
+    data = request.json or {}
+    if not check_admin(data.get('admin_user'), data.get('admin_pwd')): return jsonify({"code": 403, "msg": "无权限"})
+
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("SELECT * FROM nodes ORDER BY id ASC")
+    nodes = [dict(n) for n in c.fetchall()]
+    conn.close()
+    return jsonify({"code": 200, "data": nodes})
+
+@admin_bp.route('/api/admin/nodes/force_resync', methods=['POST'])
+def admin_nodes_force_resync():
+    data = request.json or {}
+    if not check_admin(data.get('admin_user'), data.get('admin_pwd')): return jsonify({"code": 403, "msg": "无权限"})
+
+    node_id = data.get('node_id')
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("UPDATE nodes SET pbk='', sid='', pending_key='FORCE_RESYNC', last_heartbeat='等待重新上报' WHERE node_id=?", (node_id,))
+    conn.commit()
+    conn.close()
+
+    return jsonify({"code": 200, "msg": "重置指令已就绪！已开启重置接纳模式，节点将在下次回传时自动完成重绑并回传公钥。"})
+
+@admin_bp.route('/api/admin/nodes/revoke_delete', methods=['POST'])
+def admin_revoke_delete_node():
+    data = request.json or {}
+    if not check_admin(data.get('admin_user'), data.get('admin_pwd')): return jsonify({"code": 403, "msg": "无权限"})
+
+    node_id = data.get('node_id')
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("DELETE FROM nodes WHERE node_id=?", (node_id,))
+    conn.commit()
+    conn.close()
+
+    return jsonify({"code": 200, "msg": "节点已被彻底从集群中吊销并移除！"})
+
+@admin_bp.route('/api/admin/nodes/reset_key', methods=['POST'])
+def admin_reset_node_key():
+    data = request.json or {}
+    if not check_admin(data.get('admin_user'), data.get('admin_pwd')): return jsonify({"code": 403, "msg": "无权限"})
+
+    node_id = data.get('node_id')
+    new_key = secrets.token_hex(16)
+
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("UPDATE nodes SET pending_key=? WHERE node_id=?", (new_key, node_id))
+    conn.commit()
+    conn.close()
+
+    return jsonify({
+        "code": 200,
+        "msg": "重置密钥指令已就绪！节点将在 60 秒内心跳自动同步新密钥并持久化保存。",
+        "new_key": new_key
+    })
+
+# 核心接口：修改用户配额及分配其用户组 (user_group)
+@admin_bp.route('/api/admin/users/edit', methods=['POST'])
+def edit_user_quota():
+    data = request.json or {}
+    if not check_admin(data.get('admin_user'), data.get('admin_pwd')): return jsonify({"code": 403, "msg": "无权限"})
+
+    target_user = data.get('target_user')
+    limit_mb = int(data.get('limit_mb', 0))
+    raw_expire = data.get('expire_date', '').strip()
+    is_monthly = 1 if str(data.get('is_monthly')).lower() in ['1', 'true'] else 0
+    reset_day = int(data.get('reset_day', 1) or 1)
+    user_group = str(data.get('user_group', 'default')).strip() or 'default'
+
+    clean_expire = normalize_expire_date(raw_expire)
+
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("""
+        UPDATE users 
+        SET traffic_limit_mb=?, expire_date=?, is_monthly=?, reset_day=?, user_group=? 
+        WHERE username=?
+    """, (limit_mb, clean_expire, is_monthly, reset_day, user_group, target_user))
+    conn.commit()
+    conn.close()
+    return jsonify({
+        "code": 200, 
+        "msg": f"用户 [{target_user}] 属性已更新！所属用户组：{user_group}，到期时限：{clean_expire}",
+        "expire_date": clean_expire,
+        "user_group": user_group
+    })
 
 @admin_bp.route('/api/admin/users/reset_uuid', methods=['POST'])
 def admin_reset_user_uuid():
@@ -106,30 +266,6 @@ def update_user_status():
     conn.close()
     return jsonify({"code": 200, "msg": f"用户 [{target_user}] 状态已更新"})
 
-@admin_bp.route('/api/admin/users/edit', methods=['POST'])
-def edit_user_quota():
-    data = request.json or {}
-    if not check_admin(data.get('admin_user'), data.get('admin_pwd')): return jsonify({"code": 403, "msg": "无权限"})
-
-    target_user = data.get('target_user')
-    limit_mb = int(data.get('limit_mb', 0))
-    raw_expire = data.get('expire_date', '').strip()
-    is_monthly = 1 if str(data.get('is_monthly')).lower() in ['1', 'true'] else 0
-    reset_day = int(data.get('reset_day', 1) or 1)
-
-    clean_expire = normalize_expire_date(raw_expire)
-
-    conn = get_db()
-    c = conn.cursor()
-    c.execute("""
-        UPDATE users 
-        SET traffic_limit_mb=?, expire_date=?, is_monthly=?, reset_day=? 
-        WHERE username=?
-    """, (limit_mb, clean_expire, is_monthly, reset_day, target_user))
-    conn.commit()
-    conn.close()
-    return jsonify({"code": 200, "msg": f"用户 [{target_user}] 配额属性已更新！到期时限已对齐至 {clean_expire}", "expire_date": clean_expire})
-
 @admin_bp.route('/api/admin/users/delete', methods=['POST'])
 def delete_user():
     data = request.json or {}
@@ -142,104 +278,6 @@ def delete_user():
     conn.commit()
     conn.close()
     return jsonify({"code": 200, "msg": f"用户 [{target_user}] 已被彻底删除"})
-
-@admin_bp.route('/api/admin/nodes/list', methods=['POST'])
-def admin_list_nodes():
-    data = request.json or {}
-    if not check_admin(data.get('admin_user'), data.get('admin_pwd')): return jsonify({"code": 403, "msg": "无权限"})
-
-    conn = get_db()
-    c = conn.cursor()
-    c.execute("SELECT * FROM nodes ORDER BY id ASC")
-    nodes = [dict(n) for n in c.fetchall()]
-    conn.close()
-    return jsonify({"code": 200, "data": nodes})
-
-@admin_bp.route('/api/admin/nodes/save_config', methods=['POST'])
-def admin_save_node_config():
-    data = request.json or {}
-    if not check_admin(data.get('admin_user'), data.get('admin_pwd')): return jsonify({"code": 403, "msg": "无权限"})
-
-    node_id = data.get('node_id')
-    name = data.get('name', '').strip()
-    ip = data.get('ip', '').strip()
-    port = int(data.get('port', 443))
-    raw_dest = data.get('dest', 'www.microsoft.com:443').strip()
-    raw_server_names = data.get('server_names', '').strip()
-    raw_sni = data.get('sni', 'www.microsoft.com').strip()
-    sid = data.get('sid', '').strip()
-    node_key = data.get('node_key', '').strip()
-    status = int(data.get('status', 1))
-
-    dest = raw_dest if ":" in raw_dest else f"{raw_dest}:443"
-
-    snis = []
-    for part in re.split(r'[,;\s]+', raw_server_names or raw_sni):
-        clean = part.strip().split(":")[0]
-        if clean and clean not in snis:
-            snis.append(clean)
-    server_names_str = ",".join(snis)
-    primary_sni = snis[0] if snis else "www.microsoft.com"
-
-    conn = get_db()
-    c = conn.cursor()
-    c.execute("""
-        UPDATE nodes 
-        SET name=?, ip=?, port=?, dest=?, sni=?, server_names=?, sid=?, node_key=?, status=?
-        WHERE node_id=?
-    """, (name, ip, port, dest, primary_sni, server_names_str, sid, node_key, status, node_id))
-    conn.commit()
-    conn.close()
-
-    return jsonify({"code": 200, "msg": "节点配置已更新！多域名列表已同步，远程节点下次回传时自动热重载。"})
-
-@admin_bp.route('/api/admin/nodes/force_resync', methods=['POST'])
-def admin_nodes_force_resync():
-    data = request.json or {}
-    if not check_admin(data.get('admin_user'), data.get('admin_pwd')): return jsonify({"code": 403, "msg": "无权限"})
-
-    node_id = data.get('node_id')
-    conn = get_db()
-    c = conn.cursor()
-    c.execute("UPDATE nodes SET pbk='', sid='', pending_key='FORCE_RESYNC', last_heartbeat='等待重新上报' WHERE node_id=?", (node_id,))
-    conn.commit()
-    conn.close()
-
-    return jsonify({"code": 200, "msg": "重置指令已就绪！已开启重置接纳模式，节点将在下次回传时自动完成重绑并回传公钥。"})
-
-@admin_bp.route('/api/admin/nodes/revoke_delete', methods=['POST'])
-def admin_revoke_delete_node():
-    data = request.json or {}
-    if not check_admin(data.get('admin_user'), data.get('admin_pwd')): return jsonify({"code": 403, "msg": "无权限"})
-
-    node_id = data.get('node_id')
-    conn = get_db()
-    c = conn.cursor()
-    c.execute("DELETE FROM nodes WHERE node_id=?", (node_id,))
-    conn.commit()
-    conn.close()
-
-    return jsonify({"code": 200, "msg": "节点已被彻底从集群中吊销并移除！"})
-
-@admin_bp.route('/api/admin/nodes/reset_key', methods=['POST'])
-def admin_reset_node_key():
-    data = request.json or {}
-    if not check_admin(data.get('admin_user'), data.get('admin_pwd')): return jsonify({"code": 403, "msg": "无权限"})
-
-    node_id = data.get('node_id')
-    new_key = secrets.token_hex(16)
-
-    conn = get_db()
-    c = conn.cursor()
-    c.execute("UPDATE nodes SET pending_key=? WHERE node_id=?", (new_key, node_id))
-    conn.commit()
-    conn.close()
-
-    return jsonify({
-        "code": 200,
-        "msg": "重置密钥指令已就绪！节点将在 60 秒内心跳自动同步新密钥并持久化保存。",
-        "new_key": new_key
-    })
 
 @admin_bp.route('/api/admin/notify/send', methods=['POST'])
 def admin_send_notification():

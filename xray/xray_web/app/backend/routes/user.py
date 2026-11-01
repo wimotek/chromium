@@ -6,7 +6,7 @@ from flask import Blueprint, request, jsonify, send_file, abort
 from core.db import get_db, hash_pwd
 from services.notify_service import send_smtp_email, notify_user
 from services.client_pack_service import generate_windows_package, ensure_base_v2rayng_apk
-from routes import get_node_snis, build_node_link, normalize_expire_date
+from routes import get_node_snis, build_node_link, normalize_expire_date, is_user_allowed_for_node
 
 user_bp = Blueprint('user_bp', __name__)
 
@@ -22,19 +22,24 @@ def user_refresh_info():
         conn.close()
         return jsonify({"code": 404, "msg": "用户不存在"})
 
-    c.execute("SELECT * FROM nodes WHERE status=1 ORDER BY id ASC")
-    node_rows = [dict(n) for n in c.fetchall()]
+    user_dict = dict(user)
+
+    # 查出所有节点，仅保留未禁用且用户有权访问的节点
+    c.execute("SELECT * FROM nodes ORDER BY id ASC")
+    all_nodes = [dict(n) for n in c.fetchall()]
     conn.close()
+
+    visible_nodes = [n for n in all_nodes if is_user_allowed_for_node(user_dict, n)]
 
     nodes_data = []
     host_prefix = request.host_url.rstrip('/')
-    sub_url = f"{host_prefix}/api/sub?token={user['uuid']}"
+    sub_url = f"{host_prefix}/api/sub?token={user_dict['uuid']}"
 
-    for n in node_rows:
+    for n in visible_nodes:
         if len(n.get("pbk", "")) == 43:
             snis = get_node_snis(n)
             random_sni = random.choice(snis)
-            link = build_node_link(user['uuid'], n, f"{n['name']}", chosen_sni=random_sni)
+            link = build_node_link(user_dict['uuid'], n, f"{n['name']}", chosen_sni=random_sni)
             nodes_data.append({
                 "id": n["id"],
                 "name": n["name"],
@@ -50,19 +55,20 @@ def user_refresh_info():
     return jsonify({
         "code": 200,
         "data": {
-            "username": user['username'],
-            "email": user['email'],
-            "role": user['role'],
-            "uuid": user['uuid'],
-            "used_mb": round(user['used_mb'], 2),
-            "limit_mb": user['traffic_limit_mb'],
-            "expire_date": user['expire_date'],
-            "is_monthly": user['is_monthly'] or 0,
-            "reset_day": user['reset_day'] or 1,
+            "username": user_dict['username'],
+            "email": user_dict['email'],
+            "role": user_dict['role'],
+            "uuid": user_dict['uuid'],
+            "used_mb": round(user_dict.get('used_mb', 0), 2),
+            "limit_mb": user_dict['traffic_limit_mb'],
+            "expire_date": user_dict['expire_date'],
+            "is_monthly": user_dict['is_monthly'] or 0,
+            "reset_day": user_dict['reset_day'] or 1,
+            "user_group": user_dict.get('user_group', 'default'),
             "sub_url": sub_url,
             "nodes": nodes_data,
-            "notify_type": user['notify_type'] or 'email',
-            "serverchan_key": user['serverchan_key'] or ''
+            "notify_type": user_dict['notify_type'] or 'email',
+            "serverchan_key": user_dict['serverchan_key'] or ''
         }
     })
 
@@ -80,15 +86,18 @@ def user_reset_uuid():
     conn.commit()
     c.execute("SELECT * FROM users WHERE username=?", (username,))
     user = c.fetchone()
+    user_dict = dict(user)
 
-    c.execute("SELECT * FROM nodes WHERE status=1 ORDER BY id ASC")
-    node_rows = [dict(n) for n in c.fetchall()]
+    c.execute("SELECT * FROM nodes ORDER BY id ASC")
+    all_nodes = [dict(n) for n in c.fetchall()]
     conn.close()
+
+    visible_nodes = [n for n in all_nodes if is_user_allowed_for_node(user_dict, n)]
 
     host_prefix = request.host_url.rstrip('/')
     sub_url = f"{host_prefix}/api/sub?token={new_uuid}"
     nodes_data = []
-    for n in node_rows:
+    for n in visible_nodes:
         if len(n.get("pbk", "")) == 43:
             snis = get_node_snis(n)
             random_sni = random.choice(snis)
@@ -252,7 +261,6 @@ def user_test_notify():
     if ok: return jsonify({"code": 200, "msg": "测试消息发送成功"})
     return jsonify({"code": 500, "msg": msg})
 
-# 专属 Windows v2rayN 独立包下载
 @user_bp.route('/api/user/download_client', methods=['GET'])
 def download_windows_client():
     account = request.args.get('username', '').strip()
@@ -264,8 +272,7 @@ def download_windows_client():
     user = c.fetchone()
     conn.close()
 
-    if not user:
-        abort(404)
+    if not user: abort(404)
 
     host_prefix = request.host_url.rstrip('/')
     try:
@@ -275,7 +282,6 @@ def download_windows_client():
     except Exception as e:
         return jsonify({"code": 500, "msg": f"客户端构建失败: {str(e)}"}), 500
 
-# 官方 Android v2rayNG 原版 APK 直连下载
 @user_bp.route('/api/user/download_apk', methods=['GET'])
 def download_android_apk():
     try:

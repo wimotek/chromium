@@ -3,7 +3,7 @@ import datetime
 import traceback
 from flask import Blueprint, request, jsonify
 from core.db import get_db
-from routes import get_node_snis
+from routes import get_node_snis, is_user_allowed_for_node
 
 node_bp = Blueprint('node_bp', __name__)
 
@@ -52,9 +52,7 @@ def node_heartbeat():
         c.execute("SELECT * FROM nodes WHERE node_id=?", (node_id,))
         node_row = c.fetchone()
 
-        # 场景 1：全新节点首次接入
         if not node_row:
-            # 如果同 IP 同端口有僵尸旧实例，平滑更新为当前活跃的 node_id
             c.execute("SELECT id FROM nodes WHERE ip=? AND port=?", (node_ip, node_port))
             existing = c.fetchone()
             if existing:
@@ -67,8 +65,8 @@ def node_heartbeat():
                 auto_name = f"节点-{node_ip}"
                 c.execute("""
                     INSERT INTO nodes 
-                    (node_id, node_key, pending_key, name, ip, port, dest, sni, server_names, pbk, sid, status, last_heartbeat) 
-                    VALUES (?, ?, '', ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
+                    (node_id, node_key, pending_key, name, ip, port, dest, sni, server_names, pbk, sid, status, last_heartbeat, allow_all, allowed_groups, allowed_users) 
+                    VALUES (?, ?, '', ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, 1, '', '')
                 """, (node_id, node_key, auto_name, node_ip, node_port, dest, primary_sni, server_names_str, pbk, sid, now_str))
 
             conn.commit()
@@ -79,7 +77,6 @@ def node_heartbeat():
         current_key = node.get("node_key", "")
         pending_key = node.get("pending_key", "")
 
-        # 场景 2：重置指令接纳
         if pending_key == 'FORCE_RESYNC':
             c.execute("""
                 UPDATE nodes 
@@ -100,11 +97,10 @@ def node_heartbeat():
             conn.close()
             return jsonify({"code": 200, "msg": "心跳成功，已下发新密钥", "new_node_key": pending_key})
 
-        # 场景 3：正常心跳保活
         if node_key == current_key or not current_key:
             c.execute("""
                 UPDATE nodes 
-                SET ip=?, pbk=?, sid=COALESCE(NULLIF(sid, ''), ?), status=1, last_heartbeat=? 
+                SET ip=?, pbk=?, sid=COALESCE(NULLIF(sid, ''), ?), last_heartbeat=? 
                 WHERE node_id=?
             """, (node_ip, pbk, sid, now_str, node_id))
             conn.commit()
@@ -118,6 +114,7 @@ def node_heartbeat():
         traceback.print_exc()
         return jsonify({"code": 500, "msg": f"心跳处理异常: {str(e)}"}), 500
 
+# 核心升级：根据节点是否禁用及允许范围，精准向节点下发可连接的客户端 UUID
 @node_bp.route('/api/node/sync', methods=['GET'])
 def node_sync_users():
     try:
@@ -137,25 +134,47 @@ def node_sync_users():
             conn.close()
             return jsonify({"code": 403, "msg": "鉴权失败"}), 403
 
-        c.execute("SELECT username, email, uuid FROM users WHERE status=1 AND is_verified=1")
-        users = [{"id": u["uuid"], "flow": "xtls-rprx-vision", "email": u["email"]} for u in c.fetchall()]
+        # 核心逻辑 1：如果节点被管理员禁用 (status=0)，向节点下发空用户列表，切断所有连接！
+        if int(node.get("status", 1)) == 0:
+            conn.close()
+            snis = get_node_snis(node)
+            clean_dest = node["dest"] if (node.get("dest") and ":" in node["dest"]) else f"{node.get('dest', 'www.microsoft.com')}:443"
+            return jsonify({
+                "code": 200,
+                "node_config": {
+                    "port": node["port"],
+                    "dest": clean_dest,
+                    "sni": snis[0],
+                    "server_names": snis,
+                    "sid": node["sid"]
+                },
+                "users": []  # 下发空列表，彻底阻断
+            })
+
+        # 核心逻辑 2：节点为启用状态，根据用户组和特定用户权限进行筛选
+        c.execute("SELECT username, email, uuid, user_group, role FROM users WHERE status=1 AND is_verified=1")
+        all_users = [dict(u) for u in c.fetchall()]
         conn.close()
+
+        allowed_users = [
+            {"id": u["uuid"], "flow": "xtls-rprx-vision", "email": u["email"]}
+            for u in all_users
+            if is_user_allowed_for_node(u, node)
+        ]
 
         snis = get_node_snis(node)
         clean_dest = node["dest"] if (node.get("dest") and ":" in node["dest"]) else f"{node.get('dest', 'www.microsoft.com')}:443"
 
-        node_config = {
-            "port": node["port"],
-            "dest": clean_dest,
-            "sni": snis[0],
-            "server_names": snis,
-            "sid": node["sid"]
-        }
-
         return jsonify({
             "code": 200,
-            "node_config": node_config,
-            "users": users
+            "node_config": {
+                "port": node["port"],
+                "dest": clean_dest,
+                "sni": snis[0],
+                "server_names": snis,
+                "sid": node["sid"]
+            },
+            "users": allowed_users
         })
     except Exception as e:
         traceback.print_exc()
