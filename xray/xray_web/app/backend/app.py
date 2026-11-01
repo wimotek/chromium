@@ -1,9 +1,17 @@
+import os
+import sys
 import io
 import base64
 import random
 import qrcode
 import qrcode.image.svg
 from flask import Flask, request, send_from_directory, abort, send_file
+
+# 核心保护：将当前 backend 根目录置于 Python 寻址首位，彻底免疫跨包导入找不到模块的问题
+CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
+if CURRENT_DIR not in sys.path:
+    sys.path.insert(0, CURRENT_DIR)
+
 from config import Config
 from core.db import init_db, get_db
 from core.cert_manager import ensure_certificates, CHALLENGE_DIR
