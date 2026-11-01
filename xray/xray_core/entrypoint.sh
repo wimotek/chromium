@@ -80,7 +80,6 @@ EOF
 
 [ -f "/data/private_key.txt" ] && rm -f "/data/private_key.txt"
 
-# 检查/生成私钥与公钥
 if [ ! -s "$CONFIG_FILE" ]; then
     echo "==> [Init] 首次部署，正在生成全新 REALITY 密钥对..."
     KEY_PAIR=$(/usr/bin/xray x25519)
@@ -149,7 +148,7 @@ fi
 
 UUID="${UUID:-$(/usr/bin/xray uuid)}"
 
-# ================= 5. 核心：运行模式绝对清晰分流 =================
+# ================= 5. 运行模式严谨分流 =================
 
 if [ -z "$PANEL_URL" ]; then
     # ========================================================
@@ -158,7 +157,6 @@ if [ -z "$PANEL_URL" ]; then
     # ========================================================
     echo "==> [Mode: Standalone] 当前为纯单机模式，生成/保持纯净配置，绝不启用流量统计与 10085 端口。"
 
-    # 首次部署生成纯净单机 config.json
     if [ ! -s "$CONFIG_FILE" ]; then
         [ ! -f "$TEMPLATE_FILE" ] && exit 1
         cat "$TEMPLATE_FILE" | jq \
@@ -192,13 +190,13 @@ if [ -z "$PANEL_URL" ]; then
                     }
                 }
             ] |
+            .outbounds = [.outbounds[] | select(.tag != "api")] |
             .routing.rules = [.routing.rules[]? | select(.outboundTag != "api")]
             ' > "$CONFIG_FILE"
     else
-        # 若已有历史残留的 stats/api/10085 配置，就地清洗为纯净模式
         if grep -q '10085' "$CONFIG_FILE" || grep -q 'StatsService' "$CONFIG_FILE"; then
             TMP_CLEAN="/tmp/config.clean.json"
-            jq 'del(.stats) | del(.api) | del(.policy) | .inbounds = [.inbounds[] | select(.tag != "api")] | .routing.rules = [.routing.rules[]? | select(.outboundTag != "api")]' "$CONFIG_FILE" > "$TMP_CLEAN" && mv "$TMP_CLEAN" "$CONFIG_FILE"
+            jq 'del(.stats) | del(.api) | del(.policy) | .inbounds = [.inbounds[] | select(.tag != "api")] | .outbounds = [.outbounds[] | select(.tag != "api")] | .routing.rules = [.routing.rules[]? | select(.outboundTag != "api")]' "$CONFIG_FILE" > "$TMP_CLEAN" && mv "$TMP_CLEAN" "$CONFIG_FILE"
         fi
     fi
 
@@ -225,18 +223,16 @@ EOF
     echo "==> [Standalone] 单机模式启动成功！连接信息如下："
     cat "$CLIENT_INFO_FILE"
 
-    # 单机模式直接替换为主进程，零额外开销
     exec /usr/bin/xray run -config "$CONFIG_FILE"
 
 else
     # ========================================================
     # 【分支 2：远程集群节点模式】
-    # 只有且仅在这个模式下，才必须完整初始化并维护 10085 端口与流量统计
+    # 完整配置 10085 dokodemo-door 入站 + tag:api outbound 出站 + 置顶 API 路由规则！
     # ========================================================
     echo "==> [Mode: Cluster Node] 远程集群节点模式激活，主控地址: $PANEL_URL"
     [ -f "$CLIENT_INFO_FILE" ] && rm -f "$CLIENT_INFO_FILE"
 
-    # 管理节点标识 node_id 与通信密钥 node_key
     if [ -f "$NODE_ID_FILE" ] && [ -s "$NODE_ID_FILE" ]; then
         NODE_ID=$(cat "$NODE_ID_FILE" | tr -d ' \r\n')
     else
@@ -253,7 +249,7 @@ else
         echo "$NODE_KEY" > "$NODE_KEY_FILE"
     fi
 
-    # 首次部署集群节点，直接生成带 10085 API 和流量统计的完整 config.json
+    # 首次部署集群节点：直接写齐 api 入站、api 出站与优先路由
     if [ ! -s "$CONFIG_FILE" ]; then
         [ ! -f "$TEMPLATE_FILE" ] && exit 1
         cat "$TEMPLATE_FILE" | jq \
@@ -307,48 +303,40 @@ else
                     }
                 }
             ] |
-            .routing.rules = [
-                {
-                    "type": "field",
-                    "inboundTag": ["api"],
-                    "outboundTag": "api"
-                }
-            ]
+            # 核心补齐：必须具有 tag: "api" 的 outbound，防止被默认 block 拦截！
+            .outbounds = ([{"tag": "api", "protocol": "freedom", "settings": {}}] + [.outbounds[]? | select(.tag != "api")]) |
+            # 核心补齐：API 路由必须放在最前面优先匹配！
+            .routing.rules = ([{"type": "field", "inboundTag": ["api"], "outboundTag": "api"}] + [.routing.rules[]? | select(.outboundTag != "api")])
             ' > "$CONFIG_FILE"
     else
-        # 兼容升级：若存量 config.json 没有 10085，在此为集群模式补齐
-        if ! grep -q '10085' "$CONFIG_FILE"; then
-            echo "==> [Cluster Node] 为现有配置就地补齐 10085 统计端口与 API 路由..."
-            TMP_PATCH="/tmp/config.patch.json"
-            cat "$CONFIG_FILE" | jq '
-                .stats = {} |
-                .api = { "tag": "api", "services": ["StatsService"] } |
-                .policy = {
-                    "levels": {
-                        "0": {
-                            "statsUserUplink": true,
-                            "statsUserDownlink": true
-                        }
-                    },
-                    "system": {
-                        "statsInboundUplink": true,
-                        "statsInboundDownlink": true
+        # 兼容升级：就地修复旧 config.json 中的 API 结构与路由
+        echo "==> [Cluster Node] 校验并就地固化 10085 API 端口、API 出站与路由优先规则..."
+        TMP_PATCH="/tmp/config.patch.json"
+        cat "$CONFIG_FILE" | jq '
+            .stats = {} |
+            .api = { "tag": "api", "services": ["StatsService"] } |
+            .policy = {
+                "levels": {
+                    "0": {
+                        "statsUserUplink": true,
+                        "statsUserDownlink": true
                     }
-                } |
-                .inbounds = ([.inbounds[] | select(.tag != "api")] + [{
-                    "tag": "api",
-                    "listen": "127.0.0.1",
-                    "port": 10085,
-                    "protocol": "dokodemo-door",
-                    "settings": { "address": "127.0.0.1" }
-                }]) |
-                .routing.rules = ([.routing.rules[]? | select(.outboundTag != "api")] + [{
-                    "type": "field",
-                    "inboundTag": ["api"],
-                    "outboundTag": "api"
-                }])
-            ' > "$TMP_PATCH" && mv "$TMP_PATCH" "$CONFIG_FILE"
-        fi
+                },
+                "system": {
+                    "statsInboundUplink": true,
+                    "statsInboundDownlink": true
+                }
+            } |
+            .inbounds = ([.inbounds[]? | select(.tag != "api")] + [{
+                "tag": "api",
+                "listen": "127.0.0.1",
+                "port": 10085,
+                "protocol": "dokodemo-door",
+                "settings": { "address": "127.0.0.1" }
+            }]) |
+            .outbounds = ([{"tag": "api", "protocol": "freedom", "settings": {}}] + [.outbounds[]? | select(.tag != "api")]) |
+            .routing.rules = ([{"type": "field", "inboundTag": ["api"], "outboundTag": "api"}] + [.routing.rules[]? | select(.outboundTag != "api")])
+        ' > "$TMP_PATCH" && mv "$TMP_PATCH" "$CONFIG_FILE"
     fi
 
     # 守护进程启停函数
@@ -410,7 +398,7 @@ else
 
             TMP_SYNC="/tmp/config.sync.json"
 
-            # 保持 10085 API 和 Policy 不受影响，只热更新 VLESS 业务入站
+            # 保持 10085 API、API 出站和 Policy 完整，只热更 VLESS 入站的客户端用户
             cat "$CONFIG_FILE" | jq --argjson new_clients "$REMOTE_USERS" \
                --arg port "$REMOTE_PORT" \
                --arg dest "$REMOTE_DEST" \
@@ -440,7 +428,7 @@ else
 
         # 3. 统计增量流量回传主控 (查询 10085 API)
         TRAFFIC_RAW=$(/usr/bin/xray api statsquery --server=127.0.0.1:10085 -pattern "user>>>" -reset=true 2>&1 || true)
-        
+
         if echo "$TRAFFIC_RAW" | grep -q '"value"'; then
             TRAFFIC_PAYLOAD=$(echo "$TRAFFIC_RAW" | jq -c '[
                 .stat[]? | 
