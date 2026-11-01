@@ -148,7 +148,7 @@ fi
 
 UUID="${UUID:-$(/usr/bin/xray uuid)}"
 
-# 5. 初始本地 config.json 生成 (单机纯净基础模版，默认不带任何 stats 统计开销)
+# 5. 初始本地 config.json 生成
 if [ ! -s "$CONFIG_FILE" ]; then
     [ ! -f "$TEMPLATE_FILE" ] && exit 1
     TMP_CONFIG="/tmp/config.init.tmp.json"
@@ -173,7 +173,7 @@ if [ ! -s "$CONFIG_FILE" ]; then
     [ -s "$TMP_CONFIG" ] && mv "$TMP_CONFIG" "$CONFIG_FILE"
 fi
 
-# ================= 6. Xray 守护进程平滑重启架构 =================
+# ================= 6. Xray 守护进程架构 =================
 XRAY_PID=""
 
 start_xray() {
@@ -183,7 +183,7 @@ start_xray() {
 }
 
 restart_xray() {
-    echo "==> [Xray 守护] 检测到配置变动，正在平滑重启 Xray-core..."
+    echo "==> [Xray 守护] 检测到配置变动，正在平滑重载 Xray-core..."
     if [ -n "$XRAY_PID" ] && kill -0 "$XRAY_PID" 2>/dev/null; then
         kill -TERM "$XRAY_PID" 2>/dev/null || true
         wait "$XRAY_PID" 2>/dev/null || true
@@ -196,7 +196,7 @@ trap 'echo "正在停止服务..."; [ -n "$XRAY_PID" ] && kill -TERM "$XRAY_PID"
 # ================= 7. 运行模式分流 =================
 
 if [ -n "$PANEL_URL" ]; then
-    # 【模式 A：远程节点集群模式】需要按需开启流量统计与主控通信
+    # 【模式 A：远程节点集群模式】
     [ -f "$CLIENT_INFO_FILE" ] && rm -f "$CLIENT_INFO_FILE"
 
     if [ -f "$NODE_ID_FILE" ] && [ -s "$NODE_ID_FILE" ]; then
@@ -215,114 +215,135 @@ if [ -n "$PANEL_URL" ]; then
         echo "$NODE_KEY" > "$NODE_KEY_FILE"
     fi
 
-    remote_agent_loop() {
-        echo "==> [Cluster Node] 守护进程启动 (主控: $PANEL_URL | 节点专属随机ID: $NODE_ID)..."
-        sleep 3
+    echo "==> [Cluster Node] 守护进程就绪 (主控: $PANEL_URL | 节点专属随机ID: $NODE_ID)..."
 
-        while true; do
-            if [ -f "$PUBLIC_KEY_FILE" ]; then
-                PUBLIC_KEY=$(head -n 1 "$PUBLIC_KEY_FILE" | tr -d ' \r\n')
-            fi
-
-            # 1. 向主控上报健康心跳
-            HB_RESP=$(curl -k -s -X POST "${PANEL_URL}/api/node/heartbeat" \
-                 -H "Content-Type: application/json" \
-                 --connect-timeout 8 \
-                 --max-time 15 \
-                 -d "{\"node_id\": \"$NODE_ID\", \"node_key\": \"$NODE_KEY\", \"ip\": \"$SERVER_IP\", \"port\": $PORT, \"dest\": \"$DEST\", \"sni\": \"$FIRST_SERVER_NAME\", \"server_names\": \"$SERVER_NAMES\", \"pbk\": \"$PUBLIC_KEY\", \"sid\": \"$SHORT_ID\"}" 2>&1 || true)
-
-            NEW_KEY=$(echo "$HB_RESP" | jq -r '.new_node_key // empty' 2>/dev/null || true)
-            if [ -n "$NEW_KEY" ]; then
-                NODE_KEY="$NEW_KEY"
-                echo "$NODE_KEY" > "$NODE_KEY_FILE"
-            fi
-
-            # 2. 从主控拉取配置：仅在远程集群模式下注入 stats、API 接口和 policy 用户流量统计！
-            USER_RESP=$(curl -k -s --connect-timeout 8 --max-time 15 "${PANEL_URL}/api/node/sync?node_id=${NODE_ID}&token=${NODE_KEY}" 2>&1 || true)
-            if echo "$USER_RESP" | grep -q '"code":200'; then
-                REMOTE_USERS=$(echo "$USER_RESP" | jq '.users // []')
-                REMOTE_PORT=$(echo "$USER_RESP" | jq -r '.node_config.port // empty')
-                REMOTE_DEST=$(echo "$USER_RESP" | jq -r '.node_config.dest // empty')
-                REMOTE_SID=$(echo "$USER_RESP" | jq -r '.node_config.sid // empty')
-                REMOTE_SNI_ARRAY=$(echo "$USER_RESP" | jq -c '.node_config.server_names // []')
-
-                if [ -n "$REMOTE_SID" ] && [ "$REMOTE_SID" != "$SHORT_ID" ]; then
-                    SHORT_ID="$REMOTE_SID"
-                    echo "$SHORT_ID" > "$SHORT_ID_FILE"
-                fi
-
-                TMP_SYNC="/tmp/config.agent.sync.json"
-
-                # 集群模式：按需开启 statsUserUplink 和 statsUserDownlink 统计开关
-                jq --argjson new_clients "$REMOTE_USERS" \
-                   --arg port "$REMOTE_PORT" \
-                   --arg dest "$REMOTE_DEST" \
-                   --argjson snis "$REMOTE_SNI_ARRAY" \
-                   --arg sid "$SHORT_ID" \
-                   '
-                   .stats = {} |
-                   .api = { "tag": "api", "services": ["StatsService"] } |
-                   .policy.levels."0".statsUserUplink = true |
-                   .policy.levels."0".statsUserDownlink = true |
-                   (.inbounds[] | select(.protocol == "vless")) |= (
-                       .settings.clients = $new_clients |
-                       (if $port != "" then .port = ($port | tonumber) else . end) |
-                       (if $dest != "" then .streamSettings.realitySettings.dest = $dest else . end) |
-                       (if ($snis | length) > 0 then .streamSettings.realitySettings.serverNames = $snis else . end) |
-                       (if $sid != "" then .streamSettings.realitySettings.shortIds = [$sid] else . end)
-                   )
-                   ' \
-                   "$CONFIG_FILE" > "$TMP_SYNC"
-
-                if [ -s "$TMP_SYNC" ]; then
-                    if ! cmp -s "$TMP_SYNC" "$CONFIG_FILE"; then
-                        mv "$TMP_SYNC" "$CONFIG_FILE"
-                        CLIENT_COUNT=$(echo "$REMOTE_USERS" | jq 'length')
-                        echo "==> [Cluster Node] 成功热更配置并激活用户流量统计！(已同步 $CLIENT_COUNT 位用户)"
-                        restart_xray
-                    else
-                        rm -f "$TMP_SYNC"
-                    fi
-                fi
-            fi
-
-            # 3. 统计增量流量回传主控 (精准截取用户名累加)
-            TRAFFIC_RAW=$(/usr/bin/xray api statsquery --server=127.0.0.1:10085 -pattern "user>>>" -reset=true 2>/dev/null || true)
-            if [ -n "$TRAFFIC_RAW" ] && echo "$TRAFFIC_RAW" | grep -q '"value"'; then
-                TRAFFIC_PAYLOAD=$(echo "$TRAFFIC_RAW" | jq -c '[
-                    .stat[]? | 
-                    select(.value > 0) | 
-                    {
-                        email: (.name | split(">>>")[1]), 
-                        bytes: (.value | tonumber)
-                    }
-                ]')
-
-                if [ -n "$TRAFFIC_PAYLOAD" ] && [ "$TRAFFIC_PAYLOAD" != "[]" ]; then
-                    REPORT_RES=$(curl -k -s -X POST "${PANEL_URL}/api/node/traffic" \
-                         -H "Content-Type: application/json" \
-                         --connect-timeout 8 \
-                         --max-time 15 \
-                         -d "{\"node_id\": \"$NODE_ID\", \"token\": \"$NODE_KEY\", \"traffic\": $TRAFFIC_PAYLOAD}" 2>&1 || true)
-                    echo "==> [Traffic Report] 成功回传增量流量: $TRAFFIC_PAYLOAD"
-                fi
-            fi
-
-            sleep 60
-        done
-    }
-
+    # 先以初始配置拉起 Xray
     start_xray
-    remote_agent_loop &
-    wait $XRAY_PID
+
+    # 直接在前台主线程中运行轮询，避免子 shell 导致 wait $XRAY_PID 误判退出
+    while true; do
+        if [ -f "$PUBLIC_KEY_FILE" ]; then
+            PUBLIC_KEY=$(head -n 1 "$PUBLIC_KEY_FILE" | tr -d ' \r\n')
+        fi
+
+        # 1. 向主控上报健康心跳
+        HB_RESP=$(curl -k -s -X POST "${PANEL_URL}/api/node/heartbeat" \
+             -H "Content-Type: application/json" \
+             --connect-timeout 8 \
+             --max-time 15 \
+             -d "{\"node_id\": \"$NODE_ID\", \"node_key\": \"$NODE_KEY\", \"ip\": \"$SERVER_IP\", \"port\": $PORT, \"dest\": \"$DEST\", \"sni\": \"$FIRST_SERVER_NAME\", \"server_names\": \"$SERVER_NAMES\", \"pbk\": \"$PUBLIC_KEY\", \"sid\": \"$SHORT_ID\"}" 2>&1 || true)
+
+        NEW_KEY=$(echo "$HB_RESP" | jq -r '.new_node_key // empty' 2>/dev/null || true)
+        if [ -n "$NEW_KEY" ]; then
+            NODE_KEY="$NEW_KEY"
+            echo "$NODE_KEY" > "$NODE_KEY_FILE"
+        fi
+
+        # 2. 从主控全量拉取配置并注入 10085 API 端口与路由规则
+        USER_RESP=$(curl -k -s --connect-timeout 8 --max-time 15 "${PANEL_URL}/api/node/sync?node_id=${NODE_ID}&token=${NODE_KEY}" 2>&1 || true)
+        if echo "$USER_RESP" | grep -q '"code":200'; then
+            REMOTE_USERS=$(echo "$USER_RESP" | jq '.users // []')
+            REMOTE_PORT=$(echo "$USER_RESP" | jq -r '.node_config.port // empty')
+            REMOTE_DEST=$(echo "$USER_RESP" | jq -r '.node_config.dest // empty')
+            REMOTE_SID=$(echo "$USER_RESP" | jq -r '.node_config.sid // empty')
+            REMOTE_SNI_ARRAY=$(echo "$USER_RESP" | jq -c '.node_config.server_names // []')
+
+            if [ -n "$REMOTE_SID" ] && [ "$REMOTE_SID" != "$SHORT_ID" ]; then
+                SHORT_ID="$REMOTE_SID"
+                echo "$SHORT_ID" > "$SHORT_ID_FILE"
+            fi
+
+            TMP_SYNC="/tmp/config.agent.sync.json"
+
+            # 核心修复点：明确注入 dokodemo-door 监听 10085 与 routing.rules 的 API 分流规则！
+            jq --argjson new_clients "$REMOTE_USERS" \
+               --arg port "$REMOTE_PORT" \
+               --arg dest "$REMOTE_DEST" \
+               --argjson snis "$REMOTE_SNI_ARRAY" \
+               --arg sid "$SHORT_ID" \
+               '
+               .stats = {} |
+               .api = { "tag": "api", "services": ["StatsService"] } |
+               .policy = {
+                   "levels": {
+                       "0": {
+                           "statsUserUplink": true,
+                           "statsUserDownlink": true
+                       }
+                   },
+                   "system": {
+                       "statsInboundUplink": true,
+                       "statsInboundDownlink": true
+                   }
+               } |
+               # 1. 确保 inbounds 中包含 10085 端口的 dokodemo-door API 监听
+               .inbounds = ([.inbounds[] | select(.tag != "api")] + [{
+                   "tag": "api",
+                   "listen": "127.0.0.1",
+                   "port": 10085,
+                   "protocol": "dokodemo-door",
+                   "settings": { "address": "127.0.0.1" }
+               }]) |
+               # 2. 确保 routing.rules 中包含 API 出站规则
+               .routing.rules = ([.routing.rules[]? | select(.outboundTag != "api")] + [{
+                   "type": "field",
+                   "inboundTag": ["api"],
+                   "outboundTag": "api"
+               }]) |
+               # 3. 更新真正对外提供服务的 VLESS 入站
+               (.inbounds[] | select(.protocol == "vless")) |= (
+                   .settings.clients = $new_clients |
+                   (if $port != "" then .port = ($port | tonumber) else . end) |
+                   (if $dest != "" then .streamSettings.realitySettings.dest = $dest else . end) |
+                   (if ($snis | length) > 0 then .streamSettings.realitySettings.serverNames = $snis else . end) |
+                   (if $sid != "" then .streamSettings.realitySettings.shortIds = [$sid] else . end)
+               )
+               ' \
+               "$CONFIG_FILE" > "$TMP_SYNC"
+
+            if [ -s "$TMP_SYNC" ]; then
+                if ! cmp -s "$TMP_SYNC" "$CONFIG_FILE"; then
+                    mv "$TMP_SYNC" "$CONFIG_FILE"
+                    CLIENT_COUNT=$(echo "$REMOTE_USERS" | jq 'length')
+                    echo "==> [Cluster Node] 成功配置 10085 API 监听并同步 $CLIENT_COUNT 位用户！已重启生效。"
+                    restart_xray
+                else
+                    rm -f "$TMP_SYNC"
+                fi
+            fi
+        fi
+
+        # 3. 统计增量流量回传主控 (精准截取并累加)
+        TRAFFIC_RAW=$(/usr/bin/xray api statsquery --server=127.0.0.1:10085 -pattern "user>>>" -reset=true 2>/dev/null || true)
+        if [ -n "$TRAFFIC_RAW" ] && echo "$TRAFFIC_RAW" | grep -q '"value"'; then
+            TRAFFIC_PAYLOAD=$(echo "$TRAFFIC_RAW" | jq -c '[
+                .stat[]? | 
+                select((.value | tonumber) > 0) | 
+                {
+                    email: (.name | split(">>>")[1]), 
+                    bytes: (.value | tonumber)
+                }
+            ]' 2>/dev/null || true)
+
+            if [ -n "$TRAFFIC_PAYLOAD" ] && [ "$TRAFFIC_PAYLOAD" != "[]" ]; then
+                REPORT_RES=$(curl -k -s -X POST "${PANEL_URL}/api/node/traffic" \
+                     -H "Content-Type: application/json" \
+                     --connect-timeout 8 \
+                     --max-time 15 \
+                     -d "{\"node_id\": \"$NODE_ID\", \"token\": \"$NODE_KEY\", \"traffic\": $TRAFFIC_PAYLOAD}" 2>&1 || true)
+                echo "==> [Traffic Report] 成功回传增量流量: $TRAFFIC_PAYLOAD | 主控响应: $REPORT_RES"
+            fi
+        fi
+
+        sleep 60
+    done
 
 else
-    # 【模式 B：纯单机使用模式】完全不注入任何 stats 统计开关，零额外性能损耗
+    # 【模式 B：纯单机使用模式】完全不注入任何 stats 统计开销与 10085 端口
     echo "==> [Standalone Mode] 当前为单机模式，已自动禁用所有流量统计开销，保持核心极简高效。"
 
-    # 清除由于旧版本残留的 stats / policy / api 节点
     TMP_CLEAN="/tmp/config.standalone.clean.json"
-    jq 'del(.stats) | del(.api) | del(.policy)' "$CONFIG_FILE" > "$TMP_CLEAN" && mv "$TMP_CLEAN" "$CONFIG_FILE"
+    jq 'del(.stats) | del(.api) | del(.policy) | .inbounds = [.inbounds[] | select(.tag != "api")] | .routing.rules = [.routing.rules[]? | select(.outboundTag != "api")]' "$CONFIG_FILE" > "$TMP_CLEAN" && mv "$TMP_CLEAN" "$CONFIG_FILE"
 
     VLESS_URL="vless://${UUID}@${SERVER_IP}:${PORT}?security=reality&encryption=none&pbk=${PUBLIC_KEY}&headerType=none&fp=chrome&type=tcp&flow=xtls-rprx-vision&sni=${FIRST_SERVER_NAME}&sid=${SHORT_ID}#Xray-Reality"
 
