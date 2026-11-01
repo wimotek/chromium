@@ -1,5 +1,4 @@
 #!/bin/sh
-# 彻底移除 set -e，绝不允许因网络抖动或单次报错导致容器崩溃自杀！
 
 TEMPLATE_FILE="/etc/xray/config.template.json"
 CONFIG_FILE="/data/config.json"
@@ -119,7 +118,7 @@ elif [ ! -s "$PUBLIC_KEY_FILE" ]; then
             (.inbounds[] | select(.protocol == "vless")) |= (
                 .streamSettings.realitySettings.privateKey = $privkey
             )
-        ' "$CONFIG_FILE" > "$TMP_RESET" 2>/dev/null && mv "$TMP_RESET" "$CONFIG_FILE"
+        ' "$CONFIG_FILE" > "$TMP_RESET" && mv "$TMP_RESET" "$CONFIG_FILE"
     fi
     write_public_key_file "$PUBLIC_KEY"
 
@@ -153,9 +152,9 @@ UUID="${UUID:-$(/usr/bin/xray uuid)}"
 if [ -z "$PANEL_URL" ]; then
     # ========================================================
     # 【分支 1：纯单机运行模式】
-    # 绝对纯净！无任何 stats、无 api、无 policy、无 10085 端口！
+    # 纯净模式：绝不启用 stats/policy/api/10085 端口
     # ========================================================
-    echo "==> [Mode: Standalone] 当前为纯单机模式，生成/保持纯净配置，绝不启用流量统计与 10085 端口。"
+    echo "==> [Mode: Standalone] 当前为纯单机模式，生成/保持纯净配置。"
 
     if [ ! -s "$CONFIG_FILE" ]; then
         [ ! -f "$TEMPLATE_FILE" ] && exit 1
@@ -170,6 +169,7 @@ if [ -z "$PANEL_URL" ]; then
             del(.stats) | del(.api) | del(.policy) |
             .inbounds = [
                 {
+                    "tag": "vless-in",
                     "port": ($port | tonumber),
                     "protocol": "vless",
                     "settings": {
@@ -190,14 +190,12 @@ if [ -z "$PANEL_URL" ]; then
                     }
                 }
             ] |
-            .outbounds = [.outbounds[] | select(.tag != "api")] |
+            .outbounds = [
+                {"tag": "direct", "protocol": "freedom", "settings": {}},
+                {"tag": "blocked", "protocol": "blackhole", "settings": {}}
+            ] |
             .routing.rules = [.routing.rules[]? | select(.outboundTag != "api")]
             ' > "$CONFIG_FILE"
-    else
-        if grep -q '10085' "$CONFIG_FILE" 2>/dev/null || grep -q 'StatsService' "$CONFIG_FILE" 2>/dev/null; then
-            TMP_CLEAN="/tmp/config.clean.json"
-            jq 'del(.stats) | del(.api) | del(.policy) | .inbounds = [.inbounds[] | select(.tag != "api")] | .outbounds = [.outbounds[] | select(.tag != "api")] | .routing.rules = [.routing.rules[]? | select(.outboundTag != "api")]' "$CONFIG_FILE" > "$TMP_CLEAN" 2>/dev/null && mv "$TMP_CLEAN" "$CONFIG_FILE"
-        fi
     fi
 
     VLESS_URL="vless://${UUID}@${SERVER_IP}:${PORT}?security=reality&encryption=none&pbk=${PUBLIC_KEY}&headerType=none&fp=chrome&type=tcp&flow=xtls-rprx-vision&sni=${FIRST_SERVER_NAME}&sid=${SHORT_ID}#Xray-Reality"
@@ -227,7 +225,8 @@ EOF
 
 else
     # ========================================================
-    # 【分支 2：远程集群节点模式 - 增强韧性防下线版】
+    # 【分支 2：远程集群节点模式 - 修正路由优先级】
+    # 核心：direct 必须永远是第 1 个出站！api 出站追加在后！
     # ========================================================
     echo "==> [Mode: Cluster Node] 远程集群节点模式激活，主控地址: $PANEL_URL"
     [ -f "$CLIENT_INFO_FILE" ] && rm -f "$CLIENT_INFO_FILE"
@@ -248,94 +247,81 @@ else
         echo "$NODE_KEY" > "$NODE_KEY_FILE"
     fi
 
-    # 首次部署集群节点：直接写齐 api 入站、api 出站与优先路由
-    if [ ! -s "$CONFIG_FILE" ]; then
-        [ ! -f "$TEMPLATE_FILE" ] && exit 1
-        cat "$TEMPLATE_FILE" | jq \
-            --arg port "$PORT" \
-            --arg uuid "$UUID" \
-            --arg dest "$DEST" \
-            --arg privkey "$PRIVATE_KEY" \
-            --arg shortid "$SHORT_ID" \
-            --argjson servernames "$SERVER_NAMES_JSON" \
-            '
-            .stats = {} |
-            .api = { "tag": "api", "services": ["StatsService"] } |
-            .policy = {
-                "levels": {
-                    "0": {
-                        "statsUserUplink": true,
-                        "statsUserDownlink": true
-                    }
-                },
-                "system": {
-                    "statsInboundUplink": true,
-                    "statsInboundDownlink": true
+    # 无论何时，强制校准集群配置：direct 绝对第 1，api 仅接收 10085
+    TMP_FIX="/tmp/config.cluster.fix.json"
+    SOURCE_CONFIG="$CONFIG_FILE"
+    [ ! -s "$SOURCE_CONFIG" ] && SOURCE_CONFIG="$TEMPLATE_FILE"
+
+    cat "$SOURCE_CONFIG" | jq \
+        --arg port "$PORT" \
+        --arg uuid "$UUID" \
+        --arg dest "$DEST" \
+        --arg privkey "$PRIVATE_KEY" \
+        --arg shortid "$SHORT_ID" \
+        --argjson servernames "$SERVER_NAMES_JSON" \
+        '
+        .stats = {} |
+        .api = { "tag": "api", "services": ["StatsService"] } |
+        .policy = {
+            "levels": {
+                "0": {
+                    "statsUserUplink": true,
+                    "statsUserDownlink": true
                 }
-            } |
-            .inbounds = [
-                {
-                    "tag": "api",
-                    "listen": "127.0.0.1",
-                    "port": 10085,
-                    "protocol": "dokodemo-door",
-                    "settings": { "address": "127.0.0.1" }
-                },
-                {
-                    "port": ($port | tonumber),
-                    "protocol": "vless",
-                    "settings": {
-                        "clients": [{ "id": $uuid, "flow": "xtls-rprx-vision", "email": "admin@local.host" }],
-                        "decryption": "none"
-                    },
-                    "streamSettings": {
-                        "network": "tcp",
-                        "security": "reality",
-                        "realitySettings": {
-                            "show": false,
-                            "dest": $dest,
-                            "xver": 0,
-                            "serverNames": $servernames,
-                            "privateKey": $privkey,
-                            "shortIds": [$shortid]
-                        }
-                    }
-                }
-            ] |
-            .outbounds = ([{"tag": "api", "protocol": "freedom", "settings": {}}] + [.outbounds[]? | select(.tag != "api")]) |
-            .routing.rules = ([{"type": "field", "inboundTag": ["api"], "outboundTag": "api"}] + [.routing.rules[]? | select(.outboundTag != "api")])
-            ' > "$CONFIG_FILE" 2>/dev/null || true
-    else
-        # 兼容升级：就地修复旧 config.json 中的 API 结构与路由
-        TMP_PATCH="/tmp/config.patch.json"
-        cat "$CONFIG_FILE" | jq '
-            .stats = {} |
-            .api = { "tag": "api", "services": ["StatsService"] } |
-            .policy = {
-                "levels": {
-                    "0": {
-                        "statsUserUplink": true,
-                        "statsUserDownlink": true
-                    }
-                },
-                "system": {
-                    "statsInboundUplink": true,
-                    "statsInboundDownlink": true
-                }
-            } |
-            .inbounds = ([.inbounds[]? | select(.tag != "api")] + [{
+            },
+            "system": {
+                "statsInboundUplink": true,
+                "statsInboundDownlink": true
+            }
+        } |
+        # 1. 入站列表：10085 API + 443 VLESS (显式打上 vless-in 标签)
+        .inbounds = [
+            {
                 "tag": "api",
                 "listen": "127.0.0.1",
                 "port": 10085,
                 "protocol": "dokodemo-door",
                 "settings": { "address": "127.0.0.1" }
-            }]) |
-            .outbounds = ([{"tag": "api", "protocol": "freedom", "settings": {}}] + [.outbounds[]? | select(.tag != "api")]) |
-            .routing.rules = ([{"type": "field", "inboundTag": ["api"], "outboundTag": "api"}] + [.routing.rules[]? | select(.outboundTag != "api")])
-        ' > "$TMP_PATCH" 2>/dev/null && mv "$TMP_PATCH" "$CONFIG_FILE" || true
-    fi
+            },
+            {
+                "tag": "vless-in",
+                "port": ($port | tonumber),
+                "protocol": "vless",
+                "settings": {
+                    "clients": [{ "id": $uuid, "flow": "xtls-rprx-vision", "email": "admin@local.host" }],
+                    "decryption": "none"
+                },
+                "streamSettings": {
+                    "network": "tcp",
+                    "security": "reality",
+                    "realitySettings": {
+                        "show": false,
+                        "dest": $dest,
+                        "xver": 0,
+                        "serverNames": $servernames,
+                        "privateKey": $privkey,
+                        "shortIds": [$shortid]
+                    }
+                }
+            }
+        ] |
+        # 2. 核心修复：direct 必须排在第 1 位（作为全站所有代理上网的默认出站）！api 排在后面！
+        .outbounds = [
+            {"tag": "direct", "protocol": "freedom", "settings": {}},
+            {"tag": "blocked", "protocol": "blackhole", "settings": {}},
+            {"tag": "api", "protocol": "freedom", "settings": {}}
+        ] |
+        # 3. 核心修复：只有明确属于 api 入站的，才发给 api 出站！
+        .routing.rules = [
+            {
+                "type": "field",
+                "inboundTag": ["api"],
+                "outboundTag": "api"
+            }
+        ]
+        ' > "$TMP_FIX" 2>/dev/null && mv "$TMP_FIX" "$CONFIG_FILE" || true
 
-    # 核心守护进程启停函数 (带看门狗守护)
+    # 守护进程启停函数
     XRAY_PID=""
     start_xray() {
         if [ -n "$XRAY_PID" ] && kill -0 "$XRAY_PID" 2>/dev/null; then
@@ -343,11 +329,11 @@ else
         fi
         /usr/bin/xray run -config "$CONFIG_FILE" &
         XRAY_PID=$!
-        echo "==> [Xray 守护] Xray-core 已拉起运行 (PID: $XRAY_PID)"
+        echo "==> [Xray 守护] Xray-core 已启动 (PID: $XRAY_PID)"
     }
 
     restart_xray() {
-        echo "==> [Xray 守护] 正在平滑重载 Xray 核心配置..."
+        echo "==> [Xray 守护] 正在平滑重载 Xray 核心..."
         if [ -n "$XRAY_PID" ] && kill -0 "$XRAY_PID" 2>/dev/null; then
             kill -TERM "$XRAY_PID" 2>/dev/null || true
             wait "$XRAY_PID" 2>/dev/null || true
@@ -355,18 +341,17 @@ else
         start_xray
     }
 
-    trap 'echo "收到停止信号，清理退出..."; [ -n "$XRAY_PID" ] && kill -TERM "$XRAY_PID" 2>/dev/null; exit 0' TERM INT
+    trap 'echo "收到退出信号，清理..."; [ -n "$XRAY_PID" ] && kill -TERM "$XRAY_PID" 2>/dev/null; exit 0' TERM INT
 
-    # 先行拉起 Xray 保证翻墙服务始终可用
+    # 启动 Xray
     start_xray
 
-    echo "==> [Cluster Node] 节点专属随机ID: $NODE_ID 韧性守护循环就绪..."
+    echo "==> [Cluster Node] 节点专属随机ID: $NODE_ID 守护循环启动..."
 
-    # 前台主循环：永远不退出，任何子命令失败仅打日志，绝不抛出异常退容器
+    # 前台主循环：心跳 -> 同步用户 -> 统计流量
     while true; do
-        # 看门狗检测：如果 Xray 意外掉了，立刻自动复活
         if [ -z "$XRAY_PID" ] || ! kill -0 "$XRAY_PID" 2>/dev/null; then
-            echo "==> [Watchdog] 检测到 Xray 核心离线，立即自动拉起恢复网络！"
+            echo "==> [Watchdog] Xray 核心守护：自动重启拉起！"
             start_xray
         fi
 
@@ -374,7 +359,7 @@ else
             PUBLIC_KEY=$(head -n 1 "$PUBLIC_KEY_FILE" | tr -d ' \r\n')
         fi
 
-        # 1. 向主控上报健康心跳 (防御隔离：主控连不上时不报错、不退出)
+        # 1. 心跳
         HB_RESP=$(curl -k -s -X POST "${PANEL_URL}/api/node/heartbeat" \
              -H "Content-Type: application/json" \
              --connect-timeout 6 \
@@ -386,13 +371,10 @@ else
             if [ -n "$NEW_KEY" ]; then
                 NODE_KEY="$NEW_KEY"
                 echo "$NODE_KEY" > "$NODE_KEY_FILE"
-                echo "==> [Cluster Node] 密钥已平滑同步更新: $NODE_KEY"
             fi
-        else
-            echo "==> [Heartbeat Warning] 与主控暂时失联(可能主控正在重启或网络抖动)，Xray 翻墙服务保持正常运行中..."
         fi
 
-        # 2. 从主控拉取全站用户名单并平滑同步
+        # 2. 从主控同步用户名单 (保持 direct 第 1 位出站和 routing 不被篡改，仅更新 VLESS clients)
         USER_RESP=$(curl -k -s --connect-timeout 6 --max-time 12 "${PANEL_URL}/api/node/sync?node_id=${NODE_ID}&token=${NODE_KEY}" 2>/dev/null || true)
         if echo "$USER_RESP" | grep -q '"code":200' 2>/dev/null; then
             REMOTE_USERS=$(echo "$USER_RESP" | jq '.users // []' 2>/dev/null || echo "[]")
@@ -408,7 +390,6 @@ else
 
             TMP_SYNC="/tmp/config.sync.json"
 
-            # 保持 10085 API、API 出站和 Policy 完整，只热更 VLESS 入站的客户端用户
             cat "$CONFIG_FILE" | jq --argjson new_clients "$REMOTE_USERS" \
                --arg port "$REMOTE_PORT" \
                --arg dest "$REMOTE_DEST" \
@@ -459,7 +440,6 @@ else
             fi
         fi
 
-        # 稳健休眠 60 秒后开始下一轮巡检
         sleep 60
     done
 fi

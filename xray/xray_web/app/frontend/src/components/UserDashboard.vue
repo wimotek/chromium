@@ -1,10 +1,16 @@
 <template>
   <div class="dashboard-grid">
-    <!-- 1. 流量监控与配额 -->
+    <!-- 1. 流量监控与配额 (数字与进度条完全自动更新) -->
     <div class="cyber-card">
       <div class="card-header">
-        <h3>📊 流量监控与配额</h3>
-        <span class="tag-status">ONLINE</span>
+        <div style="display: flex; align-items: center; gap: 8px;">
+          <h3>📊 流量监控与配额</h3>
+          <span class="live-pulse" title="已开启自动实时同步"></span>
+        </div>
+        <div style="display: flex; gap: 8px; align-items: center;">
+          <span class="auto-sync-text">实时同步中 (30s)</span>
+          <span class="tag-status">ONLINE</span>
+        </div>
       </div>
       <div class="traffic-meter">
         <div class="meter-info">
@@ -18,7 +24,8 @@
           </div>
         </div>
         <div class="progress-track">
-          <div class="progress-glow" :style="{ width: trafficPercent + '%' }"></div>
+          <!-- 动效平滑进度条 -->
+          <div class="progress-glow smooth-bar" :style="{ width: trafficPercent + '%' }"></div>
         </div>
         <div class="expiry-notice">
           <span>套餐有效期：</span>
@@ -44,7 +51,7 @@
       </div>
     </div>
 
-    <!-- 3. 节点列表与通用聚合订阅 (重置凭证处并排放置客户端下载按钮) -->
+    <!-- 3. 节点列表与聚合订阅 -->
     <div class="cyber-card col-span-2">
       <div class="card-header header-nowrap-row">
         <h3 class="header-title-text">🌐 全球加速节点列表与通用订阅 (共 {{ currentUser.nodes ? currentUser.nodes.length : 0 }} 个节点)</h3>
@@ -55,7 +62,6 @@
           <button class="btn-header-action btn-cyber-danger" @click="handleUserResetUuid">
             🔄 重置凭据 (UUID)
           </button>
-          <!-- 核心更新：客户端下载入口收归于此，点击打开多端客户端中枢弹窗 -->
           <button class="btn-header-action btn-client-download-main" @click="showClientModal = true">
             💻 客户端下载
           </button>
@@ -75,7 +81,7 @@
           <div class="node-detail">
             <div>地址: {{ node.ip }}:{{ node.port }}</div>
 
-            <!-- 多 SNI 候选列表下拉选择器 -->
+            <!-- 多 SNI 下拉选择器 -->
             <div v-if="node.server_names && node.server_names.length > 1" class="sni-select-wrap">
               <label style="color: #94a3b8;">伪装SNI:</label>
               <select v-model="node.selected_sni" class="cyber-select" @change="onUserChangeNodeSni(node)">
@@ -87,7 +93,6 @@
             </div>
           </div>
 
-          <!-- 核心更新：移除下载按钮，仅保留复制与扫码，并设置靠右对齐 -->
           <div class="node-card-footer">
             <div class="action-btn-right">
               <button class="btn-sm btn-action" @click="$emit('copy', node.link)">📋 复制</button>
@@ -196,7 +201,6 @@
         <h3>💻 专属加速客户端获取中心</h3>
         <p class="modal-tip">为您自动配置好的各平台客户端，解压即可直接加速使用：</p>
 
-        <!-- 选项 1：Windows v2rayN 专属独立包 -->
         <div class="client-pack-item">
           <div class="client-item-header">
             <span class="client-os-icon">🪟</span>
@@ -212,7 +216,6 @@
           </button>
         </div>
 
-        <!-- 选项 2：Android v2rayNG 平台 -->
         <div class="client-pack-item" style="margin-top: 14px;">
           <div class="client-item-header">
             <span class="client-os-icon">🤖</span>
@@ -242,7 +245,7 @@
 </template>
 
 <script setup>
-import { ref, reactive, computed } from 'vue'
+import { ref, reactive, computed, onMounted, onUnmounted } from 'vue'
 import axios from 'axios'
 import { ElMessage } from 'element-plus'
 
@@ -272,10 +275,36 @@ const emailCountdown = ref(0)
 const sendingEmailCode = ref(false)
 const loadingChangeEmail = ref(false)
 
+// 响应式计算流量百分比
 const trafficPercent = computed(() => {
   if (!props.currentUser.limit_mb) return 100
   return Math.min(100, Math.round((props.currentUser.used_mb / props.currentUser.limit_mb) * 100))
 })
+
+// ==================== 核心增强：前台无感自动轮询机制 ====================
+let autoRefreshTimer = null
+
+const performSilentRefresh = () => {
+  // 当用户正在当前标签页时，自动静默触发父组件刷新用户信息
+  if (document.visibilityState === 'visible') {
+    emit('refresh-user')
+  }
+}
+
+onMounted(() => {
+  // 每 30 秒自动静默同步一次最新已用流量与进度条
+  autoRefreshTimer = setInterval(performSilentRefresh, 30000)
+  document.addEventListener('visibilitychange', performSilentRefresh)
+})
+
+onUnmounted(() => {
+  if (autoRefreshTimer) {
+    clearInterval(autoRefreshTimer)
+    autoRefreshTimer = null
+  }
+  document.removeEventListener('visibilitychange', performSilentRefresh)
+})
+// ======================================================================
 
 const onUserChangeNodeSni = (node) => {
   if (!node.link || !node.selected_sni) return
@@ -304,7 +333,6 @@ const handleUserResetUuid = async () => {
   }
 }
 
-// 下载专为当前用户预设好的 Windows v2rayN 客户端包
 const downloadWindowsClient = () => {
   if (!props.currentUser.username) return ElMessage.warning('用户未就绪')
   ElMessage.info('正在打包您的专属 v2rayN 客户端包，请稍候...')
@@ -318,7 +346,6 @@ const downloadWindowsClient = () => {
   document.body.removeChild(a)
 }
 
-// 唤起安卓手机已安装的 v2rayNG 自动导入当前订阅
 const importToV2rayNG = () => {
   if (!props.currentUser.sub_url) return ElMessage.warning('未获取到有效订阅')
   emit('copy', props.currentUser.sub_url)
@@ -327,7 +354,6 @@ const importToV2rayNG = () => {
   ElMessage.success('已复制订阅并尝试唤起 v2rayNG，若未自动弹出可手动在软件中点击从剪贴板导入！')
 }
 
-// 下载官方最新纯净版 v2rayNG APK
 const downloadAndroidApk = () => {
   ElMessage.info('正在准备官方最新版 v2rayNG.apk 安装包...')
   const a = document.createElement('a')
@@ -480,7 +506,34 @@ const submitChangePassword = async () => {
 </script>
 
 <style scoped>
-/* 顶栏客户端下载专用发光按钮 */
+/* 丝滑平滑过渡动画：进度条变动时像水流一样慢慢涨起 */
+.smooth-bar {
+  transition: width 0.8s cubic-bezier(0.4, 0, 0.2, 1) !important;
+}
+
+/* 呼吸心跳指示灯 */
+.live-pulse {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #10b981;
+  box-shadow: 0 0 8px #10b981;
+  animation: pulse-ring 2s infinite ease-in-out;
+}
+
+@keyframes pulse-ring {
+  0% { transform: scale(0.95); opacity: 0.8; }
+  50% { transform: scale(1.3); opacity: 1; box-shadow: 0 0 12px #10b981; }
+  100% { transform: scale(0.95); opacity: 0.8; }
+}
+
+.auto-sync-text {
+  font-size: 11px;
+  color: #64748b;
+  font-family: monospace;
+}
+
 .btn-client-download-main {
   background: linear-gradient(135deg, #10b981, #059669);
   color: white;
@@ -490,7 +543,6 @@ const submitChangePassword = async () => {
   box-shadow: 0 0 10px rgba(16, 185, 129, 0.3);
 }
 
-/* 节点卡片操作区靠右对齐 */
 .node-card-footer {
   display: flex;
   justify-content: flex-end;
@@ -502,7 +554,6 @@ const submitChangePassword = async () => {
   margin-left: auto;
 }
 
-/* 多端专属客户端获取中枢弹窗卡片 */
 .client-pack-item {
   background: #0b1120;
   border: 1px solid #1e293b;
