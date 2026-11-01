@@ -35,7 +35,6 @@ def node_heartbeat():
         server_names_str = ",".join(snis)
         primary_sni = snis[0] if snis else "www.microsoft.com"
 
-        # 43 位公钥智能提取
         pbk = raw_pbk
         if len(pbk) != 43:
             matches = re.findall(r'[A-Za-z0-9_\-]{43}', pbk)
@@ -50,33 +49,37 @@ def node_heartbeat():
         conn = get_db()
         c = conn.cursor()
 
-        # 自动将相同 IP 和端口的其它旧节点标记为下线
-        c.execute("""
-            UPDATE nodes 
-            SET status=0, last_heartbeat='已下线 (新节点接管)' 
-            WHERE ip=? AND port=? AND node_id!=?
-        """, (node_ip, node_port, node_id))
-
         c.execute("SELECT * FROM nodes WHERE node_id=?", (node_id,))
         node_row = c.fetchone()
 
         # 场景 1：全新节点首次接入
         if not node_row:
-            auto_name = f"节点-{node_ip}"
-            c.execute("""
-                INSERT INTO nodes 
-                (node_id, node_key, pending_key, name, ip, port, dest, sni, server_names, pbk, sid, status, last_heartbeat) 
-                VALUES (?, ?, '', ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
-            """, (node_id, node_key, auto_name, node_ip, node_port, dest, primary_sni, server_names_str, pbk, sid, now_str))
+            # 如果同 IP 同端口有僵尸旧实例，平滑更新为当前活跃的 node_id
+            c.execute("SELECT id FROM nodes WHERE ip=? AND port=?", (node_ip, node_port))
+            existing = c.fetchone()
+            if existing:
+                c.execute("""
+                    UPDATE nodes 
+                    SET node_id=?, node_key=?, pbk=?, sid=?, status=1, last_heartbeat=?, dest=?, sni=?, server_names=?
+                    WHERE id=?
+                """, (node_id, node_key, pbk, sid, now_str, dest, primary_sni, server_names_str, existing["id"]))
+            else:
+                auto_name = f"节点-{node_ip}"
+                c.execute("""
+                    INSERT INTO nodes 
+                    (node_id, node_key, pending_key, name, ip, port, dest, sni, server_names, pbk, sid, status, last_heartbeat) 
+                    VALUES (?, ?, '', ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
+                """, (node_id, node_key, auto_name, node_ip, node_port, dest, primary_sni, server_names_str, pbk, sid, now_str))
+
             conn.commit()
             conn.close()
-            return jsonify({"code": 200, "msg": "新节点首次接入成功！旧实例已自动标记下线。"})
+            return jsonify({"code": 200, "msg": "节点上线握手成功！"})
 
         node = dict(node_row)
         current_key = node.get("node_key", "")
         pending_key = node.get("pending_key", "")
 
-        # 场景 2：重置上报熔断保护 (pending_key='FORCE_RESYNC')
+        # 场景 2：重置指令接纳
         if pending_key == 'FORCE_RESYNC':
             c.execute("""
                 UPDATE nodes 
@@ -85,7 +88,7 @@ def node_heartbeat():
             """, (node_key, node_ip, pbk, sid, now_str, node_id))
             conn.commit()
             conn.close()
-            return jsonify({"code": 200, "msg": "重置接纳完成，密钥与公钥已重新绑定生效！"})
+            return jsonify({"code": 200, "msg": "重置接纳完成，密钥已更新！"})
 
         if pending_key and node_key == current_key:
             c.execute("""
@@ -95,10 +98,10 @@ def node_heartbeat():
             """, (pending_key, node_ip, pbk, sid, now_str, node_id))
             conn.commit()
             conn.close()
-            return jsonify({"code": 200, "msg": "心跳成功，已为您同步下发新密钥", "new_node_key": pending_key})
+            return jsonify({"code": 200, "msg": "心跳成功，已下发新密钥", "new_node_key": pending_key})
 
-        # 场景 3：正常心跳
-        if node_key == current_key:
+        # 场景 3：正常心跳保活
+        if node_key == current_key or not current_key:
             c.execute("""
                 UPDATE nodes 
                 SET ip=?, pbk=?, sid=COALESCE(NULLIF(sid, ''), ?), status=1, last_heartbeat=? 
@@ -158,7 +161,6 @@ def node_sync_users():
         traceback.print_exc()
         return jsonify({"code": 500, "msg": f"同步配置异常: {str(e)}"}), 500
 
-# 核心加固：高容错流量结算回传接口
 @node_bp.route('/api/node/traffic', methods=['POST'])
 def node_report_traffic():
     try:
@@ -181,7 +183,6 @@ def node_report_traffic():
         node_key = node.get("node_key", "")
         pending_key = node.get("pending_key", "")
 
-        # 校验通信凭证
         if node_key != token and pending_key != 'FORCE_RESYNC':
             conn.close()
             return jsonify({"code": 403, "msg": "鉴权失败"}), 403
@@ -194,10 +195,7 @@ def node_report_traffic():
             account = item.get("email") or item.get("username")
             inc_bytes = int(item.get("bytes", 0))
             if account and inc_bytes > 0:
-                # 换算成 MB，按 0.01MB 保底
                 inc_mb = max(0.01, round(inc_bytes / (1024 * 1024), 2))
-                
-                # 核心修复：使用 COALESCE(used_mb, 0) 彻底杜绝 NULL 累加失效的问题！
                 c.execute("""
                     UPDATE users 
                     SET used_mb = ROUND(COALESCE(used_mb, 0) + ?, 2) 

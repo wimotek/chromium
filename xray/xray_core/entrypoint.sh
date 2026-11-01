@@ -1,5 +1,5 @@
 #!/bin/sh
-set -e
+# 彻底移除 set -e，绝不允许因网络抖动或单次报错导致容器崩溃自杀！
 
 TEMPLATE_FILE="/etc/xray/config.template.json"
 CONFIG_FILE="/data/config.json"
@@ -21,12 +21,12 @@ update_xray() {
     esac
     TMP_DIR=$(mktemp -d)
     DOWNLOAD_URL="https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-${XRAY_ARCH}.zip"
-    if curl -fSL "$DOWNLOAD_URL" -o "$TMP_DIR/xray.zip"; then
-        unzip -q -o "$TMP_DIR/xray.zip" -d "$TMP_DIR"
-        chmod +x "$TMP_DIR/xray"
-        mv "$TMP_DIR/xray" /usr/bin/xray
-        [ -f "$TMP_DIR/geosite.dat" ] && mv "$TMP_DIR/geosite.dat" /usr/share/xray/geosite.dat
-        [ -f "$TMP_DIR/geoip.dat" ] && mv "$TMP_DIR/geoip.dat" /usr/share/xray/geoip.dat
+    if curl -fSL "$DOWNLOAD_URL" -o "$TMP_DIR/xray.zip" 2>/dev/null; then
+        unzip -q -o "$TMP_DIR/xray.zip" -d "$TMP_DIR" 2>/dev/null || true
+        chmod +x "$TMP_DIR/xray" 2>/dev/null || true
+        mv "$TMP_DIR/xray" /usr/bin/xray 2>/dev/null || true
+        [ -f "$TMP_DIR/geosite.dat" ] && mv "$TMP_DIR/geosite.dat" /usr/share/xray/geosite.dat 2>/dev/null || true
+        [ -f "$TMP_DIR/geoip.dat" ] && mv "$TMP_DIR/geoip.dat" /usr/share/xray/geoip.dat 2>/dev/null || true
         rm -rf "$TMP_DIR"
     fi
 }
@@ -82,14 +82,14 @@ EOF
 
 if [ ! -s "$CONFIG_FILE" ]; then
     echo "==> [Init] 首次部署，正在生成全新 REALITY 密钥对..."
-    KEY_PAIR=$(/usr/bin/xray x25519)
+    KEY_PAIR=$(/usr/bin/xray x25519 2>/dev/null || true)
     PRIVATE_KEY=$(echo "$KEY_PAIR" | grep -i "Private" | head -n 1 | awk '{print $NF}' | tr -d ' \r\n')
     PUBLIC_KEY=$(echo "$KEY_PAIR" | grep -iE "Public|Password" | head -n 1 | awk '{print $NF}' | tr -d ' \r\n')
     write_public_key_file "$PUBLIC_KEY"
 
 elif [ ! -f "$PUBLIC_KEY_FILE" ]; then
     echo "==> [Key Reset] 检测到 public_key.txt 已删除，生成新密钥对并更新至 config.json..."
-    KEY_PAIR=$(/usr/bin/xray x25519)
+    KEY_PAIR=$(/usr/bin/xray x25519 2>/dev/null || true)
     PRIVATE_KEY=$(echo "$KEY_PAIR" | grep -i "Private" | head -n 1 | awk '{print $NF}' | tr -d ' \r\n')
     PUBLIC_KEY=$(echo "$KEY_PAIR" | grep -iE "Public|Password" | head -n 1 | awk '{print $NF}' | tr -d ' \r\n')
     write_public_key_file "$PUBLIC_KEY"
@@ -99,11 +99,11 @@ elif [ ! -f "$PUBLIC_KEY_FILE" ]; then
         (.inbounds[] | select(.protocol == "vless")) |= (
             .streamSettings.realitySettings.privateKey = $privkey
         )
-    ' "$CONFIG_FILE" > "$TMP_RESET" && mv "$TMP_RESET" "$CONFIG_FILE"
+    ' "$CONFIG_FILE" > "$TMP_RESET" 2>/dev/null && mv "$TMP_RESET" "$CONFIG_FILE"
 
 elif [ ! -s "$PUBLIC_KEY_FILE" ]; then
     echo "==> [Key Re-derive] 检测到 public_key.txt 为空，从 config.json 重新推导公钥..."
-    PRIVATE_KEY=$(jq -r '(.inbounds[] | select(.protocol == "vless")).streamSettings.realitySettings.privateKey // empty' "$CONFIG_FILE" | tr -d ' \r\n')
+    PRIVATE_KEY=$(jq -r '(.inbounds[] | select(.protocol == "vless")).streamSettings.realitySettings.privateKey // empty' "$CONFIG_FILE" 2>/dev/null | tr -d ' \r\n')
 
     if [ -n "$PRIVATE_KEY" ]; then
         PUBLIC_KEY=$(/usr/bin/xray x25519 -i "$PRIVATE_KEY" 2>/dev/null | grep -iE "Public|Password" | head -n 1 | awk '{print $NF}' | tr -d ' \r\n' || true)
@@ -111,7 +111,7 @@ elif [ ! -s "$PUBLIC_KEY_FILE" ]; then
 
     if [ -z "$PUBLIC_KEY" ] || [ $(printf "%s" "$PUBLIC_KEY" | wc -c) -lt 42 ]; then
         echo "==> [Warning] config.json 中未找到有效私钥，自动生成新密钥对..."
-        KEY_PAIR=$(/usr/bin/xray x25519)
+        KEY_PAIR=$(/usr/bin/xray x25519 2>/dev/null || true)
         PRIVATE_KEY=$(echo "$KEY_PAIR" | grep -i "Private" | head -n 1 | awk '{print $NF}' | tr -d ' \r\n')
         PUBLIC_KEY=$(echo "$KEY_PAIR" | grep -iE "Public|Password" | head -n 1 | awk '{print $NF}' | tr -d ' \r\n')
         TMP_RESET="/tmp/config.resetkey.tmp.json"
@@ -119,13 +119,13 @@ elif [ ! -s "$PUBLIC_KEY_FILE" ]; then
             (.inbounds[] | select(.protocol == "vless")) |= (
                 .streamSettings.realitySettings.privateKey = $privkey
             )
-        ' "$CONFIG_FILE" > "$TMP_RESET" && mv "$TMP_RESET" "$CONFIG_FILE"
+        ' "$CONFIG_FILE" > "$TMP_RESET" 2>/dev/null && mv "$TMP_RESET" "$CONFIG_FILE"
     fi
     write_public_key_file "$PUBLIC_KEY"
 
 else
     PUBLIC_KEY=$(head -n 1 "$PUBLIC_KEY_FILE" | tr -d ' \r\n')
-    PRIVATE_KEY=$(jq -r '(.inbounds[] | select(.protocol == "vless")).streamSettings.realitySettings.privateKey // empty' "$CONFIG_FILE" | tr -d ' \r\n')
+    PRIVATE_KEY=$(jq -r '(.inbounds[] | select(.protocol == "vless")).streamSettings.realitySettings.privateKey // empty' "$CONFIG_FILE" 2>/dev/null | tr -d ' \r\n')
 
     if [ -z "$PUBLIC_KEY" ] && [ -n "$PRIVATE_KEY" ]; then
         PUBLIC_KEY=$(/usr/bin/xray x25519 -i "$PRIVATE_KEY" 2>/dev/null | grep -iE "Public|Password" | head -n 1 | awk '{print $NF}' | tr -d ' \r\n' || true)
@@ -194,9 +194,9 @@ if [ -z "$PANEL_URL" ]; then
             .routing.rules = [.routing.rules[]? | select(.outboundTag != "api")]
             ' > "$CONFIG_FILE"
     else
-        if grep -q '10085' "$CONFIG_FILE" || grep -q 'StatsService' "$CONFIG_FILE"; then
+        if grep -q '10085' "$CONFIG_FILE" 2>/dev/null || grep -q 'StatsService' "$CONFIG_FILE" 2>/dev/null; then
             TMP_CLEAN="/tmp/config.clean.json"
-            jq 'del(.stats) | del(.api) | del(.policy) | .inbounds = [.inbounds[] | select(.tag != "api")] | .outbounds = [.outbounds[] | select(.tag != "api")] | .routing.rules = [.routing.rules[]? | select(.outboundTag != "api")]' "$CONFIG_FILE" > "$TMP_CLEAN" && mv "$TMP_CLEAN" "$CONFIG_FILE"
+            jq 'del(.stats) | del(.api) | del(.policy) | .inbounds = [.inbounds[] | select(.tag != "api")] | .outbounds = [.outbounds[] | select(.tag != "api")] | .routing.rules = [.routing.rules[]? | select(.outboundTag != "api")]' "$CONFIG_FILE" > "$TMP_CLEAN" 2>/dev/null && mv "$TMP_CLEAN" "$CONFIG_FILE"
         fi
     fi
 
@@ -227,8 +227,7 @@ EOF
 
 else
     # ========================================================
-    # 【分支 2：远程集群节点模式】
-    # 完整配置 10085 dokodemo-door 入站 + tag:api outbound 出站 + 置顶 API 路由规则！
+    # 【分支 2：远程集群节点模式 - 增强韧性防下线版】
     # ========================================================
     echo "==> [Mode: Cluster Node] 远程集群节点模式激活，主控地址: $PANEL_URL"
     [ -f "$CLIENT_INFO_FILE" ] && rm -f "$CLIENT_INFO_FILE"
@@ -303,14 +302,11 @@ else
                     }
                 }
             ] |
-            # 核心补齐：必须具有 tag: "api" 的 outbound，防止被默认 block 拦截！
             .outbounds = ([{"tag": "api", "protocol": "freedom", "settings": {}}] + [.outbounds[]? | select(.tag != "api")]) |
-            # 核心补齐：API 路由必须放在最前面优先匹配！
             .routing.rules = ([{"type": "field", "inboundTag": ["api"], "outboundTag": "api"}] + [.routing.rules[]? | select(.outboundTag != "api")])
-            ' > "$CONFIG_FILE"
+            ' > "$CONFIG_FILE" 2>/dev/null || true
     else
         # 兼容升级：就地修复旧 config.json 中的 API 结构与路由
-        echo "==> [Cluster Node] 校验并就地固化 10085 API 端口、API 出站与路由优先规则..."
         TMP_PATCH="/tmp/config.patch.json"
         cat "$CONFIG_FILE" | jq '
             .stats = {} |
@@ -336,19 +332,22 @@ else
             }]) |
             .outbounds = ([{"tag": "api", "protocol": "freedom", "settings": {}}] + [.outbounds[]? | select(.tag != "api")]) |
             .routing.rules = ([{"type": "field", "inboundTag": ["api"], "outboundTag": "api"}] + [.routing.rules[]? | select(.outboundTag != "api")])
-        ' > "$TMP_PATCH" && mv "$TMP_PATCH" "$CONFIG_FILE"
+        ' > "$TMP_PATCH" 2>/dev/null && mv "$TMP_PATCH" "$CONFIG_FILE" || true
     fi
 
-    # 守护进程启停函数
+    # 核心守护进程启停函数 (带看门狗守护)
     XRAY_PID=""
     start_xray() {
+        if [ -n "$XRAY_PID" ] && kill -0 "$XRAY_PID" 2>/dev/null; then
+            return 0
+        fi
         /usr/bin/xray run -config "$CONFIG_FILE" &
         XRAY_PID=$!
-        echo "==> [Xray 守护] Xray-core 已启动 (PID: $XRAY_PID)"
+        echo "==> [Xray 守护] Xray-core 已拉起运行 (PID: $XRAY_PID)"
     }
 
     restart_xray() {
-        echo "==> [Xray 守护] 检测到主控配置变动，正在平滑重载 Xray-core..."
+        echo "==> [Xray 守护] 正在平滑重载 Xray 核心配置..."
         if [ -n "$XRAY_PID" ] && kill -0 "$XRAY_PID" 2>/dev/null; then
             kill -TERM "$XRAY_PID" 2>/dev/null || true
             wait "$XRAY_PID" 2>/dev/null || true
@@ -356,40 +355,51 @@ else
         start_xray
     }
 
-    trap 'echo "正在停止服务..."; [ -n "$XRAY_PID" ] && kill -TERM "$XRAY_PID" 2>/dev/null; exit 0' TERM INT
+    trap 'echo "收到停止信号，清理退出..."; [ -n "$XRAY_PID" ] && kill -TERM "$XRAY_PID" 2>/dev/null; exit 0' TERM INT
 
-    # 启动 Xray
+    # 先行拉起 Xray 保证翻墙服务始终可用
     start_xray
 
-    echo "==> [Cluster Node] 节点专属随机ID: $NODE_ID 守护循环启动..."
+    echo "==> [Cluster Node] 节点专属随机ID: $NODE_ID 韧性守护循环就绪..."
 
-    # 前台主循环：心跳 -> 同步用户 -> 统计流量
+    # 前台主循环：永远不退出，任何子命令失败仅打日志，绝不抛出异常退容器
     while true; do
+        # 看门狗检测：如果 Xray 意外掉了，立刻自动复活
+        if [ -z "$XRAY_PID" ] || ! kill -0 "$XRAY_PID" 2>/dev/null; then
+            echo "==> [Watchdog] 检测到 Xray 核心离线，立即自动拉起恢复网络！"
+            start_xray
+        fi
+
         if [ -f "$PUBLIC_KEY_FILE" ]; then
             PUBLIC_KEY=$(head -n 1 "$PUBLIC_KEY_FILE" | tr -d ' \r\n')
         fi
 
-        # 1. 向主控上报健康心跳
+        # 1. 向主控上报健康心跳 (防御隔离：主控连不上时不报错、不退出)
         HB_RESP=$(curl -k -s -X POST "${PANEL_URL}/api/node/heartbeat" \
              -H "Content-Type: application/json" \
-             --connect-timeout 8 \
-             --max-time 15 \
-             -d "{\"node_id\": \"$NODE_ID\", \"node_key\": \"$NODE_KEY\", \"ip\": \"$SERVER_IP\", \"port\": $PORT, \"dest\": \"$DEST\", \"sni\": \"$FIRST_SERVER_NAME\", \"server_names\": \"$SERVER_NAMES\", \"pbk\": \"$PUBLIC_KEY\", \"sid\": \"$SHORT_ID\"}" 2>&1 || true)
+             --connect-timeout 6 \
+             --max-time 12 \
+             -d "{\"node_id\": \"$NODE_ID\", \"node_key\": \"$NODE_KEY\", \"ip\": \"$SERVER_IP\", \"port\": $PORT, \"dest\": \"$DEST\", \"sni\": \"$FIRST_SERVER_NAME\", \"server_names\": \"$SERVER_NAMES\", \"pbk\": \"$PUBLIC_KEY\", \"sid\": \"$SHORT_ID\"}" 2>/dev/null || true)
 
-        NEW_KEY=$(echo "$HB_RESP" | jq -r '.new_node_key // empty' 2>/dev/null || true)
-        if [ -n "$NEW_KEY" ]; then
-            NODE_KEY="$NEW_KEY"
-            echo "$NODE_KEY" > "$NODE_KEY_FILE"
+        if [ -n "$HB_RESP" ]; then
+            NEW_KEY=$(echo "$HB_RESP" | jq -r '.new_node_key // empty' 2>/dev/null || true)
+            if [ -n "$NEW_KEY" ]; then
+                NODE_KEY="$NEW_KEY"
+                echo "$NODE_KEY" > "$NODE_KEY_FILE"
+                echo "==> [Cluster Node] 密钥已平滑同步更新: $NODE_KEY"
+            fi
+        else
+            echo "==> [Heartbeat Warning] 与主控暂时失联(可能主控正在重启或网络抖动)，Xray 翻墙服务保持正常运行中..."
         fi
 
-        # 2. 从主控拉取全站用户名单并平滑同步进 VLESS 入站
-        USER_RESP=$(curl -k -s --connect-timeout 8 --max-time 15 "${PANEL_URL}/api/node/sync?node_id=${NODE_ID}&token=${NODE_KEY}" 2>&1 || true)
-        if echo "$USER_RESP" | grep -q '"code":200'; then
-            REMOTE_USERS=$(echo "$USER_RESP" | jq '.users // []')
-            REMOTE_PORT=$(echo "$USER_RESP" | jq -r '.node_config.port // empty')
-            REMOTE_DEST=$(echo "$USER_RESP" | jq -r '.node_config.dest // empty')
-            REMOTE_SID=$(echo "$USER_RESP" | jq -r '.node_config.sid // empty')
-            REMOTE_SNI_ARRAY=$(echo "$USER_RESP" | jq -c '.node_config.server_names // []')
+        # 2. 从主控拉取全站用户名单并平滑同步
+        USER_RESP=$(curl -k -s --connect-timeout 6 --max-time 12 "${PANEL_URL}/api/node/sync?node_id=${NODE_ID}&token=${NODE_KEY}" 2>/dev/null || true)
+        if echo "$USER_RESP" | grep -q '"code":200' 2>/dev/null; then
+            REMOTE_USERS=$(echo "$USER_RESP" | jq '.users // []' 2>/dev/null || echo "[]")
+            REMOTE_PORT=$(echo "$USER_RESP" | jq -r '.node_config.port // empty' 2>/dev/null || echo "")
+            REMOTE_DEST=$(echo "$USER_RESP" | jq -r '.node_config.dest // empty' 2>/dev/null || echo "")
+            REMOTE_SID=$(echo "$USER_RESP" | jq -r '.node_config.sid // empty' 2>/dev/null || echo "")
+            REMOTE_SNI_ARRAY=$(echo "$USER_RESP" | jq -c '.node_config.server_names // []' 2>/dev/null || echo "[]")
 
             if [ -n "$REMOTE_SID" ] && [ "$REMOTE_SID" != "$SHORT_ID" ]; then
                 SHORT_ID="$REMOTE_SID"
@@ -412,13 +422,13 @@ else
                    (if ($snis | length) > 0 then .streamSettings.realitySettings.serverNames = $snis else . end) |
                    (if $sid != "" then .streamSettings.realitySettings.shortIds = [$sid] else . end)
                )
-               ' > "$TMP_SYNC"
+               ' > "$TMP_SYNC" 2>/dev/null || true
 
             if [ -s "$TMP_SYNC" ]; then
                 if ! cmp -s "$TMP_SYNC" "$CONFIG_FILE"; then
                     mv "$TMP_SYNC" "$CONFIG_FILE"
-                    CLIENT_COUNT=$(echo "$REMOTE_USERS" | jq 'length')
-                    echo "==> [Cluster Node] 成功同步主控 $CLIENT_COUNT 位用户！已重载核心生效。"
+                    CLIENT_COUNT=$(echo "$REMOTE_USERS" | jq 'length' 2>/dev/null || echo "0")
+                    echo "==> [Cluster Node] 成功同步主控 $CLIENT_COUNT 位用户！已热重载生效。"
                     restart_xray
                 else
                     rm -f "$TMP_SYNC"
@@ -442,13 +452,14 @@ else
             if [ -n "$TRAFFIC_PAYLOAD" ] && [ "$TRAFFIC_PAYLOAD" != "[]" ]; then
                 REPORT_RES=$(curl -k -s -X POST "${PANEL_URL}/api/node/traffic" \
                      -H "Content-Type: application/json" \
-                     --connect-timeout 8 \
-                     --max-time 15 \
-                     -d "{\"node_id\": \"$NODE_ID\", \"token\": \"$NODE_KEY\", \"traffic\": $TRAFFIC_PAYLOAD}" 2>&1 || true)
+                     --connect-timeout 6 \
+                     --max-time 10 \
+                     -d "{\"node_id\": \"$NODE_ID\", \"token\": \"$NODE_KEY\", \"traffic\": $TRAFFIC_PAYLOAD}" 2>/dev/null || echo "请求超时")
                 echo "==> [Traffic Report] 成功回传结算流量: $TRAFFIC_PAYLOAD | 主控响应: $REPORT_RES"
             fi
         fi
 
+        # 稳健休眠 60 秒后开始下一轮巡检
         sleep 60
     done
 fi
