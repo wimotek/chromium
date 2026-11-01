@@ -3,9 +3,9 @@ import time
 import threading
 from flask import Blueprint, request, jsonify
 from config import Config
-from db import get_setting, set_setting
-from notify import send_smtp_email
-from cert_manager import (
+from core.db import get_setting, set_setting
+from services.notify_service import send_smtp_email
+from core.cert_manager import (
     get_cert_info,
     save_custom_certificate,
     issue_acme_certificate,
@@ -139,6 +139,6 @@ def test_email():
 def trigger_task_now():
     data = request.json or {}
     if not check_admin(data.get('admin_user'), data.get('admin_pwd')): return jsonify({"code": 403, "msg": "无权限"})
-    from app import run_scheduled_check
+    from services.scheduler_service import run_scheduled_check
     t_sent, e_sent, desc = run_scheduled_check(force=True)
     return jsonify({"code": 200, "msg": desc, "data": {"traffic_sent": t_sent, "expire_sent": e_sent}})

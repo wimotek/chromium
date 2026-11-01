@@ -5,8 +5,8 @@ import datetime
 import threading
 import time
 from flask import Blueprint, request, jsonify
-from db import get_db, hash_pwd
-from notify import notify_user
+from core.db import get_db, hash_pwd
+from services.notify_service import notify_user
 from routes import check_admin, get_node_snis, build_node_link, normalize_expire_date
 
 admin_bp = Blueprint('admin_bp', __name__)

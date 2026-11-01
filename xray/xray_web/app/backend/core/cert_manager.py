@@ -13,7 +13,7 @@ os.makedirs(CERT_DIR, exist_ok=True)
 os.makedirs(CHALLENGE_DIR, exist_ok=True)
 
 def generate_self_signed_cert():
-    """纯原生调用系统 openssl 命令行生成 10 年期自签名证书，零 Python 第三方依赖"""
+    """使用系统原生 openssl CLI 生成 10 年期自签名证书，免装 pyOpenSSL 依赖"""
     cmd = [
         "openssl", "req", "-x509", "-nodes",
         "-days", "3650",
@@ -33,12 +33,11 @@ def ensure_certificates() -> tuple[str, str]:
     return CERT_PATH, KEY_PATH
 
 def get_cert_info() -> dict:
-    """使用 openssl x509 CLI 原生解析证书信息与剩余天数"""
+    """使用系统 openssl x509 CLI 原生解析证书信息与剩余天数"""
     if not os.path.exists(CERT_PATH):
         return {"status": "none", "is_self_signed": True, "issuer": "", "days_left": 0}
 
     try:
-        # 获取颁发者
         res_issuer = subprocess.run(
             ["openssl", "x509", "-in", CERT_PATH, "-noout", "-issuer"],
             capture_output=True, text=True, timeout=5
@@ -46,7 +45,6 @@ def get_cert_info() -> dict:
         issuer_line = res_issuer.stdout.strip() if res_issuer.returncode == 0 else ""
         issuer = issuer_line.replace("issuer=", "").strip() or "Unknown"
 
-        # 获取主体
         res_subject = subprocess.run(
             ["openssl", "x509", "-in", CERT_PATH, "-noout", "-subject"],
             capture_output=True, text=True, timeout=5
@@ -54,7 +52,6 @@ def get_cert_info() -> dict:
         subject_line = res_subject.stdout.strip() if res_subject.returncode == 0 else ""
         is_self_signed = (issuer_line == subject_line) or ("xray.internal" in issuer_line)
 
-        # 获取过期时间
         res_date = subprocess.run(
             ["openssl", "x509", "-in", CERT_PATH, "-noout", "-enddate"],
             capture_output=True, text=True, timeout=5
@@ -63,7 +60,6 @@ def get_cert_info() -> dict:
         days_left = 0
         if "notAfter=" in enddate_line:
             date_str = enddate_line.replace("notAfter=", "").strip()
-            # 常见格式如: Nov 15 12:00:00 2034 GMT
             try:
                 exp_date = datetime.datetime.strptime(date_str, "%b %d %H:%M:%S %Y %Z")
                 days_left = (exp_date - datetime.datetime.utcnow()).days
@@ -86,7 +82,6 @@ def save_custom_certificate(cert_pem: str, key_pem: str) -> tuple[bool, str]:
     if not cert_str or not key_str:
         return False, "证书或私钥内容不能为空"
 
-    # 写入临时文件校验格式
     tmp_cert = "/tmp/test_cert.pem"
     tmp_key = "/tmp/test_key.pem"
     try:

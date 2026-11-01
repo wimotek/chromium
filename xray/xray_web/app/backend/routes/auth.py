@@ -3,9 +3,9 @@ import random
 import datetime
 from flask import Blueprint, request, jsonify
 from config import Config
-from db import get_db, hash_pwd, get_setting
-from notify import send_smtp_email
-from captcha import generate_math_captcha, verify_captcha
+from core.db import get_db, hash_pwd, get_setting
+from core.captcha import generate_math_captcha, verify_captcha
+from services.notify_service import send_smtp_email
 from routes import get_node_snis, build_node_link, normalize_expire_date
 
 auth_bp = Blueprint('auth_bp', __name__)

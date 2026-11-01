@@ -2,7 +2,7 @@ import uuid
 import datetime
 from flask import Blueprint, request, jsonify
 from config import Config
-from db import get_db, get_setting
+from core.db import get_db, get_setting
 from routes import check_admin
 
 card_bp = Blueprint('card_bp', __name__)

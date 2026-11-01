@@ -7,7 +7,7 @@ import qrcode
 import qrcode.image.svg
 from flask import Flask, request, send_from_directory, abort, send_file
 
-# 核心保护：将当前 backend 根目录置于 Python 寻址首位，彻底免疫跨包导入找不到模块的问题
+# 确保 backend 根路径优先加入 sys.path
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 if CURRENT_DIR not in sys.path:
     sys.path.insert(0, CURRENT_DIR)
@@ -17,6 +17,7 @@ from core.db import init_db, get_db
 from core.cert_manager import ensure_certificates, CHALLENGE_DIR
 from services.scheduler_service import start_scheduler_thread
 
+# 导入通用路由工具与所有领域蓝图
 from routes import get_node_snis, build_node_link
 from routes.auth import auth_bp
 from routes.user import user_bp
@@ -27,7 +28,7 @@ from routes.system import system_bp
 
 app = Flask(__name__, static_folder='../frontend/dist', static_url_path='/')
 
-# 注册所有领域蓝图
+# 注册所有业务功能模块蓝图
 app.register_blueprint(auth_bp)
 app.register_blueprint(user_bp)
 app.register_blueprint(node_bp)
@@ -91,7 +92,7 @@ def get_subscription():
         "Subscription-Userinfo": f"upload=0; download={int(user['used_mb']*1024*1024)}; total={int(user['traffic_limit_mb']*1024*1024)}; expire={user['expire_date']}"
     }
 
-# 启动后台守护定时线程
+# 启动后台守护定时线程 (巡检、自动重置与证书自动更新)
 start_scheduler_thread()
 
 if __name__ == '__main__':

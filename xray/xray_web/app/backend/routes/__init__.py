@@ -1,8 +1,17 @@
+import os
+import sys
 import re
 import random
 import datetime
 import calendar
-from db import get_db, hash_pwd
+
+# 确保 backend 根路径优先被 Python 解释器识别
+BACKEND_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if BACKEND_DIR not in sys.path:
+    sys.path.insert(0, BACKEND_DIR)
+
+# 核心修正：严格按照分层目录从 core.db 引入
+from core.db import get_db, hash_pwd
 
 def check_admin(u: str, p: str) -> bool:
     if not u or not p:
