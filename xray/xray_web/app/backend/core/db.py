@@ -38,7 +38,7 @@ def init_db():
         reset_day INTEGER DEFAULT 1
     )''')
 
-    # 2. 节点集群表 (新增 server_names 字段保存多域名列表)
+    # 2. 节点集群表
     c.execute('''CREATE TABLE IF NOT EXISTS nodes (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         node_id TEXT UNIQUE NOT NULL,
@@ -106,7 +106,16 @@ def init_db():
     try_add_column("ALTER TABLE nodes ADD COLUMN dest TEXT DEFAULT 'www.microsoft.com:443'")
     try_add_column("ALTER TABLE nodes ADD COLUMN server_names TEXT DEFAULT ''")
     try_add_column("ALTER TABLE users ADD COLUMN used_mb REAL DEFAULT 0")
+    try_add_column("ALTER TABLE users ADD COLUMN is_monthly INTEGER DEFAULT 0")
+    try_add_column("ALTER TABLE users ADD COLUMN reset_day INTEGER DEFAULT 1")
+    try_add_column("ALTER TABLE cards ADD COLUMN is_monthly INTEGER DEFAULT 0")
     try_add_column("ALTER TABLE cards ADD COLUMN used_at TEXT DEFAULT ''")
+
+    try:
+        c.execute("UPDATE cards SET is_monthly=1, used_at='' WHERE is_used=0 AND used_at IN ('1', 1)")
+        conn.commit()
+    except Exception:
+        pass
 
     c.execute("SELECT id FROM users WHERE role='admin'")
     if not c.fetchone():
