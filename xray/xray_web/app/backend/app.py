@@ -6,6 +6,7 @@ import base64
 import random
 import secrets
 import datetime
+import calendar
 import threading
 import time
 import qrcode
@@ -28,6 +29,40 @@ from cert_manager import (
 
 app = Flask(__name__, static_folder='../frontend/dist', static_url_path='/')
 init_db()
+
+# 核心辅助函数 1：智能清洗规范化到期时间 (自动纠偏非法月份天数如 11.31、自动补齐 23:59:59)
+def normalize_expire_date(raw_str: str) -> str:
+    s = (raw_str or "").strip()
+    if not s or s.startswith("2099"):
+        return "2099-12-31 23:59:59"
+
+    # 将各类常见分隔符如 . / _ 以及中文年月日统一替换为标准短横线 -
+    s = re.sub(r'[./_年月份]', '-', s)
+    s = s.replace('日', '')
+    s = re.sub(r'\s+', ' ', s).strip()
+
+    # 提取其中的年月日与时分秒
+    match = re.search(r'(\d{4})-(\d{1,2})-(\d{1,2})(?:\s+(\d{1,2}):(\d{1,2})(?::(\d{1,2}))?)?', s)
+    if not match:
+        # 若格式无法识别，默认给出 30 天后作为安全兜底
+        return (datetime.datetime.now() + datetime.timedelta(days=30)).strftime("%Y-%m-%d 23:59:59")
+
+    year = int(match.group(1))
+    month = max(1, min(12, int(match.group(2))))
+
+    # 自动月份天数纠偏：获取该年该月的实际最大天数 (如 11 月自动对齐为 30 天，平年 2 月自动对齐为 28 天)
+    max_days = calendar.monthrange(year, month)[1]
+    day = max(1, min(max_days, int(match.group(3))))
+
+    # 自动补齐时分秒：若未输入具体时间，默认对齐到该天的最后一秒 23:59:59
+    if match.group(4) is not None:
+        hh = max(0, min(23, int(match.group(4))))
+        mm = max(0, min(59, int(match.group(5) or 0)))
+        ss = max(0, min(59, int(match.group(6) or 0)))
+    else:
+        hh, mm, ss = 23, 59, 59
+
+    return f"{year:04d}-{month:02d}-{day:02d} {hh:02d}:{mm:02d}:{ss:02d}"
 
 def get_node_snis(node: dict) -> list[str]:
     raw = node.get("server_names") or node.get("sni") or "www.microsoft.com"
@@ -57,7 +92,7 @@ def get_captcha():
     data = generate_math_captcha()
     return jsonify({"code": 200, "data": data})
 
-# ==================== 定时巡检、每月重置与自动续签 ====================
+# ==================== 定时巡检、每月精准重置与防骚扰预警系统 ====================
 
 def run_scheduled_check(force=False) -> tuple[int, int, str]:
     enable = get_setting("task_notify_enable", "true").lower() == "true"
@@ -67,7 +102,7 @@ def run_scheduled_check(force=False) -> tuple[int, int, str]:
     traffic_threshold = int(get_setting("task_traffic_threshold", "80") or 80)
     expire_threshold_days = int(get_setting("task_expire_days", "3") or 3)
     today = datetime.date.today()
-    today_str = today.strftime("%Y-%m-%d")
+    current_year_month = today.strftime("%Y-%m")
     current_day = today.day
 
     traffic_sent, expire_sent = 0, 0
@@ -79,67 +114,80 @@ def run_scheduled_check(force=False) -> tuple[int, int, str]:
     for u in users:
         uname = u["username"]
 
+        # 1. 每月固定套餐重置保证 (当前计费月每个用户严格只重置并通知 1 次)
         if u.get("is_monthly") == 1:
-            reset_day = u.get("reset_day", 1) or 1
-            if current_day == reset_day or force:
-                c.execute("SELECT id FROM notify_logs WHERE username=? AND warn_type='monthly_reset' AND sent_date=?", (uname, today_str))
+            reset_day = int(u.get("reset_day", 1) or 1)
+            # 若当天大于等于设定重置日，或强制触发
+            if current_day >= reset_day or force:
+                monthly_warn_key = f"monthly_reset_{current_year_month}"
+                c.execute("SELECT id FROM notify_logs WHERE username=? AND warn_type=?", (uname, monthly_warn_key))
                 if not c.fetchone() or force:
                     c.execute("UPDATE users SET used_mb=0 WHERE username=?", (uname,))
-                    c.execute("INSERT INTO notify_logs (username, warn_type, sent_date) VALUES (?, 'monthly_reset', ?)", (uname, today_str))
+                    c.execute("INSERT INTO notify_logs (username, warn_type, sent_date) VALUES (?, ?, ?)",
+                              (uname, monthly_warn_key, datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
                     conn.commit()
                     title = "【流量已重置】您的每月固定流量套餐已刷新"
                     content = f"您好 {uname}，今天是您的每月固定套餐重置日（每月 {reset_day} 号），已用流量已恢复满格！"
                     notify_user(u, title, f"<h3>{title}</h3><p>{content}</p>", content)
 
+        # 2. 流量不足预警防骚扰 (当前重置周期内严格只提醒 1 次，绝不天天轰炸)
         used_mb = u.get("used_mb", 0)
         limit_mb = u.get("traffic_limit_mb", 1024)
 
         if limit_mb > 0:
             used_percent = round((used_mb / limit_mb) * 100, 1)
             if used_percent >= traffic_threshold:
-                c.execute("SELECT id FROM notify_logs WHERE username=? AND warn_type='traffic' AND sent_date=?", (uname, today_str))
+                # 状态锁：针对该用户当前套餐周期的唯一标识，避免重复打扰
+                traffic_warn_key = f"traffic_warn_{current_year_month}_{limit_mb}" if u.get("is_monthly") == 1 else f"traffic_warn_{limit_mb}"
+                c.execute("SELECT id FROM notify_logs WHERE username=? AND warn_type=?", (uname, traffic_warn_key))
                 if not c.fetchone() or force:
                     title = "【流量预警】您的节点可用流量已不足"
                     content = f"您好 {uname}，当前已用流量已达 {used_mb}MB / {limit_mb}MB ({used_percent}%)。请及时充值续费。"
                     ok, _ = notify_user(u, title, f"<h3>{title}</h3><p>{content}</p>", content)
                     if ok:
                         traffic_sent += 1
-                        c.execute("INSERT INTO notify_logs (username, warn_type, sent_date) VALUES (?, 'traffic', ?)", (uname, today_str))
+                        c.execute("INSERT INTO notify_logs (username, warn_type, sent_date) VALUES (?, ?, ?)",
+                                  (uname, traffic_warn_key, datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
                         conn.commit()
 
+        # 3. 套餐到期预警防骚扰 (按天分阶梯提醒：如还剩3天提醒1次、到期当天提醒1次，同阶段永不复发)
         exp_str = u.get("expire_date", "").strip()
         if exp_str and not exp_str.startswith("2099"):
             try:
                 exp_date = datetime.datetime.strptime(exp_str[:10], "%Y-%m-%d").date()
                 days_left = (exp_date - today).days
                 if 0 <= days_left <= expire_threshold_days:
-                    c.execute("SELECT id FROM notify_logs WHERE username=? AND warn_type='expire' AND sent_date=?", (uname, today_str))
+                    # 状态锁：阶梯锁 (记录 days_left)，比如第 3 天提醒一次，第 2 天不重复，到期当天再提醒一次
+                    expire_warn_key = f"expire_warn_{exp_str[:10]}_days_{days_left}"
+                    c.execute("SELECT id FROM notify_logs WHERE username=? AND warn_type=?", (uname, expire_warn_key))
                     if not c.fetchone() or force:
                         title = "【到期提醒】您的节点套餐即将到期"
                         content = f"您好 {uname}，您的节点服务套餐将于 {exp_str} 到期 (仅剩 {days_left} 天)。到期后服务将自动暂停。"
                         ok, _ = notify_user(u, title, f"<h3>{title}</h3><p>{content}</p>", content)
                         if ok:
                             expire_sent += 1
-                            c.execute("INSERT INTO notify_logs (username, warn_type, sent_date) VALUES (?, 'expire', ?)", (uname, today_str))
+                            c.execute("INSERT INTO notify_logs (username, warn_type, sent_date) VALUES (?, ?, ?)",
+                                      (uname, expire_warn_key, datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
                             conn.commit()
             except Exception:
                 pass
 
     conn.close()
     set_setting("task_last_run", datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
-    return traffic_sent, expire_sent, f"检测完毕，已推送 {traffic_sent} 条流量预警，{expire_sent} 条到期预警"
+    return traffic_sent, expire_sent, f"检测完毕，已精准推送 {traffic_sent} 条流量预警，{expire_sent} 条到期预警"
 
+# 后台高频轻量轮询守护线程 (每 15 分钟运行一次，保证准点触发重置日与平滑巡检)
 def scheduled_worker_loop():
-    time.sleep(15)
+    time.sleep(10)
     while True:
         try:
-            interval_hours = int(get_setting("task_interval_hours", "12") or 12)
             run_scheduled_check(force=False)
             auto_renew_acme_job()
         except Exception as e:
             print(f"[Worker Error] {e}", flush=True)
 
-        time.sleep(max(3600, interval_hours * 3600))
+        # 每 15 分钟轻量级巡检一次系统日期变化
+        time.sleep(900)
 
 threading.Thread(target=scheduled_worker_loop, daemon=True).start()
 
@@ -155,7 +203,7 @@ def system_info():
         "code": 200,
         "data": {
             "mode": Config.APP_MODE,
-            "system_notice": get_setting("system_notice", "")
+            "system_notice": get_setting("system_notice", "").strip()
         }
     })
 
@@ -284,7 +332,6 @@ def node_heartbeat():
     server_names_str = ",".join(snis)
     primary_sni = snis[0] if snis else "www.microsoft.com"
 
-    # 43 位公钥智能提取
     pbk = raw_pbk
     if len(pbk) != 43:
         matches = re.findall(r'[A-Za-z0-9_\-]{43}', pbk)
@@ -309,7 +356,6 @@ def node_heartbeat():
     c.execute("SELECT * FROM nodes WHERE node_id=?", (node_id,))
     node = c.fetchone()
 
-    # 场景 1：全新独立节点接入
     if not node:
         auto_name = f"节点-{node_ip}"
         c.execute("""
@@ -324,7 +370,7 @@ def node_heartbeat():
     current_key = node["node_key"]
     pending_key = node["pending_key"]
 
-    # 场景 2：重置上报熔断保护 (pending_key='FORCE_RESYNC')
+    # 重置上报熔断保护 (pending_key='FORCE_RESYNC')
     if pending_key == 'FORCE_RESYNC':
         c.execute("""
             UPDATE nodes 
@@ -335,7 +381,6 @@ def node_heartbeat():
         conn.close()
         return jsonify({"code": 200, "msg": "重置接纳完成，密钥与公钥已重新绑定生效！"})
 
-    # 场景 3：后台下发了新密钥
     if pending_key and node_key == current_key:
         c.execute("""
             UPDATE nodes 
@@ -346,7 +391,6 @@ def node_heartbeat():
         conn.close()
         return jsonify({"code": 200, "msg": "心跳成功，已为您同步下发新密钥", "new_node_key": pending_key})
 
-    # 场景 4：正常心跳 (强校验 node_key)
     if node_key == current_key:
         c.execute("""
             UPDATE nodes 
@@ -422,7 +466,6 @@ def node_report_traffic():
 
 # ==================== 用户端与邮箱安全改绑 ====================
 
-# 核心修复点：在此接口完整返回真实的 email、username、role，彻底解决改绑后刷新还原 Bug！
 @app.route('/api/user/refresh_info', methods=['POST'])
 def user_refresh_info():
     data = request.json or {}
@@ -460,7 +503,6 @@ def user_refresh_info():
                 "link": link
             })
 
-    # 关键修复：补全返回真实的 email 与基础信息
     return jsonify({
         "code": 200,
         "data": {
@@ -525,7 +567,6 @@ def send_change_email_code():
 
     return jsonify({"code": 200, "msg": "验证码已成功投递至新邮箱，请前往查收"})
 
-# 核心修复点：支持同时匹配用户名或旧邮箱，且将成功改绑后的 new_email 显式返回给前端
 @app.route('/api/user/change_email', methods=['POST'])
 def user_change_email():
     data = request.json or {}
@@ -756,7 +797,13 @@ def register():
 
     reg_traffic_mb = int(get_setting("reg_traffic_mb", "1024") or 1024)
     reg_expire_days = int(get_setting("reg_expire_days", "1") or 1)
-    exp = "2099-12-31 23:59:59" if reg_expire_days >= 3650 else (datetime.datetime.now() + datetime.timedelta(days=reg_expire_days)).strftime("%Y-%m-%d %H:%M:%S")
+    
+    # 核心：使用归一化补齐注册到期时间为 23:59:59
+    if reg_expire_days >= 3650:
+        exp = "2099-12-31 23:59:59"
+    else:
+        exp_date = (datetime.datetime.now() + datetime.timedelta(days=reg_expire_days)).strftime("%Y-%m-%d")
+        exp = normalize_expire_date(exp_date)
 
     try:
         c.execute("INSERT INTO users (username, password_hash, uuid, email, traffic_limit_mb, used_mb, expire_date, role, status, is_verified, is_monthly, reset_day) VALUES (?, ?, ?, ?, ?, 0, ?, 'user', 1, 1, 0, 1)",
@@ -985,7 +1032,8 @@ def recharge():
         except Exception:
             c_exp = datetime.datetime.now()
         base_time = max(datetime.datetime.now(), c_exp)
-        n_exp = (base_time + datetime.timedelta(days=total_add_days)).strftime("%Y-%m-%d %H:%M:%S")
+        calculated_date = (base_time + datetime.timedelta(days=total_add_days)).strftime("%Y-%m-%d")
+        n_exp = normalize_expire_date(calculated_date)
 
     new_is_monthly = user['is_monthly'] or 0
     new_reset_day = user['reset_day'] or 1
@@ -1383,6 +1431,7 @@ def update_user_status():
     conn.close()
     return jsonify({"code": 200, "msg": f"用户 [{target_user}] 状态已更新"})
 
+# 核心升级：管理员修改用户配额时，强制调用 normalize_expire_date 补齐纠偏
 @app.route('/api/admin/users/edit', methods=['POST'])
 def edit_user_quota():
     data = request.json or {}
@@ -1390,9 +1439,12 @@ def edit_user_quota():
 
     target_user = data.get('target_user')
     limit_mb = int(data.get('limit_mb', 0))
-    expire_date = data.get('expire_date', '').strip()
+    raw_expire = data.get('expire_date', '').strip()
     is_monthly = 1 if str(data.get('is_monthly')).lower() in ['1', 'true'] else 0
     reset_day = int(data.get('reset_day', 1) or 1)
+
+    # 智能清洗规范化：补齐时分秒并处理月份跨度
+    clean_expire = normalize_expire_date(raw_expire)
 
     conn = get_db()
     c = conn.cursor()
@@ -1400,10 +1452,10 @@ def edit_user_quota():
         UPDATE users 
         SET traffic_limit_mb=?, expire_date=?, is_monthly=?, reset_day=? 
         WHERE username=?
-    """, (limit_mb, expire_date, is_monthly, reset_day, target_user))
+    """, (limit_mb, clean_expire, is_monthly, reset_day, target_user))
     conn.commit()
     conn.close()
-    return jsonify({"code": 200, "msg": f"用户 [{target_user}] 属性已更新"})
+    return jsonify({"code": 200, "msg": f"用户 [{target_user}] 配额属性已更新！到期时限已对齐至 {clean_expire}", "expire_date": clean_expire})
 
 @app.route('/api/admin/users/delete', methods=['POST'])
 def delete_user():
@@ -1499,7 +1551,7 @@ def handle_settings():
                 "acme_enable": get_setting("acme_enable", "false"),
                 "acme_domain": get_setting("acme_domain", ""),
                 "acme_email": get_setting("acme_email", ""),
-                "system_notice": get_setting("system_notice", ""),
+                "system_notice": get_setting("system_notice", "").strip(),
                 "reg_traffic_mb": get_setting("reg_traffic_mb", "1024"),
                 "reg_expire_days": get_setting("reg_expire_days", "1")
             }

@@ -37,7 +37,7 @@
             </td>
             <td style="white-space: nowrap;">{{ (u.expire_date && u.expire_date.startsWith('2099')) ? '♾️ 永久有效' : u.expire_date }}</td>
 
-            <!-- 核心优化：准确识别月度重置、永久无限、不限流量 -->
+            <!-- 精确分类展示：永久无限、不限流量、每月重置、普通固定 -->
             <td>
               <span v-if="u.is_monthly === 1" class="badge badge-monthly">
                 🔄 每月{{ u.reset_day }}号重置
@@ -71,7 +71,7 @@
       </table>
     </div>
 
-    <!-- 弹窗 1：管理员查看指定用户的全节点订阅与各节点直连链接 -->
+    <!-- 弹窗 1：查看指定用户的专属订阅与单节点直连链接 -->
     <div v-if="showUserCredModal" class="modal-backdrop" @click="showUserCredModal = false">
       <div class="cyber-modal" style="max-width: 580px; text-align: left;" @click.stop>
         <h3>📱 用户 [{{ targetCredUser.username }}] 的节点凭据与订阅</h3>
@@ -115,10 +115,11 @@
       </div>
     </div>
 
-    <!-- 弹窗 2：管理员修改用户配额 -->
+    <!-- 弹窗 2：管理员修改用户配额 (集成输入离开焦点自动补齐 23:59:59 与纠偏) -->
     <div v-if="showEditModal" class="modal-backdrop" @click="showEditModal = false">
-      <div class="cyber-modal" style="max-width: 440px; text-align: left;" @click.stop>
+      <div class="cyber-modal" style="max-width: 480px; text-align: left;" @click.stop>
         <h3>✏️ 调整用户 [{{ editForm.username }}] 属性</h3>
+        
         <div class="form-item" style="margin-top: 15px;">
           <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
             <label style="margin: 0;">总流量限制配额 (MB)</label>
@@ -126,13 +127,27 @@
           </div>
           <input v-model.number="editForm.limit_mb" type="number" class="cyber-input modal-input" />
         </div>
+
         <div class="form-item">
           <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
             <label style="margin: 0;">套餐到期时限</label>
-            <button class="btn-link-action" @click="editForm.expire_date = '2099-12-31 23:59:59'">♾️ 设为永久有效</button>
+            <div style="display: flex; gap: 8px;">
+              <button class="btn-link-action" @click="addDaysToExpire(30)">+30天</button>
+              <button class="btn-link-action" @click="addDaysToExpire(365)">+1年</button>
+              <button class="btn-link-action" @click="editForm.expire_date = '2099-12-31 23:59:59'">♾️ 永久</button>
+            </div>
           </div>
-          <input v-model="editForm.expire_date" type="text" class="cyber-input modal-input" />
+          <!-- 离开焦点 blur 时自动执行时分秒补齐与天数纠偏 -->
+          <input
+            v-model="editForm.expire_date"
+            type="text"
+            class="cyber-input modal-input"
+            placeholder="支持输入 2026.11.30、2026-11-30 等"
+            @blur="autoFormatExpireInput"
+          />
+          <span class="input-hint">若仅输入日期（如 2026.11.30），系统离开焦点时将自动补全为 23:59:59</span>
         </div>
+
         <div class="form-item">
           <label class="radio-label"><input type="checkbox" v-model="editForm.is_monthly" /> 开启每月固定重置流量套餐</label>
         </div>
@@ -140,6 +155,7 @@
           <label>每月重置日期 (1~28 号)</label>
           <input v-model.number="editForm.reset_day" type="number" min="1" max="28" class="cyber-input modal-input" />
         </div>
+
         <div class="btn-group" style="justify-content: flex-end; margin-top: 20px;">
           <button class="btn-cyber-action" @click="showEditModal = false">取消</button>
           <button class="btn-cyber-success" @click="submitUserEdit">保存修改</button>
@@ -203,6 +219,50 @@ const onAdminChangeUserNodeSni = (nl) => {
   ElMessage.success(`已切换线路伪装 SNI 为: ${nl.selected_sni}`)
 }
 
+// 前端日期智能补全与月份纠偏函数
+const autoFormatExpireInput = () => {
+  let s = (editForm.expire_date || '').trim()
+  if (!s || s.startsWith('2099')) {
+    editForm.expire_date = '2099-12-31 23:59:59'
+    return
+  }
+
+  // 统一替换各类分隔符为短横线
+  s = s.replace(/[./_年月份]/g, '-').replace(/日/g, '').replace(/\s+/g, ' ').trim()
+  const m = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})(?:\s+(\d{1,2}):(\d{1,2})(?::(\d{1,2}))?)?$/)
+  if (!m) return
+
+  const year = parseInt(m[1], 10)
+  const month = Math.max(1, Math.min(12, parseInt(m[2], 10)))
+  // 计算该月真实最大天数 (如 11 月只有 30 天)
+  const maxDay = new Date(year, month, 0).getDate()
+  const day = Math.max(1, Math.min(maxDay, parseInt(m[3], 10)))
+
+  let hh = 23, mm = 59, ss = 59
+  if (m[4] !== undefined) {
+    hh = Math.max(0, Math.min(23, parseInt(m[4], 10)))
+    mm = Math.max(0, Math.min(59, parseInt(m[5] || '0', 10)))
+    ss = Math.max(0, Math.min(59, parseInt(m[6] || '0', 10)))
+  }
+
+  const pad = (n) => String(n).padStart(2, '0')
+  editForm.expire_date = `${year}-${pad(month)}-${pad(day)} ${pad(hh)}:${pad(mm)}:${pad(ss)}`
+}
+
+// 快捷顺延天数
+const addDaysToExpire = (days) => {
+  let base = new Date()
+  if (editForm.expire_date && !editForm.expire_date.startsWith('2099')) {
+    const parsed = new Date(editForm.expire_date.replace(/-/g, '/'))
+    if (!isNaN(parsed.getTime()) && parsed > base) {
+      base = parsed
+    }
+  }
+  base.setDate(base.getDate() + days)
+  const pad = (n) => String(n).padStart(2, '0')
+  editForm.expire_date = `${base.getFullYear()}-${pad(base.getMonth() + 1)}-${pad(base.getDate())} 23:59:59`
+}
+
 const handleAdminResetUserUuid = async (targetUser) => {
   const tip =
     `⚠️ 确定要为用户 [${targetUser}] 重置节点凭证 (UUID) 吗？\n\n` +
@@ -238,6 +298,7 @@ const openEditModal = (u) => {
 }
 
 const submitUserEdit = async () => {
+  autoFormatExpireInput()
   try {
     const res = await axios.post('/api/admin/users/edit', {
       admin_user: props.currentUser.username,

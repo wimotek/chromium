@@ -45,7 +45,9 @@ from fastapi import (
     Form,
     Request,
     Query,
-    Security
+    Security,
+    WebSocket,
+    WebSocketDisconnect
 )
 from fastapi.security.api_key import APIKeyHeader, APIKeyQuery
 from fastapi.responses import JSONResponse, FileResponse, HTMLResponse
@@ -156,7 +158,7 @@ def ensure_ssl_certificates():
             SSL_KEY_FILE = os.path.join(fallback_dir, "privkey.pem")
             generate_self_signed_cert(SSL_CERT_FILE, SSL_KEY_FILE)
 
-# ==================== 2. 数据库扩展与热迁移 (新增 direct_host) ====================
+# ==================== 2. 数据库扩展与热迁移 ====================
 def init_db_and_jwt():
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
@@ -199,7 +201,6 @@ def init_db_and_jwt():
         details TEXT
     )''')
 
-    # 热迁移补充 direct_host 等列
     for col, col_type in [
         ("direct_host", "TEXT DEFAULT '127.0.0.1'"),
         ("auto_tunnel", "INTEGER DEFAULT 1"),
@@ -226,6 +227,7 @@ def init_db_and_jwt():
         'admin_password': hash_password(INIT_PASSWORD),
         'jwt_secret': secrets.token_hex(32),
         'api_key': 'cdp_' + secrets.token_urlsafe(24),
+        'direct_port_access_enabled': '1', # 两种方式：公网裸端口访问开关 (默认开启)
         'smtp_host': 'smtp.yeah.net',
         'smtp_port': '465',
         'smtp_ssl': '1',
@@ -325,7 +327,7 @@ async def dispatch_notification(title: str, content: str):
     send_email_notification(title, content)
     await send_serverchan_notification(title, content)
 
-# ==================== 4. 域名过滤、差量计算与 CDP 读写 (支持指定 host) ====================
+# ==================== 4. 域名过滤、差量计算与 CDP 读写 ====================
 def filter_cookies_by_domains(cookies: List[dict], include_domains: List[str], exclude_domains: List[str]) -> tuple[List[dict], int]:
     if not include_domains and not exclude_domains:
         return cookies, 0
@@ -381,11 +383,6 @@ def smart_merge_cookies(all_cookie_lists: List[List[dict]]) -> List[dict]:
     return list(merged_pool.values())
 
 async def resolve_cdp_endpoint(local_port: int, target_host: str = "127.0.0.1") -> tuple[str, str]:
-    """
-    智能定位 CDP 端点：
-    若 target_host 是 127.0.0.1 / localhost，则按顺序探测 127.0.0.1 -> host.docker.internal -> 172.17.0.1 (适配容器访问宿主机)
-    若填写了特定 IP 或域名（如 192.168.1.100 或 cdp.lan），则直接以该主机为准
-    """
     host_clean = target_host.strip() if target_host else "127.0.0.1"
     if host_clean in ["127.0.0.1", "localhost"]:
         candidate_hosts = ["127.0.0.1", "host.docker.internal", "172.17.0.1"]
@@ -407,7 +404,6 @@ async def resolve_cdp_endpoint(local_port: int, target_host: str = "127.0.0.1") 
     raise ConnectionRefusedError(f"无法连通主机 {host_clean}:{local_port} 的 CDP 调试服务")
 
 async def fetch_cookies_native(local_port: int, target_host: str = "127.0.0.1") -> List[dict]:
-    """提取 Cookies (支持自定义 IP / 域名)"""
     if ChromiumSync is not None and hasattr(ChromiumSync, 'get_cookies'):
         try:
             fn = getattr(ChromiumSync, 'get_cookies')
@@ -426,7 +422,6 @@ async def fetch_cookies_native(local_port: int, target_host: str = "127.0.0.1") 
         if cookies:
             return cookies
 
-        # 回退 Network 域
         await ws.send(json.dumps({"id": 2, "method": "Network.enable"}))
         await ws.recv()
         await ws.send(json.dumps({"id": 3, "method": "Network.getAllCookies"}))
@@ -435,7 +430,6 @@ async def fetch_cookies_native(local_port: int, target_host: str = "127.0.0.1") 
         return data2.get("result", {}).get("cookies", [])
 
 async def inject_cookies_native(local_port: int, cookies: List[dict], target_host: str = "127.0.0.1"):
-    """写入 Cookies (支持自定义 IP / 域名)"""
     if ChromiumSync is not None and hasattr(ChromiumSync, 'set_cookies'):
         try:
             fn = getattr(ChromiumSync, 'set_cookies')
@@ -470,7 +464,6 @@ class TunnelManager:
         node_id = node['id']
         self.stop_tunnel(node_id)
 
-        # 直连节点：直接探测其目标 IP/域名 与端口的健康状态
         if node.get('is_local') == 1:
             direct_host = node.get('direct_host') or '127.0.0.1'
             try:
@@ -485,7 +478,6 @@ class TunnelManager:
                 self._update_node_status(node_id, "error: offline", 0)
                 return False, f"连接异常: {e}"
 
-        # 远程 SSH 节点
         ssh_kwargs = {
             "ssh_address_or_host": (node['ssh_host'], int(node['ssh_port'])),
             "ssh_username": node['ssh_user'],
@@ -893,6 +885,20 @@ def update_profile(data: dict, user: dict = Depends(verify_token)):
     if data.get("regenerate_key"):
         set_setting("api_key", 'cdp_' + secrets.token_urlsafe(24))
     return {"message": "配置更新成功"}
+
+# 远程直连开关
+@app.get("/api/remote-access")
+def get_remote_access_settings(user: dict = Depends(verify_token)):
+    return {
+        "direct_port_access_enabled": get_setting("direct_port_access_enabled", "1") == "1",
+        "api_key": get_setting("api_key")
+    }
+
+@app.post("/api/remote-access")
+def save_remote_access_settings(data: dict, user: dict = Depends(verify_token)):
+    if "direct_port_access_enabled" in data:
+        set_setting("direct_port_access_enabled", "1" if data["direct_port_access_enabled"] else "0")
+    return {"message": "远程连接策略已更新"}
 
 # 节点管理 (支持 direct_host)
 @app.get("/api/nodes")
@@ -1335,9 +1341,104 @@ async def test_serverchan(user: dict = Depends(verify_token)):
         raise HTTPException(status_code=500, detail="Server酱推送失败，请检查 SendKey")
     return {"message": "Server酱微信测试推送成功"}
 
-# 外部 Agent 开放 API (适配 direct_host)
-@app.get("/api/v1/nodes", summary="获取所有在线 CDP 节点列表")
-def external_list_nodes(auth: dict = Depends(verify_agent_access)):
+# ==================== 8. 方式一：CDP 安全反向代理网关 (WSS + API-Key 鉴权) ====================
+@app.get("/cdp/{node_id}/json/version")
+async def cdp_gateway_version(
+    request: Request,
+    node_id: int,
+    auth: dict = Depends(verify_agent_access)
+):
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM nodes WHERE id=?", (node_id,))
+    row = cur.fetchone()
+    conn.close()
+
+    if not row:
+        raise HTTPException(status_code=404, detail="目标节点不存在")
+    node = dict(row)
+
+    target_h = node.get('direct_host', '127.0.0.1') if node['is_local'] else "127.0.0.1"
+    try:
+        host, _ = await resolve_cdp_endpoint(node['local_bind_port'], target_h)
+        async with httpx.AsyncClient(timeout=3.0) as client:
+            res = await client.get(f"http://{host}:{node['local_bind_port']}/json/version")
+            data = res.json()
+            api_key = get_setting('api_key')
+            domain = request.headers.get("host", "localhost:8443")
+            data["webSocketDebuggerUrl"] = f"wss://{domain}/cdp/{node_id}/ws?api_key={api_key}"
+            return data
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"无法连通该节点的 CDP 服务: {e}")
+
+@app.websocket("/cdp/{node_id}/ws")
+async def cdp_gateway_ws(
+    websocket: WebSocket,
+    node_id: int,
+    api_key: Optional[str] = Query(None)
+):
+    valid_key = get_setting('api_key')
+    header_key = websocket.headers.get("x-api-key")
+    if (api_key != valid_key) and (header_key != valid_key):
+        await websocket.close(code=1008, reason="Unauthorized: Invalid API-Key")
+        return
+
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM nodes WHERE id=?", (node_id,))
+    row = cur.fetchone()
+    conn.close()
+
+    if not row:
+        await websocket.close(code=1008, reason="Node Not Found")
+        return
+    node = dict(row)
+
+    target_h = node.get('direct_host', '127.0.0.1') if node['is_local'] else "127.0.0.1"
+    try:
+        host, internal_ws_url = await resolve_cdp_endpoint(node['local_bind_port'], target_h)
+    except Exception:
+        await websocket.close(code=1011, reason="Target CDP Offline")
+        return
+
+    await websocket.accept()
+
+    try:
+        async with websockets.connect(internal_ws_url, max_size=100 * 1024 * 1024) as target_ws:
+            async def forward_client_to_target():
+                while True:
+                    msg = await websocket.receive_text()
+                    await target_ws.send(msg)
+
+            async def forward_target_to_client():
+                while True:
+                    msg = await target_ws.recv()
+                    await websocket.send_text(msg)
+
+            done, pending = await asyncio.wait(
+                [
+                    asyncio.create_task(forward_client_to_target()),
+                    asyncio.create_task(forward_target_to_client())
+                ],
+                return_when=asyncio.FIRST_COMPLETED
+            )
+            for task in pending:
+                task.cancel()
+    except (WebSocketDisconnect, websockets.ConnectionClosed):
+        pass
+    except Exception as e:
+        logger.debug(f"CDP 网关转发会话结束: {e}")
+    finally:
+        try:
+            await websocket.close()
+        except Exception:
+            pass
+
+# ==================== 9. 外部 Agent 开放 API (同时生成两种连接方式) ====================
+@app.get("/api/v1/nodes", summary="获取所有在线 CDP 节点列表 (支持双连接方式生成)")
+def external_list_nodes(request: Request, auth: dict = Depends(verify_agent_access)):
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     cur = conn.cursor()
@@ -1345,28 +1446,60 @@ def external_list_nodes(auth: dict = Depends(verify_agent_access)):
     rows = [dict(r) for r in cur.fetchall()]
     conn.close()
 
-    online_nodes = []
+    domain = request.headers.get("host", "localhost:8443")
+    api_key = get_setting('api_key')
+    direct_port_enabled = (get_setting("direct_port_access_enabled", "1") == "1")
+
+    # 提取主机公网域名或 IP (去除端口)
+    host_only = domain.split(":")[0]
+
+    nodes_result = []
     for r in rows:
         direct_h = r.get("direct_host") or "127.0.0.1"
-        target_endpoint = f"http://{direct_h}:{r['local_bind_port']}" if r["is_local"] else f"http://127.0.0.1:{r['local_bind_port']}"
-        online_nodes.append({
-            "id": r["id"],
+        is_loc = bool(r["is_local"])
+        node_id = r["id"]
+        bind_port = r["local_bind_port"]
+
+        # 构建两种连接方式的完整结构体
+        connection_methods = {
+            # 方式一：API-Key 安全 WSS 反向代理网关 (推荐)
+            "gateway": {
+                "type": "wss_secure_gateway",
+                "enabled": True,
+                "description": "基于 API-Key 的加密反向中继网关 (推荐，防扫描，仅走 8443)",
+                "ws_url": f"wss://{domain}/cdp/{node_id}/ws?api_key={api_key}",
+                "http_version_url": f"https://{domain}/cdp/{node_id}/json/version?api_key={api_key}"
+            },
+            # 方式二：公网端口直接映射 (兼容模式)
+            "direct": {
+                "type": "direct_port_mapping",
+                "enabled": direct_port_enabled,
+                "description": "公网直接端口映射模式 (需防火墙放行该端口，无鉴权)",
+                "port": bind_port,
+                "http_endpoint": f"http://{host_only}:{bind_port}",
+                "ws_endpoint_hint": f"http://{host_only}:{bind_port}/json/version"
+            }
+        }
+
+        nodes_result.append({
+            "id": node_id,
             "name": r["name"],
             "is_source": bool(r["is_source"]),
-            "is_local": bool(r["is_local"]),
-            "direct_host": direct_h if r["is_local"] else None,
+            "is_local": is_loc,
+            "direct_host": direct_h if is_loc else None,
             "status": r["status"],
-            "local_port": r["local_bind_port"],
-            "cdp_http_endpoint": target_endpoint,
             "cookie_count": r["cookie_count"],
             "last_sync": r["last_sync"],
-            "cookies_export_url": f"/api/v1/nodes/{r['id']}/cookies"
+            "connection_methods": connection_methods,
+            "cookies_export_url": f"/api/v1/nodes/{node_id}/cookies"
         })
+
     return {
         "code": 200,
         "total": len(rows),
         "online_count": len([n for n in rows if n["status"] == "connected"]),
-        "nodes": online_nodes
+        "direct_port_access_enabled": direct_port_enabled,
+        "nodes": nodes_result
     }
 
 @app.get("/api/v1/nodes/{node_id}/cookies", summary="提取目标节点全量 Cookies")
@@ -1400,7 +1533,7 @@ async def external_trigger_sync(auth: dict = Depends(verify_agent_access)):
     await execute_sync_task()
     return {"code": 200, "message": "全网 Cookie 同步任务已触发"}
 
-# 静态资源与 SPA 路由托管
+# ==================== 10. 静态资源与 SPA 路由托管 ====================
 if DIST_DIR:
     assets_dir = os.path.join(DIST_DIR, "assets")
     if os.path.exists(assets_dir):
