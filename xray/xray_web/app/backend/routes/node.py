@@ -1,7 +1,7 @@
 import re
 import datetime
 from flask import Blueprint, request, jsonify
-from db import get_db
+from core.db import get_db
 from routes import get_node_snis
 
 node_bp = Blueprint('node_bp', __name__)
@@ -142,7 +142,7 @@ def node_sync_users():
         "users": users
     })
 
-# 合理定点流量累加 (精确至 0.01 MB ≈ 10KB，杜绝浮点抖动与高频浪费)
+# 合理定点流量累加 (精确至 0.01 MB ≈ 10KB)
 @node_bp.route('/api/node/traffic', methods=['POST'])
 def node_report_traffic():
     data = request.json or {}
@@ -161,22 +161,4 @@ def node_report_traffic():
     total_bytes = 0
 
     for item in data.get("traffic", []):
-        account = item.get("email") or item.get("username")
-        inc_bytes = int(item.get("bytes", 0))
-        if account and inc_bytes > 0:
-            # 采用 0.01 MB 定点阶梯累加，性能极高且账单整洁
-            inc_mb = max(0.01, round(inc_bytes / (1024 * 1024), 2))
-            c.execute("""
-                UPDATE users 
-                SET used_mb = used_mb + ? 
-                WHERE email=? OR username=?
-            """, (inc_mb, account, account))
-            updated_count += 1
-            total_bytes += inc_bytes
-
-    conn.commit()
-    conn.close()
-    return jsonify({
-        "code": 200, 
-        "msg": f"流量同步成功！已结算 {updated_count} 位用户 (共计 {round(total_bytes / (1024*1024), 2)}MB)"
-    })
+        account = item.get("email") or i
