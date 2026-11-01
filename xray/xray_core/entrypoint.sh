@@ -81,7 +81,6 @@ EOF
 [ -f "/data/private_key.txt" ] && rm -f "/data/private_key.txt"
 
 if [ ! -s "$CONFIG_FILE" ]; then
-    # 场景 A: 首次部署 (无 config.json)，生成全新配对密钥
     echo "==> [Init] 首次部署，正在生成全新 REALITY 密钥对..."
     KEY_PAIR=$(/usr/bin/xray x25519)
     PRIVATE_KEY=$(echo "$KEY_PAIR" | grep -i "Private" | head -n 1 | awk '{print $NF}' | tr -d ' \r\n')
@@ -89,7 +88,6 @@ if [ ! -s "$CONFIG_FILE" ]; then
     write_public_key_file "$PUBLIC_KEY"
 
 elif [ ! -f "$PUBLIC_KEY_FILE" ]; then
-    # 场景 B: 用户删除了 public_key.txt (触发彻底重置密钥对)
     echo "==> [Key Reset] 检测到 public_key.txt 已删除，生成新密钥对并更新至 config.json..."
     KEY_PAIR=$(/usr/bin/xray x25519)
     PRIVATE_KEY=$(echo "$KEY_PAIR" | grep -i "Private" | head -n 1 | awk '{print $NF}' | tr -d ' \r\n')
@@ -104,7 +102,6 @@ elif [ ! -f "$PUBLIC_KEY_FILE" ]; then
     ' "$CONFIG_FILE" > "$TMP_RESET" && mv "$TMP_RESET" "$CONFIG_FILE"
 
 elif [ ! -s "$PUBLIC_KEY_FILE" ]; then
-    # 场景 C: public_key.txt 为空文件 (触发从 config.json 重新推导)
     echo "==> [Key Re-derive] 检测到 public_key.txt 为空，从 config.json 重新推导公钥..."
     PRIVATE_KEY=$(jq -r '(.inbounds[] | select(.protocol == "vless")).streamSettings.realitySettings.privateKey // empty' "$CONFIG_FILE" | tr -d ' \r\n')
 
@@ -127,7 +124,6 @@ elif [ ! -s "$PUBLIC_KEY_FILE" ]; then
     write_public_key_file "$PUBLIC_KEY"
 
 else
-    # 场景 D: 正常启动，首行读取公钥
     PUBLIC_KEY=$(head -n 1 "$PUBLIC_KEY_FILE" | tr -d ' \r\n')
     PRIVATE_KEY=$(jq -r '(.inbounds[] | select(.protocol == "vless")).streamSettings.realitySettings.privateKey // empty' "$CONFIG_FILE" | tr -d ' \r\n')
 
@@ -152,7 +148,7 @@ fi
 
 UUID="${UUID:-$(/usr/bin/xray uuid)}"
 
-# 5. 初始本地 config.json 生成
+# 5. 初始本地 config.json 生成 (单机纯净基础模版，默认不带任何 stats 统计开销)
 if [ ! -s "$CONFIG_FILE" ]; then
     [ ! -f "$TEMPLATE_FILE" ] && exit 1
     TMP_CONFIG="/tmp/config.init.tmp.json"
@@ -200,10 +196,9 @@ trap 'echo "正在停止服务..."; [ -n "$XRAY_PID" ] && kill -TERM "$XRAY_PID"
 # ================= 7. 运行模式分流 =================
 
 if [ -n "$PANEL_URL" ]; then
+    # 【模式 A：远程节点集群模式】需要按需开启流量统计与主控通信
     [ -f "$CLIENT_INFO_FILE" ] && rm -f "$CLIENT_INFO_FILE"
 
-    # 核心回归：完全采用纯随机 16 进制码标识节点！
-    # 每次重新生成部署或清空配置，自动生成全新的 node_id 和 node_key，绝不与旧节点冲突
     if [ -f "$NODE_ID_FILE" ] && [ -s "$NODE_ID_FILE" ]; then
         NODE_ID=$(cat "$NODE_ID_FILE" | tr -d ' \r\n')
     else
@@ -225,7 +220,6 @@ if [ -n "$PANEL_URL" ]; then
         sleep 3
 
         while true; do
-            # 首行纯净读取公钥，杜绝正则解析故障
             if [ -f "$PUBLIC_KEY_FILE" ]; then
                 PUBLIC_KEY=$(head -n 1 "$PUBLIC_KEY_FILE" | tr -d ' \r\n')
             fi
@@ -243,7 +237,7 @@ if [ -n "$PANEL_URL" ]; then
                 echo "$NODE_KEY" > "$NODE_KEY_FILE"
             fi
 
-            # 2. 从主控全量下拉用户与网络参数
+            # 2. 从主控拉取配置：仅在远程集群模式下注入 stats、API 接口和 policy 用户流量统计！
             USER_RESP=$(curl -k -s --connect-timeout 8 --max-time 15 "${PANEL_URL}/api/node/sync?node_id=${NODE_ID}&token=${NODE_KEY}" 2>&1 || true)
             if echo "$USER_RESP" | grep -q '"code":200'; then
                 REMOTE_USERS=$(echo "$USER_RESP" | jq '.users // []')
@@ -259,12 +253,17 @@ if [ -n "$PANEL_URL" ]; then
 
                 TMP_SYNC="/tmp/config.agent.sync.json"
 
+                # 集群模式：按需开启 statsUserUplink 和 statsUserDownlink 统计开关
                 jq --argjson new_clients "$REMOTE_USERS" \
                    --arg port "$REMOTE_PORT" \
                    --arg dest "$REMOTE_DEST" \
                    --argjson snis "$REMOTE_SNI_ARRAY" \
                    --arg sid "$SHORT_ID" \
                    '
+                   .stats = {} |
+                   .api = { "tag": "api", "services": ["StatsService"] } |
+                   .policy.levels."0".statsUserUplink = true |
+                   .policy.levels."0".statsUserDownlink = true |
                    (.inbounds[] | select(.protocol == "vless")) |= (
                        .settings.clients = $new_clients |
                        (if $port != "" then .port = ($port | tonumber) else . end) |
@@ -279,7 +278,7 @@ if [ -n "$PANEL_URL" ]; then
                     if ! cmp -s "$TMP_SYNC" "$CONFIG_FILE"; then
                         mv "$TMP_SYNC" "$CONFIG_FILE"
                         CLIENT_COUNT=$(echo "$REMOTE_USERS" | jq 'length')
-                        echo "==> [Cluster Node] 成功应用主控最新配置！(已同步 $CLIENT_COUNT 位用户)"
+                        echo "==> [Cluster Node] 成功热更配置并激活用户流量统计！(已同步 $CLIENT_COUNT 位用户)"
                         restart_xray
                     else
                         rm -f "$TMP_SYNC"
@@ -287,15 +286,26 @@ if [ -n "$PANEL_URL" ]; then
                 fi
             fi
 
-            # 3. 统计增量流量回传主控
+            # 3. 统计增量流量回传主控 (精准截取用户名累加)
             TRAFFIC_RAW=$(/usr/bin/xray api statsquery --server=127.0.0.1:10085 -pattern "user>>>" -reset=true 2>/dev/null || true)
-            if [ -n "$TRAFFIC_RAW" ] && echo "$TRAFFIC_RAW" | grep -q "stat"; then
-                TRAFFIC_PAYLOAD=$(echo "$TRAFFIC_RAW" | jq '[.stat[]? | {email: (.name | split(">>>")[1]), bytes: (.value | tonumber)}]')
-                curl -k -s -X POST "${PANEL_URL}/api/node/traffic" \
-                     -H "Content-Type: application/json" \
-                     --connect-timeout 8 \
-                     --max-time 15 \
-                     -d "{\"node_id\": \"$NODE_ID\", \"token\": \"$NODE_KEY\", \"traffic\": $TRAFFIC_PAYLOAD}" >/dev/null 2>&1 || true
+            if [ -n "$TRAFFIC_RAW" ] && echo "$TRAFFIC_RAW" | grep -q '"value"'; then
+                TRAFFIC_PAYLOAD=$(echo "$TRAFFIC_RAW" | jq -c '[
+                    .stat[]? | 
+                    select(.value > 0) | 
+                    {
+                        email: (.name | split(">>>")[1]), 
+                        bytes: (.value | tonumber)
+                    }
+                ]')
+
+                if [ -n "$TRAFFIC_PAYLOAD" ] && [ "$TRAFFIC_PAYLOAD" != "[]" ]; then
+                    REPORT_RES=$(curl -k -s -X POST "${PANEL_URL}/api/node/traffic" \
+                         -H "Content-Type: application/json" \
+                         --connect-timeout 8 \
+                         --max-time 15 \
+                         -d "{\"node_id\": \"$NODE_ID\", \"token\": \"$NODE_KEY\", \"traffic\": $TRAFFIC_PAYLOAD}" 2>&1 || true)
+                    echo "==> [Traffic Report] 成功回传增量流量: $TRAFFIC_PAYLOAD"
+                fi
             fi
 
             sleep 60
@@ -307,6 +317,13 @@ if [ -n "$PANEL_URL" ]; then
     wait $XRAY_PID
 
 else
+    # 【模式 B：纯单机使用模式】完全不注入任何 stats 统计开关，零额外性能损耗
+    echo "==> [Standalone Mode] 当前为单机模式，已自动禁用所有流量统计开销，保持核心极简高效。"
+
+    # 清除由于旧版本残留的 stats / policy / api 节点
+    TMP_CLEAN="/tmp/config.standalone.clean.json"
+    jq 'del(.stats) | del(.api) | del(.policy)' "$CONFIG_FILE" > "$TMP_CLEAN" && mv "$TMP_CLEAN" "$CONFIG_FILE"
+
     VLESS_URL="vless://${UUID}@${SERVER_IP}:${PORT}?security=reality&encryption=none&pbk=${PUBLIC_KEY}&headerType=none&fp=chrome&type=tcp&flow=xtls-rprx-vision&sni=${FIRST_SERVER_NAME}&sid=${SHORT_ID}#Xray-Reality"
 
     cat <<EOF > "$CLIENT_INFO_FILE"
@@ -327,7 +344,7 @@ ${VLESS_URL}
 ======================================================
 EOF
 
-    echo "==> [Standalone] 单机模式启动成功！节点连接信息如下："
+    echo "==> [Standalone] 单机模式启动成功！连接信息如下："
     cat "$CLIENT_INFO_FILE"
 
     start_xray
