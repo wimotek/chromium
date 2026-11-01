@@ -1,6 +1,6 @@
 import sqlite3
 from fastapi import APIRouter, HTTPException, Depends, Request
-from core.config import DB_PATH
+from config import DB_PATH
 from core.database import get_setting, set_setting
 from core.security import verify_token, verify_agent_access
 from services.cdp_engine import fetch_cookies_native

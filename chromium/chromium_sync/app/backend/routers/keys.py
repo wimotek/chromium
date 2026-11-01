@@ -2,7 +2,7 @@ import os
 import sqlite3
 from datetime import datetime
 from fastapi import APIRouter, Depends, UploadFile, File, Form
-from core.config import DB_PATH, KEYS_DIR
+from config import DB_PATH, KEYS_DIR
 from core.security import verify_token
 
 router = APIRouter(tags=["SSH密钥库"])

@@ -3,7 +3,7 @@ import sqlite3
 import asyncio
 from typing import Dict, Optional
 from sshtunnel import SSHTunnelForwarder
-from core.config import DB_PATH, KEYS_DIR, logger
+from config import DB_PATH, KEYS_DIR, logger
 from services.cdp_engine import probe_node_cookies
 
 class TunnelManager:

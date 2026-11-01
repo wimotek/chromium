@@ -1,6 +1,6 @@
 import sqlite3
 import secrets
-from core.config import DB_PATH, INIT_PASSWORD
+from config import DB_PATH, INIT_PASSWORD
 
 def init_db_and_jwt():
     from core.security import hash_password

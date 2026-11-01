@@ -4,13 +4,14 @@ import logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("CDP_Sync")
 
-CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
-BACKEND_DIR = os.path.abspath(os.path.join(CURRENT_DIR, ".."))
+# config.py 直接在 app/backend/ 下，BASE_DIR 即为后端根目录
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
+# 前端构建产物候选路径（直截了当，无需 .. 退级）
 CANDIDATE_DIST_DIRS = [
-    os.path.abspath(os.path.join(BACKEND_DIR, "../frontend/dist")),
-    os.path.abspath(os.path.join(BACKEND_DIR, "frontend/dist")),
-    os.path.abspath(os.path.join(BACKEND_DIR, "dist")),
+    os.path.abspath(os.path.join(BASE_DIR, "../frontend/dist")),
+    os.path.abspath(os.path.join(BASE_DIR, "frontend/dist")),
+    os.path.abspath(os.path.join(BASE_DIR, "dist")),
     "/app/frontend/dist"
 ]
 
@@ -20,6 +21,7 @@ for candidate in CANDIDATE_DIST_DIRS:
         DIST_DIR = candidate
         break
 
+# 持久化存储与安全路径
 DATA_DIR = "/data"
 KEYS_DIR = os.path.join(DATA_DIR, "keys")
 DB_PATH = os.path.join(DATA_DIR, "app.db")

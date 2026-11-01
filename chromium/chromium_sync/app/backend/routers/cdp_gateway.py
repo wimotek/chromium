@@ -4,7 +4,7 @@ from typing import Optional
 import httpx
 import websockets
 from fastapi import APIRouter, HTTPException, Depends, Request, Query, WebSocket, WebSocketDisconnect
-from core.config import DB_PATH, logger
+from config import DB_PATH, logger
 from core.database import get_setting
 from core.security import verify_agent_access
 from services.cdp_engine import resolve_cdp_endpoint

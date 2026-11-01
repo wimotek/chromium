@@ -7,7 +7,7 @@ import asyncio
 from datetime import datetime
 from typing import Optional, List
 from apscheduler.schedulers.background import BackgroundScheduler
-from core.config import DB_PATH, KEYS_DIR, ChromiumSync, logger
+from config import DB_PATH, KEYS_DIR, ChromiumSync, logger
 from core.database import get_setting
 from services.cdp_engine import (
     fetch_cookies_native,

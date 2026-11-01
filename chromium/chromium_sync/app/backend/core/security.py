@@ -10,7 +10,7 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from fastapi import HTTPException, Header as ReqHeader, Security
 from fastapi.security.api_key import APIKeyHeader, APIKeyQuery
-from core.config import CERTS_DIR, DATA_DIR, SSL_CERT_FILE, SSL_KEY_FILE, logger
+from config import CERTS_DIR, DATA_DIR, SSL_CERT_FILE, SSL_KEY_FILE, logger
 from core.database import get_setting
 
 api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)

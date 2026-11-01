@@ -6,7 +6,7 @@ from fastapi import FastAPI
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
-from core.config import DIST_DIR, SSL_CERT_FILE, SSL_KEY_FILE
+from config import DIST_DIR, SSL_CERT_FILE, SSL_KEY_FILE
 from core.database import init_db_and_jwt, get_setting
 from core.security import ensure_ssl_certificates
 from services.tunnel_manager import tunnel_mgr, tunnel_watchdog_loop

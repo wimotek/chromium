@@ -3,7 +3,7 @@ from email.mime.text import MIMEText
 from email.header import Header
 from typing import Optional
 import httpx
-from core.config import logger
+from config import logger
 from core.database import get_setting
 
 def send_email_notification(title: str, content: str, override_to: Optional[str] = None) -> tuple[bool, str]:

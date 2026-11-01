@@ -5,7 +5,7 @@ from typing import List, Dict
 from urllib.parse import urlparse, urlunparse
 import httpx
 import websockets
-from core.config import ChromiumSync, logger
+from config import ChromiumSync, logger
 
 def filter_cookies_by_domains(cookies: List[dict], include_domains: List[str], exclude_domains: List[str]) -> tuple[List[dict], int]:
     if not include_domains and not exclude_domains:

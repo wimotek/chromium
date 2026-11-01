@@ -3,7 +3,7 @@ import sqlite3
 from typing import Optional, List
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel
-from core.config import DB_PATH
+from config import DB_PATH
 from core.database import get_setting, set_setting
 from core.security import verify_token
 from services.sync_service import reschedule_sync_job, execute_sync_task
