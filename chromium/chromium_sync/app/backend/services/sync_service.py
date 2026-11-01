@@ -7,7 +7,7 @@ import asyncio
 from datetime import datetime
 from typing import Optional, List
 from apscheduler.schedulers.background import BackgroundScheduler
-from config import DB_PATH, KEYS_DIR, ChromiumSync, logger
+from core.config import DB_PATH, KEYS_DIR, ChromiumSync, logger
 from core.database import get_setting
 from services.cdp_engine import (
     fetch_cookies_native,
@@ -110,7 +110,7 @@ async def execute_sync_task(custom_source_id: Optional[int] = None, custom_targe
 
     log_detail.append(f"📋 规则审计：差量检测=[{'开启' if diff_enabled else '关闭'}] | 白名单=[{len(include_domains)}项] | 黑名单=[{len(exclude_domains)}项]")
 
-    # 场景 A: 智能全局最新值合并 (Smart Merge)
+    # 场景 A: 默认首选【智能全局最新值合并 (Smart Merge)】
     if not custom_source_id and sync_mode == "smart_merge":
         source_node_desc = "🌟 全网智能汇聚"
         try:
@@ -170,7 +170,7 @@ async def execute_sync_task(custom_source_id: Optional[int] = None, custom_targe
             status = "FAILED"
             log_detail.append(f"智能合并调度中断: {e}")
 
-    # 场景 B: 主从定向广播
+    # 场景 B: 传统指定主节点单向广播
     else:
         source = None
         if custom_source_id:
@@ -245,6 +245,16 @@ async def execute_sync_task(custom_source_id: Optional[int] = None, custom_targe
         INSERT INTO sync_logs (timestamp, source_node, target_nodes, cookie_count, duration, status, details)
         VALUES (?, ?, ?, ?, ?, ?, ?)
     """, (sync_time, source_node_desc, target_nodes_desc, cookie_count_metric, duration_str, status, "\n".join(log_detail)))
+
+    # ==================== 核心机制：自动滚动裁剪仅保留最新 20 条 ====================
+    cur.execute("""
+        DELETE FROM sync_logs 
+        WHERE id NOT IN (
+            SELECT id FROM (
+                SELECT id FROM sync_logs ORDER BY id DESC LIMIT 20
+            )
+        )
+    """)
     conn.commit()
     conn.close()
 

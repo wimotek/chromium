@@ -3,7 +3,7 @@ import sqlite3
 from typing import Optional, List
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel
-from config import DB_PATH
+from core.config import DB_PATH
 from core.database import get_setting, set_setting
 from core.security import verify_token
 from services.sync_service import reschedule_sync_job, execute_sync_task
@@ -69,6 +69,7 @@ async def trigger_sync(data: TriggerSyncDTO = TriggerSyncDTO(), user: dict = Dep
     await execute_sync_task(custom_source_id=data.source_id, custom_target_ids=data.target_ids)
     return {"message": "同步任务指令已下发执行"}
 
+# 结构化审计日志接口 (获取最新的 20 条记录)
 @router.get("/api/sync/logs")
 def get_logs(user: dict = Depends(verify_token)):
     conn = sqlite3.connect(DB_PATH)
@@ -77,8 +78,18 @@ def get_logs(user: dict = Depends(verify_token)):
     cur.execute("""
         SELECT id, timestamp, source_node, target_nodes, cookie_count, duration, status, details 
         FROM sync_logs 
-        ORDER BY id DESC LIMIT 50
+        ORDER BY id DESC LIMIT 20
     """)
     logs = [dict(r) for r in cur.fetchall()]
     conn.close()
     return logs
+
+# 手动清空所有审计流水记录接口
+@router.delete("/api/sync/logs")
+def clear_all_sync_logs(user: dict = Depends(verify_token)):
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute("DELETE FROM sync_logs")
+    conn.commit()
+    conn.close()
+    return {"message": "所有同步审计流水记录已彻底清空"}

@@ -10,11 +10,11 @@ const logs = ref([])
 const nodes = ref([])
 const isSyncing = ref(false)
 
-// 审计日志详情弹窗
+// 详情弹窗状态
 const showLogModal = ref(false)
 const selectedLogDetail = ref('')
 
-// 同步策略配置 (首选智能合并 smart_merge)
+// 同步策略配置 (首选 smart_merge)
 const syncConfig = reactive({
   sync_interval_minutes: 15,
   sync_mode: 'smart_merge',
@@ -57,6 +57,20 @@ const loadData = async () => {
     if (syncConfig.sync_source_id === 0) syncConfig.sync_source_id = defaultSrc.id
   } else if (nodes.value.length > 0) {
     manualSourceId.value = nodes.value[0].id
+  }
+}
+
+// 清空所有历史审计流水
+const clearAllLogs = async () => {
+  if (confirm('确认清空所有历史同步审计流水记录？清空后将无法恢复！')) {
+    const res = await props.api('/api/sync/logs', { method: 'DELETE' })
+    const data = await res.json()
+    if (res.ok) {
+      props.showToast(data.message, 'success')
+      logs.value = []
+    } else {
+      props.showToast(data.detail || '清空失败', 'error')
+    }
   }
 }
 
@@ -161,7 +175,7 @@ onMounted(() => {
 
 <template>
   <div class="sync-manager-container">
-    <!-- 顶栏标题与立即同步按钮 -->
+    <!-- 顶栏 -->
     <div class="sync-top-header">
       <div class="sync-title-box">
         <span class="sync-icon-globe">🌐</span>
@@ -180,7 +194,6 @@ onMounted(() => {
         <h3 class="card-title-h3">⚙️ 自动化调度策略</h3>
         
         <div class="form-vertical-flow">
-          <!-- 定时周期 -->
           <div class="form-block">
             <label class="block-label">定时调度周期 (分钟)</label>
             <div class="input-inline-wrap">
@@ -189,12 +202,11 @@ onMounted(() => {
             </div>
           </div>
 
-          <!-- 模式选择 -->
           <div class="form-block">
             <label class="block-label">同步模式规则 (默认首选智能合并)</label>
             <div class="mode-cards-stack">
               
-              <!-- 模式 1: 智能合并 (置前并默认) -->
+              <!-- 模式 1: 智能合并 -->
               <label :class="['mode-choice-card', syncConfig.sync_mode === 'smart_merge' ? 'mode-choice-active' : '']">
                 <input type="radio" v-model="syncConfig.sync_mode" value="smart_merge" style="display:none;">
                 <div class="mode-header-line">
@@ -220,7 +232,7 @@ onMounted(() => {
             </div>
           </div>
 
-          <!-- 主从模式下的目标节点选择 (支持下拉添加与 ALL 一键全选) -->
+          <!-- 主从模式下的目标节点选择 -->
           <div v-if="syncConfig.sync_mode === 'master_worker'" class="master-worker-panel">
             <div class="form-block">
               <label class="block-label">指定固定源节点 (Master)</label>
@@ -276,10 +288,9 @@ onMounted(() => {
       <!-- 右列：即时定向同步执行器 -->
       <div class="sync-config-card">
         <h3 class="card-title-h3">🎯 即时定向同步 (按需临时执行)</h3>
-        <p class="card-subtitle-desc">临时指定任意源节点，并将凭据批量推送到指定的单个或多个目标节点。</p>
+        <p class="card-subtitle-desc">临时指定任意源节点，并在本轮下发给指定的单个或多个目标节点。</p>
         
         <div class="form-vertical-flow">
-          <!-- 临时抓取源 -->
           <div class="form-block">
             <label class="block-label">选择抓取凭据的源节点 (Source)</label>
             <select v-model="manualSourceId" class="sync-input input-normal font-mono">
@@ -290,9 +301,8 @@ onMounted(() => {
             </select>
           </div>
 
-          <!-- 范围选择 -->
-          <div class="form-block">
-            <label class="block-label">分发目标范围</label>
+          <div class="form-field-block">
+            <label class="form-label">分发目标范围</label>
             <div class="mode-radios-flex">
               <label :class="['radio-pill-box', manualTargetMode === 'all' ? 'radio-pill-selected' : '']">
                 <input type="radio" v-model="manualTargetMode" value="all" style="display:none;">
@@ -304,7 +314,6 @@ onMounted(() => {
               </label>
             </div>
 
-            <!-- 即时同步：自定义目标添加控件 -->
             <div v-if="manualTargetMode === 'custom'" class="directed-custom-box">
               <div class="custom-actions-bar">
                 <div style="display:flex; gap:8px; align-items:center;">
@@ -348,14 +357,18 @@ onMounted(() => {
       </div>
     </div>
 
-    <!-- ==================== 审计列表：高规格结构化数据表格 ==================== -->
+    <!-- ==================== 审计列表：高规格结构化数据表格 (严格 20 条与清空) ==================== -->
     <div class="audit-section-wrapper">
       <div class="audit-header-bar">
         <div class="audit-title-box">
           <span style="font-size:16px;">📜</span>
           <h3 class="audit-title-text">同步任务审计追踪流水</h3>
+          <span class="badge-retention-note">仅保留最近 20 条 (自动轮转淘汰)</span>
         </div>
-        <button @click="loadData" class="link-btn-cyan">刷新审计</button>
+        <div style="display:flex; gap:12px; align-items:center;">
+          <button @click="loadData" class="link-btn-cyan">刷新审计</button>
+          <button @click="clearAllLogs" class="link-btn-red" style="font-weight:600;">🗑️ 清空审计流水</button>
+        </div>
       </div>
 
       <div class="audit-table-scroll">
@@ -373,10 +386,8 @@ onMounted(() => {
           </thead>
           <tbody>
             <tr v-for="l in logs" :key="l.id">
-              <!-- 时间戳 -->
               <td class="font-mono text-muted">{{ l.timestamp }}</td>
 
-              <!-- 源节点 -->
               <td>
                 <span v-if="l.source_node && l.source_node.includes('智能')" class="badge-smart-source">
                   {{ l.source_node }}
@@ -386,30 +397,25 @@ onMounted(() => {
                 </span>
               </td>
 
-              <!-- 分发目标 -->
               <td class="target-nodes-col" :title="l.target_nodes">
                 {{ l.target_nodes || '---' }}
               </td>
 
-              <!-- Cookie 数量 -->
               <td>
                 <span class="cookie-stat-badge">
                   🍪 {{ l.cookie_count || 0 }} 条
                 </span>
               </td>
 
-              <!-- 执行耗时 -->
               <td class="font-mono text-duration">
                 ⏱️ {{ l.duration || '0.00s' }}
               </td>
 
-              <!-- 状态 -->
               <td style="text-align: center;">
                 <span v-if="l.status==='SUCCESS'" class="status-pill-ok">● 成功</span>
                 <span v-else class="status-pill-fail">✕ 失败</span>
               </td>
 
-              <!-- 查看详情按钮 -->
               <td style="text-align: right; padding-right: 18px;">
                 <button @click="viewLogDetail(l.details)" class="btn-view-detail">
                   查看详情
@@ -417,7 +423,7 @@ onMounted(() => {
               </td>
             </tr>
             <tr v-if="logs.length === 0">
-              <td colspan="7" class="empty-table-cell">暂无同步任务审计流水</td>
+              <td colspan="7" class="empty-table-cell">暂无同步任务审计流水记录</td>
             </tr>
           </tbody>
         </table>
@@ -444,7 +450,7 @@ onMounted(() => {
 </template>
 
 <style scoped>
-/* ==================== SyncManager 专属自闭环样式体系 ==================== */
+/* ==================== SyncManager 独立样式体系 ==================== */
 
 .sync-manager-container {
   width: 100%;
@@ -455,7 +461,6 @@ onMounted(() => {
   box-sizing: border-box;
 }
 
-/* 顶栏 */
 .sync-top-header {
   display: flex;
   justify-content: space-between;
@@ -483,7 +488,6 @@ onMounted(() => {
   margin: 0;
 }
 
-/* 双列栅格 */
 .sync-cards-grid {
   display: grid;
   grid-template-columns: repeat(2, 1fr);
@@ -545,7 +549,6 @@ onMounted(() => {
   color: #94a3b8;
 }
 
-/* 输入框样式 */
 .sync-input {
   box-sizing: border-box;
   background-color: #0f1c3f;
@@ -567,9 +570,7 @@ onMounted(() => {
 .input-normal { width: 100%; max-width: 420px; min-width: 220px; }
 
 .font-mono { font-family: monospace; }
-.font-cyan-mono { color: #00f0ff; font-family: monospace; font-weight: bold; }
 
-/* 模式卡片 (智能合并 vs 主从) */
 .mode-cards-stack {
   display: flex;
   flex-direction: column;
@@ -632,7 +633,6 @@ onMounted(() => {
   font-weight: 500;
 }
 
-/* 主从面板 */
 .master-worker-panel {
   display: flex;
   flex-direction: column;
@@ -700,7 +700,6 @@ onMounted(() => {
   color: #ffffff;
 }
 
-/* 胶囊容器与芯片 */
 .chips-container-box {
   display: flex;
   gap: 8px;
@@ -735,7 +734,6 @@ onMounted(() => {
   color: #64748b;
 }
 
-/* 即时同步单选药丸卡片 */
 .mode-radios-flex {
   display: flex;
   gap: 10px;
@@ -780,7 +778,6 @@ onMounted(() => {
   padding: 4px 0;
 }
 
-/* 按钮通用渐变样式 */
 .btn-sync-action {
   background: linear-gradient(135deg, #0284c7, #2563eb);
   color: #ffffff;
@@ -803,7 +800,7 @@ onMounted(() => {
   transform: translateY(-1px);
 }
 
-/* 审计列表 */
+/* 审计表格 */
 .audit-section-wrapper {
   margin-top: 24px;
 }
@@ -826,6 +823,15 @@ onMounted(() => {
   font-weight: bold;
   color: #ffffff;
   margin: 0;
+}
+
+.badge-retention-note {
+  font-size: 11px;
+  color: #64748b;
+  background: #09122a;
+  border: 1px solid #172554;
+  padding: 2px 8px;
+  border-radius: 4px;
 }
 
 .audit-table-scroll {
@@ -942,7 +948,6 @@ onMounted(() => {
   padding: 36px;
 }
 
-/* 模态弹窗 */
 .modal-backdrop {
   position: fixed;
   inset: 0;
