@@ -4,7 +4,7 @@ from datetime import datetime
 from typing import Optional, List
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
-from core.config import DB_PATH
+from config import DB_PATH
 from core.database import get_setting, set_setting
 from core.security import verify_token
 from services.sync_service import reschedule_all_policies, execute_policy_task

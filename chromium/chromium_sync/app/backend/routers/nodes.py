@@ -2,7 +2,7 @@ import sqlite3
 import time
 from datetime import datetime
 from fastapi import APIRouter, HTTPException, Depends
-from core.config import DB_PATH
+from config import DB_PATH
 from core.security import verify_token
 from services.tunnel_manager import tunnel_mgr
 from services.cdp_engine import fetch_cookies_native, probe_node_cookies

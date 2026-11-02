@@ -7,7 +7,9 @@ import asyncio
 from datetime import datetime
 from typing import Optional, List
 from apscheduler.schedulers.background import BackgroundScheduler
-from core.config import DB_PATH, KEYS_DIR, ChromiumSync, logger
+
+# 修正导入路径：直接从 backend/config 导入
+from config import DB_PATH, KEYS_DIR, ChromiumSync, logger
 from core.database import get_setting
 from services.cdp_engine import (
     fetch_cookies_native,
@@ -257,7 +259,7 @@ async def execute_policy_task(policy_id: int):
                         diff_c, skipped = compute_cookie_diff(curr_c, cookies)
                         if diff_c:
                             await inject_cookies_native(target['local_bind_port'], diff_c, target_h)
-                        act = f"差量注入 {len(diff_c)} 条"
+                        act = f"差量注入 {len(diff_c)} 项"
                     else:
                         await inject_cookies_native(target['local_bind_port'], cookies, target_h)
                         act = f"全量写入 {len(cookies)} 条"
