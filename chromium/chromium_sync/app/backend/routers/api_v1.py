@@ -1,5 +1,6 @@
 import sqlite3
-from fastapi import APIRouter, HTTPException, Depends, Request
+from typing import Optional
+from fastapi import APIRouter, HTTPException, Depends, Request, Query
 from config import DB_PATH
 from core.database import get_setting, set_setting
 from core.security import verify_token, verify_agent_access
@@ -63,6 +64,7 @@ def external_list_nodes(request: Request, auth: dict = Depends(verify_agent_acce
         nodes_result.append({
             "id": node_id,
             "name": r["name"],
+            "group_name": r.get("group_name") or "默认分组",
             "is_source": bool(r["is_source"]),
             "is_local": is_loc,
             "direct_host": direct_h if is_loc else None,
@@ -108,6 +110,9 @@ async def external_get_cookies(node_id: int, auth: dict = Depends(verify_agent_a
         raise HTTPException(status_code=502, detail=f"提取 Cookies 失败: {e}")
 
 @router.post("/api/v1/sync", summary="外部自动化触发全网同步")
-async def external_trigger_sync(auth: dict = Depends(verify_agent_access)):
-    await execute_sync_task()
-    return {"code": 200, "message": "全网 Cookie 同步任务已触发"}
+async def external_trigger_sync(
+    policy_id: Optional[int] = Query(None, description="指定策略ID，留空则执行全部已启用策略"),
+    auth: dict = Depends(verify_agent_access)
+):
+    await execute_sync_task(policy_id)
+    return {"code": 200, "message": "Cookie 同步任务已成功触发"}

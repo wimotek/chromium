@@ -294,3 +294,28 @@ async def execute_policy_task(policy_id: int):
 
     if status == "FAILED":
         await dispatch_notification(f"策略 [{policy['name']}] 执行失败预警", f"时间: {sync_time} (耗时: {duration_str})\n" + "\n".join(log_detail))
+
+# ==================== 供外部 API / 自动化触发全网同步的标准入口 ====================
+async def execute_sync_task(policy_id: Optional[int] = None):
+    """
+    供外部 API / Webhook 调用的同步入口：
+    - 若传 policy_id：执行该特定策略；
+    - 若未传 policy_id：自动遍历并执行所有已启用的策略任务。
+    """
+    if policy_id:
+        await execute_policy_task(policy_id)
+        return
+
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    cur = conn.cursor()
+    cur.execute("SELECT id FROM sync_policies WHERE enabled=1 ORDER BY id ASC")
+    policies = cur.fetchall()
+    conn.close()
+
+    if not policies:
+        logger.warning("未检测到已启用的同步策略，跳过执行。")
+        return
+
+    for p in policies:
+        await execute_policy_task(p["id"])
