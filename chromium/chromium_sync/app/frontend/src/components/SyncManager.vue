@@ -138,6 +138,7 @@ const togglePolicy = async (p) => {
   props.showToast(data.message, 'success')
 }
 
+// 删除策略 (仅剩1条时自动拦截保护)
 const deletePolicy = async (id) => {
   if (policies.value.length <= 1) {
     props.showToast('系统必须保留至少一条调度策略，无法删除', 'error')
@@ -216,7 +217,7 @@ onMounted(() => {
       </button>
     </div>
 
-    <!-- 策略管理大列表 (核心升级：自适应一行 3 个卡片，无固定死宽度) -->
+    <!-- 策略管理大列表 (自适应一行 3 个卡片) -->
     <div class="policies-grid-3col">
       <div v-for="p in policies" :key="p.id" class="policy-card-item">
         
@@ -236,7 +237,7 @@ onMounted(() => {
           <span v-else class="status-indicator-off">○ 已停用</span>
         </div>
 
-        <!-- 卡片中段：轻量级 HUD 数据流 (彻底移除空旷死板大黑框) -->
+        <!-- 卡片中段：轻量级 HUD 数据流 -->
         <div class="policy-card-body">
           <div class="info-row">
             <span class="row-label">拓扑模式</span>
@@ -251,12 +252,19 @@ onMounted(() => {
           </div>
         </div>
 
-        <!-- 卡片底部：明确的动作栏 (对称分布，操作明确) -->
+        <!-- 卡片底部动作栏：已完成【删除】与【立即执行】对调位置 -->
         <div class="policy-card-actions">
-          <button @click="runPolicy(p.id)" :disabled="isExecuting" class="btn-micro btn-orange">
-            ⚡ 立即执行
+          <!-- 危险操作置于左侧，且当仅剩 1 条策略时自动禁用 -->
+          <button 
+            @click="deletePolicy(p.id)" 
+            :disabled="policies.length <= 1"
+            :class="['btn-micro', 'btn-trash', policies.length <= 1 ? 'btn-disabled' : '']"
+            :title="policies.length <= 1 ? '系统必须保留至少一条调度策略，不可删除' : '删除该策略'"
+          >
+            🗑️ 删除
           </button>
 
+          <!-- 右侧操作区：依次为 停用/启用、编辑、立即执行 -->
           <div class="actions-right-cluster">
             <button 
               @click="togglePolicy(p)" 
@@ -270,14 +278,9 @@ onMounted(() => {
               ✏️ 编辑
             </button>
 
-            <!-- 仅剩 1 条策略时置灰禁用删除 -->
-            <button 
-              @click="deletePolicy(p.id)" 
-              :disabled="policies.length <= 1"
-              :class="['btn-micro', 'btn-trash', policies.length <= 1 ? 'btn-disabled' : '']"
-              :title="policies.length <= 1 ? '系统必须保留至少一条调度策略，不可删除' : '删除该策略'"
-            >
-              🗑️ 删除
+            <!-- 核心执行主动作置于最右侧醒目位置 -->
+            <button @click="runPolicy(p.id)" :disabled="isExecuting" class="btn-micro btn-orange">
+              ⚡ 立即执行
             </button>
           </div>
         </div>
@@ -289,7 +292,7 @@ onMounted(() => {
       </div>
     </div>
 
-    <!-- ==================== 审计列表：高规格结构化数据表格 (20 条轮转) ==================== -->
+    <!-- 审计列表：高规格结构化数据表格 (20 条轮转) -->
     <div class="audit-section-wrapper">
       <div class="audit-header-bar">
         <div class="audit-title-box">
@@ -533,10 +536,9 @@ onMounted(() => {
   margin: 0;
 }
 
-/* ==================== 核心重构：一行 3 个自适应策略卡片 ==================== */
+/* 自适应 3 列策略卡片 */
 .policies-grid-3col {
   display: grid;
-  /* 严格自适应 3 列布局，宽度不固定死，随容器宽度自由伸缩 */
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 16px;
   margin-bottom: 24px;
@@ -544,14 +546,12 @@ onMounted(() => {
   box-sizing: border-box;
 }
 
-/* 平板降级为 2 列 */
 @media (max-width: 1200px) {
   .policies-grid-3col {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
 
-/* 手机降级为 1 列 */
 @media (max-width: 768px) {
   .policies-grid-3col {
     grid-template-columns: minmax(0, 1fr);
@@ -653,7 +653,7 @@ onMounted(() => {
   flex-shrink: 0;
 }
 
-/* ==================== 卡片中段：轻量级 HUD 数据流 (彻底移除空旷死板大黑框) ==================== */
+/* 中段 HUD 数据流 */
 .policy-card-body {
   display: flex;
   flex-direction: column;
@@ -676,7 +676,6 @@ onMounted(() => {
   flex-shrink: 0;
 }
 
-/* 拓扑标签：半透明微光，不再空洞 */
 .route-pill-badge {
   background: rgba(2, 132, 199, 0.12);
   border: 1px solid rgba(2, 132, 199, 0.35);
@@ -700,7 +699,7 @@ onMounted(() => {
   text-overflow: ellipsis;
 }
 
-/* 卡片动作栏 */
+/* 卡片动作栏：左右对调 */
 .policy-card-actions {
   display: flex;
   justify-content: space-between;
