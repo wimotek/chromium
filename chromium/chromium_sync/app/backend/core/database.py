@@ -1,7 +1,7 @@
 import sqlite3
 import secrets
 from datetime import datetime
-from core.config import DB_PATH, INIT_PASSWORD
+from config import DB_PATH, INIT_PASSWORD
 
 def init_db_and_jwt():
     from core.security import hash_password
@@ -9,7 +9,7 @@ def init_db_and_jwt():
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
     
-    # 1. 节点表 (包含 group_name)
+    # 1. 节点表 (包含 group_name, direct_host 等)
     cur.execute('''CREATE TABLE IF NOT EXISTS nodes (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         name TEXT NOT NULL,
@@ -47,6 +47,7 @@ def init_db_and_jwt():
         created_at TEXT
     )''')
 
+    # 3. 密钥库元数据表 (支持备注与添加时间)
     cur.execute('''CREATE TABLE IF NOT EXISTS ssh_keys (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         filename TEXT UNIQUE NOT NULL,
@@ -55,7 +56,10 @@ def init_db_and_jwt():
         size INTEGER DEFAULT 0
     )''')
 
+    # 4. 全局设置表
     cur.execute('''CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)''')
+
+    # 5. 结构化审计流水表 (滚动裁剪保持 20 条)
     cur.execute('''CREATE TABLE IF NOT EXISTS sync_logs (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         timestamp TEXT,
@@ -67,7 +71,7 @@ def init_db_and_jwt():
         details TEXT
     )''')
 
-    # 热迁移补充列
+    # 增量字段平滑自动迁移
     for col, col_type in [
         ("group_name", "TEXT DEFAULT '默认分组'"),
         ("direct_host", "TEXT DEFAULT '127.0.0.1'"),

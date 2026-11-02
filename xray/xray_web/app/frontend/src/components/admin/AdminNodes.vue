@@ -17,7 +17,7 @@
             <th>开放范围策略</th>
             <th>SNI 伪装域名</th>
             <th>公钥 (PublicKey)</th>
-            <th>心跳检测时间</th>
+            <th>心跳检测状态</th>
             <th style="width: 250px;">治理操作</th>
           </tr>
         </thead>
@@ -27,13 +27,13 @@
               <div style="font-weight: 700; color: #f8fafc;">{{ node.name }}</div>
               <div style="font-size: 11px; color: #38bdf8; font-family: monospace;">{{ node.ip }}:{{ node.port }}</div>
             </td>
-            <!-- 服务状态：启用 vs 停止 -->
+            <!-- 运行服务状态 -->
             <td>
               <span class="badge" :class="node.status === 1 ? 'badge-ready' : 'badge-disabled'">
                 {{ node.status === 1 ? '🟢 运行中' : '🛑 已停止' }}
               </span>
             </td>
-            <!-- 开放范围策略：公开 vs 定向 -->
+            <!-- 开放范围策略 (默认全体公开 / 定向授权) -->
             <td>
               <span v-if="node.status === 0" class="badge badge-disabled">
                 🚫 服务已停
@@ -51,20 +51,32 @@
                 多SNI: {{ node.server_names.split(',').length }} 个
               </div>
             </td>
+
+            <!-- 1. 恢复：公钥展示与一键复制功能 -->
             <td>
-              <span v-if="node.pbk && node.pbk.length === 43" class="badge badge-ready" title="公钥正常就绪">
-                43位有效
-              </span>
-              <span v-else class="badge badge-used" title="尚未正确回传或格式异常">
-                ⚠️ 异常
-              </span>
+              <div v-if="node.pbk && node.pbk.length === 43" class="pbk-copy-box">
+                <span class="pbk-text" :title="node.pbk">{{ formatPbk(node.pbk) }}</span>
+                <button class="btn-sm-icon btn-action" title="一键复制完整公钥" @click="copyPbk(node.pbk)">
+                  📋
+                </button>
+              </div>
+              <div v-else>
+                <span class="badge badge-used">⚠️ 等待回传</span>
+              </div>
             </td>
+
+            <!-- 2. 恢复：实时计算心跳活性状态 -->
             <td>
-              <div style="font-size: 11px; color: #94a3b8;">{{ node.last_heartbeat }}</div>
+              <div class="heartbeat-cell">
+                <span class="badge" :class="getHeartbeatInfo(node.last_heartbeat).cls">
+                  {{ getHeartbeatInfo(node.last_heartbeat).text }}
+                </span>
+                <div class="last-time-tip">{{ node.last_heartbeat || '无记录' }}</div>
+              </div>
             </td>
+
             <td>
               <div class="action-btn-row">
-                <!-- 彻底拆分为【配置】和【权限】两个独立按钮，去除了重复的禁用按钮 -->
                 <button class="btn-sm btn-edit" @click="openConfigModal(node)">⚙️ 配置</button>
                 <button class="btn-sm btn-perm" @click="openPermModal(node)">🔐 权限</button>
                 <button class="btn-sm btn-reset" @click="handleForceResync(node.node_id)" title="清空公钥让节点重新上报">🔄 接纳</button>
@@ -81,7 +93,7 @@
       </table>
     </div>
 
-    <!-- 弹窗 1：⚙️ 节点网络配置 (纯网络连接属性，连接地址明确支持域名) -->
+    <!-- 弹窗 1：⚙️ 节点网络配置 (连接地址支持 IP 或 域名) -->
     <div v-if="showConfigModal" class="modal-backdrop" @click="showConfigModal = false">
       <div class="cyber-modal" style="max-width: 520px; text-align: left;" @click.stop>
         <h3>⚙️ 节点网络配置 [{{ configForm.name }}]</h3>
@@ -135,12 +147,12 @@
       </div>
     </div>
 
-    <!-- 弹窗 2：🔐 节点启停与权限策略 (启停使用单选，授权使用单选) -->
+    <!-- 弹窗 2：🔐 节点启停与权限策略 (单选启停，单选开放范围) -->
     <div v-if="showPermModal" class="modal-backdrop" @click="showPermModal = false">
       <div class="cyber-modal" style="max-width: 520px; text-align: left;" @click.stop>
         <h3>🔐 节点启停与权限策略 [{{ permForm.name }}]</h3>
 
-        <!-- A. 启停节点：明确使用单选控制 -->
+        <!-- A. 启停节点：单选框 -->
         <div class="form-item" style="margin-top: 14px;">
           <label>节点运行状态 (单选启停)</label>
           <div class="radio-group">
@@ -156,7 +168,7 @@
 
         <!-- B. 授权开放范围：单选全部公开或定向限定 -->
         <div class="form-item" style="border-top: 1px dashed rgba(255,255,255,0.08); padding-top: 12px;">
-          <label>授权开放范围 (单选)</label>
+          <label>授权开放范围 (单选，默认全体公开)</label>
           <div class="radio-group">
             <label class="radio-label">
               <input type="radio" :value="1" v-model.number="permForm.allow_all" /> 🌐 全部用户可用 (公开节点)
@@ -214,12 +226,9 @@ const props = defineProps({
 const emit = defineEmits(['reload-all'])
 
 const adminNodes = ref([])
-
-// 弹窗开关状态
 const showConfigModal = ref(false)
 const showPermModal = ref(false)
 
-// 1. 网络配置表单
 const configForm = reactive({
   node_id: '',
   name: '',
@@ -231,7 +240,6 @@ const configForm = reactive({
   node_key: ''
 })
 
-// 2. 权限策略表单
 const permForm = reactive({
   node_id: '',
   name: '',
@@ -240,6 +248,40 @@ const permForm = reactive({
   allowed_groups: '',
   allowed_users: ''
 })
+
+// 格式化公钥展示 (前6位...后6位)
+const formatPbk = (pbk) => {
+  if (!pbk || pbk.length < 12) return pbk || ''
+  return `${pbk.slice(0, 6)}...${pbk.slice(-6)}`
+}
+
+// 复制公钥到剪贴板
+const copyPbk = (pbk) => {
+  if (!pbk) return
+  navigator.clipboard.writeText(pbk).then(() => {
+    ElMessage.success('公钥 (PublicKey) 已成功复制到剪贴板！')
+  }).catch(() => {
+    ElMessage.error('复制失败，请手动长按复制')
+  })
+}
+
+// 动态心跳状态计算器
+const getHeartbeatInfo = (lastHeartbeat) => {
+  if (!lastHeartbeat || lastHeartbeat.includes('等待') || lastHeartbeat.includes('下线')) {
+    return { text: lastHeartbeat || '未上线', cls: 'badge-disabled' }
+  }
+  const t = new Date(lastHeartbeat.replace(/-/g, '/')).getTime()
+  if (isNaN(t)) return { text: lastHeartbeat, cls: 'badge-disabled' }
+
+  const diffSec = Math.floor((Date.now() - t) / 1000)
+  if (diffSec < 0 || diffSec <= 90) {
+    return { text: `🟢 在线 (${diffSec <= 10 ? '刚刚' : diffSec + 's前'})`, cls: 'badge-ready' }
+  } else if (diffSec <= 300) {
+    return { text: `🟡 延迟 (${Math.floor(diffSec / 60)}m前)`, cls: 'badge-restricted' }
+  } else {
+    return { text: `🔴 离线 (${Math.floor(diffSec / 60)}m前)`, cls: 'badge-disabled' }
+  }
+}
 
 const getScopeSummary = (node) => {
   const parts = []
@@ -266,7 +308,6 @@ onMounted(() => {
   fetchNodes()
 })
 
-// 打开【⚙️ 配置】弹窗
 const openConfigModal = (node) => {
   configForm.node_id = node.node_id
   configForm.name = node.name
@@ -279,7 +320,6 @@ const openConfigModal = (node) => {
   showConfigModal.value = true
 }
 
-// 提交网络配置
 const submitNodeConfig = async () => {
   try {
     const res = await axios.post('/api/admin/nodes/save_config', {
@@ -300,7 +340,6 @@ const submitNodeConfig = async () => {
   }
 }
 
-// 打开【🔐 权限】弹窗
 const openPermModal = (node) => {
   permForm.node_id = node.node_id
   permForm.name = node.name
@@ -311,7 +350,6 @@ const openPermModal = (node) => {
   showPermModal.value = true
 }
 
-// 提交权限策略
 const submitNodePermission = async () => {
   try {
     const res = await axios.post('/api/admin/nodes/save_permission', {
@@ -399,6 +437,48 @@ const handleRevokeDelete = async (nodeId) => {
 }
 .btn-perm:hover {
   background: rgba(245, 158, 11, 0.3);
+}
+
+.pbk-copy-box {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.pbk-text {
+  font-family: monospace;
+  font-size: 11px;
+  color: #38bdf8;
+  background: rgba(15, 23, 42, 0.6);
+  padding: 2px 6px;
+  border-radius: 4px;
+  border: 1px solid rgba(56, 189, 248, 0.2);
+}
+
+.btn-sm-icon {
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  font-size: 13px;
+  padding: 2px 4px;
+  opacity: 0.8;
+  transition: opacity 0.2s;
+}
+.btn-sm-icon:hover {
+  opacity: 1;
+  transform: scale(1.1);
+}
+
+.heartbeat-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.last-time-tip {
+  font-size: 10px;
+  color: #64748b;
+  font-family: monospace;
 }
 
 .permission-sub-box {
