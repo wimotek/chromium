@@ -12,12 +12,18 @@ RUN npm run build
 FROM python:3.11-slim
 WORKDIR /app
 
-# 安装 SSH 客户端、openssl 及基础网络诊断工具
+# 默认设置上海时区 (Asia/Shanghai, UTC+8)
+ENV TZ=Asia/Shanghai
+
+# 安装 SSH 客户端、openssl、tzdata 时区包及基础工具
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     curl \
     openssh-client \
     openssl \
+    tzdata \
+    && ln -fs /usr/share/zoneinfo/${TZ} /etc/localtime \
+    && echo ${TZ} > /etc/timezone \
     && rm -rf /var/lib/apt/lists/*
 
 COPY app/backend/requirements.txt ./backend/

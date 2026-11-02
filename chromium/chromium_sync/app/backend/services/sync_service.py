@@ -4,7 +4,7 @@ import json
 import inspect
 import sqlite3
 import asyncio
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional, List
 from apscheduler.schedulers.background import BackgroundScheduler
 from config import DB_PATH, KEYS_DIR, ChromiumSync, logger
@@ -21,6 +21,13 @@ from services.notification import dispatch_notification
 
 scheduler = BackgroundScheduler()
 
+def _execute_policy_job_wrapper(policy_id: int):
+    """调度器任务包装函数，带有完善的异常捕获与日志记录"""
+    try:
+        asyncio.run(execute_policy_task(policy_id))
+    except Exception as e:
+        logger.error(f"定时调度任务执行失败 (策略ID: {policy_id}): {e}", exc_info=True)
+
 def reschedule_all_policies():
     """重新加载所有已启用的策略到定时调度器中"""
     conn = sqlite3.connect(DB_PATH)
@@ -35,16 +42,24 @@ def reschedule_all_policies():
         if job.id.startswith("policy_job_"):
             scheduler.remove_job(job.id)
 
+    now_dt = datetime.now()
     for p in policies:
         job_id = f"policy_job_{p['id']}"
         interval = max(1, int(p.get("interval_minutes") or 15))
+        
+        # 核心优化：若策略从没有执行过（last_run为空），启动后 5 秒立即执行首次触发！
+        # 若之前已经执行过，则按设定的时间间隔定时运行
+        first_run_time = (now_dt + timedelta(seconds=5)) if not p.get("last_run") else None
+
         scheduler.add_job(
-            lambda pid=p['id']: asyncio.run(execute_policy_task(pid)),
+            _execute_policy_job_wrapper,
             'interval',
+            args=[p['id']],
             minutes=interval,
-            id=job_id
+            id=job_id,
+            next_run_time=first_run_time
         )
-        logger.info(f"已调度策略 [{p['name']}] (ID: {p['id']}): 每 {interval} 分钟自动执行")
+        logger.info(f"已装载定时策略 [{p['name']}] (ID: {p['id']}): 每 {interval} 分钟自动调度 (首次触发: {'5秒后就绪执行' if first_run_time else '按周期等待'})")
 
 async def run_chromium_sync_instance(source_node: dict, target_node: dict, include_domains: List[str], exclude_domains: List[str], diff_enabled: bool) -> dict:
     if ChromiumSync is None:
@@ -297,11 +312,6 @@ async def execute_policy_task(policy_id: int):
 
 # ==================== 供外部 API / 自动化触发全网同步的标准入口 ====================
 async def execute_sync_task(policy_id: Optional[int] = None):
-    """
-    供外部 API / Webhook 调用的同步入口：
-    - 若传 policy_id：执行该特定策略；
-    - 若未传 policy_id：自动遍历并执行所有已启用的策略任务。
-    """
     if policy_id:
         await execute_policy_task(policy_id)
         return

@@ -1,5 +1,5 @@
 <script setup>
-import { ref, reactive, computed, onMounted } from 'vue'
+import { ref, reactive, onMounted, onUnmounted } from 'vue'
 
 const props = defineProps({
   api: Function,
@@ -11,6 +11,9 @@ const nodes = ref([])
 const groups = ref([])
 const logs = ref([])
 const isExecuting = ref(false)
+
+// 页面静默自动刷新定时器
+let autoRefreshTimer = null
 
 // 策略弹窗状态
 const showPolicyModal = ref(false)
@@ -44,10 +47,10 @@ const loadAllData = async () => {
     props.api('/api/node-groups'),
     props.api('/api/sync/logs')
   ])
-  policies.value = await pRes.json()
-  nodes.value = await nRes.json()
-  groups.value = await gRes.json()
-  logs.value = await lRes.json()
+  if (pRes.ok) policies.value = await pRes.json()
+  if (nRes.ok) nodes.value = await nRes.json()
+  if (gRes.ok) groups.value = await gRes.json()
+  if (lRes.ok) logs.value = await lRes.json()
 }
 
 // 格式化输出简洁优雅的路由文字
@@ -131,6 +134,7 @@ const submitPolicy = async () => {
   loadAllData()
 }
 
+// 启停切换
 const togglePolicy = async (p) => {
   const res = await props.api(`/api/sync/policies/${p.id}/toggle`, { method: 'POST' })
   const data = await res.json()
@@ -138,7 +142,7 @@ const togglePolicy = async (p) => {
   props.showToast(data.message, 'success')
 }
 
-// 删除策略 (仅剩1条时自动拦截保护)
+// 删除策略
 const deletePolicy = async (id) => {
   if (policies.value.length <= 1) {
     props.showToast('系统必须保留至少一条调度策略，无法删除', 'error')
@@ -156,6 +160,7 @@ const deletePolicy = async (id) => {
   }
 }
 
+// 核心优化：执行完毕后同时刷新策略与审计流水，保证“上次执行”瞬间更新！
 const runPolicy = async (id) => {
   if (isExecuting.value) return
   isExecuting.value = true
@@ -163,8 +168,8 @@ const runPolicy = async (id) => {
     const res = await props.api(`/api/sync/policies/${id}/run`, { method: 'POST' })
     const data = await res.json()
     props.showToast(data.message, 'success')
-    const lRes = await props.api('/api/sync/logs')
-    logs.value = await lRes.json()
+    // 立即重新拉取全部数据，使界面上次执行时间即刻更新
+    await loadAllData()
   } finally {
     isExecuting.value = false
   }
@@ -173,9 +178,8 @@ const runPolicy = async (id) => {
 const clearAllLogs = async () => {
   if (confirm('确认清空所有历史同步审计流水记录？清空后将无法恢复！')) {
     const res = await props.api('/api/sync/logs', { method: 'DELETE' })
-    const data = await res.json()
     if (res.ok) {
-      props.showToast(data.message, 'success')
+      props.showToast('审计流水已清空', 'success')
       logs.value = []
     }
   }
@@ -200,6 +204,16 @@ const viewLogDetail = (detail) => {
 
 onMounted(() => {
   loadAllData()
+  // 每 15 秒静默轮询一次，自动捕捉后台定时任务的执行更新
+  autoRefreshTimer = setInterval(() => {
+    loadAllData()
+  }, 15000)
+})
+
+onUnmounted(() => {
+  if (autoRefreshTimer) {
+    clearInterval(autoRefreshTimer)
+  }
 })
 </script>
 
@@ -252,9 +266,8 @@ onMounted(() => {
           </div>
         </div>
 
-        <!-- 卡片底部动作栏：已完成【删除】与【立即执行】对调位置 -->
+        <!-- 卡片底部动作栏：左删除，右执行 -->
         <div class="policy-card-actions">
-          <!-- 危险操作置于左侧，且当仅剩 1 条策略时自动禁用 -->
           <button 
             @click="deletePolicy(p.id)" 
             :disabled="policies.length <= 1"
@@ -264,7 +277,6 @@ onMounted(() => {
             🗑️ 删除
           </button>
 
-          <!-- 右侧操作区：依次为 停用/启用、编辑、立即执行 -->
           <div class="actions-right-cluster">
             <button 
               @click="togglePolicy(p)" 
@@ -278,7 +290,6 @@ onMounted(() => {
               ✏️ 编辑
             </button>
 
-            <!-- 核心执行主动作置于最右侧醒目位置 -->
             <button @click="runPolicy(p.id)" :disabled="isExecuting" class="btn-micro btn-orange">
               ⚡ 立即执行
             </button>
@@ -508,7 +519,6 @@ onMounted(() => {
   box-sizing: border-box;
 }
 
-/* 顶栏 */
 .sync-top-header {
   display: flex;
   justify-content: space-between;
@@ -576,7 +586,6 @@ onMounted(() => {
   box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
 }
 
-/* 卡片头部 */
 .policy-card-header {
   display: flex;
   justify-content: space-between;
@@ -629,7 +638,6 @@ onMounted(() => {
   white-space: nowrap;
 }
 
-/* 状态徽章 */
 .status-indicator-on {
   background: rgba(16, 185, 129, 0.12);
   border: 1px solid rgba(16, 185, 129, 0.35);
@@ -699,7 +707,6 @@ onMounted(() => {
   text-overflow: ellipsis;
 }
 
-/* 卡片动作栏：左右对调 */
 .policy-card-actions {
   display: flex;
   justify-content: space-between;
@@ -713,7 +720,6 @@ onMounted(() => {
   gap: 6px;
 }
 
-/* 动作按钮 */
 .btn-micro {
   border: none;
   border-radius: 4px;
@@ -774,7 +780,6 @@ onMounted(() => {
   font-size: 12px;
 }
 
-/* 表单与输入 */
 .form-vertical-flow {
   display: flex;
   flex-direction: column;
@@ -822,7 +827,6 @@ onMounted(() => {
 .font-mono { font-family: monospace; }
 .font-cyan-mono { color: #00f0ff; font-family: monospace; font-weight: bold; }
 
-/* 拓扑模式卡片 */
 .grid-2col-fluid {
   display: grid;
   grid-template-columns: repeat(2, 1fr);
@@ -872,7 +876,6 @@ onMounted(() => {
   padding: 14px;
 }
 
-/* 目标添加与胶囊标签 */
 .chips-container-box {
   display: flex;
   gap: 8px;
@@ -905,7 +908,6 @@ onMounted(() => {
   color: #64748b;
 }
 
-/* 按钮体系 */
 .btn-primary-gradient {
   background: linear-gradient(135deg, #0284c7, #2563eb);
   color: #ffffff;
