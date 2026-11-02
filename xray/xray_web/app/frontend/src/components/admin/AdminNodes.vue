@@ -27,12 +27,14 @@
               <div style="font-weight: 700; color: #f8fafc;">{{ node.name }}</div>
               <div style="font-size: 11px; color: #38bdf8; font-family: monospace;">{{ node.ip }}:{{ node.port }}</div>
             </td>
+
             <!-- 运行服务状态 -->
             <td>
               <span class="badge" :class="node.status === 1 ? 'badge-ready' : 'badge-disabled'">
                 {{ node.status === 1 ? '🟢 运行中' : '🛑 已停止' }}
               </span>
             </td>
+
             <!-- 开放范围策略 (默认全体公开 / 定向授权) -->
             <td>
               <span v-if="node.status === 0" class="badge badge-disabled">
@@ -45,6 +47,7 @@
                 🎯 定向授权 ({{ getScopeSummary(node) }})
               </span>
             </td>
+
             <td>
               <div style="font-size: 12px; color: #38bdf8;">{{ node.sni }}</div>
               <div v-if="node.server_names && node.server_names.includes(',')" style="font-size: 10px; color: #94a3b8;">
@@ -52,27 +55,29 @@
               </div>
             </td>
 
-            <!-- 1. 恢复：公钥展示与一键复制功能 -->
+            <!-- 1. 优化：纯净等宽文本呈现，无背景无方框线，附带一键复制 -->
             <td>
-              <div v-if="node.pbk && node.pbk.length === 43" class="pbk-copy-box">
-                <span class="pbk-text" :title="node.pbk">{{ formatPbk(node.pbk) }}</span>
-                <button class="btn-sm-icon btn-action" title="一键复制完整公钥" @click="copyPbk(node.pbk)">
+              <div v-if="node.pbk && node.pbk.length === 43" class="pbk-box">
+                <span class="pbk-clean-text" :title="`完整公钥: ${node.pbk} (点击右侧图标复制)`">{{ formatPbk(node.pbk) }}</span>
+                <button class="btn-copy-icon" title="点击复制完整公钥" @click="copyPbk(node.pbk)">
                   📋
                 </button>
               </div>
               <div v-else>
-                <span class="badge badge-used">⚠️ 等待回传</span>
+                <span class="text-muted" style="font-size: 11px;">⚠️ 待回传</span>
               </div>
             </td>
 
-            <!-- 2. 恢复：实时计算心跳活性状态 -->
+            <!-- 2. 优化：紧凑小巧状态胶囊，不撑满单元格；鼠标悬停浮显具体时间，移开自动隐藏 -->
             <td>
-              <div class="heartbeat-cell">
-                <span class="badge" :class="getHeartbeatInfo(node.last_heartbeat).cls">
-                  {{ getHeartbeatInfo(node.last_heartbeat).text }}
-                </span>
-                <div class="last-time-tip">{{ node.last_heartbeat || '无记录' }}</div>
-              </div>
+              <span
+                class="heartbeat-badge"
+                :class="getHeartbeatInfo(node.last_heartbeat).cls"
+                :title="`最后心跳: ${node.last_heartbeat || '无记录'} (${getHeartbeatInfo(node.last_heartbeat).diff})`"
+              >
+                <span class="status-dot"></span>
+                <span>{{ getHeartbeatInfo(node.last_heartbeat).label }}</span>
+              </span>
             </td>
 
             <td>
@@ -152,7 +157,6 @@
       <div class="cyber-modal" style="max-width: 520px; text-align: left;" @click.stop>
         <h3>🔐 节点启停与权限策略 [{{ permForm.name }}]</h3>
 
-        <!-- A. 启停节点：单选框 -->
         <div class="form-item" style="margin-top: 14px;">
           <label>节点运行状态 (单选启停)</label>
           <div class="radio-group">
@@ -166,7 +170,6 @@
           <span class="input-hint">选择停止时，所有普通用户将无法连接，且在网页和订阅中彻底消失</span>
         </div>
 
-        <!-- B. 授权开放范围：单选全部公开或定向限定 -->
         <div class="form-item" style="border-top: 1px dashed rgba(255,255,255,0.08); padding-top: 12px;">
           <label>授权开放范围 (单选，默认全体公开)</label>
           <div class="radio-group">
@@ -179,7 +182,6 @@
           </div>
         </div>
 
-        <!-- C. 细分定向名单 (仅在选择定向授权时展示) -->
         <div v-if="permForm.allow_all === 0" class="permission-sub-box">
           <div class="form-item">
             <label>允许访问的用户组 (多个用逗号隔开，如: vip, pro)</label>
@@ -249,37 +251,62 @@ const permForm = reactive({
   allowed_users: ''
 })
 
-// 格式化公钥展示 (前6位...后6位)
+// 精简公钥格式 (前6位...后6位)
 const formatPbk = (pbk) => {
-  if (!pbk || pbk.length < 12) return pbk || ''
+  if (!pbk || pbk.length < 14) return pbk || ''
   return `${pbk.slice(0, 6)}...${pbk.slice(-6)}`
 }
 
-// 复制公钥到剪贴板
+// 复制完整公钥
 const copyPbk = (pbk) => {
   if (!pbk) return
   navigator.clipboard.writeText(pbk).then(() => {
-    ElMessage.success('公钥 (PublicKey) 已成功复制到剪贴板！')
+    ElMessage.success('公钥 (PublicKey) 已成功复制！')
   }).catch(() => {
     ElMessage.error('复制失败，请手动长按复制')
   })
 }
 
-// 动态心跳状态计算器
+// 动态计算心跳状态：仅输出紧凑状态名，相对时间放入 title 提示中
 const getHeartbeatInfo = (lastHeartbeat) => {
   if (!lastHeartbeat || lastHeartbeat.includes('等待') || lastHeartbeat.includes('下线')) {
-    return { text: lastHeartbeat || '未上线', cls: 'badge-disabled' }
+    return {
+      label: lastHeartbeat || '未上线',
+      diff: '无心跳',
+      cls: 'badge-disabled'
+    }
   }
   const t = new Date(lastHeartbeat.replace(/-/g, '/')).getTime()
-  if (isNaN(t)) return { text: lastHeartbeat, cls: 'badge-disabled' }
+  if (isNaN(t)) {
+    return {
+      label: '未知',
+      diff: lastHeartbeat,
+      cls: 'badge-disabled'
+    }
+  }
 
   const diffSec = Math.floor((Date.now() - t) / 1000)
   if (diffSec < 0 || diffSec <= 90) {
-    return { text: `🟢 在线 (${diffSec <= 10 ? '刚刚' : diffSec + 's前'})`, cls: 'badge-ready' }
+    const diffText = diffSec <= 10 ? '刚刚' : `${diffSec}秒前`
+    return {
+      label: '在线',
+      diff: diffText,
+      cls: 'badge-ready'
+    }
   } else if (diffSec <= 300) {
-    return { text: `🟡 延迟 (${Math.floor(diffSec / 60)}m前)`, cls: 'badge-restricted' }
+    const diffText = `${Math.floor(diffSec / 60)}分钟前`
+    return {
+      label: '延迟',
+      diff: diffText,
+      cls: 'badge-restricted'
+    }
   } else {
-    return { text: `🔴 离线 (${Math.floor(diffSec / 60)}m前)`, cls: 'badge-disabled' }
+    const diffText = `${Math.floor(diffSec / 60)}分钟前`
+    return {
+      label: '离线',
+      diff: diffText,
+      cls: 'badge-disabled'
+    }
   }
 }
 
@@ -413,9 +440,9 @@ const handleRevokeDelete = async (nodeId) => {
 }
 
 .badge-disabled {
-  background: rgba(239, 68, 68, 0.2);
+  background: rgba(239, 68, 68, 0.15);
   color: #ef4444;
-  border: 1px solid rgba(239, 68, 68, 0.4);
+  border: 1px solid rgba(239, 68, 68, 0.3);
 }
 
 .badge-public {
@@ -439,46 +466,61 @@ const handleRevokeDelete = async (nodeId) => {
   background: rgba(245, 158, 11, 0.3);
 }
 
-.pbk-copy-box {
-  display: flex;
+/* 纯净公钥文本排版：无方框线、无底色 */
+.pbk-box {
+  display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: 5px;
 }
 
-.pbk-text {
+.pbk-clean-text {
   font-family: monospace;
   font-size: 11px;
   color: #38bdf8;
-  background: rgba(15, 23, 42, 0.6);
-  padding: 2px 6px;
-  border-radius: 4px;
-  border: 1px solid rgba(56, 189, 248, 0.2);
+  background: transparent !important;
+  border: none !important;
+  padding: 0;
+  letter-spacing: 0.5px;
 }
 
-.btn-sm-icon {
+.btn-copy-icon {
   background: transparent;
   border: none;
   cursor: pointer;
   font-size: 13px;
-  padding: 2px 4px;
-  opacity: 0.8;
-  transition: opacity 0.2s;
+  padding: 0 2px;
+  opacity: 0.75;
+  transition: opacity 0.2s, transform 0.2s;
 }
-.btn-sm-icon:hover {
+.btn-copy-icon:hover {
   opacity: 1;
-  transform: scale(1.1);
+  transform: scale(1.2);
 }
 
-.heartbeat-cell {
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
+/* 极简紧凑心跳状态徽章：自适应宽度、带发光小圆点 */
+.heartbeat-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 10px;
+  border-radius: 12px;
+  font-size: 11px;
+  font-weight: 500;
+  width: fit-content;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: transform 0.2s;
+}
+.heartbeat-badge:hover {
+  transform: scale(1.05);
 }
 
-.last-time-tip {
-  font-size: 10px;
-  color: #64748b;
-  font-family: monospace;
+.status-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  box-shadow: 0 0 6px currentColor;
 }
 
 .permission-sub-box {
