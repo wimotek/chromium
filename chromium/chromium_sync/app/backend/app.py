@@ -1,3 +1,9 @@
+import warnings
+# 最前置静音 Paramiko / Cryptography 的 TripleDES 废弃警告
+from cryptography.utils import CryptographyDeprecationWarning
+warnings.filterwarnings("ignore", category=CryptographyDeprecationWarning)
+warnings.filterwarnings("ignore", module="paramiko")
+
 import os
 import uvicorn
 import asyncio
@@ -10,7 +16,8 @@ from config import DIST_DIR, SSL_CERT_FILE, SSL_KEY_FILE
 from core.database import init_db_and_jwt, get_setting
 from core.security import ensure_ssl_certificates
 from services.tunnel_manager import tunnel_mgr, tunnel_watchdog_loop
-from services.sync_service import scheduler, reschedule_sync_job
+# 核心修复：引入多策略调度器函数 reschedule_all_policies
+from services.sync_service import scheduler, reschedule_all_policies
 
 # 引入子模块路由
 from routers.auth import router as auth_router
@@ -27,10 +34,9 @@ init_db_and_jwt()
 # 2. 现代 Lifespan 上下文生命周期管理
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # 启动定时调度
-    minutes = int(get_setting("sync_interval_minutes", "15"))
+    # 启动 APScheduler 定时调度器，并自动加载所有已启用的策略任务
     scheduler.start()
-    reschedule_sync_job(minutes)
+    reschedule_all_policies()
     
     # 启动看门狗后台保活任务
     watchdog_task = asyncio.create_task(tunnel_watchdog_loop())

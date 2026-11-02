@@ -7,8 +7,6 @@ import asyncio
 from datetime import datetime
 from typing import Optional, List
 from apscheduler.schedulers.background import BackgroundScheduler
-
-# 修正导入路径：直接从 backend/config 导入
 from config import DB_PATH, KEYS_DIR, ChromiumSync, logger
 from core.database import get_setting
 from services.cdp_engine import (
@@ -32,7 +30,7 @@ def reschedule_all_policies():
     policies = [dict(r) for r in cur.fetchall()]
     conn.close()
 
-    # 移除原有的策略定时任务
+    # 清除旧的策略任务
     for job in scheduler.get_jobs():
         if job.id.startswith("policy_job_"):
             scheduler.remove_job(job.id)
@@ -99,7 +97,7 @@ async def run_chromium_sync_instance(source_node: dict, target_node: dict, inclu
     return {"status": "success", "message": str(res) if res else "OK"}
 
 async def execute_policy_task(policy_id: int):
-    """根据多策略规则执行同步（支持组对组、节点对组、节点对节点）"""
+    """根据多策略规则执行同步（支持组对组、节点对组、节点对多节点、智能合并）"""
     start_ts = time.time()
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
@@ -125,7 +123,7 @@ async def execute_policy_task(policy_id: int):
     target_nodes_desc = ""
     cookie_count_metric = 0
 
-    # 1. 解析目标节点列表 (Target Nodes)
+    # 1. 解析目标节点列表
     target_nodes = []
     if policy["target_type"] == "group":
         target_nodes = [n for n in nodes if n.get("group_name") == policy["target_group"]]
@@ -164,7 +162,6 @@ async def execute_policy_task(policy_id: int):
             cookie_count_metric = len(golden_pool)
             log_detail.append(f"✨ 智能融合生成黄金凭据池 (共 {cookie_count_metric} 条最新 Cookies)")
 
-            # 并发注入对齐
             async def _push_golden(node):
                 target_h = node.get('direct_host', '127.0.0.1') if node['is_local'] else "127.0.0.1"
                 try:
@@ -203,7 +200,6 @@ async def execute_policy_task(policy_id: int):
             if not source_nodes:
                 raise ValueError(f"源分组 [{src_group}] 内没有可用节点")
 
-            # 先汇聚源分组内的所有最新 Cookie
             fetch_tasks = [
                 fetch_cookies_native(n['local_bind_port'], n.get('direct_host', '127.0.0.1') if n['is_local'] else "127.0.0.1")
                 for n in source_nodes
@@ -215,7 +211,6 @@ async def execute_policy_task(policy_id: int):
             cookie_count_metric = len(cleaned_cookies)
             log_detail.append(f"• 从源分组 [{src_group}] 汇聚得到 {cookie_count_metric} 条最新凭证")
 
-            # 下发给目标分组的所有节点
             dest_nodes = [n for n in target_nodes if n not in source_nodes]
             for target in dest_nodes:
                 target_h = target.get('direct_host', '127.0.0.1') if target['is_local'] else "127.0.0.1"
@@ -236,7 +231,7 @@ async def execute_policy_task(policy_id: int):
                     log_detail.append(f"-> 目标节点 [{target['name']}] 分发失败: {ex}")
             status = "SUCCESS"
 
-        # C. 节点对组 / 节点对多节点分发 (Node-to-Group / Node-to-Nodes)
+        # C. 节点对组 / 节点对多节点分发
         else:
             source = next((n for n in nodes if n["id"] == policy["source_id"]), None)
             if not source:
@@ -276,7 +271,6 @@ async def execute_policy_task(policy_id: int):
 
     duration_str = f"{time.time() - start_ts:.2f}s"
 
-    # 记录结构化审计流水，并更新策略与节点的 last_run
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
     cur.execute("""
