@@ -2,12 +2,24 @@ import sqlite3
 import time
 from datetime import datetime
 from fastapi import APIRouter, HTTPException, Depends
-from config import DB_PATH
+from core.config import DB_PATH
 from core.security import verify_token
 from services.tunnel_manager import tunnel_mgr
 from services.cdp_engine import fetch_cookies_native, probe_node_cookies
 
 router = APIRouter(tags=["节点管理"])
+
+@router.get("/api/node-groups")
+def get_node_groups(user: dict = Depends(verify_token)):
+    """获取系统中所有现存的唯一分组名称列表"""
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute("SELECT DISTINCT group_name FROM nodes WHERE group_name IS NOT NULL AND group_name != ''")
+    groups = [r[0] for r in cur.fetchall()]
+    conn.close()
+    if not groups:
+        groups = ["默认分组"]
+    return groups
 
 @router.get("/api/nodes")
 def list_nodes(user: dict = Depends(verify_token)):
@@ -23,14 +35,15 @@ def list_nodes(user: dict = Depends(verify_token)):
 def create_node(data: dict, user: dict = Depends(verify_token)):
     is_local = 1 if data.get('is_local') else 0
     direct_h = (data.get('direct_host') or '127.0.0.1').strip()
+    grp_name = (data.get('group_name') or '默认分组').strip()
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
     cur.execute('''INSERT INTO nodes (
-        name, is_source, is_local, direct_host, ssh_host, ssh_port, ssh_user, ssh_key_filename,
+        name, group_name, is_source, is_local, direct_host, ssh_host, ssh_port, ssh_user, ssh_key_filename,
         ssh_password, remote_cdp_port, local_bind_port, cookie_count, auto_tunnel, status
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 1, 'stopped')''',
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 1, 'stopped')''',
     (
-        data['name'], 1 if data.get('is_source') else 0, is_local,
+        data['name'], grp_name, 1 if data.get('is_source') else 0, is_local,
         direct_h if is_local else '127.0.0.1',
         "" if is_local else data.get('ssh_host', ''),
         22 if is_local else data.get('ssh_port', 22),
@@ -48,14 +61,15 @@ def create_node(data: dict, user: dict = Depends(verify_token)):
 async def update_node(node_id: int, data: dict, user: dict = Depends(verify_token)):
     is_local = 1 if data.get('is_local') else 0
     direct_h = (data.get('direct_host') or '127.0.0.1').strip()
+    grp_name = (data.get('group_name') or '默认分组').strip()
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
     cur.execute('''UPDATE nodes SET 
-        name=?, is_local=?, direct_host=?, ssh_host=?, ssh_port=?, ssh_user=?, 
+        name=?, group_name=?, is_local=?, direct_host=?, ssh_host=?, ssh_port=?, ssh_user=?, 
         ssh_key_filename=?, ssh_password=?, remote_cdp_port=?, local_bind_port=?
         WHERE id=?''',
     (
-        data['name'], is_local,
+        data['name'], grp_name, is_local,
         direct_h if is_local else '127.0.0.1',
         "" if is_local else data.get('ssh_host', ''),
         22 if is_local else data.get('ssh_port', 22),
@@ -77,7 +91,7 @@ async def update_node(node_id: int, data: dict, user: dict = Depends(verify_toke
     conn.close()
     await tunnel_mgr.start_tunnel(updated_node)
 
-    return {"message": "节点配置已更新并重新载入连接"}
+    return {"message": "节点配置与分组已更新并重新载入连接"}
 
 @router.delete("/api/nodes/{node_id}")
 def delete_node(node_id: int, user: dict = Depends(verify_token)):

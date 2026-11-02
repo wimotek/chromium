@@ -1,15 +1,19 @@
 import sqlite3
 import secrets
-from config import DB_PATH, INIT_PASSWORD
+from datetime import datetime
+from core.config import DB_PATH, INIT_PASSWORD
 
 def init_db_and_jwt():
     from core.security import hash_password
 
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
+    
+    # 1. 节点表 (包含 group_name)
     cur.execute('''CREATE TABLE IF NOT EXISTS nodes (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         name TEXT NOT NULL,
+        group_name TEXT DEFAULT '默认分组',
         is_source INTEGER DEFAULT 0,
         is_local INTEGER DEFAULT 0,
         direct_host TEXT DEFAULT '127.0.0.1',
@@ -24,6 +28,23 @@ def init_db_and_jwt():
         auto_tunnel INTEGER DEFAULT 1,
         status TEXT DEFAULT 'stopped',
         last_sync TEXT
+    )''')
+
+    # 2. 多策略管理表 (支持组对组、节点对组、一对多)
+    cur.execute('''CREATE TABLE IF NOT EXISTS sync_policies (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL,
+        enabled INTEGER DEFAULT 1,
+        interval_minutes INTEGER DEFAULT 15,
+        sync_type TEXT DEFAULT 'smart_merge',
+        source_type TEXT DEFAULT 'node',
+        source_id INTEGER DEFAULT 0,
+        source_group TEXT DEFAULT '',
+        target_type TEXT DEFAULT 'all',
+        target_ids TEXT DEFAULT '[]',
+        target_group TEXT DEFAULT '',
+        last_run TEXT,
+        created_at TEXT
     )''')
 
     cur.execute('''CREATE TABLE IF NOT EXISTS ssh_keys (
@@ -46,7 +67,9 @@ def init_db_and_jwt():
         details TEXT
     )''')
 
+    # 热迁移补充列
     for col, col_type in [
+        ("group_name", "TEXT DEFAULT '默认分组'"),
         ("direct_host", "TEXT DEFAULT '127.0.0.1'"),
         ("auto_tunnel", "INTEGER DEFAULT 1"),
         ("cookie_count", "INTEGER DEFAULT 0")
@@ -67,6 +90,15 @@ def init_db_and_jwt():
         except Exception:
             pass
 
+    # 首次自动补齐默认策略
+    cur.execute("SELECT count(*) FROM sync_policies")
+    if cur.fetchone()[0] == 0:
+        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        cur.execute('''INSERT INTO sync_policies 
+            (name, enabled, interval_minutes, sync_type, source_type, source_id, source_group, target_type, target_ids, target_group, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+            ("默认全网智能双向合并", 1, 15, "smart_merge", "all", 0, "", "all", "[]", "", now_str))
+
     defaults = {
         'admin_username': 'admin',
         'admin_password': hash_password(INIT_PASSWORD),
@@ -84,10 +116,6 @@ def init_db_and_jwt():
         'email_notify_to': '',
         'serverchan_enabled': '0',
         'serverchan_key': '',
-        'sync_interval_minutes': '15',
-        'sync_mode': 'smart_merge',
-        'sync_source_id': '0',
-        'sync_target_ids': '[]',
         'sync_diff_enabled': '1',
         'sync_include_domains': '',
         'sync_exclude_domains': 'doubleclick.net,google-analytics.com'

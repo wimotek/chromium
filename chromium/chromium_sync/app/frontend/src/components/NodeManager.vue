@@ -1,5 +1,5 @@
 <script setup>
-import { ref, reactive, onMounted } from 'vue'
+import { ref, reactive, computed, onMounted } from 'vue'
 
 const props = defineProps({
   api: Function,
@@ -9,18 +9,21 @@ const emit = defineEmits(['update-nodes'])
 
 const nodes = ref([])
 const keys = ref([])
+const groups = ref([])
+const selectedFilterGroup = ref('') // 分组筛选
+
 const showNodeModal = ref(false)
 const isEditMode = ref(false)
 const editingNodeId = ref(null)
 
 const showCookieModal = ref(false)
 const cookieDetails = ref({ node_name: '', total: 0, valid_count: 0, session_count: 0, expired_count: 0, cookies: [] })
-const isLoadingCookies = ref(false)
 
 const nodeForm = reactive({
   name: '',
+  group_name: '默认分组',
   is_local: true,
-  direct_host: '127.0.0.1', // 默认 127.0.0.1，支持局域网 IP 或内部域名
+  direct_host: '127.0.0.1',
   ssh_host: '',
   ssh_port: 22,
   ssh_user: 'root',
@@ -31,20 +34,29 @@ const nodeForm = reactive({
 })
 
 const loadNodes = async () => {
-  const [nRes, kRes] = await Promise.all([
+  const [nRes, kRes, gRes] = await Promise.all([
     props.api('/api/nodes'),
-    props.api('/api/ssh-keys')
+    props.api('/api/ssh-keys'),
+    props.api('/api/node-groups')
   ])
   nodes.value = await nRes.json()
   keys.value = await kRes.json()
+  groups.value = await gRes.json()
   emit('update-nodes')
 }
+
+// 依据分组筛选过滤节点
+const filteredNodes = computed(() => {
+  if (!selectedFilterGroup.value) return nodes.value
+  return nodes.value.filter(n => n.group_name === selectedFilterGroup.value)
+})
 
 const openCreateModal = () => {
   isEditMode.value = false
   editingNodeId.value = null
   Object.assign(nodeForm, {
     name: '',
+    group_name: selectedFilterGroup.value || '默认分组',
     is_local: true,
     direct_host: '127.0.0.1',
     ssh_host: '',
@@ -63,6 +75,7 @@ const openEditModal = (node) => {
   editingNodeId.value = node.id
   Object.assign(nodeForm, {
     name: node.name,
+    group_name: node.group_name || '默认分组',
     is_local: Boolean(node.is_local),
     direct_host: node.direct_host || '127.0.0.1',
     ssh_host: node.ssh_host,
@@ -91,19 +104,13 @@ const submitNodeForm = async () => {
 }
 
 const viewCookieDetails = async (node) => {
-  isLoadingCookies.value = true
   showCookieModal.value = true
-  try {
-    const res = await props.api(`/api/nodes/${node.id}/cookie-details`)
-    if (res.ok) {
-      cookieDetails.value = await res.json()
-    } else {
-      const err = await res.json()
-      props.showToast(err.detail || '读取 Cookie 详情受阻', 'error')
-      showCookieModal.value = false
-    }
-  } finally {
-    isLoadingCookies.value = false
+  const res = await props.api(`/api/nodes/${node.id}/cookie-details`)
+  if (res.ok) {
+    cookieDetails.value = await res.json()
+  } else {
+    props.showToast('读取 Cookie 详情异常', 'error')
+    showCookieModal.value = false
   }
 }
 
@@ -124,7 +131,6 @@ const toggleTunnel = async (node) => {
   const res = await props.api(`/api/nodes/${node.id}/toggle-tunnel`, { method: 'POST' })
   const data = await res.json()
   if (res.ok) props.showToast(data.message, 'success')
-  else props.showToast(data.detail || '操作异常', 'error')
   loadNodes()
 }
 
@@ -155,7 +161,15 @@ onMounted(() => {
         <span class="icon-duo-users">👥</span>
         <h2>CDP 节点实例治理列表</h2>
       </div>
-      <div style="display:flex; gap:10px;">
+
+      <!-- 右侧：分组筛选器 + 操作 -->
+      <div style="display:flex; gap:10px; align-items:center;">
+        <!-- 分组过滤下拉 -->
+        <select v-model="selectedFilterGroup" class="sync-input font-mono" style="width:auto; height:32px; font-size:12px;">
+          <option value="">📂 全部分组 ({{ nodes.length }})</option>
+          <option v-for="g in groups" :key="g" :value="g">📁 {{ g }}</option>
+        </select>
+
         <button @click="openCreateModal" class="btn-primary-gradient">+ 新增接入节点</button>
         <button @click="loadNodes" class="btn-primary-gradient">🔄 刷新列表</button>
       </div>
@@ -165,17 +179,25 @@ onMounted(() => {
       <table class="cdp-fluid-table">
         <thead>
           <tr>
-            <th style="width: 20%;">节点名称 / 接入目标</th>
+            <th style="width: 14%;">所属分组</th>
+            <th style="width: 18%;">节点名称 / 接入目标</th>
             <th style="width: 10%;">连通状态</th>
-            <th style="width: 16%;">直连 / 映射调试端点</th>
-            <th style="width: 16%;">实时 Cookie (点击查看透视)</th>
-            <th style="width: 12%;">接入类型</th>
-            <th style="width: 10%;">同步角色</th>
-            <th style="width: 16%; text-align: right;">治理操作</th>
+            <th style="width: 14%;">直连 / 映射调试端点</th>
+            <th style="width: 14%;">实时 Cookie 存量</th>
+            <th style="width: 10%;">接入类型</th>
+            <th style="width: 8%;">同步角色</th>
+            <th style="width: 12%; text-align: right;">治理操作</th>
           </tr>
         </thead>
         <tbody>
-          <tr v-for="node in nodes" :key="node.id">
+          <tr v-for="node in filteredNodes" :key="node.id">
+            <!-- 分组标签 -->
+            <td>
+              <span class="tag-group-pill">
+                📁 {{ node.group_name || '默认分组' }}
+              </span>
+            </td>
+
             <td>
               <div class="cell-main-name">{{ node.name }}</div>
               <div class="cell-sub-desc">
@@ -189,21 +211,20 @@ onMounted(() => {
               <span v-else class="status-error" :title="node.status">✕ 异常</span>
             </td>
 
-            <!-- 端点地址展示 -->
             <td class="font-cyan-mono">
               {{ node.is_local ? (node.direct_host || '127.0.0.1') : '127.0.0.1' }}:{{ node.local_bind_port }}
             </td>
 
             <td>
-              <div class="cookie-badge" @click="viewCookieDetails(node)" style="cursor:pointer;" title="点击查看 Cookie 详细过期信息">
+              <div class="cookie-badge" @click="viewCookieDetails(node)" style="cursor:pointer;" title="查看详情">
                 <span>🍪 {{ node.cookie_count || 0 }} 条</span>
                 <span style="font-size:10px; color:#38bdf8; text-decoration:underline; margin-left:4px;">详情</span>
               </div>
             </td>
 
             <td>
-              <span v-if="node.is_local" class="tag-plan-blue">免SSH直连 ({{ node.direct_host || '127.0.0.1' }})</span>
-              <span v-else class="tag-plan-indigo">SSH 穿透 (远程)</span>
+              <span v-if="node.is_local" class="tag-plan-blue">免SSH直连</span>
+              <span v-else class="tag-plan-indigo">SSH穿透</span>
             </td>
 
             <td>
@@ -212,15 +233,15 @@ onMounted(() => {
                 @click="toggleSource(node.id)" 
                 class="btn-qrcode" 
                 style="background: #0284c7; cursor: pointer;"
-                title="已是默认源，点击可取消"
+                title="已是默认源，点击取消"
               >
-                ★ 默认源 (点击取消)
+                ★ 默认源
               </button>
               <button 
                 v-else 
                 @click="toggleSource(node.id)" 
                 class="btn-set-source"
-                title="点击设为全网默认源"
+                title="设为全网源"
               >
                 设为源
               </button>
@@ -229,7 +250,7 @@ onMounted(() => {
             <td style="text-align: right;">
               <div class="btn-group-row">
                 <button @click="toggleTunnel(node)" class="btn-micro btn-orange">
-                  🔑 {{ node.is_local ? '测试连通' : (node.status === 'connected' ? '断开' : '穿透') }}
+                  🔑 {{ node.is_local ? '测试' : (node.status === 'connected' ? '断开' : '穿透') }}
                 </button>
                 <button @click="probeNode(node)" class="btn-micro btn-purple">🔀 探针</button>
                 <button @click="openEditModal(node)" class="btn-micro" style="background:#2563eb;">✏️ 修改</button>
@@ -241,7 +262,7 @@ onMounted(() => {
       </table>
     </div>
 
-    <!-- 弹窗：新增 / 编辑节点 -->
+    <!-- 弹窗：新增 / 编辑节点 (包含分组定义) -->
     <div v-if="showNodeModal" class="modal-backdrop">
       <div class="modal-card">
         <div class="modal-title-bar">
@@ -266,16 +287,27 @@ onMounted(() => {
             </div>
           </div>
 
-          <div class="form-field-block">
-            <label class="form-label">节点名称</label>
-            <input v-model="nodeForm.name" required placeholder="如: 宿主机 Chrome 01 / 局域网节点" class="cdp-input cdp-w-normal">
+          <div class="row-flex-gap">
+            <div class="form-field-block" style="flex:1;">
+              <label class="form-label">节点名称</label>
+              <input v-model="nodeForm.name" required placeholder="如: 欧洲爬虫 01" class="cdp-input font-cyan-mono" style="width:100% !important;">
+            </div>
+
+            <!-- 自定义分组支持 -->
+            <div class="form-field-block" style="flex:1;">
+              <label class="form-label">所属集群分组 (可自由输入新组名)</label>
+              <input v-model="nodeForm.group_name" required list="group-suggestions" placeholder="如: 默认分组 / 爬虫A组" class="cdp-input font-cyan-mono" style="width:100% !important;">
+              <datalist id="group-suggestions">
+                <option v-for="g in groups" :key="g" :value="g"></option>
+              </datalist>
+            </div>
           </div>
 
-          <!-- 本地/局域网直连专用输入 (支持 IP 与域名，默认 127.0.0.1) -->
+          <!-- 本地直连输入 -->
           <div v-if="nodeForm.is_local" style="background:#09122a; padding:12px; border-radius:6px; border:1px solid #172554;">
             <div class="row-flex-gap">
               <div class="form-field-block" style="flex:1;">
-                <label class="form-label">直连 IP 地址 / 域名 (默认 127.0.0.1)</label>
+                <label class="form-label">直连 IP / 域名 (默认 127.0.0.1)</label>
                 <input v-model="nodeForm.direct_host" required placeholder="127.0.0.1 或 cdp.lan" class="cdp-input font-cyan-mono" style="width:100% !important;">
               </div>
               <div class="form-field-block">
@@ -283,9 +315,6 @@ onMounted(() => {
                 <input v-model="nodeForm.local_bind_port" type="number" required placeholder="9222" class="cdp-input cdp-w-port font-cyan-mono">
               </div>
             </div>
-            <p style="font-size:11px; color:#64748b; margin-top:6px;">
-              支持填写 <code>127.0.0.1</code>、局域网 IP（如 <code>192.168.1.100</code>）或 Docker 内部域名（如 <code>chrome</code>），无需 SSH 密钥。
-            </p>
           </div>
 
           <!-- 远程 SSH 节点输入 -->
@@ -339,7 +368,7 @@ onMounted(() => {
       </div>
     </div>
 
-    <!-- 弹窗 2：宽幅 Cookie 生命周期透视 (96vw) -->
+    <!-- 弹窗：Cookie 深度透视 (96vw) -->
     <div v-if="showCookieModal" class="modal-backdrop">
       <div class="modal-card cookie-modal-wide">
         <div class="modal-title-bar">
@@ -349,7 +378,7 @@ onMounted(() => {
               节点 [{{ cookieDetails.node_name }}] Cookie 生命周期与有效性分析
             </h3>
           </div>
-          <button @click="showCookieModal = false" style="background:none; border:none; color:#94a3b8; font-size:16px; cursor:pointer;">✕</button>
+          <button @click="showCookieModal = false" class="modal-close-btn">✕</button>
         </div>
 
         <div style="margin-top:12px;">
@@ -389,11 +418,6 @@ onMounted(() => {
                     <span v-if="!c.httpOnly && !c.secure" style="color: #64748b;">-</span>
                   </td>
                 </tr>
-                <tr v-if="cookieDetails.cookies.length === 0">
-                  <td colspan="6" style="text-align:center; padding: 28px; color: #64748b;">
-                    该节点暂未探测到任何 Cookie 资产数据
-                  </td>
-                </tr>
               </tbody>
             </table>
           </div>
@@ -408,3 +432,17 @@ onMounted(() => {
 
   </div>
 </template>
+
+<style scoped>
+.tag-group-pill {
+  background: #0f1f42;
+  border: 1px solid #1d4ed8;
+  color: #60a5fa;
+  border-radius: 4px;
+  padding: 2px 8px;
+  font-size: 11px;
+  display: inline-flex;
+  align-items: center;
+  white-space: nowrap;
+}
+</style>

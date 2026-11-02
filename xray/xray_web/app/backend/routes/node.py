@@ -53,7 +53,7 @@ def node_heartbeat():
         node_row = c.fetchone()
 
         if not node_row:
-            c.execute("SELECT id FROM nodes WHERE ip=? AND port=?", (node_ip, node_port))
+            c.execute("SELECT id, ip FROM nodes WHERE ip=? AND port=?", (node_ip, node_port))
             existing = c.fetchone()
             if existing:
                 c.execute("""
@@ -77,12 +77,17 @@ def node_heartbeat():
         current_key = node.get("node_key", "")
         pending_key = node.get("pending_key", "")
 
+        # 核心保护：如果管理员在面板把地址配置成了域名（含英文字符），心跳不覆盖，保留管理员配置的域名！
+        current_ip = node.get("ip", "")
+        is_custom_domain = bool(current_ip and any(ch.isalpha() for ch in current_ip))
+        save_ip = current_ip if is_custom_domain else (node_ip or current_ip)
+
         if pending_key == 'FORCE_RESYNC':
             c.execute("""
                 UPDATE nodes 
                 SET node_key=?, pending_key='', ip=?, pbk=?, sid=COALESCE(NULLIF(?, ''), sid), status=1, last_heartbeat=? 
                 WHERE node_id=?
-            """, (node_key, node_ip, pbk, sid, now_str, node_id))
+            """, (node_key, save_ip, pbk, sid, now_str, node_id))
             conn.commit()
             conn.close()
             return jsonify({"code": 200, "msg": "重置接纳完成，密钥已更新！"})
@@ -92,7 +97,7 @@ def node_heartbeat():
                 UPDATE nodes 
                 SET node_key=?, pending_key='', ip=?, pbk=?, sid=COALESCE(NULLIF(sid, ''), ?), status=1, last_heartbeat=? 
                 WHERE node_id=?
-            """, (pending_key, node_ip, pbk, sid, now_str, node_id))
+            """, (pending_key, save_ip, pbk, sid, now_str, node_id))
             conn.commit()
             conn.close()
             return jsonify({"code": 200, "msg": "心跳成功，已下发新密钥", "new_node_key": pending_key})
@@ -102,7 +107,7 @@ def node_heartbeat():
                 UPDATE nodes 
                 SET ip=?, pbk=?, sid=COALESCE(NULLIF(sid, ''), ?), last_heartbeat=? 
                 WHERE node_id=?
-            """, (node_ip, pbk, sid, now_str, node_id))
+            """, (save_ip, pbk, sid, now_str, node_id))
             conn.commit()
             conn.close()
             return jsonify({"code": 200, "msg": "心跳正常"})
@@ -114,7 +119,6 @@ def node_heartbeat():
         traceback.print_exc()
         return jsonify({"code": 500, "msg": f"心跳处理异常: {str(e)}"}), 500
 
-# 核心升级：根据节点是否禁用及允许范围，精准向节点下发可连接的客户端 UUID
 @node_bp.route('/api/node/sync', methods=['GET'])
 def node_sync_users():
     try:
@@ -134,7 +138,7 @@ def node_sync_users():
             conn.close()
             return jsonify({"code": 403, "msg": "鉴权失败"}), 403
 
-        # 核心逻辑 1：如果节点被管理员禁用 (status=0)，向节点下发空用户列表，切断所有连接！
+        # 若节点停止服务 (status=0)，下发空用户切断所有连接
         if int(node.get("status", 1)) == 0:
             conn.close()
             snis = get_node_snis(node)
@@ -148,10 +152,9 @@ def node_sync_users():
                     "server_names": snis,
                     "sid": node["sid"]
                 },
-                "users": []  # 下发空列表，彻底阻断
+                "users": []
             })
 
-        # 核心逻辑 2：节点为启用状态，根据用户组和特定用户权限进行筛选
         c.execute("SELECT username, email, uuid, user_group, role FROM users WHERE status=1 AND is_verified=1")
         all_users = [dict(u) for u in c.fetchall()]
         conn.close()

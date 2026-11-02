@@ -21,11 +21,9 @@ def admin_data():
     c.execute("SELECT code, traffic_gb, days, is_used, used_by, created_at, used_at, is_monthly FROM cards ORDER BY rowid DESC LIMIT 200")
     cards = [dict(r) for r in c.fetchall()]
 
-    # 返回节点的完整权限字段
     c.execute("SELECT * FROM nodes ORDER BY id ASC")
     active_nodes = [dict(n) for n in c.fetchall()]
 
-    # 返回用户的 user_group 属性
     c.execute("SELECT username, email, traffic_limit_mb, used_mb, expire_date, role, uuid, status, notify_type, is_monthly, reset_day, user_group FROM users")
     raw_users = c.fetchall()
     conn.close()
@@ -58,28 +56,7 @@ def admin_data():
 
     return jsonify({"code": 200, "cards": cards, "users": users, "nodes": active_nodes})
 
-# 核心接口：单独一键切换节点的启用 / 禁用状态
-@admin_bp.route('/api/admin/nodes/toggle_status', methods=['POST'])
-def admin_nodes_toggle_status():
-    data = request.json or {}
-    if not check_admin(data.get('admin_user'), data.get('admin_pwd')): return jsonify({"code": 403, "msg": "无权限"})
-
-    node_id = data.get('node_id')
-    new_status = int(data.get('status', 1))
-
-    conn = get_db()
-    c = conn.cursor()
-    c.execute("UPDATE nodes SET status=? WHERE node_id=?", (new_status, node_id))
-    conn.commit()
-    conn.close()
-
-    status_text = "🟢 启用" if new_status == 1 else "🛑 禁用"
-    tip = f"节点已{status_text}！"
-    tip += "该节点已对所有普通用户屏蔽，且服务端将在下次心跳时切断所有连接。" if new_status == 0 else "该节点已恢复正常服务与展示。"
-
-    return jsonify({"code": 200, "msg": tip})
-
-# 核心接口：保存节点配置与可见开放范围策略 (公开 / 指定用户组 / 指定特定用户)
+# 1. 独立配置接口：仅维护网络连接参数（支持 IP 或 域名）
 @admin_bp.route('/api/admin/nodes/save_config', methods=['POST'])
 def admin_save_node_config():
     data = request.json or {}
@@ -87,19 +64,13 @@ def admin_save_node_config():
 
     node_id = data.get('node_id')
     name = data.get('name', '').strip()
-    ip = data.get('ip', '').strip()
+    ip = data.get('ip', '').strip()  # 支持 IPv4/IPv6 或 域名 (如 hk.domain.com)
     port = int(data.get('port', 443))
     raw_dest = data.get('dest', 'www.microsoft.com:443').strip()
     raw_server_names = data.get('server_names', '').strip()
     raw_sni = data.get('sni', 'www.microsoft.com').strip()
     sid = data.get('sid', '').strip()
     node_key = data.get('node_key', '').strip()
-    status = int(data.get('status', 1))
-
-    # 权限字段
-    allow_all = int(data.get('allow_all', 1))
-    allowed_groups = data.get('allowed_groups', '').strip()
-    allowed_users = data.get('allowed_users', '').strip()
 
     dest = raw_dest if ":" in raw_dest else f"{raw_dest}:443"
 
@@ -115,15 +86,38 @@ def admin_save_node_config():
     c = conn.cursor()
     c.execute("""
         UPDATE nodes 
-        SET name=?, ip=?, port=?, dest=?, sni=?, server_names=?, sid=?, node_key=?, status=?,
-            allow_all=?, allowed_groups=?, allowed_users=?
+        SET name=?, ip=?, port=?, dest=?, sni=?, server_names=?, sid=?, node_key=?
         WHERE node_id=?
-    """, (name, ip, port, dest, primary_sni, server_names_str, sid, node_key, status,
-          allow_all, allowed_groups, allowed_users, node_id))
+    """, (name, ip, port, dest, primary_sni, server_names_str, sid, node_key, node_id))
     conn.commit()
     conn.close()
 
-    return jsonify({"code": 200, "msg": "节点配置与访问控制策略已更新！下次心跳时将自动向节点推送最新权限列表。"})
+    return jsonify({"code": 200, "msg": "节点网络配置已成功保存！地址与伪装参数已更新。"})
+
+# 2. 独立权限接口：单选控制启停状态与开放用户/用户组范围
+@admin_bp.route('/api/admin/nodes/save_permission', methods=['POST'])
+def admin_save_node_permission():
+    data = request.json or {}
+    if not check_admin(data.get('admin_user'), data.get('admin_pwd')): return jsonify({"code": 403, "msg": "无权限"})
+
+    node_id = data.get('node_id')
+    status = int(data.get('status', 1))  # 单选：1 启动 / 0 停止
+    allow_all = int(data.get('allow_all', 1))  # 单选：1 全部公开 / 0 定向授权
+    allowed_groups = data.get('allowed_groups', '').strip()
+    allowed_users = data.get('allowed_users', '').strip()
+
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("""
+        UPDATE nodes 
+        SET status=?, allow_all=?, allowed_groups=?, allowed_users=?
+        WHERE node_id=?
+    """, (status, allow_all, allowed_groups, allowed_users, node_id))
+    conn.commit()
+    conn.close()
+
+    action_text = "🟢 已启动并生效" if status == 1 else "🛑 已停止并阻断"
+    return jsonify({"code": 200, "msg": f"节点运行权限策略已保存 ({action_text})！"})
 
 @admin_bp.route('/api/admin/nodes/list', methods=['POST'])
 def admin_list_nodes():
@@ -185,7 +179,6 @@ def admin_reset_node_key():
         "new_key": new_key
     })
 
-# 核心接口：修改用户配额及分配其用户组 (user_group)
 @admin_bp.route('/api/admin/users/edit', methods=['POST'])
 def edit_user_quota():
     data = request.json or {}
