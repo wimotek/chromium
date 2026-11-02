@@ -1,5 +1,5 @@
 <script setup>
-import { ref, reactive, onMounted } from 'vue'
+import { ref, reactive, computed, onMounted } from 'vue'
 
 const props = defineProps({
   api: Function,
@@ -48,6 +48,21 @@ const loadAllData = async () => {
   nodes.value = await nRes.json()
   groups.value = await gRes.json()
   logs.value = await lRes.json()
+}
+
+// 格式化输出简洁优雅的路由文字
+const formatRouteText = (p) => {
+  if (p.sync_type === 'smart_merge') return '全网最新值智能双向合并'
+  if (p.sync_type === 'group_to_group') {
+    return `[${p.source_group || '默认分组'}] ➔ [${p.target_group || '默认分组'}]`
+  }
+  if (p.sync_type === 'node_to_group') {
+    const srcName = nodes.value.find(n => n.id === p.source_id)?.name || '未指定节点'
+    return `[${srcName}] ➔ [${p.target_group || '默认分组'}]`
+  }
+  const count = JSON.parse(p.target_ids || '[]').length
+  const srcName = nodes.value.find(n => n.id === p.source_id)?.name || '未指定'
+  return `[${srcName}] ➔ ${count} 个指定目标`
 }
 
 const openCreatePolicy = () => {
@@ -116,7 +131,6 @@ const submitPolicy = async () => {
   loadAllData()
 }
 
-// 启停切换
 const togglePolicy = async (p) => {
   const res = await props.api(`/api/sync/policies/${p.id}/toggle`, { method: 'POST' })
   const data = await res.json()
@@ -124,7 +138,6 @@ const togglePolicy = async (p) => {
   props.showToast(data.message, 'success')
 }
 
-// 删除策略 (仅剩1条时自动拦截保护)
 const deletePolicy = async (id) => {
   if (policies.value.length <= 1) {
     props.showToast('系统必须保留至少一条调度策略，无法删除', 'error')
@@ -192,7 +205,7 @@ onMounted(() => {
 <template>
   <div class="sync-manager-container">
     
-    <!-- 顶栏标题与新建按钮 -->
+    <!-- 顶栏标题与新增操作 -->
     <div class="sync-top-header">
       <div class="sync-title-box">
         <span class="sync-icon-globe">🌐</span>
@@ -203,83 +216,76 @@ onMounted(() => {
       </button>
     </div>
 
-    <!-- 策略管理列表 (自适应紧凑卡片网格，拒绝死板拉长) -->
-    <div class="policies-grid-wrapper">
+    <!-- 策略管理大列表 (核心升级：自适应一行 3 个卡片，无固定死宽度) -->
+    <div class="policies-grid-3col">
       <div v-for="p in policies" :key="p.id" class="policy-card-item">
         
-        <!-- 卡片头部：图标 + 标题 + 运行中状态标签 -->
-        <div class="policy-card-top">
-          <div style="display:flex; align-items:center; gap:10px;">
+        <!-- 卡片头部：图标 + 标题 + 运行中徽章 -->
+        <div class="policy-card-header">
+          <div class="header-left-flex">
             <span class="policy-badge-icon">
               {{ p.sync_type === 'smart_merge' ? '🌟' : p.sync_type === 'group_to_group' ? '🏢' : '🎯' }}
             </span>
-            <div>
-              <h4 class="policy-name-text">{{ p.name }}</h4>
+            <div class="title-meta-box">
+              <h4 class="policy-name-text" :title="p.name">{{ p.name }}</h4>
               <span class="policy-time-tag">⏱️ 每 {{ p.interval_minutes }} 分钟自动调度</span>
             </div>
           </div>
 
-          <!-- 右上角状态胶囊展示 -->
-          <div>
-            <span v-if="p.enabled" class="status-indicator-on">● 正在运行</span>
-            <span v-else class="status-indicator-off">○ 已停用</span>
-          </div>
+          <span v-if="p.enabled" class="status-indicator-on">● 运行中</span>
+          <span v-else class="status-indicator-off">○ 已停用</span>
         </div>
 
-        <!-- 卡片中部：元数据信息面板 (紧凑 HUD 质感) -->
-        <div class="policy-meta-body">
-          <div class="meta-row">
-            <span class="meta-label">拓扑路由:</span>
-            <span class="meta-val font-cyan-mono">
-              {{ 
-                p.sync_type === 'smart_merge' ? '全网最新值智能合并' : 
-                p.sync_type === 'group_to_group' ? `组对组分发 [${p.source_group}] ➔ [${p.target_group}]` : 
-                p.sync_type === 'node_to_group' ? `节点对组分发 [${nodes.find(n => n.id === p.source_id)?.name || '未指定'}] ➔ [${p.target_group}]` : 
-                '节点对多节点分发' 
-              }}
+        <!-- 卡片中段：轻量级 HUD 数据流 (彻底移除空旷死板大黑框) -->
+        <div class="policy-card-body">
+          <div class="info-row">
+            <span class="row-label">拓扑模式</span>
+            <span class="route-pill-badge" :title="formatRouteText(p)">
+              {{ formatRouteText(p) }}
             </span>
           </div>
 
-          <div class="meta-row">
-            <span class="meta-label">上次执行:</span>
-            <span class="meta-val">{{ p.last_run || '等待定时器触发...' }}</span>
+          <div class="info-row">
+            <span class="row-label">上次执行</span>
+            <span class="time-value-text">{{ p.last_run || '等待定时器触发...' }}</span>
           </div>
         </div>
 
-        <!-- 卡片底部：明确的动作栏 (包含启用/停用、立即执行、编辑、删除) -->
+        <!-- 卡片底部：明确的动作栏 (对称分布，操作明确) -->
         <div class="policy-card-actions">
-          <!-- 立即执行 -->
           <button @click="runPolicy(p.id)" :disabled="isExecuting" class="btn-micro btn-orange">
             ⚡ 立即执行
           </button>
 
-          <!-- 明确的启用/停用切换按钮 -->
-          <button 
-            @click="togglePolicy(p)" 
-            :class="['btn-micro', p.enabled ? 'btn-pause' : 'btn-resume']"
-          >
-            {{ p.enabled ? '⏸️ 停用' : '▶️ 启用' }}
-          </button>
+          <div class="actions-right-cluster">
+            <button 
+              @click="togglePolicy(p)" 
+              :class="['btn-micro', p.enabled ? 'btn-pause' : 'btn-resume']"
+              :title="p.enabled ? '点击暂停此策略的定时调度' : '点击恢复此策略的定时调度'"
+            >
+              {{ p.enabled ? '⏸️ 停用' : '▶️ 启用' }}
+            </button>
 
-          <!-- 编辑 -->
-          <button @click="openEditPolicy(p)" class="btn-micro btn-blue">
-            ✏️ 编辑
-          </button>
+            <button @click="openEditPolicy(p)" class="btn-micro btn-blue">
+              ✏️ 编辑
+            </button>
 
-          <!-- 删除 (当仅剩 1 条策略时自动禁用) -->
-          <button 
-            @click="deletePolicy(p.id)" 
-            :disabled="policies.length <= 1"
-            :class="['btn-micro', 'btn-trash', policies.length <= 1 ? 'btn-disabled' : '']"
-            :title="policies.length <= 1 ? '系统必须保留至少一条调度策略，不可删除' : '删除该策略'"
-          >
-            🗑️ 删除
-          </button>
+            <!-- 仅剩 1 条策略时置灰禁用删除 -->
+            <button 
+              @click="deletePolicy(p.id)" 
+              :disabled="policies.length <= 1"
+              :class="['btn-micro', 'btn-trash', policies.length <= 1 ? 'btn-disabled' : '']"
+              :title="policies.length <= 1 ? '系统必须保留至少一条调度策略，不可删除' : '删除该策略'"
+            >
+              🗑️ 删除
+            </button>
+          </div>
         </div>
+
       </div>
 
       <div v-if="policies.length === 0" class="empty-policy-box">
-        暂无调度策略，请点击上方「+ 新增调度策略」配置同步策略。
+        暂无调度策略，请点击右上角「+ 新增调度策略」配置同步策略。
       </div>
     </div>
 
@@ -339,7 +345,7 @@ onMounted(() => {
       </div>
     </div>
 
-    <!-- 弹窗：新建 / 修改策略 (支持组对组与节点对组) -->
+    <!-- 弹窗：新建 / 修改策略 -->
     <div v-if="showPolicyModal" class="modal-backdrop">
       <div class="modal-card modal-policy-size">
         <div class="modal-title-bar">
@@ -488,7 +494,7 @@ onMounted(() => {
 </template>
 
 <style scoped>
-/* ==================== SyncManager 独立样式体系 ==================== */
+/* ==================== SyncManager 极客 HUD 专有样式体系 ==================== */
 
 .sync-manager-container {
   width: 100%;
@@ -506,7 +512,7 @@ onMounted(() => {
   align-items: center;
   padding-bottom: 16px;
   border-bottom: 1px solid #172554;
-  margin-bottom: 16px;
+  margin-bottom: 18px;
 }
 
 .sync-title-box {
@@ -527,24 +533,36 @@ onMounted(() => {
   margin: 0;
 }
 
-/* ==================== 核心优化：自适应紧凑卡片网格 (杜绝超宽拉伸) ==================== */
-.policies-grid-wrapper {
+/* ==================== 核心重构：一行 3 个自适应策略卡片 ==================== */
+.policies-grid-3col {
   display: grid;
-  /* 卡片宽度自适应收敛在 420px ~ 560px 之间，单张或多张都美观紧凑 */
-  grid-template-columns: repeat(auto-fill, minmax(420px, 560px));
+  /* 严格自适应 3 列布局，宽度不固定死，随容器宽度自由伸缩 */
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 16px;
   margin-bottom: 24px;
   width: 100%;
+  box-sizing: border-box;
 }
-@media (max-width: 680px) {
-  .policies-grid-wrapper { grid-template-columns: 1fr; }
+
+/* 平板降级为 2 列 */
+@media (max-width: 1200px) {
+  .policies-grid-3col {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+/* 手机降级为 1 列 */
+@media (max-width: 768px) {
+  .policies-grid-3col {
+    grid-template-columns: minmax(0, 1fr);
+  }
 }
 
 .policy-card-item {
   background: #09122a;
   border: 1px solid #172554;
   border-radius: 10px;
-  padding: 16px 18px;
+  padding: 14px 16px;
   display: flex;
   flex-direction: column;
   justify-content: space-between;
@@ -552,105 +570,196 @@ onMounted(() => {
   transition: all 0.2s ease;
   box-sizing: border-box;
 }
+
 .policy-card-item:hover {
   border-color: #1e3a8a;
   box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
 }
 
-.policy-card-top {
+/* 卡片头部 */
+.policy-card-header {
   display: flex;
   justify-content: space-between;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.header-left-flex {
+  display: flex;
   align-items: center;
+  gap: 10px;
+  min-width: 0;
+  flex: 1;
 }
 
 .policy-badge-icon {
-  width: 36px;
-  height: 36px;
+  width: 34px;
+  height: 34px;
   border-radius: 8px;
   background: #0f1f42;
   border: 1px solid #1d4ed8;
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 16px;
+  font-size: 15px;
   flex-shrink: 0;
 }
 
+.title-meta-box {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  flex: 1;
+}
+
 .policy-name-text {
-  font-size: 14px;
+  font-size: 13px;
   font-weight: bold;
   color: #ffffff;
   margin: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .policy-time-tag {
   font-size: 11px;
-  color: #94a3b8;
+  color: #64748b;
   margin-top: 2px;
-  display: inline-block;
+  white-space: nowrap;
 }
 
-/* 顶部状态胶囊 */
+/* 状态徽章 */
 .status-indicator-on {
   background: rgba(16, 185, 129, 0.12);
   border: 1px solid rgba(16, 185, 129, 0.35);
   color: #34d399;
-  font-size: 11px;
-  padding: 2px 8px;
+  font-size: 10px;
+  padding: 2px 7px;
   border-radius: 4px;
   font-weight: 500;
+  white-space: nowrap;
+  flex-shrink: 0;
 }
+
 .status-indicator-off {
   background: rgba(100, 116, 139, 0.12);
   border: 1px solid rgba(100, 116, 139, 0.3);
   color: #94a3b8;
-  font-size: 11px;
-  padding: 2px 8px;
+  font-size: 10px;
+  padding: 2px 7px;
   border-radius: 4px;
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 
-/* 元数据栏 (紧凑适中) */
-.policy-meta-body {
-  background: #060b17;
-  border: 1px solid #131e3d;
-  border-radius: 6px;
-  padding: 10px 14px;
-  font-size: 12px;
+/* ==================== 卡片中段：轻量级 HUD 数据流 (彻底移除空旷死板大黑框) ==================== */
+.policy-card-body {
   display: flex;
   flex-direction: column;
+  gap: 8px;
+  padding: 10px 0;
+  border-top: 1px solid #131e3d;
+  border-bottom: 1px solid #131e3d;
+}
+
+.info-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 11px;
+}
+
+.row-label {
+  color: #64748b;
+  flex-shrink: 0;
+}
+
+/* 拓扑标签：半透明微光，不再空洞 */
+.route-pill-badge {
+  background: rgba(2, 132, 199, 0.12);
+  border: 1px solid rgba(2, 132, 199, 0.35);
+  color: #38bdf8;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-family: monospace;
+  font-size: 11px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 78%;
+  text-align: right;
+}
+
+.time-value-text {
+  color: #94a3b8;
+  font-family: monospace;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* 卡片动作栏 */
+.policy-card-actions {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
   gap: 6px;
 }
 
-.meta-row { display: flex; gap: 8px; align-items: center; }
-.meta-label { color: #64748b; font-size: 11px; width: 62px; flex-shrink: 0; }
-.meta-val { color: #cbd5e1; font-size: 11px; word-break: break-all; }
-
-/* 动作按钮栏 */
-.policy-card-actions {
+.actions-right-cluster {
   display: flex;
-  justify-content: flex-end;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
 }
 
-/* 停用/启用按扭 */
-.btn-pause {
-  background-color: #334155 !important;
-  color: #e2e8f0 !important;
+/* 动作按钮 */
+.btn-micro {
+  border: none;
+  border-radius: 4px;
+  padding: 3px 8px;
+  font-size: 11px;
+  font-weight: 500;
+  color: #ffffff;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: all 0.15s ease;
+  height: 26px;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
 }
-.btn-pause:hover { background-color: #475569 !important; }
 
-.btn-resume {
-  background-color: #065f46 !important;
-  color: #34d399 !important;
-}
-.btn-resume:hover { background-color: #047857 !important; }
+.btn-orange { background-color: #d97706; }
+.btn-orange:hover { background-color: #b45309; }
 
 .btn-blue { background-color: #2563eb; }
+.btn-blue:hover { background-color: #1d4ed8; }
 
-/* 禁用状态样式 */
+.btn-trash { background-color: #991b1b; }
+.btn-trash:hover { background-color: #7f1d1d; }
+
+.btn-pause {
+  background-color: #1e293b;
+  border: 1px solid #334155;
+  color: #e2e8f0;
+}
+.btn-pause:hover {
+  background-color: #334155;
+}
+
+.btn-resume {
+  background-color: #064e3b;
+  border: 1px solid #059669;
+  color: #34d399;
+}
+.btn-resume:hover {
+  background-color: #047857;
+}
+
 .btn-disabled {
-  opacity: 0.35 !important;
+  opacity: 0.3 !important;
   cursor: not-allowed !important;
   filter: grayscale(1);
 }
@@ -659,7 +768,7 @@ onMounted(() => {
   grid-column: 1 / -1;
   text-align: center;
   color: #64748b;
-  padding: 30px;
+  padding: 36px;
   background: #09122a;
   border: 1px dashed #172554;
   border-radius: 8px;
@@ -803,7 +912,7 @@ onMounted(() => {
   color: #ffffff;
   border: none;
   border-radius: 6px;
-  padding: 7px 20px;
+  padding: 7px 18px;
   font-size: 12px;
   font-weight: 600;
   cursor: pointer;
@@ -871,20 +980,6 @@ onMounted(() => {
   text-decoration: underline;
   padding: 0;
 }
-
-.btn-micro {
-  border: none;
-  border-radius: 4px;
-  padding: 4px 10px;
-  font-size: 11px;
-  font-weight: bold;
-  color: #ffffff;
-  cursor: pointer;
-  white-space: nowrap;
-  transition: all 0.2s;
-}
-.btn-orange { background-color: #d97706; }
-.btn-trash  { background-color: #991b1b; }
 
 /* 审计列表表格 */
 .audit-section-wrapper {
