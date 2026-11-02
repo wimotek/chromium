@@ -74,11 +74,17 @@ def update_policy(policy_id: int, data: dict, user: dict = Depends(verify_token)
     reschedule_all_policies()
     return {"message": "策略配置修改已生效"}
 
-# 删除策略
+# 删除策略 (核心防护：仅剩 1 条时强制禁止删除)
 @router.delete("/api/sync/policies/{policy_id}")
 def delete_policy(policy_id: int, user: dict = Depends(verify_token)):
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
+    cur.execute("SELECT count(*) FROM sync_policies")
+    count = cur.fetchone()[0]
+    if count <= 1:
+        conn.close()
+        raise HTTPException(status_code=400, detail="系统必须保留至少一条调度策略，无法全部删除")
+
     cur.execute("DELETE FROM sync_policies WHERE id=?", (policy_id,))
     conn.commit()
     conn.close()

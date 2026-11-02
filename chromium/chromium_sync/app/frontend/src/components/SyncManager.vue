@@ -116,6 +116,7 @@ const submitPolicy = async () => {
   loadAllData()
 }
 
+// 启停切换
 const togglePolicy = async (p) => {
   const res = await props.api(`/api/sync/policies/${p.id}/toggle`, { method: 'POST' })
   const data = await res.json()
@@ -123,11 +124,21 @@ const togglePolicy = async (p) => {
   props.showToast(data.message, 'success')
 }
 
+// 删除策略 (仅剩1条时自动拦截保护)
 const deletePolicy = async (id) => {
-  if (confirm('确认销毁该条调度策略？')) {
-    await props.api(`/api/sync/policies/${id}`, { method: 'DELETE' })
-    props.showToast('策略已删除', 'success')
-    loadAllData()
+  if (policies.value.length <= 1) {
+    props.showToast('系统必须保留至少一条调度策略，无法删除', 'error')
+    return
+  }
+  if (confirm('确认销毁该条调度策略？销毁后定时任务将同步下线。')) {
+    const res = await props.api(`/api/sync/policies/${id}`, { method: 'DELETE' })
+    const data = await res.json()
+    if (res.ok) {
+      props.showToast(data.message, 'success')
+      loadAllData()
+    } else {
+      props.showToast(data.detail || '删除受阻', 'error')
+    }
   }
 }
 
@@ -152,8 +163,6 @@ const clearAllLogs = async () => {
     if (res.ok) {
       props.showToast(data.message, 'success')
       logs.value = []
-    } else {
-      props.showToast(data.detail || '清空失败', 'error')
     }
   }
 }
@@ -183,7 +192,7 @@ onMounted(() => {
 <template>
   <div class="sync-manager-container">
     
-    <!-- 顶栏 -->
+    <!-- 顶栏标题与新建按钮 -->
     <div class="sync-top-header">
       <div class="sync-title-box">
         <span class="sync-icon-globe">🌐</span>
@@ -194,9 +203,11 @@ onMounted(() => {
       </button>
     </div>
 
-    <!-- 策略管理列表 (Cards) -->
+    <!-- 策略管理列表 (自适应紧凑卡片网格，拒绝死板拉长) -->
     <div class="policies-grid-wrapper">
       <div v-for="p in policies" :key="p.id" class="policy-card-item">
+        
+        <!-- 卡片头部：图标 + 标题 + 运行中状态标签 -->
         <div class="policy-card-top">
           <div style="display:flex; align-items:center; gap:10px;">
             <span class="policy-badge-icon">
@@ -208,16 +219,17 @@ onMounted(() => {
             </div>
           </div>
 
-          <div style="display:flex; align-items:center; gap:8px;">
-            <button @click="togglePolicy(p)" :class="p.enabled ? 'btn-status-on' : 'btn-status-off'">
-              {{ p.enabled ? '● 正在运行' : '○ 已停用' }}
-            </button>
+          <!-- 右上角状态胶囊展示 -->
+          <div>
+            <span v-if="p.enabled" class="status-indicator-on">● 正在运行</span>
+            <span v-else class="status-indicator-off">○ 已停用</span>
           </div>
         </div>
 
+        <!-- 卡片中部：元数据信息面板 (紧凑 HUD 质感) -->
         <div class="policy-meta-body">
           <div class="meta-row">
-            <span class="meta-label">同步模式:</span>
+            <span class="meta-label">拓扑路由:</span>
             <span class="meta-val font-cyan-mono">
               {{ 
                 p.sync_type === 'smart_merge' ? '全网最新值智能合并' : 
@@ -234,26 +246,44 @@ onMounted(() => {
           </div>
         </div>
 
-        <!-- 策略操作按钮行 -->
+        <!-- 卡片底部：明确的动作栏 (包含启用/停用、立即执行、编辑、删除) -->
         <div class="policy-card-actions">
+          <!-- 立即执行 -->
           <button @click="runPolicy(p.id)" :disabled="isExecuting" class="btn-micro btn-orange">
             ⚡ 立即执行
           </button>
-          <button @click="openEditPolicy(p)" class="btn-micro" style="background:#2563eb;">
+
+          <!-- 明确的启用/停用切换按钮 -->
+          <button 
+            @click="togglePolicy(p)" 
+            :class="['btn-micro', p.enabled ? 'btn-pause' : 'btn-resume']"
+          >
+            {{ p.enabled ? '⏸️ 停用' : '▶️ 启用' }}
+          </button>
+
+          <!-- 编辑 -->
+          <button @click="openEditPolicy(p)" class="btn-micro btn-blue">
             ✏️ 编辑
           </button>
-          <button @click="deletePolicy(p.id)" class="btn-micro btn-trash">
+
+          <!-- 删除 (当仅剩 1 条策略时自动禁用) -->
+          <button 
+            @click="deletePolicy(p.id)" 
+            :disabled="policies.length <= 1"
+            :class="['btn-micro', 'btn-trash', policies.length <= 1 ? 'btn-disabled' : '']"
+            :title="policies.length <= 1 ? '系统必须保留至少一条调度策略，不可删除' : '删除该策略'"
+          >
             🗑️ 删除
           </button>
         </div>
       </div>
 
       <div v-if="policies.length === 0" class="empty-policy-box">
-        暂无调度策略，请点击上方「+ 新增调度策略」配置组对组或节点间同步。
+        暂无调度策略，请点击上方「+ 新增调度策略」配置同步策略。
       </div>
     </div>
 
-    <!-- ==================== 审计列表：高规格结构化数据表格 (严格 20 条与清空) ==================== -->
+    <!-- ==================== 审计列表：高规格结构化数据表格 (20 条轮转) ==================== -->
     <div class="audit-section-wrapper">
       <div class="audit-header-bar">
         <div class="audit-title-box">
@@ -458,7 +488,7 @@ onMounted(() => {
 </template>
 
 <style scoped>
-/* ==================== SyncManager 完整独立自闭环样式体系 ==================== */
+/* ==================== SyncManager 独立样式体系 ==================== */
 
 .sync-manager-container {
   width: 100%;
@@ -497,15 +527,16 @@ onMounted(() => {
   margin: 0;
 }
 
-/* 多策略管理卡片网格 */
+/* ==================== 核心优化：自适应紧凑卡片网格 (杜绝超宽拉伸) ==================== */
 .policies-grid-wrapper {
   display: grid;
-  grid-template-columns: repeat(2, 1fr);
+  /* 卡片宽度自适应收敛在 420px ~ 560px 之间，单张或多张都美观紧凑 */
+  grid-template-columns: repeat(auto-fill, minmax(420px, 560px));
   gap: 16px;
   margin-bottom: 24px;
   width: 100%;
 }
-@media (max-width: 1050px) {
+@media (max-width: 680px) {
   .policies-grid-wrapper { grid-template-columns: 1fr; }
 }
 
@@ -513,22 +544,23 @@ onMounted(() => {
   background: #09122a;
   border: 1px solid #172554;
   border-radius: 10px;
-  padding: 16px;
+  padding: 16px 18px;
   display: flex;
   flex-direction: column;
   justify-content: space-between;
   gap: 12px;
   transition: all 0.2s ease;
+  box-sizing: border-box;
 }
 .policy-card-item:hover {
   border-color: #1e3a8a;
-  transform: translateY(-1px);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
 }
 
 .policy-card-top {
   display: flex;
   justify-content: space-between;
-  align-items: flex-start;
+  align-items: center;
 }
 
 .policy-badge-icon {
@@ -558,44 +590,69 @@ onMounted(() => {
   display: inline-block;
 }
 
-.btn-status-on {
-  background: rgba(16, 185, 129, 0.15);
-  border: 1px solid #059669;
+/* 顶部状态胶囊 */
+.status-indicator-on {
+  background: rgba(16, 185, 129, 0.12);
+  border: 1px solid rgba(16, 185, 129, 0.35);
   color: #34d399;
   font-size: 11px;
   padding: 2px 8px;
   border-radius: 4px;
-  cursor: pointer;
+  font-weight: 500;
 }
-.btn-status-off {
-  background: rgba(100, 116, 139, 0.15);
-  border: 1px solid #475569;
+.status-indicator-off {
+  background: rgba(100, 116, 139, 0.12);
+  border: 1px solid rgba(100, 116, 139, 0.3);
   color: #94a3b8;
   font-size: 11px;
   padding: 2px 8px;
   border-radius: 4px;
-  cursor: pointer;
 }
 
+/* 元数据栏 (紧凑适中) */
 .policy-meta-body {
   background: #060b17;
   border: 1px solid #131e3d;
   border-radius: 6px;
-  padding: 10px 12px;
+  padding: 10px 14px;
   font-size: 12px;
   display: flex;
   flex-direction: column;
   gap: 6px;
 }
 
-.meta-row { display: flex; gap: 8px; }
-.meta-label { color: #64748b; font-size: 11px; width: 65px; flex-shrink: 0; }
+.meta-row { display: flex; gap: 8px; align-items: center; }
+.meta-label { color: #64748b; font-size: 11px; width: 62px; flex-shrink: 0; }
 .meta-val { color: #cbd5e1; font-size: 11px; word-break: break-all; }
 
+/* 动作按钮栏 */
 .policy-card-actions {
   display: flex;
   justify-content: flex-end;
+  align-items: center;
   gap: 8px;
+}
+
+/* 停用/启用按扭 */
+.btn-pause {
+  background-color: #334155 !important;
+  color: #e2e8f0 !important;
+}
+.btn-pause:hover { background-color: #475569 !important; }
+
+.btn-resume {
+  background-color: #065f46 !important;
+  color: #34d399 !important;
+}
+.btn-resume:hover { background-color: #047857 !important; }
+
+.btn-blue { background-color: #2563eb; }
+
+/* 禁用状态样式 */
+.btn-disabled {
+  opacity: 0.35 !important;
+  cursor: not-allowed !important;
+  filter: grayscale(1);
 }
 
 .empty-policy-box {
@@ -818,12 +875,13 @@ onMounted(() => {
 .btn-micro {
   border: none;
   border-radius: 4px;
-  padding: 4px 8px;
+  padding: 4px 10px;
   font-size: 11px;
   font-weight: bold;
   color: #ffffff;
   cursor: pointer;
   white-space: nowrap;
+  transition: all 0.2s;
 }
 .btn-orange { background-color: #d97706; }
 .btn-trash  { background-color: #991b1b; }
@@ -970,7 +1028,6 @@ onMounted(() => {
   padding: 36px;
 }
 
-/* 模态弹窗 */
 .modal-backdrop {
   position: fixed;
   inset: 0;
