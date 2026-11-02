@@ -1,63 +1,59 @@
-明白了，已记下。以后生成 README 等 Markdown 文档时，直接输出原生 Markdown 文本，绝不再在外层包裹多余的 Markdown 代码框。
+# ⚡ Chromium CDP Sync Hub
 
-以下是完整的 `README.md` 原码内容：
-
-# Chromium CDP Cluster Cookie Sync Manager
-
-> 专注于 Chromium / Chrome CDP（Chrome DevTools Protocol）节点 Cookie 集中调度、SSH 穿透隧道管理与自动化同步的 Web 控制台。
-
-[![Docker](https://img.shields.io/badge/Docker-Ready-blue.svg?logo=docker)](https://www.docker.com/)
-[![Vue](https://img.shields.io/badge/Frontend-Vue%203%20(Vite)-4FC08D.svg?logo=vue.js)](https://vuejs.org/)
-[![FastAPI](https://img.shields.io/badge/Backend-FastAPI-009688.svg?logo=fastapi)](https://fastapi.tiangolo.com/)
-[![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+> **分布式 Chromium 节点集群治理与多策略 Cookie 调度控制台**  
+> 基准代码仓：`https://github.com/wimotek/chromium/tree/main/chromium/chromium_sync`
 
 ---
 
-## 📌 项目特性
+## 📖 项目简介
 
-- **现代暗黑风 SPA 界面**：基于 Vue 3 (`<script setup>`) 与 Tailwind CSS 构建，输入表单遵循 70% 响应式自适应约束。
-- **SSH 动态穿透与隧道池**：自动建立本地端口到远程 CDP 实例（默认 9222）的本地端口转发，支持后台一键开关隧道与状态监控。
-- **证书集中管理与多节点复用**：
-  - 支持集中上传私钥证书（`.pem` / `id_rsa` 等），权限自动规范为 `0o600`；
-  - 节点创建时自由选取证书，支持多个节点复用同一个私钥，亦兼容密码认证。
-- **Cookie 智能同步引擎**：
-  - **原生集成**：自动载入目录下的 `chromium_sync_module` 模块；
-  - **无缝容灾**：若模块未引入，自动回退到纯原生 WebSocket CDP 通讯机制（`Storage.getCookies` & `Network.setCookies`）。
-  - **调度机制**：支持手动一键同步及 15 分钟间隔的自动定时同步；自由指定源节点（Source Node）。
-- **人机安全防护与防爆破**：
-  - 动态服务端生成几何噪点算术 SVG 验证码，防爬虫机器人探测；
-  - 密码连续错误 IP 级 15 分钟临时封禁；
-  - JWT 秘钥自增存储于 SQLite，完全免除手工配置。
-- **全链路 SSL (HTTPS)**：
-  - 默认以 HTTPS 协议启动（监听 `8443` 端口）；
-  - **智能回退机制**：自动检测 `/certs` 目录下通用的 `fullchain.pem` 与 `privkey.pem`。若未挂载有效证书，系统自动签发 10 年期自签名证书，实现开箱即用。
-- **零前端依赖打包**：采用 Docker 多阶段构建（Multi-stage Build），在容器内自动编译前端，宿主机无需安装 Node.js 或 npm。
+**Chromium CDP Sync Hub** 是一套专为多账号矩阵、分布式爬虫及自动化测试集群打造的生产级 Chrome DevTools Protocol (CDP) 节点治理与 Cookie 智能同步调度系统。
+
+系统通过深曜石黑科技风格（Dark Obsidian HUD）的 Web 控制台，帮助运维与开发者将分散在各地的本地或远程 Chromium 实例进行统一分组监管、凭证汇聚融合与双向增量下发，并提供基于 API-Key 的安全 WSS 远程调试反向代理网关。
+
+### 🌟 核心特性
+
+- **👥 节点集群分组与双向穿透**：
+  - 支持 **免 SSH 本地/局域网直连**（支持配置局域网 IP 如 `192.168.x.x` 或内部域名，默认 `127.0.0.1`）；
+  - 支持 **远程 SSH 密钥/密码隧道穿透**，内置 30 秒心跳看门狗后台自动自愈保活；
+  - 支持 **自定义集群分组（Group）**，提供顶部按组快速筛选；
+  - 支持 **双击切换源节点**，随时取消默认源，回归完全对等节点。
+- **🌐 多策略同步调度中枢**：
+  - **🌟 智能全局最新值合并 (Smart Merge)**：各节点产生的最新有效登录态自动取并集，同名 Cookie 按有效期顺延时间与特征消歧融合，**无需指定固定源节点**；
+  - **🏢 组对组分发 (Group-to-Group)**：自动聚合源分组全部节点的最新 Cookie，并发分发给目标分组所有节点；
+  - **🎯 节点对组分发 (Node-to-Group)**：以单个 Master 节点为基准一键辐射分发至指定分组；
+  - **💻 节点对多节点 (Node-to-Nodes)**：经典一对多定向队列下发；
+  - 独立定时调度：每条策略均可独立设置定时执行周期（分钟），并支持手动即时单项触发。
+- **🛡️ 全局 Cookie 过滤与差量同步 (Diff / Delta Sync)**：
+  - **差量指纹检测**：仅对比发生实质变更（值或到期时间）的 Cookie 进行增量下发，跳过无变化项，极大降低浏览器存储刷盘损耗；
+  - **域名黑/白名单**：支持配置业务域名白名单（仅同步指定站点）与广告追踪黑名单（默认过滤 `doubleclick.net, google-analytics.com`）。
+- **🔒 两种远程 CDP 连接方式（安全网关 vs 裸端口直连）**：
+  - **方式一（安全 WSS 反向网关，推荐）**：全流量收敛于唯一的 HTTPS `8443` 端口，强制校验 `X-API-Key`，彻底消除公网扫描与 RCE 裸奔风险；
+  - **方式二（公网裸端口映射）**：兼容原有直接连接 `19200-19250` 端口的自动化脚本，控制台提供全局动态开关。
+- **🍪 96vw 超宽生命周期透视抽屉**：
+  - 弹出全屏流式 96vw 宽幅抽屉，详细透视每条 Cookie 的有效持久状态、会话凭证状态与到期倒计时，**单行平铺绝不折行**。
+- **📜 定容结构化审计流水**：
+  - 清晰呈现：时间戳、源端发起、分发目标范围、Cookie 数量、精确耗时（如 `0.85s`）、状态与详细堆栈轨迹；
+  - **自动定容滚动淘汰**：入库自动轮转，**严格仅保留最近 20 条记录**，数据库永久轻量，支持一键清空。
+- **🔔 独立双通道告警中心**：
+  - **SMTP 邮件底座**（1:1 状态指示灯、密码留空保持、发件人名称、SSL 加密与即时发信测试）；
+  - **Server酱微信服务号推送**（一键微信弹窗通知集群离线与同步故障）。
+
 
 ---
 
-## 🚀 快速启动
+## 🚀 快速部署与启动
 
-### 1. 前置准备
-确保宿主机已安装 Docker 及 Docker Compose。
+### 1. 克隆仓库与准备环境
 
-### 2. 配置与启动
-进入 `chromium_sync` 目录：
+确保服务器已安装 Docker 与 Docker Compose：
 
 ```bash
-# 启动并自动进行多阶段编译构建
-docker compose up -d --build
+git clone https://github.com/wimotek/chromium.git
+cd chromium/chromium/chromium_sync
 ```
 
-### 3. 访问系统
-* 浏览器打开：`https://<你的服务器IP>:8443`
-* **默认管理员密码**：`Admin@123456`
-* **首次访问说明**：若未挂载外部正式证书，浏览器将使用系统生成的自签名证书，会提示“您的连接不是私密连接”，点击 **高级 -> 继续前往** 即可。
-
----
-
-## ⚙️ 配置说明
-
-### 1. 环境变量与端口 (`docker-compose.yml`)
+### 2. 检查 `docker-compose.yml`
 
 ```yaml
 services:
@@ -66,78 +62,196 @@ services:
     container_name: cdp_sync_manager
     restart: unless-stopped
     ports:
-      - "8443:8443"              # Web 控制台 HTTPS 端口
-      - "19200-19250:19200-19250" # 映射给本地 CDP 隧道的监听端口段
+      - "8443:8443"
     volumes:
-      - ./data:/data             # 数据库及 SSH 私钥持久化
-      - ./certs:/certs           # SSL 证书目录
-    environment:
-      - ADMIN_INIT_PASS=Admin@123456  # 初始管理员密码
+      - ./data:/data
+      - ./certs:/certs
+    # environment:
+    #   # 【可选】：如果完全注释不填，系统默认使用 admin / 123456
+    #   - ADMIN_INIT_USER=admin
+    #   - ADMIN_INIT_PASS=123456
 ```
 
-> **提示**：若希望直接通过标准 HTTPS 端口访问，只需修改端口映射为 `"443:8443"` 即可。
+### 3. 一键编译并启动
 
-### 2. 挂载自有 SSL 证书
-如果你拥有正式域名证书（如 Let's Encrypt、阿里云、腾讯云申请的证书）：
-1. 将公钥证书（包含证书链）命名为 `fullchain.pem`
-2. 将私钥文件命名为 `privkey.pem`
-3. 将上述两文件存入宿主机的 `./certs` 文件夹：
-   ```bash
-   cp your_cert.crt ./certs/fullchain.pem
-   cp your_cert.key ./certs/privkey.pem
-   ```
-4. 重启容器生效：
-   ```bash
-   docker compose restart
-   ```
+```bash
+docker compose up -d --build
+```
+
+### 4. 访问系统
+
+- **访问地址**：`https://<你的服务器IP或域名>:8443`
+- **默认用户名**：`admin`
+- **默认初始化密码**：`123456`（首次登录后可在卡片 4 中随时修改）
+- **算术验证码**：直接输入计算结果即可登录。
 
 ---
 
-## 📖 使用指南
+## 🛠️ 外部程序与 Agent 调用指南
 
-### 步骤 1：上传 SSH 证书（可选）
-若远程节点使用私钥登录，进入面板 **SSH 密钥/证书管理** 区域，上传 `.pem` 或私钥文件。
+系统已为外部第三方自动化程序（如 AI Agent、分布式爬虫）开放了标准接口与反向中继通道。
 
-### 步骤 2：添加 CDP 节点
-点击 **+ 新建节点**，填写目标节点信息：
-- **节点名称**：自定义标识（如：`欧洲-节点01`）
-- **SSH 连接信息**：SSH Host、Port（默认 22）、用户名（如 `root`）
-- **认证方式**：
-  - 从下拉框选取之前上传的证书（**多台主机可随意复用同一个证书**）；
-  - 或留空证书下拉项，在下方直接填写 SSH 登录密码。
-- **远程 CDP 端口**：远程 Chromium 启动时的调试端口（默认 `9222`）
-- **本地转发端口**：绑定到容器内的本地端口（如 `19222`，需在已开放端口范围内）
+### 方式一：API-Key 安全 WSS 反向网关连接（强烈推荐 ⭐⭐⭐⭐⭐）
 
-### 步骤 3：建立穿透并设置源节点
-1. 点击节点列表中的 **启动穿透**，状态变为绿色的 `● connected` 即代表 SSH 隧道建立成功；
-2. 点击某个节点的 **设为源**，将其标记为 `源 (Source)`。
-   - 系统将以此节点的 Cookie 为基准，分发至其他所有未设为源的目标节点。
+无需在云服务器防火墙开放复杂的 `19200-19250` 裸端口，全部通过 **`8443` 端口全量 TLS 加密传输**，未携带合法 API-Key 外部连接将被直接断开。
 
-### 步骤 4：执行同步
-- **手动同步**：点击右上角 **⚡ 立即同步**，执行 Cookie 捕获并推送到各节点；
-- **定时同步**：系统后台每 15 分钟自动执行一次全量提取与分发；
-- **任务日志**：右下角可实时追踪每次同步的 Cookie 数量及各节点分发状态。
+#### 1. Playwright (Python 示例)
+
+```python
+import asyncio
+from playwright.async_api import async_playwright
+
+API_KEY = "cdp_U2GZUVe-TxGRevRV90eq_gMPrpHyUsbF"  # 在卡片 4 中获取
+DOMAIN = "your-domain.com"
+NODE_ID = 1  # 目标节点 ID
+
+async def main():
+    async with async_playwright() as p:
+        # 直接通过 WSS 鉴权网关连接远程浏览器
+        cdp_url = f"wss://{DOMAIN}:8443/cdp/{NODE_ID}/ws?api_key={API_KEY}"
+        browser = await p.chromium.connect_over_cdp(cdp_url)
+        
+        context = browser.contexts[0]
+        page = await context.new_page()
+        await page.goto("https://ipinfo.io")
+        print("页面标题:", await page.title())
+        
+        await browser.close()
+
+asyncio.run(main())
+```
+
+#### 2. Playwright (Node.js 示例)
+
+```javascript
+const { chromium } = require('playwright');
+
+(async () => {
+  const apiKey = 'cdp_U2GZUVe-TxGRevRV90eq_gMPrpHyUsbF';
+  const cdpUrl = `wss://your-domain.com:8443/cdp/1/ws?api_key=${apiKey}`;
+
+  const browser = await chromium.connectOverCDP(cdpUrl);
+  const context = browser.contexts()[0];
+  const page = await context.newPage();
+  await page.goto('https://ipinfo.io');
+  console.log(await page.title());
+  await browser.close();
+})();
+```
+
+#### 3. Puppeteer 连接示例
+
+```javascript
+const puppeteer = require('puppeteer-core');
+
+(async () => {
+  const browser = await puppeteer.connect({
+    browserWSEndpoint: 'wss://your-domain.com:8443/cdp/1/ws?api_key=cdp_U2GZUVe-TxGRevRV90eq_gMPrpHyUsbF'
+  });
+  const page = await browser.newPage();
+  await page.goto('https://ipinfo.io');
+  await browser.disconnect();
+})();
+```
 
 ---
 
-## 🛡️ 安全与防护
+### 方式二：公网裸端口直接映射（兼容模式）
 
-1. **防爆破机制**：单 IP 连续密码或验证码错误 5 次，自动触发封禁 15 分钟。
-2. **密码重置**：登录后点击导航栏的 **修改密码**，可直接在线重置管理员登录密码。
-3. **私钥权限控制**：上传的 SSH 私钥保存到 `/data/keys` 后，系统会自动赋予 `0o600` Linux 权限，防止 Paramiko 因权限过大抛出异常。
-4. **JWT 签名防篡改**：首次启动由系统在 SQLite 中生成 64 位不可逆强随机密钥，重启不丢失，外部不可猜解。
+若你的旧脚本不支持 WSS URL 参数，可在控制台卡片 4 开启「公网端口直接映射访问」，并在宿主机防火墙放行对应端口（如 `19222`）：
+
+```python
+from playwright.async_api import async_playwright
+
+async with async_playwright() as p:
+    browser = await p.chromium.connect_over_cdp("http://<服务器IP>:19222")
+    page = await browser.new_page()
+    await page.goto("https://ipinfo.io")
+```
 
 ---
 
-## 🛠️ 常见问题 (FAQ)
+### 开放 REST API 接口汇总
 
-#### Q1：添加节点并启动穿透时，显示 `error: Authentication failed`？
-- 检查 SSH 用户名、密码或上传的证书内容是否正确；
-- 远程目标主机的 `/etc/ssh/sshd_config` 是否开启了对应的公钥认证（`PubkeyAuthentication yes`）或密码认证。
+所有开放 API 需在请求头携带 `X-API-Key: cdp_xxx` 或 URL 参数 `?api_key=cdp_xxx`。
 
-#### Q2：同步日志显示 `源节点读取中断: Connection refused`？
-- 确认远程主机上的 Chromium 进程是否已正确开启远程调试，需包含启动参数：
-  ```bash
-  --remote-debugging-port=9222 --remote-debugging-address=0.0.0.0
-  ```
-- 确认已在控制台点击该节点的 **启动穿透**，且状态为绿色的 `● connected`。
+| 方法 | 请求路径 | 说明 | 返回内容 |
+| :--- | :--- | :--- | :--- |
+| `GET` | `/api/v1/nodes` | 获取全网节点列表 | 包含每个节点的在线状态、双连接方式（WSS 网关 + 裸端口直连完整 URL） |
+| `GET` | `/api/v1/nodes/{id}/cookies` | 导出单节点全量 Cookies | 包含完整的 Cookie JSON 数据 |
+| `POST` | `/api/v1/sync` | 外部 Webhook 触发同步 | 触发默认策略的全网 Cookie 同步与对齐 |
+
+#### 批量获取节点连接信息示例：
+```bash
+curl -H "X-API-Key: cdp_U2GZUVe-TxGRevRV90eq_gMPrpHyUsbF" \
+     https://your-domain.com:8443/api/v1/nodes
+```
+**返回数据格式：**
+```json
+{
+  "code": 200,
+  "total": 2,
+  "online_count": 2,
+  "direct_port_access_enabled": true,
+  "nodes": [
+    {
+      "id": 1,
+      "name": "欧洲爬虫 01",
+      "is_source": false,
+      "is_local": false,
+      "status": "connected",
+      "cookie_count": 85,
+      "last_sync": "2026-11-02 10:00:00",
+      "connection_methods": {
+        "gateway": {
+          "type": "wss_secure_gateway",
+          "enabled": true,
+          "description": "基于 API-Key 的加密反向中继网关 (推荐，防扫描，仅走 8443)",
+          "ws_url": "wss://your-domain.com:8443/cdp/1/ws?api_key=cdp_U2GZUVe-TxGRevRV90eq_gMPrpHyUsbF",
+          "http_version_url": "https://your-domain.com:8443/cdp/1/json/version?api_key=cdp_U2GZUVe-TxGRevRV90eq_gMPrpHyUsbF"
+        },
+        "direct": {
+          "type": "direct_port_mapping",
+          "enabled": true,
+          "port": 19222,
+          "http_endpoint": "http://your-domain.com:19222"
+        }
+      },
+      "cookies_export_url": "/api/v1/nodes/1/cookies"
+    }
+  ]
+}
+```
+
+---
+
+## ⚙️ 常见运维与排查手册
+
+### 1. 查看容器日志
+```bash
+docker compose logs -f
+```
+
+### 2. 重置管理员密码
+如果忘记密码，可进入容器执行重置指令：
+```bash
+docker exec -it cdp_sync_manager python3 -c '
+from core.database import set_setting
+from core.security import hash_password
+set_setting("admin_password", hash_password("Admin@123456"))
+print("管理员密码已重置为: Admin@123456")
+'
+```
+
+### 3. 数据备份与迁移
+所有数据（节点配置、分组、策略、SSH 私钥及审计记录）均持久化在 `./data` 目录下：
+- 数据库文件：`./data/app.db`
+- SSH 私钥金库：`./data/keys/`
+- 仅需备份 `./data` 目录即可实现全量无损迁移。
+
+---
+
+## 📜 开源与生态组件
+
+- **核心同步组件**：已发布至 PyPI 的通用库 [`wimotek-chromium-sync`](https://pypi.org/project/wimotek-chromium-sync/)，可通过 `pip install wimotek-chromium-sync` 直接引入。
+- **协议兼容**：遵循原生 Chrome DevTools Protocol 规范。

@@ -1,7 +1,7 @@
 import sqlite3
 import secrets
 from datetime import datetime
-from config import DB_PATH, INIT_PASSWORD
+from config import DB_PATH, INIT_USERNAME, INIT_PASSWORD
 
 def init_db_and_jwt():
     from core.security import hash_password
@@ -103,8 +103,9 @@ def init_db_and_jwt():
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
             ("默认全网智能双向合并", 1, 15, "smart_merge", "all", 0, "", "all", "[]", "", now_str))
 
+    # 首次初始化默认值 (使用配置的 INIT_USERNAME 与 INIT_PASSWORD)
     defaults = {
-        'admin_username': 'admin',
+        'admin_username': INIT_USERNAME,
         'admin_password': hash_password(INIT_PASSWORD),
         'jwt_secret': secrets.token_hex(32),
         'api_key': 'cdp_' + secrets.token_urlsafe(24),
