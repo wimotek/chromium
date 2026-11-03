@@ -18,6 +18,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     tini \
     gosu \
     ca-certificates \
+    autocutsel \
     && ln -s /usr/share/novnc/vnc.html /usr/share/novnc/index.html \
     && rm -rf /var/lib/apt/lists/*
 

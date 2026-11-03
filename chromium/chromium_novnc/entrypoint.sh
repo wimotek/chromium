@@ -56,6 +56,10 @@ export XDG_CONFIG_HOME=/home/appuser/.config
 export XDG_CACHE_HOME=/home/appuser/.cache
 export NO_AT_BRIDGE=1
 
+# 【核心修复 1】强制声明 UTF-8 编码环境，解决多字节中文粘贴乱码
+export LANG=C.UTF-8
+export LC_ALL=C.UTF-8
+
 mkdir -p /home/appuser/.config /home/appuser/.cache /tmp/crashpad
 
 RESOLUTION="${RESOLUTION:-1920x1080}"
@@ -73,6 +77,10 @@ done
 
 # 2. 启动轻量窗口管理器 Openbox
 openbox &
+
+# 【核心修复 2】启动 autocutsel 同步 UTF-8 剪贴板与选择区
+autocutsel -fork
+autocutsel -selection PRIMARY -fork
 
 # 3. 启动 x11vnc 服务 (支持动态密码验证)
 if [ -n "$VNC_PASSWORD" ]; then
