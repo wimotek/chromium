@@ -1,4 +1,4 @@
-name: Build noVNC Edition
+name: Build and Push noVNC Edition
 
 on:
   push:
