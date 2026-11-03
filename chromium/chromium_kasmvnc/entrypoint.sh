@@ -1,139 +1,141 @@
-#!/bin/bash
+#!/usr/bin/env bash
 set -e
 
-# ========================================================
-# 阶段 1：Root 权限自愈、证书合成与降权 (由 gosu 调度)
-# ========================================================
-if [ "$(id -u)" = "0" ]; then
-    # 1. 自动修复挂载目录所有权，清理可能残留的 X11 锁文件与浏览器单例锁
-    chown -R appuser:appuser /data /home/appuser /tmp/.X11-unix 2>/dev/null || true
-    rm -rf /tmp/.X1-lock /tmp/.X11-unix/X1 /home/appuser/.vnc/*.pid /home/appuser/.vnc/*.log
-    rm -rf /data/SingletonLock /data/SingletonCookie /data/SingletonSocket
+# ==============================================================================
+# 0. 环境与分辨率初始化
+# ==============================================================================
+RESOLUTION=${RESOLUTION:-1920x1080}
+WIDTH=$(echo "$RESOLUTION" | cut -d'x' -f1)
+HEIGHT=$(echo "$RESOLUTION" | cut -d'x' -f2)
+CHROME_RES="${WIDTH},${HEIGHT}"
 
-    # 2. 【核心修复】：以 Root 身份扫描并合成证书（彻底解决宝塔 600 root:root 权限问题）
-    mkdir -p /home/appuser/.vnc
-    CUSTOM_CERT=""
-    CUSTOM_KEY=""
-
-    for f in "$SSL_CERT_FILE" /certs/fullchain.pem /certs/cert.pem /certs/tls.crt /certs/*.crt /certs/*.pem; do
-        if [ -f "$f" ] && [ "$f" != "/certs/privkey.pem" ] && [ "$f" != "/certs/key.pem" ]; then
-            CUSTOM_CERT="$f"
-            break
-        fi
-    done
-
-    for f in "$SSL_KEY_FILE" /certs/privkey.pem /certs/key.pem /certs/tls.key /certs/*.key; do
-        if [ -f "$f" ]; then
-            CUSTOM_KEY="$f"
-            break
-        fi
-    done
-
-    if [ -n "$CUSTOM_CERT" ] && [ -n "$CUSTOM_KEY" ]; then
-        echo "[SSL] (Root阶段) 成功检测到外部证书: $CUSTOM_CERT 与私钥: $CUSTOM_KEY"
-        cat "$CUSTOM_CERT" "$CUSTOM_KEY" > /home/appuser/.vnc/self.pem
-        chown appuser:appuser /home/appuser/.vnc/self.pem
-        chmod 600 /home/appuser/.vnc/self.pem
-        echo "[SSL] (Root阶段) 证书已成功合成至 /home/appuser/.vnc/self.pem"
-    else
-        echo "[SSL] (Root阶段) 未检测到外部有效证书，将使用自签证书"
-    fi
-
-    # 3. 重设环境变量并降权
-    export HOME=/home/appuser
-    export USER=appuser
-    export LOGNAME=appuser
-    exec gosu appuser "$0" "$@"
-fi
-
-# ========================================================
-# 阶段 2：以普通用户 appuser 正式启动所有服务
-# ========================================================
-export HOME=/home/appuser
-export USER=appuser
-export LOGNAME=appuser
-export XDG_CONFIG_HOME=/home/appuser/.config
-export XDG_CACHE_HOME=/home/appuser/.cache
-export NO_AT_BRIDGE=1
-
-mkdir -p /home/appuser/.vnc /home/appuser/.config /home/appuser/.cache /tmp/crashpad
-touch /home/appuser/.Xauthority
-
-RESOLUTION="${RESOLUTION:-1920x1080}"
-DEPTH="${DEPTH:-24}"
 VNC_USER="${VNC_USER:-admin}"
-VNC_PASSWORD="${VNC_PASSWORD:-admin123}"
-HOMEPAGE="${HOMEPAGE:-about:blank}"
-CHROME_ARGS="${CHROME_ARGS:-}"
+VNC_PASSWORD="${VNC_PASSWORD:-admin}"
 
-# 1. 配置 KasmVNC 访问密码
-echo -e "${VNC_PASSWORD}\n${VNC_PASSWORD}" | vncpasswd -u "${VNC_USER}" -w -r
+# ==============================================================================
+# 1. 证书检测逻辑 (优先 /certs 的 fullchain + privkey，检测到才使用，否则自签)
+# ==============================================================================
+CERTS_DIR="/certs"
+SSL_OUT_DIR="/etc/ssl/app"
+mkdir -p "$SSL_OUT_DIR"
 
-# 2. 准备 xstartup 脚本 (使用 Openbox 窗口管理器)
-cat << 'EOF' > /home/appuser/.vnc/xstartup
-#!/bin/sh
-unset SESSION_MANAGER
-unset DBUS_SESSION_BUS_ADDRESS
-openbox &
-EOF
-chmod +x /home/appuser/.vnc/xstartup
+CERT_FILE=""
+KEY_FILE=""
 
-# 3. 证书处理：若 Root 阶段未合成自定义证书，自动生成 10 年 SAN 自签证书
-SSL_CERT="/home/appuser/.vnc/self.pem"
-if [ -f "$SSL_CERT" ]; then
-    echo "[SSL] 正在加载证书: $SSL_CERT"
+# 检测挂载目录中的 fullchain 文件
+for f in "$CERTS_DIR"/fullchain*.pem "$CERTS_DIR"/fullchain*.crt "$CERTS_DIR"/fullchain "$CERTS_DIR"/cert*.pem; do
+    if [ -f "$f" ]; then
+        CERT_FILE="$f"
+        break
+    fi
+done
+
+# 检测挂载目录中的 privkey 文件
+for k in "$CERTS_DIR"/privkey*.pem "$CERTS_DIR"/privkey*.key "$CERTS_DIR"/privkey "$CERTS_DIR"/key*.pem; do
+    if [ -f "$k" ]; then
+        KEY_FILE="$k"
+        break
+    fi
+done
+
+if [ -n "$CERT_FILE" ] && [ -n "$KEY_FILE" ]; then
+    echo "[SSL] 检测到外部映射证书，优先启用自有证书:"
+    echo "       -> Cert (fullchain): $CERT_FILE"
+    echo "       -> Key  (privkey)  : $KEY_FILE"
+    cp "$CERT_FILE" "$SSL_OUT_DIR/server.crt"
+    cp "$KEY_FILE" "$SSL_OUT_DIR/server.key"
 else
-    echo "[SSL] 回退生成标准 SAN 自签名证书..."
-    openssl req -new -x509 -days 3650 -nodes \
-        -out "$SSL_CERT" -keyout "$SSL_CERT" \
-        -subj "/CN=KasmVNC" \
-        -addext "subjectAltName=DNS:localhost,IP:127.0.0.1,IP:0.0.0.0" 2>/dev/null || \
-    openssl req -new -x509 -days 3650 -nodes \
-        -out "$SSL_CERT" -keyout "$SSL_CERT" \
-        -subj "/CN=localhost" 2>/dev/null
-    chmod 600 "$SSL_CERT"
+    echo "[SSL] 未检测到有效的映射证书 (需同时具备 fullchain 与 privkey)，回退使用自签证书..."
+    if [ ! -f "$SSL_OUT_DIR/server.crt" ] || [ ! -f "$SSL_OUT_DIR/server.key" ]; then
+        openssl req -x509 -nodes -days 3650 -newkey rsa:2048 \
+            -keyout "$SSL_OUT_DIR/server.key" \
+            -out "$SSL_OUT_DIR/server.crt" \
+            -subj "/C=US/ST=State/L=City/O=Chromium/CN=localhost" 2>/dev/null
+    fi
 fi
 
-# 4. 生成 KasmVNC 配置文件 (侧边栏设为图标折叠模式，启用 WebP 流媒体高帧率压缩)
-cat <<EOF > /home/appuser/.vnc/kasmvnc.yaml
+FINAL_CERT="$SSL_OUT_DIR/server.crt"
+FINAL_KEY="$SSL_OUT_DIR/server.key"
+chmod 644 "$FINAL_CERT"
+chmod 600 "$FINAL_KEY"
+
+# ==============================================================================
+# 2. 用户与 KasmVNC 权限配置
+# ==============================================================================
+if ! id -u "$VNC_USER" >/dev/null 2>&1; then
+    useradd -m -s /bin/bash "$VNC_USER"
+    adduser "$VNC_USER" sudo 2>/dev/null || true
+fi
+echo "$VNC_USER:$VNC_PASSWORD" | chpasswd
+
+# 设置 KasmVNC Web 认证密码
+mkdir -p "/home/$VNC_USER/.vnc" "/etc/kasmvnc"
+echo "$VNC_PASSWORD" | kasmvncpasswd -u "$VNC_USER" -wo
+
+# 写入 KasmVNC 全局 SSL 与 WebSocket 配置
+cat <<EOF > /etc/kasmvnc/kasmvnc.yaml
 network:
   ssl:
     require_ssl: true
-    pem_certificate: ${SSL_CERT}
-    pem_key: ${SSL_CERT}
-  websocket_port: 8444
-desktop:
-  allow_resize: true
-client:
-  control_bar:
-    visible: true
-    auto_hide: true
-  video:
-    preferred_encoding: webp
+    pem_certificate: $FINAL_CERT
+    pem_key: $FINAL_KEY
+  websocket:
+    port: 8444
 EOF
 
-# 5. 启动 KasmVNC 服务（运行于 X 显示口 :1）
-vncserver :1 -select-de manual -geometry "${RESOLUTION}" -depth "${DEPTH}"
+# 配置桌面启动项 (集成 numlockx on 确保进入桌面时小键盘处于激活状态)
+cat << 'EOF' > "/home/$VNC_USER/.vnc/xstartup"
+#!/bin/sh
+numlockx on &
+exec openbox
+EOF
+chmod +x "/home/$VNC_USER/.vnc/xstartup"
+
+chown -R "$VNC_USER:$VNC_USER" "/home/$VNC_USER" "$SSL_OUT_DIR" /data /tmp/crashpad 2>/dev/null || true
+
+# ==============================================================================
+# 3. 启动 KasmVNC Server 与 Num Lock 锁定
+# ==============================================================================
+rm -f /tmp/.X1-lock /tmp/.X11-unix/X1 2>/dev/null
+
+echo "[KasmVNC] 正在拉起 KasmVNC 服务 (:1)..."
+su - "$VNC_USER" -c "vncserver :1 \
+    -geometry $RESOLUTION \
+    -depth 24 \
+    -websocketPort 8444 \
+    -cert $FINAL_CERT \
+    -key $FINAL_KEY" &
+
 export DISPLAY=:1
 
-until [ -e /tmp/.X11-unix/X1 ]; do
-    sleep 0.1
+# 等待显示服务就绪
+for i in {1..30}; do
+    if su - "$VNC_USER" -c "DISPLAY=:1 xset q" >/dev/null 2>&1; then
+        break
+    fi
+    sleep 0.2
 done
 
-# 6. 启动 CDP 9222 -> 9223 端口穿透
-socat TCP-LISTEN:9222,fork,reuseaddr TCP:127.0.0.1:9223 &
+# 允许本地进程连接 X11 Display
+su - "$VNC_USER" -c "DISPLAY=:1 xhost +local:" >/dev/null 2>&1 || true
 
-CHROME_RES=$(echo "$RESOLUTION" | tr 'x' ',')
-
-if [ $# -eq 0 ]; then
-    set -- "$HOMEPAGE"
+# 开启 Num Lock (需求: 小键盘数字键保持 ON)
+if command -v numlockx >/dev/null 2>&1; then
+    DISPLAY=:1 numlockx on || true
+    echo "[Keyboard] Num Lock 已成功开启 (Num Lock ON)"
 fi
 
-# 7. 循环守护启动 Chromium (全方位速度调优与抗崩溃版)
-echo "Starting Chromium under KasmVNC with args: $CHROME_ARGS $@"
-while true; do
-    rm -f /data/SingletonLock /data/SingletonCookie /data/SingletonSocket
+# ==============================================================================
+# 4. CDP 端口穿透转发 (0.0.0.0:9222 -> 127.0.0.1:9223)
+# ==============================================================================
+socat TCP-LISTEN:9222,fork,reuseaddr TCP:127.0.0.1:9223 &
 
+echo "[Ready] KasmVNC HTTPS 运行于 :8444, CDP 穿透运行于 :9222"
+
+# ==============================================================================
+# 5. 原版 Chromium 看门狗自愈守护进程 (支持 CMD 与附加参数 "$@")
+# ==============================================================================
+while true; do
     chromium \
         --no-sandbox \
         --test-type \

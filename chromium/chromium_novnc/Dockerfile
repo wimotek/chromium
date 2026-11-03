@@ -9,9 +9,9 @@ ENV DEBIAN_FRONTEND=noninteractive \
     VNC_PASSWORD= \
     CHROME_ARGS=
 
-# 安装 Chromium、TigerVNC Standalone (自带 X Server)、Openbox、noVNC、socat 及核心工具
-# 包含 numlockx (解决小键盘锁定) 与 locales (确保 UTF-8 剪贴板完全不乱码)
+# 安装 tini、Chromium、TigerVNC Standalone (自带 X Server)、Openbox、noVNC、socat、numlockx 及中文字体
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    tini \
     chromium \
     tigervnc-standalone-server \
     tigervnc-common \
@@ -32,7 +32,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && locale-gen \
     && rm -rf /var/lib/apt/lists/*
 
-# 创建运行目录
+# 创建工作与证书运行目录
 RUN mkdir -p /data /certs /etc/ssl/app /tmp/crashpad /root/.vnc /usr/share/novnc
 
 COPY entrypoint.sh /entrypoint.sh
@@ -43,4 +43,8 @@ WORKDIR /data
 # 暴露端口：6080(HTTP), 6443(HTTPS), 9222(CDP 穿透端口)
 EXPOSE 6080 6443 9222
 
-ENTRYPOINT ["/entrypoint.sh"]
+# 使用 tini 接管信号与子进程回收
+ENTRYPOINT ["/usr/bin/tini", "--", "/entrypoint.sh"]
+
+# 保持原版 CMD []，完全由外部运行时传参决定
+CMD []

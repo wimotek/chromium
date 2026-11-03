@@ -10,7 +10,7 @@ HEIGHT=$(echo "$RESOLUTION" | cut -d'x' -f2)
 CHROME_RES="${WIDTH},${HEIGHT}"
 
 # ==============================================================================
-# 1. 证书检测逻辑 (需求 3: 优先 /certs 的 fullchain + privkey，检测到才使用，否则自签)
+# 1. 证书检测逻辑 (优先 /certs 的 fullchain + privkey，检测到才使用，否则自签)
 # ==============================================================================
 CERTS_DIR="/certs"
 SSL_OUT_DIR="/etc/ssl/app"
@@ -57,7 +57,7 @@ chmod 600 "$FINAL_KEY"
 
 # ==============================================================================
 # 2. 启动 TigerVNC Standalone Server (Xvnc)
-#    原生 UTF-8 剪贴板支持，彻底淘汰 xvfb + x11vnc 导致的乱码 (需求 2)
+#    原生 UTF-8 剪贴板协议支持，杜绝粘贴乱码
 # ==============================================================================
 rm -f /tmp/.X0-lock /tmp/.X11-unix/X0 2>/dev/null
 
@@ -93,7 +93,7 @@ for i in {1..30}; do
 done
 
 # ==============================================================================
-# 3. 强制开启 Num Lock (需求 1: 小键盘数字键保持 ON)
+# 3. 强制开启 Num Lock (小键盘数字键保持 ON)
 # ==============================================================================
 if command -v numlockx >/dev/null 2>&1; then
     DISPLAY=:0 numlockx on || true
@@ -109,16 +109,16 @@ openbox &
 # 4.1 noVNC HTTP 端 (6080)
 websockify --web=/usr/share/novnc 6080 localhost:5900 &
 
-# 4.2 noVNC HTTPS 端 (6443)
+# 4.2 noVNC HTTPS 端 (6443) -> 载入自有/自签证书
 websockify --web=/usr/share/novnc --cert="$FINAL_CERT" --key="$FINAL_KEY" 6443 localhost:5900 &
 
 # 4.3 CDP 端口穿透转发: 将 0.0.0.0:9222 流量转至 Chromium 本地 127.0.0.1:9223
 socat TCP-LISTEN:9222,fork,reuseaddr TCP:127.0.0.1:9223 &
 
-echo "[Ready] noVNC HTTP运行于 :6080, HTTPS运行于 :6443, CDP穿透运行于 :9222"
+echo "[Ready] noVNC HTTP 运行于 :6080, HTTPS 运行于 :6443, CDP 穿透运行于 :9222"
 
 # ==============================================================================
-# 5. 原版 Chromium 看门狗自愈守护进程 (原封不动保留全部精调参数)
+# 5. 原版 Chromium 看门狗自愈守护进程 (支持 CMD [] 外部附加参数 "$@")
 # ==============================================================================
 while true; do
     chromium \

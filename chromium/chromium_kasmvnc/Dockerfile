@@ -1,54 +1,60 @@
 FROM debian:bookworm-slim
 
-ENV DEBIAN_FRONTEND=noninteractive
+ENV DEBIAN_FRONTEND=noninteractive \
+    LANG=zh_CN.UTF-8 \
+    LANGUAGE=zh_CN:zh \
+    LC_ALL=zh_CN.UTF-8 \
+    DISPLAY=:1 \
+    RESOLUTION=1920x1080 \
+    VNC_USER=admin \
+    VNC_PASSWORD=admin \
+    CHROME_ARGS=
 
-# 优化策略：
-# 1. 安装基础依赖、Chromium、Openbox、文泉驿中文字体与 gosu 权限管理工具
-# 2. 补齐 KasmVNC 运行依赖 (hostname、libdatetime-perl 等)
+# 1. 严格保留 tini 作为 init 进程
+#    安装 Chromium、Openbox、socat、numlockx (小键盘锁定)、中文字体及运行库
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    tini \
     chromium \
     openbox \
-    fonts-wqy-zenhei \
     socat \
+    numlockx \
+    locales \
+    fonts-wqy-zenhei \
     openssl \
-    tini \
-    gosu \
-    curl \
     ca-certificates \
-    x11-xkb-utils \
-    xauth \
+    curl \
+    wget \
+    procps \
+    net-tools \
+    sudo \
     libxfont2 \
-    libxshmfence1 \
-    libwebp7 \
-    libjpeg62-turbo \
-    hostname \
-    libdatetime-perl \
-    libhash-merge-simple-perl \
-    libyaml-tiny-perl \
+    xauth \
+    x11-xserver-utils \
+    && echo "zh_CN.UTF-8 UTF-8" > /etc/locale.gen \
+    && echo "en_US.UTF-8 UTF-8" >> /etc/locale.gen \
+    && locale-gen
+
+# 2. 安装官方 KasmVNC Debian 12 (Bookworm) 预编译包
+RUN ARCH=$(dpkg --print-architecture) \
+    && KASM_VER="1.3.2" \
+    && wget -q https://github.com/kasmtech/KasmVNC/releases/download/v${KASM_VER}/kasmvncserver_bookworm_${KASM_VER}_${ARCH}.deb -O /tmp/kasmvnc.deb \
+    && apt-get install -y /tmp/kasmvnc.deb \
+    && rm -f /tmp/kasmvnc.deb \
     && rm -rf /var/lib/apt/lists/*
 
-# 自动根据当前 CPU 架构 (amd64 / arm64) 下载安装 KasmVNC 官方稳定版
-RUN ARCH=$(dpkg --print-architecture) && \
-    curl -LO "https://github.com/kasmtech/KasmVNC/releases/download/v1.3.3/kasmvncserver_bookworm_1.3.3_${ARCH}.deb" && \
-    apt-get update && \
-    apt-get install -y --no-install-recommends ./kasmvncserver_bookworm_1.3.3_${ARCH}.deb && \
-    rm -f ./kasmvncserver_bookworm_1.3.3_${ARCH}.deb && \
-    rm -rf /var/lib/apt/lists/*
-
-# 创建非特权用户 appuser (UID 1000) 及必要目录
-RUN useradd -m -u 1000 -s /bin/bash appuser && \
-    usermod -aG ssl-cert appuser && \
-    mkdir -p /data /home/appuser/.vnc /tmp/.X11-unix /certs && \
-    chown -R appuser:appuser /data /home/appuser /tmp/.X11-unix /certs && \
-    chmod 1777 /tmp/.X11-unix
-
-WORKDIR /home/appuser
+# 3. 创建运行目录
+RUN mkdir -p /data /certs /etc/ssl/app /tmp/crashpad /etc/kasmvnc
 
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
-# 暴露端口：8444(KasmVNC HTTPS), 9222(CDP 自动化调试)
+WORKDIR /data
+
+# 暴露端口：8444(KasmVNC HTTPS Web), 9222(CDP 穿透端口)
 EXPOSE 8444 9222
 
+# 使用 tini 接管信号与僵尸进程回收
 ENTRYPOINT ["/usr/bin/tini", "--", "/entrypoint.sh"]
+
+# 默认参数（支持通过命令行追加自定义 URL 或参数覆盖）
 CMD []
