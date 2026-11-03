@@ -2,44 +2,31 @@
 set -e
 
 # ========================================================
-# 阶段 1：Root 权限自愈、证书合成与降权 (由 gosu 调度)
+# 阶段 1：Root 权限自愈、证书合成与降权 (保持原样)
 # ========================================================
 if [ "$(id -u)" = "0" ]; then
-    # 1. 自动将外部挂载的 /data 卷所有权过户给 appuser，清理历史残留锁文件
     chown -R appuser:appuser /data /home/appuser /tmp/.X11-unix 2>/dev/null || true
     rm -rf /tmp/.X0-lock /tmp/.X11-unix/X0 /data/SingletonLock /data/SingletonCookie /data/SingletonSocket
+    mkdir -p /home/appuser/.vnc
 
-    # 2. 【核心修复】：以 Root 身份扫描并合成证书（彻底解决宝塔 600 root:root 权限问题）
     CUSTOM_CERT=""
     CUSTOM_KEY=""
-
-    # 扫描证书公钥
     for f in "$SSL_CERT_FILE" /certs/fullchain.pem /certs/cert.pem /certs/tls.crt /certs/*.crt /certs/*.pem; do
         if [ -f "$f" ] && [ "$f" != "/certs/privkey.pem" ] && [ "$f" != "/certs/key.pem" ]; then
-            CUSTOM_CERT="$f"
-            break
+            CUSTOM_CERT="$f"; break
         fi
     done
-
-    # 扫描私钥
     for f in "$SSL_KEY_FILE" /certs/privkey.pem /certs/key.pem /certs/tls.key /certs/*.key; do
-        if [ -f "$f" ]; then
-            CUSTOM_KEY="$f"
-            break
-        fi
+        if [ -f "$f" ]; then CUSTOM_KEY="$f"; break; fi
     done
 
     if [ -n "$CUSTOM_CERT" ] && [ -n "$CUSTOM_KEY" ]; then
-        echo "[SSL] (Root阶段) 成功检测到外部证书: $CUSTOM_CERT 与私钥: $CUSTOM_KEY"
+        echo "[SSL] 成功检测到外部证书，组合装载..."
         cat "$CUSTOM_CERT" "$CUSTOM_KEY" > /tmp/novnc_combined.pem
         chown appuser:appuser /tmp/novnc_combined.pem
         chmod 600 /tmp/novnc_combined.pem
-        echo "[SSL] (Root阶段) 证书已成功合成至 /tmp/novnc_combined.pem"
-    else
-        echo "[SSL] (Root阶段) 未检测到外部有效证书，将使用自签证书"
     fi
 
-    # 3. 重设环境变量并降权
     export HOME=/home/appuser
     export USER=appuser
     export LOGNAME=appuser
@@ -47,7 +34,7 @@ if [ "$(id -u)" = "0" ]; then
 fi
 
 # ========================================================
-# 阶段 2：以普通用户 appuser 正式启动所有服务
+# 阶段 2：以普通用户 appuser 启动服务 (使用 TigerVNC Xvnc)
 # ========================================================
 export HOME=/home/appuser
 export USER=appuser
@@ -56,48 +43,42 @@ export XDG_CONFIG_HOME=/home/appuser/.config
 export XDG_CACHE_HOME=/home/appuser/.cache
 export NO_AT_BRIDGE=1
 
-# 【核心修复 1】强制声明 UTF-8 编码环境，解决多字节中文粘贴乱码
-export LANG=C.UTF-8
-export LC_ALL=C.UTF-8
-
-mkdir -p /home/appuser/.config /home/appuser/.cache /tmp/crashpad
+mkdir -p /home/appuser/.vnc /home/appuser/.config /home/appuser/.cache /tmp/crashpad
 
 RESOLUTION="${RESOLUTION:-1920x1080}"
 DEPTH="${DEPTH:-24}"
 HOMEPAGE="${HOMEPAGE:-about:blank}"
 CHROME_ARGS="${CHROME_ARGS:-}"
 
-# 1. 启动 Xvfb 虚拟屏幕
-Xvfb :0 -screen 0 "${RESOLUTION}x${DEPTH}" -ac +extension GLX +render -noreset &
+# 1. 配置 VNC 密码安全参数
+mkdir -p /home/appuser/.vnc
+if [ -n "$VNC_PASSWORD" ]; then
+    echo "$VNC_PASSWORD" | vncpasswd -f > /home/appuser/.vnc/passwd
+    chmod 600 /home/appuser/.vnc/passwd
+    SECURITY_ARGS="-SecurityTypes VncAuth -PasswordFile /home/appuser/.vnc/passwd"
+else
+    SECURITY_ARGS="-SecurityTypes None"
+fi
+
+# 2. 【核心替换】：启动原生支持 UTF-8 剪贴板的 Xvnc (集成了虚拟显卡与 VNC)
+Xvnc :0 -geometry "${RESOLUTION}" -depth "${DEPTH}" -rfbport 5900 $SECURITY_ARGS -pn &
 export DISPLAY=:0
 
 until [ -e /tmp/.X11-unix/X0 ]; do
     sleep 0.1
 done
 
-# 2. 启动轻量窗口管理器 Openbox
+# 3. 启动 Openbox 并激活小键盘数字状态
 openbox &
+numlockx on || true
 
-# 【核心修复 2】启动 autocutsel 同步 UTF-8 剪贴板与选择区
-autocutsel -fork
-autocutsel -selection PRIMARY -fork
-
-# 3. 启动 x11vnc 服务 (支持动态密码验证)
-if [ -n "$VNC_PASSWORD" ]; then
-    x11vnc -display :0 -rfbport 5900 -passwd "$VNC_PASSWORD" -forever -shared -listen 127.0.0.1 &
-else
-    x11vnc -display :0 -rfbport 5900 -nopw -forever -shared -listen 127.0.0.1 &
-fi
-
-# 4.1 启动 HTTP Web 访问 (端口 6080)
+# 4.1 启动 HTTP 纯 Web 访问 (端口 6080)
 websockify --web=/usr/share/novnc 6080 127.0.0.1:5900 &
 
-# 4.2 读取前面 Root 阶段合成的证书
+# 4.2 证书与 HTTPS 启动 (端口 6443)
 if [ -f /tmp/novnc_combined.pem ]; then
-    echo "[SSL] 正在加载商业证书: /tmp/novnc_combined.pem"
     FINAL_SSL_CERT="/tmp/novnc_combined.pem"
 else
-    echo "[SSL] 回退使用标准 SAN 自签名证书..."
     FINAL_SSL_CERT="${SSL_CERT:-/data/novnc.pem}"
     if [ ! -f "$FINAL_SSL_CERT" ]; then
         openssl req -new -x509 -days 3650 -nodes \
@@ -109,21 +90,18 @@ else
             -subj "/CN=localhost" 2>/dev/null
     fi
 fi
-
-# 4.3 启动 HTTPS Web 访问 (端口 6443)
 websockify --cert="$FINAL_SSL_CERT" --web=/usr/share/novnc 6443 127.0.0.1:5900 &
 
 # 5. 启动 CDP 9222 -> 9223 端口穿透
 socat TCP-LISTEN:9222,fork,reuseaddr TCP:127.0.0.1:9223 &
 
 CHROME_RES=$(echo "$RESOLUTION" | tr 'x' ',')
-
 if [ $# -eq 0 ]; then
     set -- "$HOMEPAGE"
 fi
 
 # 6. 循环守护启动 Chromium
-echo "Starting Chromium under noVNC with args: $CHROME_ARGS $@"
+echo "Starting Chromium under TigerVNC with args: $CHROME_ARGS $@"
 while true; do
     rm -f /data/SingletonLock /data/SingletonCookie /data/SingletonSocket
 
