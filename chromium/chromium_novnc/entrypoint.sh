@@ -11,6 +11,9 @@ if [ "$(id -u)" = "0" ]; then
     mkdir -p /tmp/.X11-unix /home/appuser/.vnc /home/appuser/.config /home/appuser/.cache /tmp/crashpad /etc/ssl/app
     chmod 1777 /tmp /tmp/.X11-unix /tmp/crashpad
 
+    # 【仅在此处增加 1 行软链接：彻底解决 noVNC 目录列表 Directory listing 问题】
+    ln -sf /usr/share/novnc/vnc.html /usr/share/novnc/index.html 2>/dev/null || true
+
     # 2. 清理历史残留的锁文件
     rm -rf /tmp/.X0-lock /tmp/.X11-unix/X0 /data/SingletonLock /data/SingletonCookie /data/SingletonSocket
 
