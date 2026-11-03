@@ -137,6 +137,13 @@ fi
 # 4. 启动轻量窗口管理器 Openbox
 openbox &
 
+# 双向桥接 CLIPBOARD 与 PRIMARY 选择区，保证剪贴板数据无缝同步给 Chromium
+if command -v autocutsel >/dev/null 2>&1; then
+    autocutsel -fork -selection CLIPBOARD
+    autocutsel -fork -selection PRIMARY
+fi
+
+
 # 5. 启动 WebUI 访问端
 # 5.1 noVNC HTTP 端 (端口 6080)
 websockify --web=/usr/share/novnc 6080 127.0.0.1:5900 &
