@@ -9,9 +9,6 @@ on:
     tags: [ 'v*.*.*' ]
   workflow_dispatch:
 
-defaults:
-  run:
-    working-directory: ./chromium/chromium_novnc
 
 permissions:
   contents: read
@@ -19,6 +16,7 @@ permissions:
 
 env:
   IMAGE_NAME: ${{ secrets.DOCKERHUB_USERNAME }}/chromium
+  WORKING_DIR: ./chromium/chromium_novnc
 
 jobs:
   build-novnc:
@@ -61,7 +59,7 @@ jobs:
       - name: Build and push noVNC
         uses: docker/build-push-action@v6
         with:
-          context: .
+          context: ${{ env.WORKING_DIR }}
           platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ steps.meta.outputs.tags }}
@@ -75,5 +73,5 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
           repository: ${{ env.IMAGE_NAME }}
-          readme-filepath: ./README.md
+          readme-filepath: ${{ env.WORKING_DIR }}/README.md
           short-description: "Minimal Chromium with KasmVNC/noVNC, CDP, and Clipboard sync"

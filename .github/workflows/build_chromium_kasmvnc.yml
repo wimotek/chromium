@@ -7,11 +7,7 @@ on:
       - 'chromium/chromium_kasmvnc/**'
       - '.github/workflows/*kasm*.yml'
     tags: [ 'v*.*.*' ]
-  workflow_dispatch:
-
-defaults:
-  run:
-    working-directory: ./chromium/chromium_kasmvnc   
+  workflow_dispatch: 
 
 # 必须赋予 packages: write 权限才能推送到 ghcr.io
 permissions:
@@ -20,6 +16,7 @@ permissions:
 
 env:
   IMAGE_NAME: ${{ secrets.DOCKERHUB_USERNAME }}/chromium
+  WORKING_DIR: ./chromium/chromium_kasmvnc
 
 jobs:
   build-kasmvnc:
@@ -65,7 +62,7 @@ jobs:
       - name: Build and push KasmVNC
         uses: docker/build-push-action@v6
         with:
-          context: .
+          context: ${{ env.WORKING_DIR }}
           platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ steps.meta.outputs.tags }}
@@ -79,5 +76,5 @@ jobs:
       #    username: ${{ secrets.DOCKERHUB_USERNAME }}
       #    password: ${{ secrets.DOCKERHUB_TOKEN }}
       #    repository: ${{ env.IMAGE_NAME }}
-      #    readme-filepath: ./README.md
+      #    readme-filepath: ${{ env.WORKING_DIR }}/README.md
       #    short-description: "Chromium in Docker with KasmVNC (60FPS), CDP and Clipboard sync"
