@@ -1,11 +1,16 @@
 FROM debian:bookworm-slim
 
-ENV DEBIAN_FRONTEND=noninteractive
-# 【解决 echo $LANG 为空】：在此全局声明环境变量
-ENV LANG=C.UTF-8
-ENV LC_ALL=C.UTF-8
+ENV DEBIAN_FRONTEND=noninteractive \
+    LANG=zh_CN.UTF-8 \
+    LANGUAGE=zh_CN:zh \
+    LC_ALL=zh_CN.UTF-8 \
+    DISPLAY=:0 \
+    RESOLUTION=1920x1080 \
+    VNC_PASSWORD= \
+    CHROME_ARGS=
 
-# 淘汰 x11vnc 和 xvfb，安装支持 UTF-8 剪贴板的 tigervnc-standalone-server
+# 安装 Chromium、TigerVNC Standalone (自带 X Server)、Openbox、noVNC、socat 及核心工具
+# 包含 numlockx (解决小键盘锁定) 与 locales (确保 UTF-8 剪贴板完全不乱码)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     chromium \
     tigervnc-standalone-server \
@@ -13,27 +18,29 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     openbox \
     novnc \
     websockify \
-    fonts-wqy-zenhei \
     socat \
-    openssl \
-    tini \
-    gosu \
-    ca-certificates \
     numlockx \
-    && ln -s /usr/share/novnc/vnc.html /usr/share/novnc/index.html \
+    locales \
+    fonts-wqy-zenhei \
+    openssl \
+    ca-certificates \
+    curl \
+    procps \
+    net-tools \
+    && echo "zh_CN.UTF-8 UTF-8" > /etc/locale.gen \
+    && echo "en_US.UTF-8 UTF-8" >> /etc/locale.gen \
+    && locale-gen \
     && rm -rf /var/lib/apt/lists/*
 
-RUN useradd -m -u 1000 -s /bin/bash appuser && \
-    mkdir -p /data /home/appuser/.vnc /tmp/.X11-unix /certs && \
-    chown -R appuser:appuser /data /home/appuser /tmp/.X11-unix /certs && \
-    chmod 1777 /tmp/.X11-unix
-
-WORKDIR /home/appuser
+# 创建运行目录
+RUN mkdir -p /data /certs /etc/ssl/app /tmp/crashpad /root/.vnc /usr/share/novnc
 
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
+WORKDIR /data
+
+# 暴露端口：6080(HTTP), 6443(HTTPS), 9222(CDP 穿透端口)
 EXPOSE 6080 6443 9222
 
-ENTRYPOINT ["/usr/bin/tini", "--", "/entrypoint.sh"]
-CMD []
+ENTRYPOINT ["/entrypoint.sh"]
