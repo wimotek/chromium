@@ -4,16 +4,15 @@ ENV DEBIAN_FRONTEND=noninteractive \
     LANG=zh_CN.UTF-8 \
     LANGUAGE=zh_CN:zh \
     LC_ALL=zh_CN.UTF-8 \
-    DISPLAY=:1 \
+    DISPLAY=:0 \
     RESOLUTION=1920x1080 \
-    VNC_USER=admin \
-    VNC_PASSWORD=admin \
+    VNC_PASSWORD= \
     CHROME_ARGS=
 
-# 1. 严格保留 tini 作为 init 进程
-#    安装 Chromium、Openbox、socat、numlockx (小键盘锁定)、中文字体及运行库
+# 1. 安装基础依赖、Chromium、Openbox、socat、gosu、tini、numlockx 及中文字体
 RUN apt-get update && apt-get install -y --no-install-recommends \
     tini \
+    gosu \
     chromium \
     openbox \
     socat \
@@ -26,35 +25,45 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     wget \
     procps \
     net-tools \
-    sudo \
-    libxfont2 \
-    xauth \
-    x11-xserver-utils \
+    libxcomposite1 \
+    libxfixes3 \
+    libxrandr2 \
+    libxcursor1 \
+    libxi6 \
+    libxtst6 \
+    libxinerama1 \
+    ssl-cert \
     && echo "zh_CN.UTF-8 UTF-8" > /etc/locale.gen \
     && echo "en_US.UTF-8 UTF-8" >> /etc/locale.gen \
-    && locale-gen
+    && locale-gen \
+    && rm -rf /var/lib/apt/lists/*
 
-# 2. 安装官方 KasmVNC Debian 12 (Bookworm) 预编译包
+# 2. 自动检测 CPU 架构并安装官方最新稳定版 KasmVNC Server
 RUN ARCH=$(dpkg --print-architecture) \
-    && KASM_VER="1.3.2" \
-    && wget -q https://github.com/kasmtech/KasmVNC/releases/download/v${KASM_VER}/kasmvncserver_bookworm_${KASM_VER}_${ARCH}.deb -O /tmp/kasmvnc.deb \
-    && apt-get install -y /tmp/kasmvnc.deb \
+    && KASMVNC_VER="1.3.3" \
+    && wget -q https://github.com/kasmtech/KasmVNC/releases/download/v${KASMVNC_VER}/kasmvncserver_bookworm_${KASMVNC_VER}_${ARCH}.deb -O /tmp/kasmvnc.deb \
+    && apt-get update \
+    && apt-get install -y /tmp/kasmvnc.deb --no-install-recommends \
     && rm -f /tmp/kasmvnc.deb \
     && rm -rf /var/lib/apt/lists/*
 
-# 3. 创建运行目录
-RUN mkdir -p /data /certs /etc/ssl/app /tmp/crashpad /etc/kasmvnc
+# 3. 创建 Kasm 专属普通用户 kasm-user (UID 1000)，加入 ssl-cert 组
+RUN useradd -m -u 1000 -s /bin/bash kasm-user \
+    && adduser kasm-user ssl-cert
+
+# 4. 创建工作、运行与证书挂载目录
+RUN mkdir -p /data /certs /etc/ssl/app /tmp/crashpad /home/kasm-user/.vnc /etc/kasmvnc \
+    && chown -R kasm-user:kasm-user /data /certs /etc/ssl/app /tmp/crashpad /home/kasm-user /etc/kasmvnc
 
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
 WORKDIR /data
 
-# 暴露端口：8444(KasmVNC HTTPS Web), 9222(CDP 穿透端口)
-EXPOSE 8444 9222
+# 暴露端口：6901(KasmVNC Web 端), 9222(CDP 穿透端口)
+EXPOSE 6901 9222
 
-# 使用 tini 接管信号与僵尸进程回收
+# 使用 tini 接管信号处理
 ENTRYPOINT ["/usr/bin/tini", "--", "/entrypoint.sh"]
 
-# 默认参数（支持通过命令行追加自定义 URL 或参数覆盖）
 CMD []

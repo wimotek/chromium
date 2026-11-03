@@ -9,12 +9,14 @@ ENV DEBIAN_FRONTEND=noninteractive \
     VNC_PASSWORD= \
     CHROME_ARGS=
 
-# 安装 tini、Chromium、TigerVNC Standalone (自带 X Server)、Openbox、noVNC、socat、numlockx 及中文字体
+# 安装 tini、Chromium、TigerVNC 全套工具、Openbox、noVNC、socat、gosu、numlockx 及中文字体
 RUN apt-get update && apt-get install -y --no-install-recommends \
     tini \
+    gosu \
     chromium \
     tigervnc-standalone-server \
     tigervnc-common \
+    tigervnc-tools \
     openbox \
     novnc \
     websockify \
@@ -32,8 +34,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && locale-gen \
     && rm -rf /var/lib/apt/lists/*
 
+# 创建运行 Chromium 的普通非 root 用户 appuser (UID 1000)
+RUN useradd -m -u 1000 -s /bin/bash appuser
+
 # 创建工作与证书运行目录
-RUN mkdir -p /data /certs /etc/ssl/app /tmp/crashpad /root/.vnc /usr/share/novnc
+RUN mkdir -p /data /certs /etc/ssl/app /tmp/crashpad /home/appuser/.vnc /usr/share/novnc \
+    && chown -R appuser:appuser /data /certs /etc/ssl/app /tmp/crashpad /home/appuser
 
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
