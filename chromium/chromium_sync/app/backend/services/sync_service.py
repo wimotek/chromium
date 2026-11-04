@@ -7,6 +7,8 @@ import asyncio
 from datetime import datetime, timedelta
 from typing import Optional, List
 from apscheduler.schedulers.background import BackgroundScheduler
+from apscheduler.events import EVENT_JOB_EXECUTED, EVENT_JOB_ERROR
+
 from config import DB_PATH, KEYS_DIR, ChromiumSync, logger
 from core.database import get_setting
 from services.cdp_engine import (
@@ -19,16 +21,33 @@ from services.cdp_engine import (
 )
 from services.notification import dispatch_notification
 
-scheduler = BackgroundScheduler()
+scheduler = BackgroundScheduler(timezone="Asia/Shanghai")
+
+def _job_listener(event):
+    if event.exception:
+        logger.error(f"❌ 定时策略调度任务执行失败 (Job ID: {event.job_id}): {event.exception}")
+    else:
+        logger.info(f"✅ 定时策略调度任务触发执行完毕 (Job ID: {event.job_id})")
+
+scheduler.add_listener(_job_listener, EVENT_JOB_EXECUTED | EVENT_JOB_ERROR)
 
 def _execute_policy_job_wrapper(policy_id: int):
+    """调度器任务包装函数，带有独立的事件循环和完善的异常捕获"""
     try:
-        asyncio.run(execute_policy_task(policy_id))
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            loop.run_until_complete(execute_policy_task(policy_id))
+        finally:
+            loop.close()
     except Exception as e:
-        logger.error(f"定时调度任务执行失败 (策略ID: {policy_id}): {e}", exc_info=True)
+        logger.error(f"定时调度任务异常 (策略ID: {policy_id}): {e}", exc_info=True)
 
 def reschedule_all_policies():
-    """重新加载所有已启用的策略到定时调度器中"""
+    """
+    重新加载所有已启用的策略到定时调度器中
+    核心算法：绝不传 next_run_time=None (None 会导致任务被 APScheduler 判定为永久挂起)
+    """
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     cur = conn.cursor()
@@ -36,15 +55,30 @@ def reschedule_all_policies():
     policies = [dict(r) for r in cur.fetchall()]
     conn.close()
 
+    # 清除旧的策略任务
     for job in scheduler.get_jobs():
         if job.id.startswith("policy_job_"):
             scheduler.remove_job(job.id)
 
     now_dt = datetime.now()
+    logger.info(f"🔄 正在装载同步策略至定时器 (共 {len(policies)} 条启用策略)...")
+
     for p in policies:
         job_id = f"policy_job_{p['id']}"
         interval = max(1, int(p.get("interval_minutes") or 15))
-        first_run_time = (now_dt + timedelta(seconds=5)) if not p.get("last_run") else None
+
+        # 动态演算下次运行时间：
+        # 1. 若从未执行过 (last_run 为空)：启动 5 秒后立即首跑！
+        # 2. 若此前执行过：根据 上次执行时间 + 周期 算出精确触发点；若已超时则 5 秒内立即补跑！
+        if not p.get("last_run"):
+            first_run = now_dt + timedelta(seconds=5)
+        else:
+            try:
+                last_dt = datetime.strptime(p["last_run"], "%Y-%m-%d %H:%M:%S")
+                target_dt = last_dt + timedelta(minutes=interval)
+                first_run = target_dt if target_dt > now_dt else (now_dt + timedelta(seconds=5))
+            except Exception:
+                first_run = now_dt + timedelta(minutes=interval)
 
         scheduler.add_job(
             _execute_policy_job_wrapper,
@@ -52,9 +86,9 @@ def reschedule_all_policies():
             args=[p['id']],
             minutes=interval,
             id=job_id,
-            next_run_time=first_run_time
+            next_run_time=first_run
         )
-        logger.info(f"已装载定时策略 [{p['name']}] (ID: {p['id']}): 每 {interval} 分钟自动调度 (首次触发: {'5秒后就绪执行' if first_run_time else '按周期等待'})")
+        logger.info(f"⏱️ 策略 [{p['name']}] (ID:{p['id']}) 装载完成 | 周期: {interval}分钟 | 下次运行时间: {first_run.strftime('%Y-%m-%d %H:%M:%S')}")
 
 async def run_chromium_sync_instance(source_node: dict, target_node: dict, include_domains: List[str], exclude_domains: List[str], diff_enabled: bool) -> dict:
     if ChromiumSync is None:
@@ -107,9 +141,7 @@ async def run_chromium_sync_instance(source_node: dict, target_node: dict, inclu
     return {"status": "success", "message": str(res) if res else "OK"}
 
 async def execute_policy_task(policy_id: int):
-    """
-    根据多策略规则执行同步（深度智能化：自动跳过离线/非活跃节点）
-    """
+    """根据多策略规则执行同步（自动跳过离线/非活跃节点）"""
     start_ts = time.time()
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
@@ -117,12 +149,13 @@ async def execute_policy_task(policy_id: int):
     cur.execute("SELECT * FROM sync_policies WHERE id=?", (policy_id,))
     policy_row = cur.fetchone()
     
-    # 核心：只抓取启用且状态处于 connected 的活跃节点
+    # 核心：只抓取启用状态的节点
     cur.execute("SELECT * FROM nodes WHERE enabled=1")
     all_enabled_nodes = [dict(r) for r in cur.fetchall()]
     conn.close()
 
     if not policy_row or not all_enabled_nodes:
+        logger.warning(f"策略 ID:{policy_id} 执行跳过: 策略不存在或集群无已启用节点")
         return
 
     policy = dict(policy_row)
@@ -145,7 +178,7 @@ async def execute_policy_task(policy_id: int):
     target_nodes_desc = ""
     cookie_count_metric = 0
 
-    # 1. 解析目标节点并过滤非活跃机器
+    # 解析目标节点
     scope_targets = []
     if policy["target_type"] == "group":
         group_all = [n for n in all_enabled_nodes if n.get("group_name") == policy["target_group"]]
@@ -161,7 +194,7 @@ async def execute_policy_task(policy_id: int):
         target_nodes_desc = f"全网活跃节点 ({len(active_nodes)} 个)"
 
     try:
-        # A. 全网/组内智能最新值合并 (仅在活跃节点间互通)
+        # A. 全网/组内智能最新值合并
         if policy["sync_type"] == "smart_merge":
             source_node_desc = "🌟 智能多主汇聚"
             merge_pool_nodes = scope_targets if policy["target_type"] == "group" else active_nodes
@@ -267,7 +300,6 @@ async def execute_policy_task(policy_id: int):
         else:
             source = next((n for n in all_enabled_nodes if n["id"] == policy["source_id"]), None)
             if not source or source.get("status") != "connected":
-                # 若指定的源节点不在线，尝试寻找集群中在线的默认源
                 source = next((n for n in active_nodes if n.get("is_source") == 1), None) or (active_nodes[0] if active_nodes else None)
 
             if not source:
@@ -318,6 +350,7 @@ async def execute_policy_task(policy_id: int):
 
     duration_str = f"{time.time() - start_ts:.2f}s"
 
+    # 写回数据库
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
     cur.execute("""
@@ -327,7 +360,7 @@ async def execute_policy_task(policy_id: int):
     
     cur.execute("UPDATE sync_policies SET last_run=? WHERE id=?", (sync_time, policy_id))
 
-    # 滚动裁剪保留最近 20 条日志
+    # 滚动淘汰保持最近 20 条
     cur.execute("""
         DELETE FROM sync_logs 
         WHERE id NOT IN (
@@ -342,6 +375,7 @@ async def execute_policy_task(policy_id: int):
     if status == "FAILED":
         await dispatch_notification(f"策略 [{policy['name']}] 执行失败预警", f"时间: {sync_time} (耗时: {duration_str})\n" + "\n".join(log_detail))
 
+# ==================== 供外部 API / Webhook 调用的标准入口 ====================
 async def execute_sync_task(policy_id: Optional[int] = None):
     if policy_id:
         await execute_policy_task(policy_id)
