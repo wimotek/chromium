@@ -8,8 +8,19 @@ import httpx
 import websockets
 from config import ChromiumSync, logger
 
+def get_cookie_signature_key(c: dict) -> tuple:
+    """四元组全局唯一签名 (兼容普通 Cookie 与 Chrome 115+ 分区 Cookie)"""
+    pkey = c.get('partitionKey')
+    pkey_str = json.dumps(pkey, sort_keys=True) if isinstance(pkey, dict) else str(pkey or '')
+    return (
+        str(c.get('name') or ''),
+        str(c.get('domain') or ''),
+        str(c.get('path') or '/'),
+        pkey_str
+    )
+
 def normalize_cookie_for_cdp(c: dict) -> dict:
-    """清洗 CookieParam 参数，确保 Chromium 严格接收"""
+    """清洗合规参数，剥离可能导致 Chromium 拒绝的非法字段"""
     name = c.get("name")
     value = c.get("value")
     if not name or value is None:
@@ -33,6 +44,7 @@ def normalize_cookie_for_cdp(c: dict) -> dict:
     elif c.get("url"):
         param["url"] = c["url"]
 
+    # 自动清理：只有未来的有效时间戳才传递，已过期与会话凭证严禁传 expires
     expires = c.get("expires")
     now_ts = time.time()
     if expires is not None and isinstance(expires, (int, float)) and expires > now_ts:
@@ -42,48 +54,83 @@ def normalize_cookie_for_cdp(c: dict) -> dict:
     if same_site in ["Strict", "Lax", "None"]:
         param["sameSite"] = same_site
 
+    if "priority" in c and c["priority"] in ["Low", "Medium", "High"]:
+        param["priority"] = c["priority"]
+
+    if "partitionKey" in c and c["partitionKey"]:
+        param["partitionKey"] = c["partitionKey"]
+
     return param
 
-def filter_cookies_by_domains(cookies: List[dict], include_domains: List[str], exclude_domains: List[str]) -> tuple[List[dict], int]:
-    if not include_domains and not exclude_domains:
-        return cookies, 0
-
-    original_len = len(cookies)
-    filtered = []
+def filter_cookies_by_domains(cookies: List[dict], include_domains: List[str], exclude_domains: List[str]) -> tuple[List[dict], int, int]:
+    """
+    前置自动垃圾清理：
+    1. 自动丢弃物理过期 Cookie
+    2. 自动剔除广告、追踪黑名单
+    返回: (清洗后Cookie列表, 过滤黑名单数, 丢弃过期数)
+    """
+    now_ts = time.time()
     clean_inc = [inc.lower().lstrip('.') for inc in include_domains if inc.strip()]
     clean_exc = [exc.lower().lstrip('.') for exc in exclude_domains if exc.strip()]
 
+    filtered = []
+    expired_dropped = 0
+    blacklist_dropped = 0
+
     for c in cookies:
-        domain = c.get('domain', '').lower().lstrip('.')
-        if clean_exc and any(exc in domain for exc in clean_exc):
+        # 自动清理 1：物理过期绝对淘汰
+        exp = c.get('expires')
+        if exp is not None and isinstance(exp, (int, float)) and exp > 0 and exp <= now_ts:
+            expired_dropped += 1
             continue
+
+        domain = c.get('domain', '').lower().lstrip('.')
+        # 自动清理 2：黑名单彻底丢弃
+        if clean_exc and any(exc in domain for exc in clean_exc):
+            blacklist_dropped += 1
+            continue
+        # 白名单过滤
         if clean_inc and not any(inc in domain for inc in clean_inc):
             continue
+
         filtered.append(c)
 
-    dropped_count = original_len - len(filtered)
-    return filtered, dropped_count
+    return filtered, blacklist_dropped, expired_dropped
 
 def compute_cookie_diff(current_cookies: List[dict], target_cookies: List[dict]) -> tuple[List[dict], int]:
+    """使用四元组比对指纹，找出目标端缺失或发生变更的 Cookie"""
     curr_map = {
-        (c.get('name'), c.get('domain'), c.get('path', '/')): c.get('value')
+        get_cookie_signature_key(c): c.get('value')
         for c in current_cookies
     }
     diff = []
     skipped_count = 0
     for n in target_cookies:
-        key = (n.get('name'), n.get('domain'), n.get('path', '/'))
+        key = get_cookie_signature_key(n)
         if key not in curr_map or curr_map[key] != n.get('value'):
             diff.append(n)
         else:
             skipped_count += 1
     return diff, skipped_count
 
-def smart_merge_cookies(all_cookie_lists: List[List[dict]]) -> List[dict]:
+def smart_merge_cookies(all_cookie_lists: List[List[dict]], max_per_domain: int = 50) -> tuple[List[dict], int]:
+    """
+    智能合并 + 自动防膨胀熔断：
+    1. 自动过滤过期条目
+    2. 最新值冲突消歧
+    3. 单域名上限熔断 (单域名最多保留 50 条，彻底消灭 HTTP 431 风险)
+    返回: (黄金凭据池, 熔断裁剪数)
+    """
     merged_pool: Dict[tuple, dict] = {}
+    now_ts = time.time()
+
     for cookies in all_cookie_lists:
         for c in cookies:
-            key = (c.get('name'), c.get('domain'), c.get('path', '/'))
+            exp = c.get('expires')
+            if exp is not None and isinstance(exp, (int, float)) and exp > 0 and exp <= now_ts:
+                continue
+
+            key = get_cookie_signature_key(c)
             if key not in merged_pool:
                 merged_pool[key] = c
             else:
@@ -96,13 +143,27 @@ def smart_merge_cookies(all_cookie_lists: List[List[dict]]) -> List[dict]:
                     elif exp_new == exp_existing:
                         if len(str(c.get('value', ''))) >= len(str(existing.get('value', ''))):
                             merged_pool[key] = c
-    return list(merged_pool.values())
+
+    # 自动清理 3：单域名条数超额熔断保护 (按域名桶管理)
+    domain_buckets: Dict[str, List[dict]] = {}
+    for c in merged_pool.values():
+        d = (c.get('domain') or '').lower().lstrip('.')
+        domain_buckets.setdefault(d, []).append(c)
+
+    final_pool = []
+    trimmed_count = 0
+    for d, d_cookies in domain_buckets.items():
+        if len(d_cookies) > max_per_domain:
+            # 优先保留未来有效时间更靠后的健康凭据
+            d_cookies.sort(key=lambda x: (x.get('expires') or 0), reverse=True)
+            final_pool.extend(d_cookies[:max_per_domain])
+            trimmed_count += (len(d_cookies) - max_per_domain)
+        else:
+            final_pool.extend(d_cookies)
+
+    return final_pool, trimmed_count
 
 async def resolve_cdp_endpoint(local_port: int, target_host: str = "127.0.0.1", prefer_page: bool = False) -> tuple[str, str]:
-    """
-    智能解析 CDP 端点：
-    当 prefer_page=True 时，优先寻找真实的 Page 目标，确保 Network.setCookies 能够真正写入浏览器！
-    """
     host_clean = target_host.strip() if target_host else "127.0.0.1"
     if host_clean in ["127.0.0.1", "localhost"]:
         candidate_hosts = ["127.0.0.1", "host.docker.internal", "172.17.0.1"]
@@ -112,7 +173,6 @@ async def resolve_cdp_endpoint(local_port: int, target_host: str = "127.0.0.1", 
     async with httpx.AsyncClient(timeout=3.0) as client:
         for host in candidate_hosts:
             try:
-                # 若需要写入，优先连接活跃的 Page 目标
                 if prefer_page:
                     list_res = await client.get(f"http://{host}:{local_port}/json/list")
                     if list_res.status_code == 200:
@@ -123,7 +183,6 @@ async def resolve_cdp_endpoint(local_port: int, target_host: str = "127.0.0.1", 
                             parsed = urlparse(raw_ws)
                             return host, urlunparse(parsed._replace(netloc=f"{host}:{local_port}"))
 
-                # 兜底连接 Browser 根目标
                 ver_res = await client.get(f"http://{host}:{local_port}/json/version")
                 if ver_res.status_code == 200:
                     raw_ws = ver_res.json()["webSocketDebuggerUrl"]
@@ -134,7 +193,6 @@ async def resolve_cdp_endpoint(local_port: int, target_host: str = "127.0.0.1", 
     raise ConnectionRefusedError(f"无法连通主机 {host_clean}:{local_port} 的 CDP 调试端口")
 
 async def fetch_cookies_native(local_port: int, target_host: str = "127.0.0.1") -> List[dict]:
-    """提取全局 Cookies (Storage 域可在 Browser 根端点全局提取)"""
     host, ws_url = await resolve_cdp_endpoint(local_port, target_host, prefer_page=False)
     async with websockets.connect(ws_url, timeout=5.0) as ws:
         await ws.send(json.dumps({"id": 1, "method": "Storage.getCookies"}))
@@ -144,7 +202,6 @@ async def fetch_cookies_native(local_port: int, target_host: str = "127.0.0.1") 
         if cookies:
             return cookies
 
-        # 回退 Network.getAllCookies
         await ws.send(json.dumps({"id": 2, "method": "Network.enable"}))
         await ws.recv()
         await ws.send(json.dumps({"id": 3, "method": "Network.getAllCookies"}))
@@ -152,10 +209,48 @@ async def fetch_cookies_native(local_port: int, target_host: str = "127.0.0.1") 
         data2 = json.loads(resp2)
         return data2.get("result", {}).get("cookies", [])
 
+async def purge_stale_cookies_on_node(local_port: int, target_host: str = "127.0.0.1", exclude_domains: List[str] = None) -> int:
+    """
+    自动清理核心机制：
+    通过 CDP 在目标浏览器物理删除已过期与命中了黑名单的垃圾 Cookie
+    """
+    try:
+        raw_cookies = await fetch_cookies_native(local_port, target_host)
+        now_ts = time.time()
+        clean_exc = [exc.lower().lstrip('.') for exc in (exclude_domains or []) if exc.strip()]
+
+        to_delete = []
+        for c in raw_cookies:
+            exp = c.get('expires')
+            is_expired = (exp is not None and isinstance(exp, (int, float)) and exp > 0 and exp <= now_ts)
+            domain = (c.get('domain') or '').lower().lstrip('.')
+            is_blacklisted = bool(clean_exc and any(exc in domain for exc in clean_exc))
+
+            if is_expired or is_blacklisted:
+                to_delete.append({
+                    "name": c.get("name"),
+                    "domain": c.get("domain"),
+                    "path": c.get("path", "/")
+                })
+
+        if not to_delete:
+            return 0
+
+        host, ws_url = await resolve_cdp_endpoint(local_port, target_host, prefer_page=True)
+        async with websockets.connect(ws_url, timeout=8.0) as ws:
+            for i, d in enumerate(to_delete):
+                await ws.send(json.dumps({
+                    "id": 8000 + i,
+                    "method": "Network.deleteCookies",
+                    "params": d
+                }))
+        logger.info(f"🧹 目标 [{target_host}:{local_port}] 自动物理清理了 {len(to_delete)} 条垃圾/过期 Cookie")
+        return len(to_delete)
+    except Exception as e:
+        logger.debug(f"物理清理目标 Cookie 异常 ({target_host}:{local_port}): {e}")
+        return 0
+
 async def inject_cookies_native(local_port: int, cookies: List[dict], target_host: str = "127.0.0.1") -> int:
-    """
-    核心修复：连接真实的 Page 页面目标进行 Cookie 写入，确保落盘成功！
-    """
     if not cookies:
         return 0
 
@@ -168,41 +263,53 @@ async def inject_cookies_native(local_port: int, cookies: List[dict], target_hos
     if not valid_params:
         return 0
 
-    # 1. 优先获取 Page 级别的 WebSocket 调试端点
     try:
         host, ws_url = await resolve_cdp_endpoint(local_port, target_host, prefer_page=True)
     except Exception as e:
-        logger.error(f"无法获取注入端点: {e}")
+        logger.error(f"无法获取 Page 注入端点: {e}")
         return 0
 
+    start_t = time.time()
     async with websockets.connect(ws_url, timeout=10.0, max_size=100 * 1024 * 1024) as ws:
-        # 激活 Network 域
         await ws.send(json.dumps({"id": 1, "method": "Network.enable"}))
         await asyncio.wait_for(ws.recv(), timeout=3.0)
 
-        # 批量设置 Cookies
-        await ws.send(json.dumps({
-            "id": 2,
-            "method": "Network.setCookies",
-            "params": {"cookies": valid_params}
-        }))
-        resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=6.0))
-        
-        if "error" in resp:
-            logger.error(f"Network.setCookies 批量写入报错: {resp['error']}")
-            # 降级：逐条写入
-            success_cnt = 0
-            for idx, p in enumerate(valid_params):
-                await ws.send(json.dumps({"id": 100 + idx, "method": "Network.setCookie", "params": p}))
-                r = json.loads(await asyncio.wait_for(ws.recv(), timeout=2.0))
-                if r.get("result", {}).get("success") is True:
-                    success_cnt += 1
-            return success_cnt
+        # 一级极速批量注入
+        try:
+            await ws.send(json.dumps({
+                "id": 2,
+                "method": "Network.setCookies",
+                "params": {"cookies": valid_params}
+            }))
+            resp_batch = json.loads(await asyncio.wait_for(ws.recv(), timeout=6.0))
+            if "error" not in resp_batch:
+                await asyncio.sleep(0.3)
+                elapsed = f"{(time.time() - start_t)*1000:.1f}ms"
+                logger.info(f"⚡ [批量极速] 目标 [{target_host}:{local_port}] 写入 {len(valid_params)} 条 Cookies 完成 (耗时: {elapsed})")
+                return len(valid_params)
+        except Exception:
+            pass
 
-    # 留出 0.3 秒缓冲落盘
-    await asyncio.sleep(0.3)
-    logger.info(f"目标 [{target_host}:{local_port}] 成功注入 {len(valid_params)} 条 Cookies")
-    return len(valid_params)
+        # 二级流水线容灾
+        for i, p in enumerate(valid_params):
+            await ws.send(json.dumps({
+                "id": 1000 + i,
+                "method": "Network.setCookie",
+                "params": p
+            }))
+
+        success_count = 0
+        for _ in range(len(valid_params)):
+            try:
+                resp_text = await asyncio.wait_for(ws.recv(), timeout=2.0)
+                resp = json.loads(resp_text)
+                if resp.get("result", {}).get("success") is True:
+                    success_count += 1
+            except Exception:
+                pass
+
+        await asyncio.sleep(0.3)
+        return success_count
 
 async def probe_node_cookies(local_port: int, target_host: str = "127.0.0.1") -> tuple[int, str]:
     try:

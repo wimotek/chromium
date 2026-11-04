@@ -17,13 +17,13 @@ from services.cdp_engine import (
     probe_node_cookies,
     filter_cookies_by_domains,
     compute_cookie_diff,
-    smart_merge_cookies
+    smart_merge_cookies,
+    purge_stale_cookies_on_node
 )
 from services.notification import dispatch_notification
 
 scheduler = BackgroundScheduler(timezone="Asia/Shanghai")
 
-# 全局任务互斥锁与执行标记 (杜绝手动触发与定时器撞车)
 _is_sync_running = False
 
 def _job_listener(event):
@@ -35,10 +35,9 @@ def _job_listener(event):
 scheduler.add_listener(_job_listener, EVENT_JOB_EXECUTED | EVENT_JOB_ERROR)
 
 def _execute_policy_job_wrapper(policy_id: int):
-    """调度器任务包装函数"""
     global _is_sync_running
     if _is_sync_running:
-        logger.info(f"⏳ 同步引擎正忙，定时器跳过策略 ID:{policy_id} 的本次调度 (防撞车保护)")
+        logger.info(f"⏳ 同步引擎正忙，定时器跳过策略 ID:{policy_id} (防撞车保护)")
         return
 
     try:
@@ -52,7 +51,6 @@ def _execute_policy_job_wrapper(policy_id: int):
         logger.error(f"定时调度任务异常 (策略ID: {policy_id}): {e}", exc_info=True)
 
 def reschedule_all_policies():
-    """重新加载所有已启用的策略到定时调度器中"""
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     cur = conn.cursor()
@@ -142,7 +140,9 @@ async def run_chromium_sync_instance(source_node: dict, target_node: dict, inclu
     return {"status": "success", "message": str(res) if res else "OK"}
 
 async def execute_policy_task(policy_id: int):
-    """根据多策略规则执行同步（内置防重入互斥锁与定时器自动顺延）"""
+    """
+    根据多策略规则执行同步（集成了全自动垃圾清理 Auto-GC）
+    """
     global _is_sync_running
     if _is_sync_running:
         logger.warning(f"⚠️ 拦截重复调度：已有策略正在同步中，策略 ID:{policy_id} 自动跳过")
@@ -170,7 +170,6 @@ async def execute_policy_task(policy_id: int):
         sync_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         log_detail = [f"🚀 触发策略 [{policy['name']}] (类型: {policy['sync_type']})"]
 
-        # 智能分流活跃节点与离线节点
         active_nodes = [n for n in all_enabled_nodes if n.get("status") == "connected"]
         inactive_nodes = [n for n in all_enabled_nodes if n.get("status") != "connected"]
         
@@ -202,7 +201,7 @@ async def execute_policy_task(policy_id: int):
             target_nodes_desc = f"全网活跃节点 ({len(active_nodes)} 个)"
 
         try:
-            # A. 全网/组内智能最新值合并
+            # ==================== A. 全网智能最新值合并 (含 Auto-GC) ====================
             if policy["sync_type"] == "smart_merge":
                 source_node_desc = "🌟 智能多主汇聚"
                 merge_pool_nodes = scope_targets if policy["target_type"] == "group" else active_nodes
@@ -217,30 +216,46 @@ async def execute_policy_task(policy_id: int):
                     ]
                     fetched_results = await asyncio.gather(*fetch_tasks, return_exceptions=True)
                     valid_cookie_lists = []
+                    total_expired_dropped = 0
+                    total_blacklisted_dropped = 0
+
                     for idx, res in enumerate(fetched_results):
                         n_name = merge_pool_nodes[idx]['name']
                         if isinstance(res, list):
-                            cleaned_c, dropped = filter_cookies_by_domains(res, include_domains, exclude_domains)
+                            cleaned_c, bl_cnt, exp_cnt = filter_cookies_by_domains(res, include_domains, exclude_domains)
                             valid_cookie_lists.append(cleaned_c)
-                            drop_info = f" (过滤 {dropped} 广告项)" if dropped > 0 else ""
-                            log_detail.append(f"• 节点 [{n_name}] 贡献 {len(cleaned_c)} 条凭据{drop_info}")
+                            total_expired_dropped += exp_cnt
+                            total_blacklisted_dropped += bl_cnt
+                            log_detail.append(f"• 节点 [{n_name}] 贡献 {len(cleaned_c)} 条鲜活凭据")
                         else:
                             log_detail.append(f"• 节点 [{n_name}] 握手异常，自动跳过")
 
-                    golden_pool = smart_merge_cookies(valid_cookie_lists)
+                    # 智能消歧 + 单域名熔断防 431 膨胀
+                    golden_pool, cap_trimmed = smart_merge_cookies(valid_cookie_lists, max_per_domain=50)
                     cookie_count_metric = len(golden_pool)
-                    log_detail.append(f"✨ 黄金凭据池聚拢完成 (共 {cookie_count_metric} 条最新 Cookies)")
+
+                    gc_summary = []
+                    if total_expired_dropped > 0: gc_summary.append(f"已淘汰 {total_expired_dropped} 条物理过期项")
+                    if total_blacklisted_dropped > 0: gc_summary.append(f"已拦截 {total_blacklisted_dropped} 条黑名单追踪项")
+                    if cap_trimmed > 0: gc_summary.append(f"超额熔断裁剪 {cap_trimmed} 条陈旧项")
+                    gc_info = f" ({', '.join(gc_summary)})" if gc_summary else ""
+
+                    log_detail.append(f"✨ 黄金凭据池聚拢完成: 共 {cookie_count_metric} 条最新 Cookies{gc_info}")
 
                     async def _push_golden(node):
                         target_h = node.get('direct_host', '127.0.0.1') if node['is_local'] else "127.0.0.1"
                         try:
+                            # 自动物理清理目标节点浏览器内的陈旧垃圾
+                            purged_cnt = await purge_stale_cookies_on_node(node['local_bind_port'], target_h, exclude_domains)
+                            
                             if diff_enabled:
                                 curr_c = await fetch_cookies_native(node['local_bind_port'], target_h)
                                 diff_cookies, skipped = compute_cookie_diff(curr_c, golden_pool)
                                 if diff_cookies:
                                     await inject_cookies_native(node['local_bind_port'], diff_cookies, target_h)
                                 c_cnt, _ = await probe_node_cookies(node['local_bind_port'], target_h)
-                                action_desc = f"差量注入 {len(diff_cookies)} 项 (跳过 {skipped} 个无变化项)"
+                                purge_tip = f"，物理清空 {purged_cnt} 条垃圾" if purged_cnt > 0 else ""
+                                action_desc = f"差量注入 {len(diff_cookies)} 项 (跳过 {skipped} 个无变化项{purge_tip})"
                             else:
                                 await inject_cookies_native(node['local_bind_port'], golden_pool, target_h)
                                 c_cnt, _ = await probe_node_cookies(node['local_bind_port'], target_h)
@@ -260,7 +275,7 @@ async def execute_policy_task(policy_id: int):
                     log_detail.extend(push_results)
                     status = "SUCCESS"
 
-            # B. 组对组分发 (Group-to-Group)
+            # ==================== B. 组对组分发 (含 Auto-GC) ====================
             elif policy["sync_type"] == "group_to_group":
                 src_group = policy.get("source_group") or "默认分组"
                 src_active_nodes = [n for n in active_nodes if n.get("group_name") == src_group]
@@ -275,11 +290,15 @@ async def execute_policy_task(policy_id: int):
                         for n in src_active_nodes
                     ]
                     fetched_results = await asyncio.gather(*fetch_tasks, return_exceptions=True)
-                    valid_lists = [r for r in fetched_results if isinstance(r, list)]
-                    group_cookies = smart_merge_cookies(valid_lists)
-                    cleaned_cookies, _ = filter_cookies_by_domains(group_cookies, include_domains, exclude_domains)
-                    cookie_count_metric = len(cleaned_cookies)
-                    log_detail.append(f"• 从源分组 [{src_group}] 汇聚到 {cookie_count_metric} 条凭据")
+                    valid_lists = []
+                    for r in fetched_results:
+                        if isinstance(r, list):
+                            cl, _, _ = filter_cookies_by_domains(r, include_domains, exclude_domains)
+                            valid_lists.append(cl)
+
+                    group_cookies, _ = smart_merge_cookies(valid_lists, max_per_domain=50)
+                    cookie_count_metric = len(group_cookies)
+                    log_detail.append(f"• 从源分组 [{src_group}] 汇聚到 {cookie_count_metric} 条鲜活凭据")
 
                     dest_nodes = [n for n in scope_targets if n not in src_active_nodes]
                     if not dest_nodes:
@@ -288,15 +307,16 @@ async def execute_policy_task(policy_id: int):
                         for target in dest_nodes:
                             target_h = target.get('direct_host', '127.0.0.1') if target['is_local'] else "127.0.0.1"
                             try:
+                                await purge_stale_cookies_on_node(target['local_bind_port'], target_h, exclude_domains)
                                 if diff_enabled:
                                     curr_c = await fetch_cookies_native(target['local_bind_port'], target_h)
-                                    diff_c, skipped = compute_cookie_diff(curr_c, cleaned_cookies)
+                                    diff_c, skipped = compute_cookie_diff(curr_c, group_cookies)
                                     if diff_c:
                                         await inject_cookies_native(target['local_bind_port'], diff_c, target_h)
                                     act = f"差量注入 {len(diff_c)} 项"
                                 else:
-                                    await inject_cookies_native(target['local_bind_port'], cleaned_cookies, target_h)
-                                    act = f"全量写入 {len(cleaned_cookies)} 条"
+                                    await inject_cookies_native(target['local_bind_port'], group_cookies, target_h)
+                                    act = f"全量写入 {len(group_cookies)} 条"
 
                                 t_cnt, _ = await probe_node_cookies(target['local_bind_port'], target_h)
                                 log_detail.append(f"-> 目标节点 [{target['name']}] 分发成功 ({act})，现存: {t_cnt}")
@@ -304,7 +324,7 @@ async def execute_policy_task(policy_id: int):
                                 log_detail.append(f"-> 目标节点 [{target['name']}] 分发失败: {ex}")
                     status = "SUCCESS"
 
-            # C. 节点对组 / 节点对多节点分发
+            # ==================== C. 节点对组 / 节点对多节点分发 (含 Auto-GC) ====================
             else:
                 source = next((n for n in all_enabled_nodes if n["id"] == policy["source_id"]), None)
                 if not source or source.get("status") != "connected":
@@ -319,9 +339,9 @@ async def execute_policy_task(policy_id: int):
                     source_h = source.get('direct_host', '127.0.0.1') if source['is_local'] else "127.0.0.1"
 
                     raw_c = await fetch_cookies_native(source['local_bind_port'], source_h)
-                    cookies, dropped = filter_cookies_by_domains(raw_c, include_domains, exclude_domains)
+                    cookies, _, _ = filter_cookies_by_domains(raw_c, include_domains, exclude_domains)
                     cookie_count_metric = len(cookies)
-                    log_detail.append(f"• 从源节点 [{source['name']}] 抓取到 {cookie_count_metric} 个有效凭据")
+                    log_detail.append(f"• 从源节点 [{source['name']}] 提取到 {cookie_count_metric} 个有效凭据")
 
                     dest_nodes = [n for n in scope_targets if n["id"] != source["id"]]
                     if not dest_nodes:
@@ -330,6 +350,7 @@ async def execute_policy_task(policy_id: int):
                         for target in dest_nodes:
                             target_h = target.get('direct_host', '127.0.0.1') if target['is_local'] else "127.0.0.1"
                             try:
+                                await purge_stale_cookies_on_node(target['local_bind_port'], target_h, exclude_domains)
                                 if ChromiumSync is not None and not target['is_local']:
                                     sync_res = await run_chromium_sync_instance(source, target, include_domains, exclude_domains, diff_enabled)
                                     target_count, _ = await probe_node_cookies(target['local_bind_port'], target_h)
@@ -358,7 +379,6 @@ async def execute_policy_task(policy_id: int):
 
         duration_str = f"{time.time() - start_ts:.2f}s"
 
-        # 写回数据库
         conn = sqlite3.connect(DB_PATH)
         cur = conn.cursor()
         cur.execute("""
@@ -368,7 +388,6 @@ async def execute_policy_task(policy_id: int):
         
         cur.execute("UPDATE sync_policies SET last_run=? WHERE id=?", (sync_time, policy_id))
 
-        # 滚动淘汰保持 20 条
         cur.execute("""
             DELETE FROM sync_logs 
             WHERE id NOT IN (
@@ -380,7 +399,6 @@ async def execute_policy_task(policy_id: int):
         conn.commit()
         conn.close()
 
-        # ==================== 核心：自动顺延该策略下一次定时调度时间 ====================
         try:
             job_id = f"policy_job_{policy_id}"
             job = scheduler.get_job(job_id)
@@ -388,15 +406,14 @@ async def execute_policy_task(policy_id: int):
                 interval_mins = max(1, int(policy.get("interval_minutes") or 15))
                 next_trigger = datetime.now() + timedelta(minutes=interval_mins)
                 job.modify(next_run_time=next_trigger)
-                logger.info(f"🔄 策略 [{policy['name']}] 刚刚完成执行，下次定时调度已自动推迟至: {next_trigger.strftime('%Y-%m-%d %H:%M:%S')}")
+                logger.info(f"🔄 策略 [{policy['name']}] 执行完成，下次自动调度已顺延至: {next_trigger.strftime('%Y-%m-%d %H:%M:%S')}")
         except Exception as ex:
-            logger.debug(f"调整定时任务下次触发时间异常: {ex}")
+            logger.debug(f"顺延下次触发时间异常: {ex}")
 
         if status == "FAILED":
             await dispatch_notification(f"策略 [{policy['name']}] 执行失败预警", f"时间: {sync_time} (耗时: {duration_str})\n" + "\n".join(log_detail))
 
     finally:
-        # 解除互斥锁
         _is_sync_running = False
 
 async def execute_sync_task(policy_id: Optional[int] = None):
