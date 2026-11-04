@@ -1,5 +1,5 @@
 <script setup>
-import { ref, reactive, onMounted, onUnmounted } from 'vue'
+import { ref, reactive, computed, onMounted, onUnmounted } from 'vue'
 
 const props = defineProps({
   api: Function,
@@ -10,9 +10,9 @@ const policies = ref([])
 const nodes = ref([])
 const groups = ref([])
 const logs = ref([])
-const isExecuting = ref(false)
 
-// 页面静默自动刷新定时器
+// 正在执行的策略 ID (用于按钮加载状态显示)
+const runningPolicyId = ref(null)
 let autoRefreshTimer = null
 
 // 策略弹窗状态
@@ -53,7 +53,6 @@ const loadAllData = async () => {
   if (lRes.ok) logs.value = await lRes.json()
 }
 
-// 格式化输出简洁优雅的路由文字
 const formatRouteText = (p) => {
   if (p.sync_type === 'smart_merge') return '全网最新值智能双向合并'
   if (p.sync_type === 'group_to_group') {
@@ -134,7 +133,6 @@ const submitPolicy = async () => {
   loadAllData()
 }
 
-// 启停切换
 const togglePolicy = async (p) => {
   const res = await props.api(`/api/sync/policies/${p.id}/toggle`, { method: 'POST' })
   const data = await res.json()
@@ -142,7 +140,6 @@ const togglePolicy = async (p) => {
   props.showToast(data.message, 'success')
 }
 
-// 删除策略
 const deletePolicy = async (id) => {
   if (policies.value.length <= 1) {
     props.showToast('系统必须保留至少一条调度策略，无法删除', 'error')
@@ -160,18 +157,25 @@ const deletePolicy = async (id) => {
   }
 }
 
-// 核心优化：执行完毕后同时刷新策略与审计流水，保证“上次执行”瞬间更新！
+// 核心优化：点击立即响应，按钮变为加载中，Toast 实时反馈
 const runPolicy = async (id) => {
-  if (isExecuting.value) return
-  isExecuting.value = true
+  if (runningPolicyId.value) return
+  runningPolicyId.value = id
+  props.showToast('正在执行同步策略，请稍候...', 'info')
   try {
     const res = await props.api(`/api/sync/policies/${id}/run`, { method: 'POST' })
     const data = await res.json()
-    props.showToast(data.message, 'success')
-    // 立即重新拉取全部数据，使界面上次执行时间即刻更新
+    if (res.ok) {
+      props.showToast(data.message || '策略执行完成！', 'success')
+    } else {
+      props.showToast(data.detail || '执行受阻', 'error')
+    }
+    // 立即刷新所有数据和审计表
     await loadAllData()
+  } catch (e) {
+    props.showToast('网络请求异常', 'error')
   } finally {
-    isExecuting.value = false
+    runningPolicyId.value = null
   }
 }
 
@@ -204,16 +208,13 @@ const viewLogDetail = (detail) => {
 
 onMounted(() => {
   loadAllData()
-  // 每 15 秒静默轮询一次，自动捕捉后台定时任务的执行更新
   autoRefreshTimer = setInterval(() => {
     loadAllData()
   }, 15000)
 })
 
 onUnmounted(() => {
-  if (autoRefreshTimer) {
-    clearInterval(autoRefreshTimer)
-  }
+  if (autoRefreshTimer) clearInterval(autoRefreshTimer)
 })
 </script>
 
@@ -266,11 +267,11 @@ onUnmounted(() => {
           </div>
         </div>
 
-        <!-- 卡片底部动作栏：左删除，右执行 -->
+        <!-- 卡片底部动作栏：左删除，右执行 (带执行中动画) -->
         <div class="policy-card-actions">
           <button 
             @click="deletePolicy(p.id)" 
-            :disabled="policies.length <= 1"
+            :disabled="policies.length <= 1 || runningPolicyId === p.id"
             :class="['btn-micro', 'btn-trash', policies.length <= 1 ? 'btn-disabled' : '']"
             :title="policies.length <= 1 ? '系统必须保留至少一条调度策略，不可删除' : '删除该策略'"
           >
@@ -280,18 +281,25 @@ onUnmounted(() => {
           <div class="actions-right-cluster">
             <button 
               @click="togglePolicy(p)" 
+              :disabled="runningPolicyId === p.id"
               :class="['btn-micro', p.enabled ? 'btn-pause' : 'btn-resume']"
               :title="p.enabled ? '点击暂停此策略的定时调度' : '点击恢复此策略的定时调度'"
             >
               {{ p.enabled ? '⏸️ 停用' : '▶️ 启用' }}
             </button>
 
-            <button @click="openEditPolicy(p)" class="btn-micro btn-blue">
+            <button @click="openEditPolicy(p)" :disabled="runningPolicyId === p.id" class="btn-micro btn-blue">
               ✏️ 编辑
             </button>
 
-            <button @click="runPolicy(p.id)" :disabled="isExecuting" class="btn-micro btn-orange">
-              ⚡ 立即执行
+            <!-- 核心执行按钮：点击立刻展现执行中状态 -->
+            <button 
+              @click="runPolicy(p.id)" 
+              :disabled="runningPolicyId !== null" 
+              class="btn-micro btn-orange"
+            >
+              <span v-if="runningPolicyId === p.id">⏳ 执行中...</span>
+              <span v-else>⚡ 立即执行</span>
             </button>
           </div>
         </div>
@@ -303,7 +311,7 @@ onUnmounted(() => {
       </div>
     </div>
 
-    <!-- 审计列表：高规格结构化数据表格 (20 条轮转) -->
+    <!-- ==================== 审计列表：高规格结构化数据表格 (20 条轮转) ==================== -->
     <div class="audit-section-wrapper">
       <div class="audit-header-bar">
         <div class="audit-title-box">
@@ -519,6 +527,7 @@ onUnmounted(() => {
   box-sizing: border-box;
 }
 
+/* 顶栏 */
 .sync-top-header {
   display: flex;
   justify-content: space-between;
@@ -586,6 +595,7 @@ onUnmounted(() => {
   box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
 }
 
+/* 卡片头部 */
 .policy-card-header {
   display: flex;
   justify-content: space-between;
@@ -638,6 +648,7 @@ onUnmounted(() => {
   white-space: nowrap;
 }
 
+/* 状态徽章 */
 .status-indicator-on {
   background: rgba(16, 185, 129, 0.12);
   border: 1px solid rgba(16, 185, 129, 0.35);
@@ -707,6 +718,7 @@ onUnmounted(() => {
   text-overflow: ellipsis;
 }
 
+/* 卡片动作栏 */
 .policy-card-actions {
   display: flex;
   justify-content: space-between;
@@ -720,6 +732,7 @@ onUnmounted(() => {
   gap: 6px;
 }
 
+/* 动作按钮 */
 .btn-micro {
   border: none;
   border-radius: 4px;
@@ -780,6 +793,7 @@ onUnmounted(() => {
   font-size: 12px;
 }
 
+/* 表单与输入 */
 .form-vertical-flow {
   display: flex;
   flex-direction: column;
@@ -827,6 +841,7 @@ onUnmounted(() => {
 .font-mono { font-family: monospace; }
 .font-cyan-mono { color: #00f0ff; font-family: monospace; font-weight: bold; }
 
+/* 拓扑模式卡片 */
 .grid-2col-fluid {
   display: grid;
   grid-template-columns: repeat(2, 1fr);
@@ -876,6 +891,7 @@ onUnmounted(() => {
   padding: 14px;
 }
 
+/* 目标添加与胶囊标签 */
 .chips-container-box {
   display: flex;
   gap: 8px;
@@ -908,6 +924,7 @@ onUnmounted(() => {
   color: #64748b;
 }
 
+/* 按钮体系 */
 .btn-primary-gradient {
   background: linear-gradient(135deg, #0284c7, #2563eb);
   color: #ffffff;
