@@ -350,9 +350,10 @@ onUnmounted(() => {
               <td>
                 <span class="cookie-stat-badge">🍪 {{ l.cookie_count || 0 }} 条</span>
               </td>
-              <td class="font-mono text-duration">⏱️ {{ l.duration || '0.00s' }}</td>
+<!-- 状态胶囊 -->
               <td style="text-align: center;">
                 <span v-if="l.status==='SUCCESS'" class="status-pill-ok">● 成功</span>
+                <span v-else-if="l.status==='NO_CHANGE'" class="status-pill-skip">● 一致跳过</span>
                 <span v-else class="status-pill-fail">✕ 失败</span>
               </td>
               <td style="text-align: right; padding-right: 18px;">
@@ -1206,5 +1207,14 @@ onUnmounted(() => {
   color: #e2e8f0;
   white-space: pre-wrap;
   margin: 0;
+}
+
+.status-pill-skip {
+  background-color: rgba(2, 132, 199, 0.2);
+  border: 1px solid #0284c7;
+  color: #38bdf8;
+  border-radius: 9999px;
+  padding: 2px 8px;
+  font-size: 11px;
 }
 </style>

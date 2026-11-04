@@ -141,7 +141,7 @@ async def run_chromium_sync_instance(source_node: dict, target_node: dict, inclu
 
 async def execute_policy_task(policy_id: int):
     """
-    根据多策略规则执行同步（集成了全自动垃圾清理 Auto-GC）
+    根据策略执行同步：集成【前置差异研判】与【零变化秒级跳过】
     """
     global _is_sync_running
     if _is_sync_running:
@@ -163,7 +163,7 @@ async def execute_policy_task(policy_id: int):
         conn.close()
 
         if not policy_row or not all_enabled_nodes:
-            logger.warning(f"策略 ID:{policy_id} 执行跳过: 策略不存在或集群无可用节点")
+            logger.warning(f"策略 ID:{policy_id} 执行跳过: 策略不存在或无可用节点")
             return
 
         policy = dict(policy_row)
@@ -175,7 +175,7 @@ async def execute_policy_task(policy_id: int):
         
         if inactive_nodes:
             skip_names = ", ".join([n['name'] for n in inactive_nodes])
-            log_detail.append(f"ℹ️ 自动跳过 {len(inactive_nodes)} 个非活跃离线节点: {skip_names}")
+            log_detail.append(f"ℹ️ 自动跳过 {len(inactive_nodes)} 个离线节点: {skip_names}")
 
         diff_enabled = (get_setting("sync_diff_enabled", "1") == "1")
         include_domains = [d.strip() for d in get_setting("sync_include_domains", "").split(",") if d.strip()]
@@ -190,18 +190,18 @@ async def execute_policy_task(policy_id: int):
         if policy["target_type"] == "group":
             group_all = [n for n in all_enabled_nodes if n.get("group_name") == policy["target_group"]]
             scope_targets = [n for n in group_all if n.get("status") == "connected"]
-            target_nodes_desc = f"分组 [{policy['target_group']}] (活跃: {len(scope_targets)}/{len(group_all)})"
+            target_nodes_desc = f"分组 [{policy['target_group']}] ({len(scope_targets)} 活跃)"
         elif policy["target_type"] == "nodes":
             tids = json.loads(policy.get("target_ids") or "[]")
             nodes_all = [n for n in all_enabled_nodes if n["id"] in tids]
             scope_targets = [n for n in nodes_all if n.get("status") == "connected"]
-            target_nodes_desc = f"指定节点 (活跃: {len(scope_targets)}/{len(nodes_all)})"
+            target_nodes_desc = f"指定节点 ({len(scope_targets)} 活跃)"
         else:
             scope_targets = active_nodes
             target_nodes_desc = f"全网活跃节点 ({len(active_nodes)} 个)"
 
         try:
-            # ==================== A. 全网智能最新值合并 (含 Auto-GC) ====================
+            # ==================== A. 全网智能最新值合并 ====================
             if policy["sync_type"] == "smart_merge":
                 source_node_desc = "🌟 智能多主汇聚"
                 merge_pool_nodes = scope_targets if policy["target_type"] == "group" else active_nodes
@@ -210,79 +210,88 @@ async def execute_policy_task(policy_id: int):
                     log_detail.append("⚠️ 无可用在线活跃节点，本次智能合并自动挂起跳过")
                     status = "SKIPPED"
                 else:
+                    # 1. 单次并发抓取各节点 Cookie 存入内存
                     fetch_tasks = [
                         fetch_cookies_native(n['local_bind_port'], n.get('direct_host', '127.0.0.1') if n['is_local'] else "127.0.0.1")
                         for n in merge_pool_nodes
                     ]
                     fetched_results = await asyncio.gather(*fetch_tasks, return_exceptions=True)
+                    
+                    node_in_memory_data = [] # 结构: [{"node": n, "cookies": cleaned_c, "dropped": count}]
                     valid_cookie_lists = []
-                    total_expired_dropped = 0
-                    total_blacklisted_dropped = 0
+                    total_dropped = 0
 
                     for idx, res in enumerate(fetched_results):
-                        n_name = merge_pool_nodes[idx]['name']
+                        n = merge_pool_nodes[idx]
                         if isinstance(res, list):
                             cleaned_c, bl_cnt, exp_cnt = filter_cookies_by_domains(res, include_domains, exclude_domains)
                             valid_cookie_lists.append(cleaned_c)
-                            total_expired_dropped += exp_cnt
-                            total_blacklisted_dropped += bl_cnt
-                            log_detail.append(f"• 节点 [{n_name}] 贡献 {len(cleaned_c)} 条鲜活凭据")
+                            total_dropped += (bl_cnt + exp_cnt)
+                            node_in_memory_data.append({"node": n, "cookies": cleaned_c})
                         else:
-                            log_detail.append(f"• 节点 [{n_name}] 握手异常，自动跳过")
+                            log_detail.append(f"• 节点 [{n['name']}] 握手异常，自动跳过")
 
-                    # 智能消歧 + 单域名熔断防 431 膨胀
+                    # 2. 聚拢生成黄金池 (带四元组分区防重与 50 条熔断)
                     golden_pool, cap_trimmed = smart_merge_cookies(valid_cookie_lists, max_per_domain=50)
                     cookie_count_metric = len(golden_pool)
 
-                    gc_summary = []
-                    if total_expired_dropped > 0: gc_summary.append(f"已淘汰 {total_expired_dropped} 条物理过期项")
-                    if total_blacklisted_dropped > 0: gc_summary.append(f"已拦截 {total_blacklisted_dropped} 条黑名单追踪项")
-                    if cap_trimmed > 0: gc_summary.append(f"超额熔断裁剪 {cap_trimmed} 条陈旧项")
-                    gc_info = f" ({', '.join(gc_summary)})" if gc_summary else ""
+                    # ==================== 核心：前置差异研判 (Pre-flight Diff Check) ====================
+                    nodes_to_inject = []
+                    total_diff_count = 0
 
-                    log_detail.append(f"✨ 黄金凭据池聚拢完成: 共 {cookie_count_metric} 条最新 Cookies{gc_info}")
+                    for item in node_in_memory_data:
+                        n = item["node"]
+                        node_cookies = item["cookies"]
+                        # 在内存中直接比对目标与黄金池的差异
+                        diff_c, skipped = compute_cookie_diff(node_cookies, golden_pool)
+                        if diff_c:
+                            nodes_to_inject.append({"node": n, "diff_cookies": diff_c, "skipped": skipped})
+                            total_diff_count += len(diff_c)
 
-                    async def _push_golden(node):
-                        target_h = node.get('direct_host', '127.0.0.1') if node['is_local'] else "127.0.0.1"
-                        try:
-                            # 自动物理清理目标节点浏览器内的陈旧垃圾
-                            purged_cnt = await purge_stale_cookies_on_node(node['local_bind_port'], target_h, exclude_domains)
+                    # 3. 全局无变化秒级跳过 (Fast-Skip)
+                    if total_diff_count == 0 and total_dropped == 0 and cap_trimmed == 0:
+                        elapsed_fast = f"{(time.time() - start_ts):.2f}s"
+                        log_detail.append(f"⚡ [前置比对无差异] 各节点凭据已 100% 保持最新且完全对齐 (0 差异项 / 0 过期垃圾)，已自动跳过下发落盘 (耗时: {elapsed_fast})")
+                        status = "NO_CHANGE"
+                    else:
+                        log_detail.append(f"✨ 黄金凭据池聚拢完成: 共 {cookie_count_metric} 条最新 Cookies (发现 {total_diff_count} 项增量需对齐)")
+                        
+                        # 4. 仅向真正有差异的节点发起定向写入 (差异为0的节点直接忽略，不连网络)
+                        for item in node_in_memory_data:
+                            n = item["node"]
+                            match_inject = next((x for x in nodes_to_inject if x["node"]["id"] == n["id"]), None)
+                            target_h = n.get('direct_host', '127.0.0.1') if n['is_local'] else "127.0.0.1"
                             
-                            if diff_enabled:
-                                curr_c = await fetch_cookies_native(node['local_bind_port'], target_h)
-                                diff_cookies, skipped = compute_cookie_diff(curr_c, golden_pool)
-                                if diff_cookies:
-                                    await inject_cookies_native(node['local_bind_port'], diff_cookies, target_h)
-                                c_cnt, _ = await probe_node_cookies(node['local_bind_port'], target_h)
-                                purge_tip = f"，物理清空 {purged_cnt} 条垃圾" if purged_cnt > 0 else ""
-                                action_desc = f"差量注入 {len(diff_cookies)} 项 (跳过 {skipped} 个无变化项{purge_tip})"
+                            if match_inject:
+                                # 有差异：物理清理垃圾 + 仅注入增量项
+                                purged_cnt = await purge_stale_cookies_on_node(n['local_bind_port'], target_h, exclude_domains)
+                                diff_c = match_inject["diff_cookies"]
+                                skipped = match_inject["skipped"]
+                                await inject_cookies_native(n['local_bind_port'], diff_c, target_h)
+                                c_cnt, _ = await probe_node_cookies(n['local_bind_port'], target_h)
+                                
+                                conn = sqlite3.connect(DB_PATH)
+                                cur = conn.cursor()
+                                cur.execute("UPDATE nodes SET cookie_count=?, last_sync=? WHERE id=?", (c_cnt, sync_time, n['id']))
+                                conn.commit()
+                                conn.close()
+                                
+                                purge_info = f"，清除 {purged_cnt} 垃圾" if purged_cnt > 0 else ""
+                                log_detail.append(f"-> 节点 [{n['name']}] 差量写入 {len(diff_c)} 项 (跳过 {skipped} 个无变化项{purge_info})，现存 {c_cnt} 条")
                             else:
-                                await inject_cookies_native(node['local_bind_port'], golden_pool, target_h)
-                                c_cnt, _ = await probe_node_cookies(node['local_bind_port'], target_h)
-                                action_desc = f"全量写入 {len(golden_pool)} 条"
+                                # 毫无差异：直接标记跳过，0 次网络连接
+                                log_detail.append(f"-> 节点 [{n['name']}] 凭据已对齐，跳过写入 (现存 {len(item['cookies'])} 条)")
 
-                            conn = sqlite3.connect(DB_PATH)
-                            cur = conn.cursor()
-                            cur.execute("UPDATE nodes SET cookie_count=?, last_sync=? WHERE id=?", (c_cnt, sync_time, node['id']))
-                            conn.commit()
-                            conn.close()
-                            return f"-> 节点 [{node['name']}] 对齐完成 ({action_desc}，现存 {c_cnt} 条)"
-                        except Exception as ex:
-                            return f"-> 节点 [{node['name']}] 回写异常: {ex}"
+                        status = "SUCCESS"
 
-                    push_tasks = [_push_golden(n) for n in merge_pool_nodes]
-                    push_results = await asyncio.gather(*push_tasks)
-                    log_detail.extend(push_results)
-                    status = "SUCCESS"
-
-            # ==================== B. 组对组分发 (含 Auto-GC) ====================
+            # ==================== B. 组对组分发 (含前置比对) ====================
             elif policy["sync_type"] == "group_to_group":
                 src_group = policy.get("source_group") or "默认分组"
                 src_active_nodes = [n for n in active_nodes if n.get("group_name") == src_group]
-                source_node_desc = f"🏢 源分组 [{src_group}] (活跃: {len(src_active_nodes)})"
+                source_node_desc = f"🏢 源分组 [{src_group}] ({len(src_active_nodes)} 活跃)"
 
                 if not src_active_nodes:
-                    log_detail.append(f"⚠️ 源分组 [{src_group}] 中没有在线活跃节点，已自动跳过")
+                    log_detail.append(f"⚠️ 源分组 [{src_group}] 中无在线活跃节点，已自动跳过")
                     status = "SKIPPED"
                 else:
                     fetch_tasks = [
@@ -290,41 +299,35 @@ async def execute_policy_task(policy_id: int):
                         for n in src_active_nodes
                     ]
                     fetched_results = await asyncio.gather(*fetch_tasks, return_exceptions=True)
-                    valid_lists = []
-                    for r in fetched_results:
-                        if isinstance(r, list):
-                            cl, _, _ = filter_cookies_by_domains(r, include_domains, exclude_domains)
-                            valid_lists.append(cl)
+                    valid_lists = [filter_cookies_by_domains(r, include_domains, exclude_domains)[0] for r in fetched_results if isinstance(r, list)]
 
                     group_cookies, _ = smart_merge_cookies(valid_lists, max_per_domain=50)
                     cookie_count_metric = len(group_cookies)
-                    log_detail.append(f"• 从源分组 [{src_group}] 汇聚到 {cookie_count_metric} 条鲜活凭据")
 
                     dest_nodes = [n for n in scope_targets if n not in src_active_nodes]
                     if not dest_nodes:
-                        log_detail.append("ℹ️ 目标分组中无在线活跃接收节点，本次分发完毕")
+                        log_detail.append("ℹ️ 目标分组中无在线活跃接收节点")
+                        status = "SKIPPED"
                     else:
+                        # 检查目标节点是否有差异
+                        injected_any = False
                         for target in dest_nodes:
                             target_h = target.get('direct_host', '127.0.0.1') if target['is_local'] else "127.0.0.1"
-                            try:
+                            curr_c = await fetch_cookies_native(target['local_bind_port'], target_h)
+                            diff_c, skipped = compute_cookie_diff(curr_c, group_cookies)
+                            
+                            if diff_c:
+                                injected_any = True
                                 await purge_stale_cookies_on_node(target['local_bind_port'], target_h, exclude_domains)
-                                if diff_enabled:
-                                    curr_c = await fetch_cookies_native(target['local_bind_port'], target_h)
-                                    diff_c, skipped = compute_cookie_diff(curr_c, group_cookies)
-                                    if diff_c:
-                                        await inject_cookies_native(target['local_bind_port'], diff_c, target_h)
-                                    act = f"差量注入 {len(diff_c)} 项"
-                                else:
-                                    await inject_cookies_native(target['local_bind_port'], group_cookies, target_h)
-                                    act = f"全量写入 {len(group_cookies)} 条"
-
+                                await inject_cookies_native(target['local_bind_port'], diff_c, target_h)
                                 t_cnt, _ = await probe_node_cookies(target['local_bind_port'], target_h)
-                                log_detail.append(f"-> 目标节点 [{target['name']}] 分发成功 ({act})，现存: {t_cnt}")
-                            except Exception as ex:
-                                log_detail.append(f"-> 目标节点 [{target['name']}] 分发失败: {ex}")
-                    status = "SUCCESS"
+                                log_detail.append(f"-> 目标节点 [{target['name']}] 差量写入 {len(diff_c)} 项，现存: {t_cnt}")
+                            else:
+                                log_detail.append(f"-> 目标节点 [{target['name']}] 数据完全一致，跳过写入")
 
-            # ==================== C. 节点对组 / 节点对多节点分发 (含 Auto-GC) ====================
+                        status = "SUCCESS" if injected_any else "NO_CHANGE"
+
+            # ==================== C. 节点对组 / 节点对多节点分发 ====================
             else:
                 source = next((n for n in all_enabled_nodes if n["id"] == policy["source_id"]), None)
                 if not source or source.get("status") != "connected":
@@ -341,37 +344,33 @@ async def execute_policy_task(policy_id: int):
                     raw_c = await fetch_cookies_native(source['local_bind_port'], source_h)
                     cookies, _, _ = filter_cookies_by_domains(raw_c, include_domains, exclude_domains)
                     cookie_count_metric = len(cookies)
-                    log_detail.append(f"• 从源节点 [{source['name']}] 提取到 {cookie_count_metric} 个有效凭据")
 
                     dest_nodes = [n for n in scope_targets if n["id"] != source["id"]]
                     if not dest_nodes:
                         log_detail.append("ℹ️ 目标接收队列中无在线活跃节点")
+                        status = "SKIPPED"
                     else:
+                        injected_any = False
                         for target in dest_nodes:
                             target_h = target.get('direct_host', '127.0.0.1') if target['is_local'] else "127.0.0.1"
-                            try:
+                            curr_c = await fetch_cookies_native(target['local_bind_port'], target_h)
+                            diff_c, skipped = compute_cookie_diff(curr_c, cookies)
+                            
+                            if diff_c:
+                                injected_any = True
                                 await purge_stale_cookies_on_node(target['local_bind_port'], target_h, exclude_domains)
                                 if ChromiumSync is not None and not target['is_local']:
                                     sync_res = await run_chromium_sync_instance(source, target, include_domains, exclude_domains, diff_enabled)
                                     target_count, _ = await probe_node_cookies(target['local_bind_port'], target_h)
-                                    msg = sync_res.get("message", "OK") if isinstance(sync_res, dict) else sync_res
-                                    log_detail.append(f"-> 目标节点 [{target['name']}] 同步完成 ({msg})，现存: {target_count}")
+                                    log_detail.append(f"-> 目标节点 [{target['name']}] 模块同步完成，现存: {target_count}")
                                 else:
-                                    if diff_enabled:
-                                        curr_c = await fetch_cookies_native(target['local_bind_port'], target_h)
-                                        diff_c, skipped = compute_cookie_diff(curr_c, cookies)
-                                        if diff_c:
-                                            await inject_cookies_native(target['local_bind_port'], diff_c, target_h)
-                                        act = f"差量注入 {len(diff_c)} 项"
-                                    else:
-                                        await inject_cookies_native(target['local_bind_port'], cookies, target_h)
-                                        act = f"全量写入 {len(cookies)} 条"
-
+                                    await inject_cookies_native(target['local_bind_port'], diff_c, target_h)
                                     target_count, _ = await probe_node_cookies(target['local_bind_port'], target_h)
-                                    log_detail.append(f"-> 目标节点 [{target['name']}] 写入成功 ({act})，现存: {target_count}")
-                            except Exception as ex:
-                                log_detail.append(f"-> 目标节点 [{target['name']}] 写入异常: {ex}")
-                    status = "SUCCESS"
+                                    log_detail.append(f"-> 目标节点 [{target['name']}] 差量写入 {len(diff_c)} 项，现存: {target_count}")
+                            else:
+                                log_detail.append(f"-> 目标节点 [{target['name']}] 数据一致，跳过写入")
+
+                        status = "SUCCESS" if injected_any else "NO_CHANGE"
 
         except Exception as e:
             status = "FAILED"
@@ -379,6 +378,7 @@ async def execute_policy_task(policy_id: int):
 
         duration_str = f"{time.time() - start_ts:.2f}s"
 
+        # 写回审计流水
         conn = sqlite3.connect(DB_PATH)
         cur = conn.cursor()
         cur.execute("""
@@ -388,6 +388,7 @@ async def execute_policy_task(policy_id: int):
         
         cur.execute("UPDATE sync_policies SET last_run=? WHERE id=?", (sync_time, policy_id))
 
+        # 滚动淘汰保持 20 条
         cur.execute("""
             DELETE FROM sync_logs 
             WHERE id NOT IN (
@@ -399,6 +400,7 @@ async def execute_policy_task(policy_id: int):
         conn.commit()
         conn.close()
 
+        # 顺延下次调度
         try:
             job_id = f"policy_job_{policy_id}"
             job = scheduler.get_job(job_id)
@@ -406,9 +408,8 @@ async def execute_policy_task(policy_id: int):
                 interval_mins = max(1, int(policy.get("interval_minutes") or 15))
                 next_trigger = datetime.now() + timedelta(minutes=interval_mins)
                 job.modify(next_run_time=next_trigger)
-                logger.info(f"🔄 策略 [{policy['name']}] 执行完成，下次自动调度已顺延至: {next_trigger.strftime('%Y-%m-%d %H:%M:%S')}")
-        except Exception as ex:
-            logger.debug(f"顺延下次触发时间异常: {ex}")
+        except Exception:
+            pass
 
         if status == "FAILED":
             await dispatch_notification(f"策略 [{policy['name']}] 执行失败预警", f"时间: {sync_time} (耗时: {duration_str})\n" + "\n".join(log_detail))
