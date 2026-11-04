@@ -44,6 +44,26 @@ const loadData = async () => {
   Object.assign(remoteAccess, await rRes.json())
 }
 
+// 核心功能：一键复制 API Key 到剪贴板
+const copyApiKey = async () => {
+  if (!profile.api_key) return
+  try {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      await navigator.clipboard.writeText(profile.api_key)
+    } else {
+      const ta = document.createElement('textarea')
+      ta.value = profile.api_key
+      document.body.appendChild(ta)
+      ta.select()
+      document.execCommand('copy')
+      document.body.removeChild(ta)
+    }
+    props.showToast('API Key 已复制到剪切板', 'success')
+  } catch (err) {
+    props.showToast('复制失败，请手动选择复制', 'error')
+  }
+}
+
 const saveProfile = async () => {
   const res = await props.api('/api/profile', {
     method: 'POST',
@@ -168,7 +188,6 @@ onMounted(() => {
         <p style="font-size:11px; color:#64748b; margin-bottom:14px;">全局通用生效，作用于所有后台定时调度、即时同步及 API 提取流程。</p>
         
         <form @submit.prevent="saveCookiePolicy" class="form-v-stack">
-          <!-- 差量同步检测开关 -->
           <div style="background:#09122a; border:1px solid #1e3a8a; border-radius:6px; padding:12px; width:100%; max-width:440px;">
             <div style="display:flex; align-items:center; gap:8px;">
               <input type="checkbox" v-model="cookiePolicy.sync_diff_enabled" id="diff_toggle" class="check-box-blue">
@@ -181,14 +200,12 @@ onMounted(() => {
             </p>
           </div>
 
-          <!-- 域名白名单 -->
           <div class="form-field-block">
             <label class="form-label">域名白名单 (Include Domains，选填)</label>
             <input v-model="cookiePolicy.sync_include_domains" placeholder="例如: google.com, twitter.com, github.com (留空则同步全部)" class="cdp-input cdp-w-normal font-cyan-mono">
             <p class="form-field-hint">仅同步匹配这些域名的 Cookie，多个域名用英文逗号分隔；留空表示不过滤。</p>
           </div>
 
-          <!-- 域名黑名单 -->
           <div class="form-field-block">
             <label class="form-label">域名黑名单 (Exclude Domains，选填)</label>
             <input v-model="cookiePolicy.sync_exclude_domains" placeholder="例如: doubleclick.net, google-analytics.com" class="cdp-input cdp-w-normal font-cyan-mono">
@@ -203,28 +220,38 @@ onMounted(() => {
 
     </div>
 
-    <!-- 右列：远程连接控制中枢、使用说明与密钥金库 -->
+    <!-- 右列：远程连接控制中枢 (含 API Key 一键复制)、使用说明与密钥金库 -->
     <div style="display:flex; flex-direction:column; gap:20px;">
 
-      <!-- 卡片 3: 远程 CDP 连接与外部 Agent 接入中枢 (包含两种方式开关与使用说明) -->
+      <!-- 卡片 3: 远程 CDP 连接与外部 Agent 接入中枢 -->
       <div class="content-full-card">
         <div class="table-header-bar" style="margin-bottom:10px; padding-bottom:8px;">
           <h3 class="card-inner-h3">🌐 远程 CDP 连接与外部 Agent 接入中枢</h3>
           <span class="badge-recommend">支持双模式</span>
         </div>
 
-        <!-- API Key 展示区 -->
+        <!-- API Key 展示与一键复制区 -->
         <div style="background:#09122a; border:1px solid #172554; border-radius:8px; padding:12px; margin-bottom:14px;">
           <div style="display:flex; justify-content:space-between; align-items:center;">
             <span style="font-size:12px; color:#38bdf8; font-weight:bold;">外部 Agent / 第三方程序调用 Key</span>
-            <button @click="regenApiKey" class="link-probe" style="font-size:11px;">重新生成</button>
+            
+            <div style="display:flex; gap:10px; align-items:center;">
+              <!-- 核心优化：一键复制独立按钮 -->
+              <button type="button" @click="copyApiKey" class="btn-copy-tag" title="一键复制 API Key">
+                📋 复制 Key
+              </button>
+              <button @click="regenApiKey" class="link-probe" style="font-size:11px;">重新生成</button>
+            </div>
           </div>
-          <div style="font-family:monospace; font-size:12px; color:#f8fafc; margin-top:6px; word-break:break-all; background:#060b17; padding:6px; border-radius:4px;">
-            {{ profile.api_key }}
+
+          <!-- 可点击高亮复制框 -->
+          <div class="api-key-interactive-box" @click="copyApiKey" title="点击整行亦可直接复制">
+            <span class="font-cyan-mono" style="word-break:break-all; font-size:12px;">{{ profile.api_key || '正在获取...' }}</span>
+            <span class="copy-hint-icon">📋</span>
           </div>
         </div>
 
-        <!-- 远程连接开关 (公网直接端口连接开关) -->
+        <!-- 远程连接开关 -->
         <div style="background:#09122a; border:1px solid #1e3a8a; border-radius:6px; padding:12px; margin-bottom:16px;">
           <div style="display:flex; justify-content:space-between; align-items:center;">
             <div>
@@ -359,6 +386,51 @@ curl -X POST -H "X-API-Key: {{ profile.api_key }}" https://&lt;域名&gt;:8443/a
 </template>
 
 <style scoped>
+/* 一键复制专属按钮样式 */
+.btn-copy-tag {
+  background: #1e293b;
+  border: 1px solid #3b82f6;
+  color: #38bdf8;
+  font-size: 11px;
+  padding: 3px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  transition: all 0.15s ease;
+}
+.btn-copy-tag:hover {
+  background: #0284c7;
+  color: #ffffff;
+}
+
+/* 交互式 Key 容器 */
+.api-key-interactive-box {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  background: #060b17;
+  border: 1px solid #172554;
+  padding: 8px 10px;
+  border-radius: 4px;
+  margin-top: 8px;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+.api-key-interactive-box:hover {
+  border-color: #00f0ff;
+  background: #08112b;
+}
+
+.copy-hint-icon {
+  font-size: 12px;
+  opacity: 0.7;
+}
+.api-key-interactive-box:hover .copy-hint-icon {
+  opacity: 1;
+}
+
 .guide-tab-normal {
   background: none;
   border: none;
