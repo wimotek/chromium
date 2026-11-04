@@ -7,6 +7,58 @@ import httpx
 import websockets
 from config import ChromiumSync, logger
 
+def sanitize_cookie_for_cdp(c: dict) -> dict:
+    """
+    核心转换器：将 CDP 读出的原始 Cookie 转换为 Network.setCookies 合规的 CookieParam
+    1. 剔除 size, session 等非法只读字段
+    2. 针对 expires <= 0 的会话凭证，必须剔除 expires 字段，否则会被浏览器当场作为过期垃圾丢弃
+    3. 自动根据 domain + path + secure 计算补齐 url，确保 Chromium CookieJar 能够落盘
+    """
+    name = c.get("name")
+    value = c.get("value")
+    if not name or value is None:
+        return None
+
+    path = c.get("path") or "/"
+    secure = bool(c.get("secure", False))
+    http_only = bool(c.get("httpOnly", False))
+
+    clean_item = {
+        "name": str(name),
+        "value": str(value),
+        "path": path,
+        "secure": secure,
+        "httpOnly": http_only
+    }
+
+    # 处理 domain 与 url
+    domain = c.get("domain", "").strip()
+    if domain:
+        clean_item["domain"] = domain
+        clean_domain = domain.lstrip(".")
+        scheme = "https" if secure else "http"
+        clean_item["url"] = f"{scheme}://{clean_domain}{path}"
+    elif c.get("url"):
+        clean_item["url"] = c["url"]
+    else:
+        # 兜底构造 URL
+        clean_item["url"] = f"https://localhost{path}"
+
+    # 处理过期时间：只有大于当前时间戳的有效值才传入，会话 Cookie 绝不传 expires
+    expires = c.get("expires")
+    if expires is not None and isinstance(expires, (int, float)) and expires > 0:
+        clean_item["expires"] = float(expires)
+
+    # 传递合规的 SameSite 属性
+    same_site = c.get("sameSite")
+    if same_site in ["Strict", "Lax", "None"]:
+        clean_item["sameSite"] = same_site
+
+    if "priority" in c and c["priority"] in ["Low", "Medium", "High"]:
+        clean_item["priority"] = c["priority"]
+
+    return clean_item
+
 def filter_cookies_by_domains(cookies: List[dict], include_domains: List[str], exclude_domains: List[str]) -> tuple[List[dict], int]:
     if not include_domains and not exclude_domains:
         return cookies, 0
@@ -28,6 +80,7 @@ def filter_cookies_by_domains(cookies: List[dict], include_domains: List[str], e
     return filtered, dropped_count
 
 def compute_cookie_diff(current_cookies: List[dict], target_cookies: List[dict]) -> tuple[List[dict], int]:
+    """比对指纹，找出目标端没有或者值已发生变化的 Cookie"""
     curr_map = {
         (c.get('name'), c.get('domain'), c.get('path', '/')): c.get('value')
         for c in current_cookies
@@ -101,6 +154,7 @@ async def fetch_cookies_native(local_port: int, target_host: str = "127.0.0.1") 
         if cookies:
             return cookies
 
+        # 回退 Network 域抓取
         await ws.send(json.dumps({"id": 2, "method": "Network.enable"}))
         await ws.recv()
         await ws.send(json.dumps({"id": 3, "method": "Network.getAllCookies"}))
@@ -109,21 +163,54 @@ async def fetch_cookies_native(local_port: int, target_host: str = "127.0.0.1") 
         return data2.get("result", {}).get("cookies", [])
 
 async def inject_cookies_native(local_port: int, cookies: List[dict], target_host: str = "127.0.0.1"):
+    """
+    写入 Cookies：
+    1. 严格使用 sanitize_cookie_for_cdp 清洗每一条凭证，剔除只读字段，纠正负数 expires
+    2. 先开启 Network.enable 再批量 setCookies，确保 Chromium 真正保存到 CookieJar
+    """
+    if not cookies:
+        return
+
+    # 清洗为合规的 CookieParam 数组
+    clean_params = []
+    for c in cookies:
+        cleaned = sanitize_cookie_for_cdp(c)
+        if cleaned:
+            clean_params.append(cleaned)
+
+    if not clean_params:
+        return
+
+    # 若第三方模块支持直接写入
     if ChromiumSync is not None and hasattr(ChromiumSync, 'set_cookies'):
         try:
             fn = getattr(ChromiumSync, 'set_cookies')
             if inspect.iscoroutinefunction(fn):
-                await fn(cookies=cookies, port=local_port, host=target_host)
+                await fn(cookies=clean_params, port=local_port, host=target_host)
                 return
-            await asyncio.to_thread(fn, cookies=cookies, port=local_port, host=target_host)
+            await asyncio.to_thread(fn, cookies=clean_params, port=local_port, host=target_host)
             return
         except Exception as e:
-            logger.debug(f"ChromiumSync.set_cookies 调用异常，回退内置写入器: {e}")
+            logger.debug(f"ChromiumSync.set_cookies 调用异常，使用内置注入器: {e}")
 
     host, ws_url = await resolve_cdp_endpoint(local_port, target_host)
-    async with websockets.connect(ws_url, timeout=6.0) as ws:
-        await ws.send(json.dumps({"id": 1, "method": "Network.setCookies", "params": {"cookies": cookies}}))
-        await asyncio.wait_for(ws.recv(), timeout=6.0)
+    async with websockets.connect(ws_url, timeout=8.0) as ws:
+        # 必须先激活 Network 域
+        await ws.send(json.dumps({"id": 100, "method": "Network.enable"}))
+        await asyncio.wait_for(ws.recv(), timeout=5.0)
+
+        # 批量注入合规的 Cookies 参数
+        await ws.send(json.dumps({
+            "id": 101,
+            "method": "Network.setCookies",
+            "params": {"cookies": clean_params}
+        }))
+        resp = await asyncio.wait_for(ws.recv(), timeout=8.0)
+        data = json.loads(resp)
+        if "error" in data:
+            logger.error(f"CDP 注入 Cookies 被拒绝: {data['error']}")
+        else:
+            logger.info(f"CDP 成功写入 {len(clean_params)} 条 Cookies 到目标主机 {target_host}:{local_port}")
 
 async def probe_node_cookies(local_port: int, target_host: str = "127.0.0.1") -> tuple[int, str]:
     try:
