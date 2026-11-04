@@ -1,29 +1,32 @@
 import json
 import inspect
 import asyncio
+import time
 from typing import List, Dict
 from urllib.parse import urlparse, urlunparse
 import httpx
 import websockets
 from config import ChromiumSync, logger
 
-def sanitize_cookie_for_cdp(c: dict) -> dict:
+def normalize_cookie_for_cdp(c: dict) -> dict:
     """
-    核心转换器：将 CDP 读出的原始 Cookie 转换为 Network.setCookies 合规的 CookieParam
-    1. 剔除 size, session 等非法只读字段
-    2. 针对 expires <= 0 的会话凭证，必须剔除 expires 字段，否则会被浏览器当场作为过期垃圾丢弃
-    3. 自动根据 domain + path + secure 计算补齐 url，确保 Chromium CookieJar 能够落盘
+    CDP 终极清洗器：
+    严格遵守 Chrome DevTools Protocol 规范：
+    1. 若有 domain，绝对不传 url (防止跨域域名前导点与 URL 校验冲突导致静默拒收)
+    2. 只有有效的未来时间戳才传 expires，负数与会话绝对不传
+    3. 过滤掉 size, session, sourcePort 等只读字段
     """
     name = c.get("name")
     value = c.get("value")
     if not name or value is None:
         return None
 
-    path = c.get("path") or "/"
+    domain = (c.get("domain") or "").strip()
+    path = (c.get("path") or "/").strip()
     secure = bool(c.get("secure", False))
     http_only = bool(c.get("httpOnly", False))
 
-    clean_item = {
+    param = {
         "name": str(name),
         "value": str(value),
         "path": path,
@@ -31,33 +34,25 @@ def sanitize_cookie_for_cdp(c: dict) -> dict:
         "httpOnly": http_only
     }
 
-    # 处理 domain 与 url
-    domain = c.get("domain", "").strip()
     if domain:
-        clean_item["domain"] = domain
-        clean_domain = domain.lstrip(".")
-        scheme = "https" if secure else "http"
-        clean_item["url"] = f"{scheme}://{clean_domain}{path}"
+        param["domain"] = domain
     elif c.get("url"):
-        clean_item["url"] = c["url"]
-    else:
-        # 兜底构造 URL
-        clean_item["url"] = f"https://localhost{path}"
+        param["url"] = c["url"]
 
-    # 处理过期时间：只有大于当前时间戳的有效值才传入，会话 Cookie 绝不传 expires
+    # 过期时间必须是未来的有效时间戳，会话 Cookie 绝不带 expires
     expires = c.get("expires")
-    if expires is not None and isinstance(expires, (int, float)) and expires > 0:
-        clean_item["expires"] = float(expires)
+    now_ts = time.time()
+    if expires is not None and isinstance(expires, (int, float)) and expires > now_ts:
+        param["expires"] = float(expires)
 
-    # 传递合规的 SameSite 属性
     same_site = c.get("sameSite")
     if same_site in ["Strict", "Lax", "None"]:
-        clean_item["sameSite"] = same_site
+        param["sameSite"] = same_site
 
     if "priority" in c and c["priority"] in ["Low", "Medium", "High"]:
-        clean_item["priority"] = c["priority"]
+        param["priority"] = c["priority"]
 
-    return clean_item
+    return param
 
 def filter_cookies_by_domains(cookies: List[dict], include_domains: List[str], exclude_domains: List[str]) -> tuple[List[dict], int]:
     if not include_domains and not exclude_domains:
@@ -136,15 +131,7 @@ async def resolve_cdp_endpoint(local_port: int, target_host: str = "127.0.0.1") 
     raise ConnectionRefusedError(f"无法连通主机 {host_clean}:{local_port} 的 CDP 调试服务")
 
 async def fetch_cookies_native(local_port: int, target_host: str = "127.0.0.1") -> List[dict]:
-    if ChromiumSync is not None and hasattr(ChromiumSync, 'get_cookies'):
-        try:
-            fn = getattr(ChromiumSync, 'get_cookies')
-            if inspect.iscoroutinefunction(fn):
-                return await fn(port=local_port, host=target_host)
-            return await asyncio.to_thread(fn, port=local_port, host=target_host)
-        except Exception as e:
-            logger.debug(f"ChromiumSync.get_cookies 调用异常，回退内置提取器: {e}")
-
+    """提取当前所有 Cookies"""
     host, ws_url = await resolve_cdp_endpoint(local_port, target_host)
     async with websockets.connect(ws_url, timeout=5.0) as ws:
         await ws.send(json.dumps({"id": 1, "method": "Storage.getCookies"}))
@@ -162,55 +149,74 @@ async def fetch_cookies_native(local_port: int, target_host: str = "127.0.0.1") 
         data2 = json.loads(resp2)
         return data2.get("result", {}).get("cookies", [])
 
-async def inject_cookies_native(local_port: int, cookies: List[dict], target_host: str = "127.0.0.1"):
+async def inject_cookies_native(local_port: int, cookies: List[dict], target_host: str = "127.0.0.1") -> int:
     """
-    写入 Cookies：
-    1. 严格使用 sanitize_cookie_for_cdp 清洗每一条凭证，剔除只读字段，纠正负数 expires
-    2. 先开启 Network.enable 再批量 setCookies，确保 Chromium 真正保存到 CookieJar
+    两级加速写入通道：
+    1. 优先尝试极速批量合流注入 (Network.setCookies) -> 1 次网络往返，几毫秒内搞定；
+    2. 若遇异常，秒级降级为异步流水线 (Pipelining，一口气发射所有单条，不串行等待) -> 依然仅需 1 次网络往返！
     """
     if not cookies:
-        return
+        return 0
 
-    # 清洗为合规的 CookieParam 数组
-    clean_params = []
+    valid_params = []
     for c in cookies:
-        cleaned = sanitize_cookie_for_cdp(c)
-        if cleaned:
-            clean_params.append(cleaned)
+        norm = normalize_cookie_for_cdp(c)
+        if norm:
+            valid_params.append(norm)
 
-    if not clean_params:
-        return
-
-    # 若第三方模块支持直接写入
-    if ChromiumSync is not None and hasattr(ChromiumSync, 'set_cookies'):
-        try:
-            fn = getattr(ChromiumSync, 'set_cookies')
-            if inspect.iscoroutinefunction(fn):
-                await fn(cookies=clean_params, port=local_port, host=target_host)
-                return
-            await asyncio.to_thread(fn, cookies=clean_params, port=local_port, host=target_host)
-            return
-        except Exception as e:
-            logger.debug(f"ChromiumSync.set_cookies 调用异常，使用内置注入器: {e}")
+    if not valid_params:
+        return 0
 
     host, ws_url = await resolve_cdp_endpoint(local_port, target_host)
-    async with websockets.connect(ws_url, timeout=8.0) as ws:
-        # 必须先激活 Network 域
-        await ws.send(json.dumps({"id": 100, "method": "Network.enable"}))
-        await asyncio.wait_for(ws.recv(), timeout=5.0)
+    start_t = time.time()
 
-        # 批量注入合规的 Cookies 参数
-        await ws.send(json.dumps({
-            "id": 101,
-            "method": "Network.setCookies",
-            "params": {"cookies": clean_params}
-        }))
-        resp = await asyncio.wait_for(ws.recv(), timeout=8.0)
-        data = json.loads(resp)
-        if "error" in data:
-            logger.error(f"CDP 注入 Cookies 被拒绝: {data['error']}")
-        else:
-            logger.info(f"CDP 成功写入 {len(clean_params)} 条 Cookies 到目标主机 {target_host}:{local_port}")
+    async with websockets.connect(ws_url, timeout=10.0, max_size=100 * 1024 * 1024) as ws:
+        # 激活 Network 域
+        await ws.send(json.dumps({"id": 1, "method": "Network.enable"}))
+        await asyncio.wait_for(ws.recv(), timeout=3.0)
+
+        # ==================== 优先策略：极速批量注入 (单次 RTT，毫秒级) ====================
+        batch_success = False
+        try:
+            await ws.send(json.dumps({
+                "id": 2,
+                "method": "Network.setCookies",
+                "params": {"cookies": valid_params}
+            }))
+            resp_batch = json.loads(await asyncio.wait_for(ws.recv(), timeout=5.0))
+            if "error" not in resp_batch:
+                batch_success = True
+                elapsed = f"{(time.time() - start_t)*1000:.1f}ms"
+                logger.info(f"⚡ [批量极速通道] 目标 [{target_host}:{local_port}] 一次性注入 {len(valid_params)} 条 Cookies 完成 (耗时: {elapsed})")
+                return len(valid_params)
+        except Exception as e:
+            logger.debug(f"批量通道不可用 ({e})，自动切入流水线模式")
+
+        # ==================== 容灾策略：全异步流水线模式 (Pipelining，绝不发一条等一条) ====================
+        logger.info(f"🚀 [异步流水线] 正在为目标 [{target_host}:{local_port}] 流水线并发推送 {len(valid_params)} 条 Cookies...")
+        
+        # 1. 瞬间将全部请求连环打入 Socket 发送队列 (耗时 < 1ms)
+        for i, p in enumerate(valid_params):
+            await ws.send(json.dumps({
+                "id": 1000 + i,
+                "method": "Network.setCookie",
+                "params": p
+            }))
+
+        # 2. 一次性接收全部 ACK 回执
+        success_count = 0
+        for _ in range(len(valid_params)):
+            try:
+                resp_text = await asyncio.wait_for(ws.recv(), timeout=2.0)
+                resp = json.loads(resp_text)
+                if resp.get("result", {}).get("success") is True:
+                    success_count += 1
+            except Exception:
+                pass
+
+        elapsed = f"{(time.time() - start_t)*1000:.1f}ms"
+        logger.info(f"✨ [流水线完成] 目标 [{target_host}:{local_port}] 成功写入: {success_count}/{len(valid_params)} 条 (总耗时: {elapsed})")
+        return success_count
 
 async def probe_node_cookies(local_port: int, target_host: str = "127.0.0.1") -> tuple[int, str]:
     try:
