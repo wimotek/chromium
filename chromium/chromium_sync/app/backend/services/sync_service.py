@@ -22,14 +22,12 @@ from services.notification import dispatch_notification
 scheduler = BackgroundScheduler()
 
 def _execute_policy_job_wrapper(policy_id: int):
-    """调度器任务包装函数，带有完善的异常捕获与日志记录"""
     try:
         asyncio.run(execute_policy_task(policy_id))
     except Exception as e:
         logger.error(f"定时调度任务执行失败 (策略ID: {policy_id}): {e}", exc_info=True)
 
 def reschedule_all_policies():
-    """重新加载所有已启用的策略到定时调度器中"""
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     cur = conn.cursor()
@@ -37,7 +35,6 @@ def reschedule_all_policies():
     policies = [dict(r) for r in cur.fetchall()]
     conn.close()
 
-    # 清除旧的策略任务
     for job in scheduler.get_jobs():
         if job.id.startswith("policy_job_"):
             scheduler.remove_job(job.id)
@@ -46,9 +43,6 @@ def reschedule_all_policies():
     for p in policies:
         job_id = f"policy_job_{p['id']}"
         interval = max(1, int(p.get("interval_minutes") or 15))
-        
-        # 核心优化：若策略从没有执行过（last_run为空），启动后 5 秒立即执行首次触发！
-        # 若之前已经执行过，则按设定的时间间隔定时运行
         first_run_time = (now_dt + timedelta(seconds=5)) if not p.get("last_run") else None
 
         scheduler.add_job(
@@ -112,14 +106,16 @@ async def run_chromium_sync_instance(source_node: dict, target_node: dict, inclu
     return {"status": "success", "message": str(res) if res else "OK"}
 
 async def execute_policy_task(policy_id: int):
-    """根据多策略规则执行同步（支持组对组、节点对组、节点对多节点、智能合并）"""
+    """根据多策略规则执行同步（严格排除已禁用的节点）"""
     start_ts = time.time()
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     cur = conn.cursor()
     cur.execute("SELECT * FROM sync_policies WHERE id=?", (policy_id,))
     policy_row = cur.fetchone()
-    cur.execute("SELECT * FROM nodes")
+    
+    # 核心：只抓取已启用的节点 (enabled=1)，禁用节点彻底排除
+    cur.execute("SELECT * FROM nodes WHERE enabled=1")
     nodes = [dict(r) for r in cur.fetchall()]
     conn.close()
 
@@ -138,7 +134,6 @@ async def execute_policy_task(policy_id: int):
     target_nodes_desc = ""
     cookie_count_metric = 0
 
-    # 1. 解析目标节点列表
     target_nodes = []
     if policy["target_type"] == "group":
         target_nodes = [n for n in nodes if n.get("group_name") == policy["target_group"]]
@@ -146,12 +141,11 @@ async def execute_policy_task(policy_id: int):
     elif policy["target_type"] == "nodes":
         tids = json.loads(policy.get("target_ids") or "[]")
         target_nodes = [n for n in nodes if n["id"] in tids]
-        target_nodes_desc = ", ".join([n["name"] for n in target_nodes]) or "无目标"
+        target_nodes_desc = ", ".join([n["name"] for n in target_nodes]) or "无可用目标"
     else:
         target_nodes = nodes
-        target_nodes_desc = f"全网所有节点 ({len(nodes)} 个)"
+        target_nodes_desc = f"在线可用节点 ({len(nodes)} 个)"
 
-    # 2. 根据同步类型分支执行
     try:
         # A. 全网/组内智能最新值合并
         if policy["sync_type"] == "smart_merge":
@@ -206,14 +200,14 @@ async def execute_policy_task(policy_id: int):
             log_detail.extend(push_results)
             status = "SUCCESS"
 
-        # B. 组对组分发 (Group-to-Group)
+        # B. 组对组分发
         elif policy["sync_type"] == "group_to_group":
             src_group = policy.get("source_group") or "默认分组"
             source_nodes = [n for n in nodes if n.get("group_name") == src_group]
             source_node_desc = f"🏢 源分组 [{src_group}] ({len(source_nodes)} 个节点)"
 
             if not source_nodes:
-                raise ValueError(f"源分组 [{src_group}] 内没有可用节点")
+                raise ValueError(f"源分组 [{src_group}] 内没有启用的可用节点")
 
             fetch_tasks = [
                 fetch_cookies_native(n['local_bind_port'], n.get('direct_host', '127.0.0.1') if n['is_local'] else "127.0.0.1")
@@ -250,7 +244,10 @@ async def execute_policy_task(policy_id: int):
         else:
             source = next((n for n in nodes if n["id"] == policy["source_id"]), None)
             if not source:
-                source = next((n for n in nodes if n["is_source"] == 1), None) or nodes[0]
+                source = next((n for n in nodes if n["is_source"] == 1), None) or (nodes[0] if nodes else None)
+
+            if not source:
+                raise ValueError("未找到可用的启用源节点")
 
             source_node_desc = f"{source['name']} ({'本地' if source['is_local'] else source['ssh_host']})"
             source_h = source.get('direct_host', '127.0.0.1') if source['is_local'] else "127.0.0.1"
@@ -295,7 +292,6 @@ async def execute_policy_task(policy_id: int):
     
     cur.execute("UPDATE sync_policies SET last_run=? WHERE id=?", (sync_time, policy_id))
 
-    # 滚动裁剪保留最近 20 条日志
     cur.execute("""
         DELETE FROM sync_logs 
         WHERE id NOT IN (
@@ -310,7 +306,6 @@ async def execute_policy_task(policy_id: int):
     if status == "FAILED":
         await dispatch_notification(f"策略 [{policy['name']}] 执行失败预警", f"时间: {sync_time} (耗时: {duration_str})\n" + "\n".join(log_detail))
 
-# ==================== 供外部 API / 自动化触发全网同步的标准入口 ====================
 async def execute_sync_task(policy_id: Optional[int] = None):
     if policy_id:
         await execute_policy_task(policy_id)

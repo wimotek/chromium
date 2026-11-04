@@ -11,7 +11,6 @@ router = APIRouter(tags=["节点管理"])
 
 @router.get("/api/node-groups")
 def get_node_groups(user: dict = Depends(verify_token)):
-    """获取系统中所有现存的唯一分组名称列表"""
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
     cur.execute("SELECT DISTINCT group_name FROM nodes WHERE group_name IS NOT NULL AND group_name != ''")
@@ -39,9 +38,9 @@ def create_node(data: dict, user: dict = Depends(verify_token)):
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
     cur.execute('''INSERT INTO nodes (
-        name, group_name, is_source, is_local, direct_host, ssh_host, ssh_port, ssh_user, ssh_key_filename,
+        name, group_name, enabled, is_source, is_local, direct_host, ssh_host, ssh_port, ssh_user, ssh_key_filename,
         ssh_password, remote_cdp_port, local_bind_port, cookie_count, auto_tunnel, status
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 1, 'stopped')''',
+    ) VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 1, 'stopped')''',
     (
         data['name'], grp_name, 1 if data.get('is_source') else 0, is_local,
         direct_h if is_local else '127.0.0.1',
@@ -89,9 +88,40 @@ async def update_node(node_id: int, data: dict, user: dict = Depends(verify_toke
     cur.execute("SELECT * FROM nodes WHERE id=?", (node_id,))
     updated_node = dict(cur.fetchone())
     conn.close()
-    await tunnel_mgr.start_tunnel(updated_node)
+
+    # 仅在启用状态下自愈启动连接
+    if updated_node.get('enabled', 1) == 1:
+        await tunnel_mgr.start_tunnel(updated_node)
 
     return {"message": "节点配置与分组已更新并重新载入连接"}
+
+# 核心新增：一键切换节点启用/禁用状态
+@router.post("/api/nodes/{node_id}/toggle-enabled")
+def toggle_node_enabled(node_id: int, user: dict = Depends(verify_token)):
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    cur = conn.cursor()
+    cur.execute("SELECT enabled FROM nodes WHERE id=?", (node_id,))
+    row = cur.fetchone()
+    if not row:
+        conn.close()
+        raise HTTPException(status_code=404, detail="节点不存在")
+    
+    curr = row["enabled"]
+    new_val = 0 if curr == 1 else 1
+    new_status = "standby" if new_val == 1 else "disabled"
+    cur.execute("UPDATE nodes SET enabled=?, status=? WHERE id=?", (new_val, new_status, node_id))
+    conn.commit()
+    conn.close()
+
+    # 禁用时立即切断隧道并停止占用端口
+    if new_val == 0:
+        tunnel_mgr.stop_tunnel(node_id)
+        msg = "节点已禁用 (已切断穿透并从调度中排除)"
+    else:
+        msg = "节点已恢复启用 (已重新加入看门狗调度)"
+
+    return {"message": msg, "enabled": new_val}
 
 @router.delete("/api/nodes/{node_id}")
 def delete_node(node_id: int, user: dict = Depends(verify_token)):

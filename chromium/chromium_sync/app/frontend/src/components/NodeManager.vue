@@ -10,7 +10,7 @@ const emit = defineEmits(['update-nodes'])
 const nodes = ref([])
 const keys = ref([])
 const groups = ref([])
-const selectedFilterGroup = ref('') // 分组筛选
+const selectedFilterGroup = ref('')
 
 const showNodeModal = ref(false)
 const isEditMode = ref(false)
@@ -45,7 +45,6 @@ const loadNodes = async () => {
   emit('update-nodes')
 }
 
-// 依据分组筛选过滤节点
 const filteredNodes = computed(() => {
   if (!selectedFilterGroup.value) return nodes.value
   return nodes.value.filter(n => n.group_name === selectedFilterGroup.value)
@@ -99,6 +98,14 @@ const submitNodeForm = async () => {
   })
   const data = await res.json()
   showNodeModal.value = false
+  props.showToast(data.message, 'success')
+  loadNodes()
+}
+
+// 核心功能：切换节点启用与禁用
+const toggleNodeEnabled = async (node) => {
+  const res = await props.api(`/api/nodes/${node.id}/toggle-enabled`, { method: 'POST' })
+  const data = await res.json()
   props.showToast(data.message, 'success')
   loadNodes()
 }
@@ -162,9 +169,7 @@ onMounted(() => {
         <h2>CDP 节点实例治理列表</h2>
       </div>
 
-      <!-- 右侧：分组筛选器 + 操作 -->
       <div style="display:flex; gap:10px; align-items:center;">
-        <!-- 分组过滤下拉 -->
         <select v-model="selectedFilterGroup" class="sync-input font-mono" style="width:auto; height:32px; font-size:12px;">
           <option value="">📂 全部分组 ({{ nodes.length }})</option>
           <option v-for="g in groups" :key="g" :value="g">📁 {{ g }}</option>
@@ -179,19 +184,18 @@ onMounted(() => {
       <table class="cdp-fluid-table">
         <thead>
           <tr>
-            <th style="width: 14%;">所属分组</th>
+            <th style="width: 12%;">所属分组</th>
             <th style="width: 18%;">节点名称 / 接入目标</th>
-            <th style="width: 10%;">连通状态</th>
+            <th style="width: 10%;">运行状态</th>
             <th style="width: 14%;">直连 / 映射调试端点</th>
             <th style="width: 14%;">实时 Cookie 存量</th>
             <th style="width: 10%;">接入类型</th>
             <th style="width: 8%;">同步角色</th>
-            <th style="width: 12%; text-align: right;">治理操作</th>
+            <th style="width: 14%; text-align: right;">治理操作</th>
           </tr>
         </thead>
         <tbody>
-          <tr v-for="node in filteredNodes" :key="node.id">
-            <!-- 分组标签 -->
+          <tr v-for="node in filteredNodes" :key="node.id" :class="node.enabled === 0 ? 'row-node-disabled' : ''">
             <td>
               <span class="tag-group-pill">
                 📁 {{ node.group_name || '默认分组' }}
@@ -199,14 +203,19 @@ onMounted(() => {
             </td>
 
             <td>
-              <div class="cell-main-name">{{ node.name }}</div>
+              <div class="cell-main-name">
+                {{ node.name }}
+                <span v-if="node.enabled === 0" style="font-size:10px; color:#f87171; margin-left:4px;">[已禁用]</span>
+              </div>
               <div class="cell-sub-desc">
                 {{ node.is_local ? `直连主机: ${node.direct_host || '127.0.0.1'}` : `${node.ssh_user}@${node.ssh_host}:${node.ssh_port}` }}
               </div>
             </td>
 
+            <!-- 状态展示 -->
             <td>
-              <span v-if="node.status === 'connected'" class="status-active">● 活跃</span>
+              <span v-if="node.enabled === 0" class="status-standby" style="background:rgba(100, 116, 139, 0.2); border-color:#475569; color:#94a3b8;">○ 已禁用</span>
+              <span v-else-if="node.status === 'connected'" class="status-active">● 活跃</span>
               <span v-else-if="node.status === 'stopped'" class="status-standby">○ 离线</span>
               <span v-else class="status-error" :title="node.status">✕ 异常</span>
             </td>
@@ -249,11 +258,20 @@ onMounted(() => {
 
             <td style="text-align: right;">
               <div class="btn-group-row">
-                <button @click="toggleTunnel(node)" class="btn-micro btn-orange">
+                <!-- 核心：启用 / 停用切换按钮 -->
+                <button 
+                  @click="toggleNodeEnabled(node)" 
+                  :class="['btn-micro', node.enabled === 0 ? 'btn-resume-node' : 'btn-pause-node']"
+                  :title="node.enabled === 0 ? '点击恢复启用此节点' : '点击禁用此节点 (切断连接并在调度中排除)'"
+                >
+                  {{ node.enabled === 0 ? '▶️ 启用' : '⏸️ 停用' }}
+                </button>
+
+                <button @click="toggleTunnel(node)" :disabled="node.enabled === 0" class="btn-micro btn-orange">
                   🔑 {{ node.is_local ? '测试' : (node.status === 'connected' ? '断开' : '穿透') }}
                 </button>
-                <button @click="probeNode(node)" class="btn-micro btn-purple">🔀 探针</button>
-                <button @click="openEditModal(node)" class="btn-micro" style="background:#2563eb;">✏️ 修改</button>
+                <button @click="probeNode(node)" :disabled="node.enabled === 0" class="btn-micro btn-purple">🔀 探针</button>
+                <button @click="openEditModal(node)" class="btn-micro" style="background:#2563eb;">✏️</button>
                 <button @click="deleteNode(node.id)" class="btn-micro btn-trash">🗑️</button>
               </div>
             </td>
@@ -262,7 +280,7 @@ onMounted(() => {
       </table>
     </div>
 
-    <!-- 弹窗：新增 / 编辑节点 (包含分组定义) -->
+    <!-- 弹窗：新增 / 编辑节点 -->
     <div v-if="showNodeModal" class="modal-backdrop">
       <div class="modal-card">
         <div class="modal-title-bar">
@@ -290,12 +308,11 @@ onMounted(() => {
           <div class="row-flex-gap">
             <div class="form-field-block" style="flex:1;">
               <label class="form-label">节点名称</label>
-              <input v-model="nodeForm.name" required placeholder="如: 欧洲爬虫 01" class="cdp-input font-cyan-mono" style="width:100% !important;">
+              <input v-model="nodeForm.name" required placeholder="如: 宿主机 Chrome 01" class="cdp-input font-cyan-mono" style="width:100% !important;">
             </div>
 
-            <!-- 自定义分组支持 -->
             <div class="form-field-block" style="flex:1;">
-              <label class="form-label">所属集群分组 (可自由输入新组名)</label>
+              <label class="form-label">所属集群分组</label>
               <input v-model="nodeForm.group_name" required list="group-suggestions" placeholder="如: 默认分组 / 爬虫A组" class="cdp-input font-cyan-mono" style="width:100% !important;">
               <datalist id="group-suggestions">
                 <option v-for="g in groups" :key="g" :value="g"></option>
@@ -444,5 +461,30 @@ onMounted(() => {
   display: inline-flex;
   align-items: center;
   white-space: nowrap;
+}
+
+/* 停用节点置灰效果 */
+.row-node-disabled {
+  opacity: 0.55;
+  filter: grayscale(0.8);
+}
+
+.btn-pause-node {
+  background-color: #334155;
+  color: #cbd5e1;
+}
+.btn-pause-node:hover {
+  background-color: #475569;
+  color: #fff;
+}
+
+.btn-resume-node {
+  background-color: #065f46;
+  color: #34d399;
+  border: 1px solid #059669;
+}
+.btn-resume-node:hover {
+  background-color: #047857;
+  color: #fff;
 }
 </style>

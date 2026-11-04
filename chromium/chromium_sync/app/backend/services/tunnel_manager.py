@@ -81,29 +81,36 @@ class TunnelManager:
 
 tunnel_mgr = TunnelManager()
 
+# ==================== 核心：看门狗每 30 秒自动巡检探活与自愈 ====================
 async def tunnel_watchdog_loop():
-    logger.info("启动守护看门狗：维持直连与 SSH 隧道在线...")
+    logger.info("启动守护看门狗：维持直连探活与 SSH 隧道在线 (周期: 30秒)...")
     while True:
         try:
             conn = sqlite3.connect(DB_PATH)
             conn.row_factory = sqlite3.Row
             cur = conn.cursor()
-            cur.execute("SELECT * FROM nodes")
+            # 仅巡检已启用的节点，自动忽略已禁用的节点
+            cur.execute("SELECT * FROM nodes WHERE enabled=1")
             nodes = [dict(r) for r in cur.fetchall()]
             conn.close()
 
             for node in nodes:
-                if node.get('auto_tunnel', 1) == 1:
-                    is_running = False
-                    if node['is_local'] == 1:
-                        target_h = node.get('direct_host') or '127.0.0.1'
-                        c, msg = await probe_node_cookies(node['local_bind_port'], target_h)
-                        is_running = (msg == "OK")
-                    else:
-                        is_running = (node['id'] in tunnel_mgr.tunnels and tunnel_mgr.tunnels[node['id']].is_active)
-
-                    if not is_running:
+                node_id = node['id']
+                if node.get('is_local') == 1:
+                    # 免 SSH 直连节点：主动探测并实时写回状态与 Cookie 水位
+                    target_h = node.get('direct_host') or '127.0.0.1'
+                    count, msg = await probe_node_cookies(node['local_bind_port'], target_h)
+                    new_status = "connected" if msg == "OK" else "error: refused"
+                    tunnel_mgr._update_node_status(node_id, new_status, count if msg == "OK" else 0)
+                else:
+                    # 远程 SSH 节点：断线自愈拉起，在线则刷新 Cookie
+                    is_active = (node_id in tunnel_mgr.tunnels and tunnel_mgr.tunnels[node_id].is_active)
+                    if not is_active:
                         await tunnel_mgr.start_tunnel(node)
+                    else:
+                        count, msg = await probe_node_cookies(node['local_bind_port'], "127.0.0.1")
+                        new_status = "connected" if msg == "OK" else "error: refused"
+                        tunnel_mgr._update_node_status(node_id, new_status, count if msg == "OK" else 0)
         except Exception as e:
             logger.debug(f"看门狗巡检异常: {e}")
         await asyncio.sleep(30)

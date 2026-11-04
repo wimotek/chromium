@@ -9,11 +9,12 @@ def init_db_and_jwt():
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
     
-    # 1. 节点表 (包含 group_name, direct_host 等)
+    # 1. 节点表 (包含 enabled 开关)
     cur.execute('''CREATE TABLE IF NOT EXISTS nodes (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         name TEXT NOT NULL,
         group_name TEXT DEFAULT '默认分组',
+        enabled INTEGER DEFAULT 1,
         is_source INTEGER DEFAULT 0,
         is_local INTEGER DEFAULT 0,
         direct_host TEXT DEFAULT '127.0.0.1',
@@ -30,7 +31,7 @@ def init_db_and_jwt():
         last_sync TEXT
     )''')
 
-    # 2. 多策略管理表 (支持组对组、节点对组、一对多)
+    # 2. 多策略管理表
     cur.execute('''CREATE TABLE IF NOT EXISTS sync_policies (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         name TEXT NOT NULL,
@@ -47,7 +48,6 @@ def init_db_and_jwt():
         created_at TEXT
     )''')
 
-    # 3. 密钥库元数据表 (支持备注与添加时间)
     cur.execute('''CREATE TABLE IF NOT EXISTS ssh_keys (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         filename TEXT UNIQUE NOT NULL,
@@ -56,10 +56,7 @@ def init_db_and_jwt():
         size INTEGER DEFAULT 0
     )''')
 
-    # 4. 全局设置表
     cur.execute('''CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)''')
-
-    # 5. 结构化审计流水表 (滚动裁剪保持 20 条)
     cur.execute('''CREATE TABLE IF NOT EXISTS sync_logs (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         timestamp TEXT,
@@ -73,6 +70,7 @@ def init_db_and_jwt():
 
     # 增量字段平滑自动迁移
     for col, col_type in [
+        ("enabled", "INTEGER DEFAULT 1"),
         ("group_name", "TEXT DEFAULT '默认分组'"),
         ("direct_host", "TEXT DEFAULT '127.0.0.1'"),
         ("auto_tunnel", "INTEGER DEFAULT 1"),
@@ -103,7 +101,6 @@ def init_db_and_jwt():
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
             ("默认全网智能双向合并", 1, 15, "smart_merge", "all", 0, "", "all", "[]", "", now_str))
 
-    # 首次初始化默认值 (使用配置的 INIT_USERNAME 与 INIT_PASSWORD)
     defaults = {
         'admin_username': INIT_USERNAME,
         'admin_password': hash_password(INIT_PASSWORD),
