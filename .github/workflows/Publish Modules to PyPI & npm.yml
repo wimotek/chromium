@@ -1,4 +1,4 @@
-name: Auto Increment Version & Publish Modules to PyPI & npm
+name: Auto Build & Publish Modules to PyPI & npm
 
 on:
   push:
@@ -11,12 +11,14 @@ on:
 
 jobs:
   auto-publish:
-    name: Build & Auto-Bump Publish
+    name: Build & Auto-Version Publish
     runs-on: ubuntu-latest
     steps:
+      # 1. 检出代码
       - name: Checkout Repository
         uses: actions/checkout@v4
 
+      # 2. 安装 Python 环境与打包依赖
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -25,19 +27,22 @@ jobs:
       - name: Install Build Tools
         run: |
           python3 -m pip install --upgrade pip
-          pip install --upgrade build twine packaging tomli tomli-w
+          pip install --upgrade build twine tomli tomli-w
 
+      # 3. 安装 Node.js 环境
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
           node-version: '20'
           registry-url: 'https://registry.npmjs.org'
 
-      - name: Auto-Detect, Bump Version and Publish
+      # 4. 自动读取文件中配置的版本号，并拼接流水号进行打包发布
+      - name: Prefix File Version and Auto-Publish
         env:
           TWINE_USERNAME: __token__
           TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          RUN_NUM: ${{ github.run_number }} # 随仓库构建自动递增的流水号
         run: |
           set -e
           MODULE_ROOT="Module"
@@ -47,113 +52,85 @@ jobs:
             exit 0
           fi
 
-          # 自动计算下一个自增版本的内联 Python 脚本
-          cat << 'EOF' > /tmp/bump_version.py
-          import sys, json, re, urllib.request
-
-          pkg_name = sys.argv[1]
-          base_version = sys.argv[2] if len(sys.argv) > 2 else "0.1.0"
-
-          def parse_and_inc(v_str):
-              parts = [int(x) for x in re.findall(r'\d+', v_str)]
-              while len(parts) < 3:
-                  parts.append(0)
-              parts[-1] += 1
-              return ".".join(str(x) for x in parts[:3])
-
-          online_version = None
-          # 1. 尝试查询 PyPI 线上最新版本
-          try:
-              req = urllib.request.Request(f"https://pypi.org/pypi/{pkg_name}/json", headers={'User-Agent': 'CI-Version-Check'})
-              with urllib.request.urlopen(req, timeout=3) as resp:
-                  data = json.loads(resp.read().decode())
-                  online_version = data.get("info", {}).get("version")
-          except Exception:
-              pass
-
-          if online_version:
-              print(parse_and_inc(online_version))
-          else:
-              # 线上无版本时，以本地基线为准
-              print(base_version)
-          EOF
-
           for mod_dir in "$MODULE_ROOT"/*; do
             if [ -d "$mod_dir" ]; then
               MODULE_NAME=$(basename "$mod_dir")
               echo "=========================================================="
-              echo "📦 正在分析模块: [ $MODULE_NAME ] (路径: $mod_dir)"
+              echo "📦 正在处理模块: [ $MODULE_NAME ] (路径: $mod_dir)"
               echo "=========================================================="
 
-              # ==================== A. Python 自动算号与发布 ====================
-              if [ -f "$mod_dir/pyproject.toml" ] || [ -f "$mod_dir/setup.py" ]; then
+              # ==================== A. Python / PyPI ====================
+              if [ -f "$mod_dir/pyproject.toml" ]; then
                 (
                   cd "$mod_dir"
                   rm -rf dist/ build/ *.egg-info
 
-                  # 提取包名与基础版本
-                  PKG_NAME=$(python3 -c "
+                  # 1. 读取 pyproject.toml 中用户配置的基础版本号 (如 0.2.0)
+                  CONFIG_VER=$(python3 -c "
                   import tomli
                   with open('pyproject.toml', 'rb') as f:
                       cfg = tomli.load(f)
-                      print(cfg.get('project', {}).get('name', ''))
-                  " 2>/dev/null || echo "$MODULE_NAME")
+                  print(cfg.get('project', {}).get('version', '0.1.0').strip())
+                  ")
 
-                  BASE_VER=$(python3 -c "
-                  import tomli
-                  with open('pyproject.toml', 'rb') as f:
-                      cfg = tomli.load(f)
-                      print(cfg.get('project', {}).get('version', '0.1.0'))
-                  " 2>/dev/null || echo "0.1.0")
+                  # 2. 拼接：【文件中配置的版本号】 + . + 【自动自增编号】
+                  # 例如: 0.2.0 -> 拼装为 0.2.0.1, 0.2.0.2...
+                  FINAL_PYPI_VER="${CONFIG_VER}.${RUN_NUM}"
+                  echo "🐍 [PyPI] 文件配置基线: $CONFIG_VER ➔ 最终自动版本: $FINAL_PYPI_VER"
 
-                  # 自动计算自增后的新版本
-                  NEW_VER=$(python3 /tmp/bump_version.py "$PKG_NAME" "$BASE_VER")
-                  echo "🚀 [PyPI] 包名: $PKG_NAME | 自动推算最新版本号 ➔ $NEW_VER"
-
-                  # 动态覆写 pyproject.toml 中的版本号
+                  # 3. 动态更新内存中的 pyproject.toml 进行打包
                   python3 -c "
                   import tomli, tomli_w
                   with open('pyproject.toml', 'rb') as f:
                       data = tomli.load(f)
                   if 'project' in data:
-                      data['project']['version'] = '$NEW_VER'
+                      data['project']['version'] = '$FINAL_PYPI_VER'
                   with open('pyproject.toml', 'wb') as f:
                       tomli_w.dump(data, f)
-                  " 2>/dev/null || true
+                  "
 
-                  # 编译并发布
+                  # 4. 编译并推送到 PyPI
                   python3 -m build
                   if [ -n "$TWINE_PASSWORD" ]; then
                     twine upload --skip-existing --non-interactive dist/*
-                    echo "✅ PyPI 发布完成: $PKG_NAME@$NEW_VER"
+                    echo "✅ PyPI 发布完成: $MODULE_NAME@$FINAL_PYPI_VER"
+                  else
+                    echo "⚠️ 未配置 PYPI_API_TOKEN Secret，跳过发布。"
                   fi
                 )
               fi
 
-              # ==================== B. npm 自动同步版本与发布 ====================
+              # ==================== B. Node.js / npm ====================
               if [ -f "$mod_dir/package.json" ]; then
                 (
                   cd "$mod_dir"
                   NPM_NAME=$(node -p "require('./package.json').name" 2>/dev/null || echo "")
-                  
+                  CONFIG_NPM_VER=$(node -p "require('./package.json').version" 2>/dev/null || echo "0.1.0")
+
                   if [ -n "$NPM_NAME" ]; then
-                    # 获取 npm 线上当前版本
-                    ONLINE_NPM_VER=$(npm view "$NPM_NAME" version 2>/dev/null || echo "")
-                    
-                    if [ -n "$ONLINE_NPM_VER" ]; then
-                      NEW_NPM_VER=$(python3 /tmp/bump_version.py "$NPM_NAME" "$ONLINE_NPM_VER")
-                    else
-                      NEW_NPM_VER=$(node -p "require('./package.json').version || '0.1.0'")
-                    fi
+                    # 适配 npm 的 SemVer (X.Y.Z) 规范：
+                    # 取文件前两段 (如 0.2) + 自动自增号 (如 1) ➔ 0.2.1, 0.2.2
+                    FINAL_NPM_VER=$(node -e "
+                      const ver = '$CONFIG_NPM_VER';
+                      const run = '$RUN_NUM';
+                      const parts = ver.split('.');
+                      if (parts.length >= 2) {
+                        console.log(parts[0] + '.' + parts[1] + '.' + run);
+                      } else {
+                        console.log(ver + '.' + run);
+                      }
+                    ")
 
-                    echo "🚀 [npm] 包名: $NPM_NAME | 自动推算最新版本号 ➔ $NEW_NPM_VER"
+                    echo "🟢 [npm] 文件配置基线: $CONFIG_NPM_VER ➔ 最终自动版本: $FINAL_NPM_VER"
 
-                    # 动态覆写 package.json 版本号
-                    npm version "$NEW_NPM_VER" --no-git-tag-version --allow-same-version
+                    # 动态更新 package.json 版本号
+                    npm version "$FINAL_NPM_VER" --no-git-tag-version --allow-same-version
 
                     if [ -n "$NODE_AUTH_TOKEN" ]; then
                       npm publish --access public
-                      echo "✅ npm 发布完成: $NPM_NAME@$NEW_NPM_VER"
+                      echo "✅ npm 发布完成: $NPM_NAME@$FINAL_NPM_VER"
+                    else
+                      echo "⚠️ 未配置 NPM_TOKEN Secret，跳过发布。"
                     fi
                   fi
                 )
