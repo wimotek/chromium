@@ -6,7 +6,7 @@ on:
       - main
     paths:
       - 'Module/**'
-      - '.github/workflows/publish-modules.yml'
+      - '.github/workflows/Publish Modules to PyPI & npm.yml'
   workflow_dispatch:
 
 jobs:
