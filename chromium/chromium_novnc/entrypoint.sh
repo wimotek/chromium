@@ -12,7 +12,7 @@ if [ "$(id -u)" = "0" ]; then
     chmod 1777 /tmp /tmp/.X11-unix /tmp/crashpad
 
     # 【仅在此处增加 1 行软链接：彻底解决 noVNC 目录列表 Directory listing 问题】
-    ln -sf /usr/share/novnc/vnc.html /usr/share/novnc/index.html 2>/dev/null || true
+    cp -f /usr/share/novnc/vnc.html /usr/share/novnc/index.html 2>/dev/null || true
 
     # 2. 清理历史残留的锁文件
     rm -rf /tmp/.X0-lock /tmp/.X11-unix/X0 /data/SingletonLock /data/SingletonCookie /data/SingletonSocket
@@ -71,6 +71,14 @@ if [ "$(id -u)" = "0" ]; then
     export USER=appuser
     export LOGNAME=appuser
     exec gosu appuser "$0" "$@"
+
+
+    mkdir -p /var/lib/openbox
+    [ -f /var/lib/openbox/debian-menu.xml ] || cat > /var/lib/openbox/debian-menu.xml <<'EOF'
+    <?xml version="1.0" encoding="UTF-8"?>
+    <openbox_menu xmlns="http://openbox.org/3.4/menu">
+    </openbox_menu>
+EOF
 fi
 
 # ==============================================================================
@@ -146,12 +154,12 @@ fi
 
 # 5. 启动 WebUI 访问端
 # 5.1 noVNC HTTP 端 (端口 6080)
-websockify --web=/usr/share/novnc 6080 127.0.0.1:5900 &
+websockify --web=/usr/share/novnc --file-only 6080 127.0.0.1:5900 &
 
 # 5.2 noVNC HTTPS 端 (端口 6443) -> 读取 Root 阶段授权好的证书
 FINAL_CERT="/etc/ssl/app/server.crt"
 FINAL_KEY="/etc/ssl/app/server.key"
-websockify --web=/usr/share/novnc --cert="$FINAL_CERT" --key="$FINAL_KEY" 6443 127.0.0.1:5900 &
+websockify --web=/usr/share/novnc --cert="$FINAL_CERT" --key="$FINAL_KEY" --file-only 6443 127.0.0.1:5900 &
 
 # 6. CDP 端口穿透转发 (将外部 9222 流量转发至 Chromium 内部 127.0.0.1:9223)
 socat TCP-LISTEN:9222,fork,reuseaddr TCP:127.0.0.1:9223 &
