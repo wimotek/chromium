@@ -27,22 +27,56 @@ jobs:
       - name: Install Build Tools
         run: |
           python3 -m pip install --upgrade pip
-          pip install --upgrade build twine tomli tomli-w
+          pip install --upgrade build twine tomli-w
 
-      # 3. 安装 Node.js 环境
+      # 3. 安装现代 Node.js 22 LTS 环境 (消除 Node 20 废弃警告)
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22'
           registry-url: 'https://registry.npmjs.org'
 
-      # 4. 自动读取文件中配置的版本号，并拼接流水号进行打包发布
-      - name: Prefix File Version and Auto-Publish
+      # 4. 生成独立的版本读写辅助脚本 (彻底杜绝 IndentationError)
+      - name: Prepare Version Helper Script
+        run: |
+          cat << 'EOF' > /tmp/bump_module.py
+          import sys
+          from pathlib import Path
+          try:
+              import tomllib
+          except ImportError:
+              import tomli as tomllib
+          import tomli_w
+
+          mode = sys.argv[1]
+          file_path = Path(sys.argv[2])
+
+          if mode == "read":
+              try:
+                  with open(file_path, "rb") as f:
+                      data = tomllib.load(f)
+                  ver = data.get("project", {}).get("version", "0.1.0")
+                  print(ver.strip())
+              except Exception:
+                  print("0.1.0")
+
+          elif mode == "write":
+              new_ver = sys.argv[3]
+              with open(file_path, "rb") as f:
+                  data = tomllib.load(f)
+              if "project" in data:
+                  data["project"]["version"] = new_ver
+              with open(file_path, "wb") as f:
+                  tomli_w.dump(data, f)
+          EOF
+
+      # 5. 自动检索、前缀版本拼接并发布
+      - name: Scan Modules and Auto-Publish
         env:
           TWINE_USERNAME: __token__
           TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-          RUN_NUM: ${{ github.run_number }} # 随仓库构建自动递增的流水号
+          RUN_NUM: ${{ github.run_number }}
         run: |
           set -e
           MODULE_ROOT="Module"
@@ -65,31 +99,17 @@ jobs:
                   cd "$mod_dir"
                   rm -rf dist/ build/ *.egg-info
 
-                  # 1. 读取 pyproject.toml 中用户配置的基础版本号 (如 0.2.0)
-                  CONFIG_VER=$(python3 -c "
-                  import tomli
-                  with open('pyproject.toml', 'rb') as f:
-                      cfg = tomli.load(f)
-                  print(cfg.get('project', {}).get('version', '0.1.0').strip())
-                  ")
+                  # 1. 提取 pyproject.toml 中的原始版本号
+                  CONFIG_VER=$(python3 /tmp/bump_module.py read pyproject.toml)
 
-                  # 2. 拼接：【文件中配置的版本号】 + . + 【自动自增编号】
-                  # 例如: 0.2.0 -> 拼装为 0.2.0.1, 0.2.0.2...
+                  # 2. 拼接版本号：【文件中配置版本号】 + . + 【GitHub 流水号】
                   FINAL_PYPI_VER="${CONFIG_VER}.${RUN_NUM}"
                   echo "🐍 [PyPI] 文件配置基线: $CONFIG_VER ➔ 最终自动版本: $FINAL_PYPI_VER"
 
-                  # 3. 动态更新内存中的 pyproject.toml 进行打包
-                  python3 -c "
-                  import tomli, tomli_w
-                  with open('pyproject.toml', 'rb') as f:
-                      data = tomli.load(f)
-                  if 'project' in data:
-                      data['project']['version'] = '$FINAL_PYPI_VER'
-                  with open('pyproject.toml', 'wb') as f:
-                      tomli_w.dump(data, f)
-                  "
+                  # 3. 动态更新 pyproject.toml 版本
+                  python3 /tmp/bump_module.py write pyproject.toml "$FINAL_PYPI_VER"
 
-                  # 4. 编译并推送到 PyPI
+                  # 4. 编译打包并发布
                   python3 -m build
                   if [ -n "$TWINE_PASSWORD" ]; then
                     twine upload --skip-existing --non-interactive dist/*
@@ -108,18 +128,17 @@ jobs:
                   CONFIG_NPM_VER=$(node -p "require('./package.json').version" 2>/dev/null || echo "0.1.0")
 
                   if [ -n "$NPM_NAME" ]; then
-                    # 适配 npm 的 SemVer (X.Y.Z) 规范：
-                    # 取文件前两段 (如 0.2) + 自动自增号 (如 1) ➔ 0.2.1, 0.2.2
+                    # 针对 npm 语义化三段式 (SemVer: X.Y.Z) 进行适配
                     FINAL_NPM_VER=$(node -e "
-                      const ver = '$CONFIG_NPM_VER';
-                      const run = '$RUN_NUM';
+                      const ver = process.argv[1] || '0.1.0';
+                      const run = process.argv[2] || '1';
                       const parts = ver.split('.');
                       if (parts.length >= 2) {
                         console.log(parts[0] + '.' + parts[1] + '.' + run);
                       } else {
                         console.log(ver + '.' + run);
                       }
-                    ")
+                    " "$CONFIG_NPM_VER" "$RUN_NUM")
 
                     echo "🟢 [npm] 文件配置基线: $CONFIG_NPM_VER ➔ 最终自动版本: $FINAL_NPM_VER"
 
