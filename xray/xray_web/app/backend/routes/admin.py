@@ -5,7 +5,7 @@ import datetime
 import threading
 import time
 from flask import Blueprint, request, jsonify
-from core.db import get_db, hash_pwd
+from core.db import get_db, hash_pwd, get_setting, set_setting
 from services.notify_service import notify_user
 from routes import check_admin, get_node_snis, build_node_link, normalize_expire_date
 
@@ -54,9 +54,66 @@ def admin_data():
                 })
         users.append(d)
 
-    return jsonify({"code": 200, "cards": cards, "users": users, "nodes": active_nodes})
+    cluster_token = get_setting("cluster_token", "")
+    auto_approve = get_setting("node_auto_approve", "true").lower() == "true"
 
-# 1. 独立配置接口：仅维护网络连接参数（支持 IP 或 域名）
+    return jsonify({
+        "code": 200, 
+        "cards": cards, 
+        "users": users, 
+        "nodes": active_nodes,
+        "cluster_info": {
+            "cluster_token": cluster_token,
+            "auto_approve": auto_approve,
+            "panel_url": host_prefix
+        }
+    })
+
+# 集群通信引导令牌管理
+@admin_bp.route('/api/admin/cluster/token', methods=['GET', 'POST'])
+def admin_cluster_token():
+    if request.method == 'GET':
+        admin_user = request.args.get('admin_user')
+        admin_pwd = request.args.get('admin_pwd')
+        if not check_admin(admin_user, admin_pwd): return jsonify({"code": 403, "msg": "无权限"})
+        return jsonify({
+            "code": 200,
+            "cluster_token": get_setting("cluster_token", ""),
+            "auto_approve": get_setting("node_auto_approve", "true").lower() == "true"
+        })
+    else:
+        data = request.json or {}
+        if not check_admin(data.get('admin_user'), data.get('admin_pwd')): return jsonify({"code": 403, "msg": "无权限"})
+        
+        action = data.get("action")
+        if action == "regenerate":
+            new_token = "ctk_" + secrets.token_hex(16)
+            set_setting("cluster_token", new_token)
+            return jsonify({"code": 200, "msg": "集群引导令牌已轮换重置！旧令牌已立即失效。", "cluster_token": new_token})
+        
+        if "auto_approve" in data:
+            val = "true" if data.get("auto_approve") else "false"
+            set_setting("node_auto_approve", val)
+            tip = "自动准入已开启，新节点可免审上线" if val == "true" else "零信任隔离模式已开启，新节点需审批通过后方可激活服务"
+            return jsonify({"code": 200, "msg": tip})
+
+        return jsonify({"code": 400, "msg": "未知操作"})
+
+# 管理员手动审批激活隔离节点
+@admin_bp.route('/api/admin/nodes/approve', methods=['POST'])
+def admin_approve_node():
+    data = request.json or {}
+    if not check_admin(data.get('admin_user'), data.get('admin_pwd')): return jsonify({"code": 403, "msg": "无权限"})
+    node_id = data.get("node_id")
+
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("UPDATE nodes SET is_approved=1, status=1 WHERE node_id=?", (node_id,))
+    conn.commit()
+    conn.close()
+
+    return jsonify({"code": 200, "msg": f"节点 [{node_id}] 审核批准通过！已解除隔离并激活上线服务。"})
+
 @admin_bp.route('/api/admin/nodes/save_config', methods=['POST'])
 def admin_save_node_config():
     data = request.json or {}
@@ -64,7 +121,7 @@ def admin_save_node_config():
 
     node_id = data.get('node_id')
     name = data.get('name', '').strip()
-    ip = data.get('ip', '').strip()  # 支持 IPv4/IPv6 或 域名 (如 hk.domain.com)
+    ip = data.get('ip', '').strip()
     port = int(data.get('port', 443))
     raw_dest = data.get('dest', 'www.microsoft.com:443').strip()
     raw_server_names = data.get('server_names', '').strip()
@@ -92,17 +149,16 @@ def admin_save_node_config():
     conn.commit()
     conn.close()
 
-    return jsonify({"code": 200, "msg": "节点网络配置已成功保存！地址与伪装参数已更新。"})
+    return jsonify({"code": 200, "msg": "节点网络配置已保存！"})
 
-# 2. 独立权限接口：单选控制启停状态与开放用户/用户组范围
 @admin_bp.route('/api/admin/nodes/save_permission', methods=['POST'])
 def admin_save_node_permission():
     data = request.json or {}
     if not check_admin(data.get('admin_user'), data.get('admin_pwd')): return jsonify({"code": 403, "msg": "无权限"})
 
     node_id = data.get('node_id')
-    status = int(data.get('status', 1))  # 单选：1 启动 / 0 停止
-    allow_all = int(data.get('allow_all', 1))  # 单选：1 全部公开 / 0 定向授权
+    status = int(data.get('status', 1))
+    allow_all = int(data.get('allow_all', 1))
     allowed_groups = data.get('allowed_groups', '').strip()
     allowed_users = data.get('allowed_users', '').strip()
 
@@ -165,7 +221,7 @@ def admin_reset_node_key():
     if not check_admin(data.get('admin_user'), data.get('admin_pwd')): return jsonify({"code": 403, "msg": "无权限"})
 
     node_id = data.get('node_id')
-    new_key = secrets.token_hex(16)
+    new_key = "nk_" + secrets.token_hex(20)
 
     conn = get_db()
     c = conn.cursor()

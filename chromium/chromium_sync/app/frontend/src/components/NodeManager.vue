@@ -45,10 +45,42 @@ const loadNodes = async () => {
   emit('update-nodes')
 }
 
+// 提取 TOFU 待审批认领节点队列
+const pendingNodes = computed(() => {
+  return nodes.value.filter(n => n.approval_status === 0)
+})
+
 const filteredNodes = computed(() => {
   if (!selectedFilterGroup.value) return nodes.value
   return nodes.value.filter(n => n.group_name === selectedFilterGroup.value)
 })
+
+// TOFU 认领批准
+const approveNode = async (node) => {
+  const res = await props.api(`/api/nodes/${node.id}/approve`, { method: 'POST' })
+  const data = await res.json()
+  props.showToast(data.message, 'success')
+  loadNodes()
+}
+
+// TOFU 拒绝清除
+const rejectNode = async (node) => {
+  if (confirm(`确认拒绝并清除该待审节点 [${node.name}]？`)) {
+    const res = await props.api(`/api/nodes/${node.id}/reject`, { method: 'POST' })
+    const data = await res.json()
+    props.showToast(data.message, 'success')
+    loadNodes()
+  }
+}
+
+// 一键全部认领
+const approveAllPending = async () => {
+  for (const n of pendingNodes.value) {
+    await props.api(`/api/nodes/${n.id}/approve`, { method: 'POST' })
+  }
+  props.showToast(`已成功认领信任 ${pendingNodes.value.length} 个节点`, 'success')
+  loadNodes()
+}
 
 const openCreateModal = () => {
   isEditMode.value = false
@@ -102,7 +134,6 @@ const submitNodeForm = async () => {
   loadNodes()
 }
 
-// 核心功能：切换节点启用与禁用
 const toggleNodeEnabled = async (node) => {
   const res = await props.api(`/api/nodes/${node.id}/toggle-enabled`, { method: 'POST' })
   const data = await res.json()
@@ -163,6 +194,26 @@ onMounted(() => {
 
 <template>
   <div class="content-full-card">
+    
+    <!-- ==================== TOFU 待认领待审批边缘节点提示条 ==================== -->
+    <div v-if="pendingNodes.length > 0" class="tofu-alert-banner">
+      <div class="tofu-banner-left">
+        <span class="tofu-bell-icon">🔔</span>
+        <div>
+          <h4 class="tofu-title-text">
+            检测到 {{ pendingNodes.length }} 个待认领边缘节点 (TOFU 模式首次接入)
+          </h4>
+          <p class="tofu-sub-text">来自 NAT4 内网容器主动接入，请核验指纹后认领信任，未认领前不参与业务调度与探活。</p>
+        </div>
+      </div>
+      <div class="tofu-banner-actions">
+        <button @click="approveAllPending" class="btn-micro" style="background:#059669;">
+          ⚡ 一键信任全部 ({{ pendingNodes.length }})
+        </button>
+      </div>
+    </div>
+
+    <!-- 顶部标题与操作 -->
     <div class="table-header-bar">
       <div class="table-title">
         <span class="icon-duo-users">👥</span>
@@ -187,41 +238,44 @@ onMounted(() => {
             <th style="width: 12%;">所属分组</th>
             <th style="width: 18%;">节点名称 / 接入目标</th>
             <th style="width: 10%;">运行状态</th>
-            <th style="width: 14%;">直连 / 映射调试端点</th>
-            <th style="width: 14%;">实时 Cookie 存量</th>
-            <th style="width: 10%;">接入类型</th>
+            <th style="width: 14%;">调试端点</th>
+            <th style="width: 12%;">实时 Cookie</th>
+            <th style="width: 12%;">接入通道类型</th>
             <th style="width: 8%;">同步角色</th>
             <th style="width: 14%; text-align: right;">治理操作</th>
           </tr>
         </thead>
         <tbody>
-          <tr v-for="node in filteredNodes" :key="node.id" :class="node.enabled === 0 ? 'row-node-disabled' : ''">
+          <tr v-for="node in filteredNodes" :key="node.id" :class="[node.enabled === 0 ? 'row-node-disabled' : '', node.approval_status === 0 ? 'row-node-pending' : '']">
             <td>
-              <span class="tag-group-pill">
-                📁 {{ node.group_name || '默认分组' }}
-              </span>
+              <span class="tag-group-pill">📁 {{ node.group_name || '默认分组' }}</span>
             </td>
 
             <td>
               <div class="cell-main-name">
                 {{ node.name }}
-                <span v-if="node.enabled === 0" style="font-size:10px; color:#f87171; margin-left:4px;">[已禁用]</span>
+                <span v-if="node.approval_status === 0" style="font-size:10px; color:#fbbf24; margin-left:4px;">[待审核]</span>
+                <span v-else-if="node.enabled === 0" style="font-size:10px; color:#f87171; margin-left:4px;">[已禁用]</span>
               </div>
               <div class="cell-sub-desc">
-                {{ node.is_local ? `直连主机: ${node.direct_host || '127.0.0.1'}` : `${node.ssh_user}@${node.ssh_host}:${node.ssh_port}` }}
+                <span v-if="node.conn_type === 'reverse'">指纹: {{ node.node_uuid ? node.node_uuid.slice(0, 8) + '...' : 'NAT4-Client' }}</span>
+                <span v-else-if="node.is_local">直连: {{ node.direct_host || '127.0.0.1' }}</span>
+                <span v-else>{{ node.ssh_user }}@{{ node.ssh_host }}:{{ node.ssh_port }}</span>
               </div>
             </td>
 
-            <!-- 状态展示 -->
+            <!-- 状态 -->
             <td>
-              <span v-if="node.enabled === 0" class="status-standby" style="background:rgba(100, 116, 139, 0.2); border-color:#475569; color:#94a3b8;">○ 已禁用</span>
+              <span v-if="node.approval_status === 0" class="status-standby" style="background:rgba(217, 119, 6, 0.2); border-color:#d97706; color:#fbbf24;">⏳ 待认领</span>
+              <span v-else-if="node.enabled === 0" class="status-standby" style="background:rgba(100, 116, 139, 0.2); border-color:#475569; color:#94a3b8;">○ 已禁用</span>
               <span v-else-if="node.status === 'connected'" class="status-active">● 活跃</span>
               <span v-else-if="node.status === 'stopped'" class="status-standby">○ 离线</span>
               <span v-else class="status-error" :title="node.status">✕ 异常</span>
             </td>
 
             <td class="font-cyan-mono">
-              {{ node.is_local ? (node.direct_host || '127.0.0.1') : '127.0.0.1' }}:{{ node.local_bind_port }}
+              <span v-if="node.conn_type === 'reverse'">Reverse-WSS</span>
+              <span v-else>{{ node.is_local ? (node.direct_host || '127.0.0.1') : '127.0.0.1' }}:{{ node.local_bind_port }}</span>
             </td>
 
             <td>
@@ -231,8 +285,10 @@ onMounted(() => {
               </div>
             </td>
 
+            <!-- 接入类型 (直连/SSH/NAT4反向) -->
             <td>
-              <span v-if="node.is_local" class="tag-plan-blue">免SSH直连</span>
+              <span v-if="node.conn_type === 'reverse'" class="tag-plan-indigo" style="background:#3730a3; border-color:#6366f1;">🌐 反向穿透(NAT4)</span>
+              <span v-else-if="node.is_local" class="tag-plan-blue">免SSH直连</span>
               <span v-else class="tag-plan-indigo">SSH穿透</span>
             </td>
 
@@ -256,23 +312,37 @@ onMounted(() => {
               </button>
             </td>
 
+            <!-- 操作列 -->
             <td style="text-align: right;">
               <div class="btn-group-row">
-                <!-- 核心：启用 / 停用切换按钮 -->
-                <button 
-                  @click="toggleNodeEnabled(node)" 
-                  :class="['btn-micro', node.enabled === 0 ? 'btn-resume-node' : 'btn-pause-node']"
-                  :title="node.enabled === 0 ? '点击恢复启用此节点' : '点击禁用此节点 (切断连接并在调度中排除)'"
-                >
-                  {{ node.enabled === 0 ? '▶️ 启用' : '⏸️ 停用' }}
-                </button>
+                <!-- 若处于待审批状态：直接展现认领与拒绝 -->
+                <template v-if="node.approval_status === 0">
+                  <button @click="approveNode(node)" class="btn-micro" style="background:#059669;" title="信任并批准该节点加入集群">
+                    ✅ 认领
+                  </button>
+                  <button @click="rejectNode(node)" class="btn-micro btn-trash" title="拒绝并清除">
+                    ❌ 拒绝
+                  </button>
+                </template>
 
-                <button @click="toggleTunnel(node)" :disabled="node.enabled === 0" class="btn-micro btn-orange">
-                  🔑 {{ node.is_local ? '测试' : (node.status === 'connected' ? '断开' : '穿透') }}
-                </button>
-                <button @click="probeNode(node)" :disabled="node.enabled === 0" class="btn-micro btn-purple">🔀 探针</button>
-                <button @click="openEditModal(node)" class="btn-micro" style="background:#2563eb;">✏️</button>
-                <button @click="deleteNode(node.id)" class="btn-micro btn-trash">🗑️</button>
+                <!-- 已批准节点的常规治理 -->
+                <template v-else>
+                  <button 
+                    @click="toggleNodeEnabled(node)" 
+                    :class="['btn-micro', node.enabled === 0 ? 'btn-resume-node' : 'btn-pause-node']"
+                    :title="node.enabled === 0 ? '点击恢复启用此节点' : '点击禁用此节点'"
+                  >
+                    {{ node.enabled === 0 ? '▶️' : '⏸️' }}
+                  </button>
+
+                  <button @click="toggleTunnel(node)" :disabled="node.enabled === 0 || node.conn_type === 'reverse'" class="btn-micro btn-orange">
+                    🔑 {{ node.conn_type === 'reverse' ? '长连' : (node.status === 'connected' ? '断开' : '穿透') }}
+                  </button>
+
+                  <button @click="probeNode(node)" :disabled="node.enabled === 0" class="btn-micro btn-purple">🔀 探针</button>
+                  <button @click="openEditModal(node)" class="btn-micro" style="background:#2563eb;">✏️</button>
+                  <button @click="deleteNode(node.id)" class="btn-micro btn-trash">🗑️</button>
+                </template>
               </div>
             </td>
           </tr>
@@ -451,6 +521,36 @@ onMounted(() => {
 </template>
 
 <style scoped>
+/* 待审核节点专属横幅 */
+.tofu-alert-banner {
+  background: rgba(217, 119, 6, 0.12);
+  border: 1px solid #d97706;
+  border-radius: 8px;
+  padding: 12px 16px;
+  margin-bottom: 16px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+}
+.tofu-banner-left {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.tofu-bell-icon { font-size: 20px; }
+.tofu-title-text {
+  font-size: 13px;
+  font-weight: bold;
+  color: #fbbf24;
+  margin: 0;
+}
+.tofu-sub-text {
+  font-size: 11px;
+  color: #cbd5e1;
+  margin: 2px 0 0 0;
+}
+
 .tag-group-pill {
   background: #0f1f42;
   border: 1px solid #1d4ed8;
@@ -463,28 +563,24 @@ onMounted(() => {
   white-space: nowrap;
 }
 
-/* 停用节点置灰效果 */
 .row-node-disabled {
   opacity: 0.55;
   filter: grayscale(0.8);
+}
+.row-node-pending {
+  background: rgba(217, 119, 6, 0.05);
 }
 
 .btn-pause-node {
   background-color: #334155;
   color: #cbd5e1;
 }
-.btn-pause-node:hover {
-  background-color: #475569;
-  color: #fff;
-}
+.btn-pause-node:hover { background-color: #475569; color: #fff; }
 
 .btn-resume-node {
   background-color: #065f46;
   color: #34d399;
   border: 1px solid #059669;
 }
-.btn-resume-node:hover {
-  background-color: #047857;
-  color: #fff;
-}
+.btn-resume-node:hover { background-color: #047857; color: #fff; }
 </style>

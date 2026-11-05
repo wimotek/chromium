@@ -1,0 +1,163 @@
+name: Auto Increment Version & Publish Modules to PyPI & npm
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'Module/**'
+      - '.github/workflows/publish-modules.yml'
+  workflow_dispatch:
+
+jobs:
+  auto-publish:
+    name: Build & Auto-Bump Publish
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Build Tools
+        run: |
+          python3 -m pip install --upgrade pip
+          pip install --upgrade build twine packaging tomli tomli-w
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Auto-Detect, Bump Version and Publish
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -e
+          MODULE_ROOT="Module"
+
+          if [ ! -d "$MODULE_ROOT" ]; then
+            echo "⚠️ 未找到 $MODULE_ROOT 目录，流程跳过。"
+            exit 0
+          fi
+
+          # 自动计算下一个自增版本的内联 Python 脚本
+          cat << 'EOF' > /tmp/bump_version.py
+          import sys, json, re, urllib.request
+
+          pkg_name = sys.argv[1]
+          base_version = sys.argv[2] if len(sys.argv) > 2 else "0.1.0"
+
+          def parse_and_inc(v_str):
+              parts = [int(x) for x in re.findall(r'\d+', v_str)]
+              while len(parts) < 3:
+                  parts.append(0)
+              parts[-1] += 1
+              return ".".join(str(x) for x in parts[:3])
+
+          online_version = None
+          # 1. 尝试查询 PyPI 线上最新版本
+          try:
+              req = urllib.request.Request(f"https://pypi.org/pypi/{pkg_name}/json", headers={'User-Agent': 'CI-Version-Check'})
+              with urllib.request.urlopen(req, timeout=3) as resp:
+                  data = json.loads(resp.read().decode())
+                  online_version = data.get("info", {}).get("version")
+          except Exception:
+              pass
+
+          if online_version:
+              print(parse_and_inc(online_version))
+          else:
+              # 线上无版本时，以本地基线为准
+              print(base_version)
+          EOF
+
+          for mod_dir in "$MODULE_ROOT"/*; do
+            if [ -d "$mod_dir" ]; then
+              MODULE_NAME=$(basename "$mod_dir")
+              echo "=========================================================="
+              echo "📦 正在分析模块: [ $MODULE_NAME ] (路径: $mod_dir)"
+              echo "=========================================================="
+
+              # ==================== A. Python 自动算号与发布 ====================
+              if [ -f "$mod_dir/pyproject.toml" ] || [ -f "$mod_dir/setup.py" ]; then
+                (
+                  cd "$mod_dir"
+                  rm -rf dist/ build/ *.egg-info
+
+                  # 提取包名与基础版本
+                  PKG_NAME=$(python3 -c "
+                  import tomli
+                  with open('pyproject.toml', 'rb') as f:
+                      cfg = tomli.load(f)
+                      print(cfg.get('project', {}).get('name', ''))
+                  " 2>/dev/null || echo "$MODULE_NAME")
+
+                  BASE_VER=$(python3 -c "
+                  import tomli
+                  with open('pyproject.toml', 'rb') as f:
+                      cfg = tomli.load(f)
+                      print(cfg.get('project', {}).get('version', '0.1.0'))
+                  " 2>/dev/null || echo "0.1.0")
+
+                  # 自动计算自增后的新版本
+                  NEW_VER=$(python3 /tmp/bump_version.py "$PKG_NAME" "$BASE_VER")
+                  echo "🚀 [PyPI] 包名: $PKG_NAME | 自动推算最新版本号 ➔ $NEW_VER"
+
+                  # 动态覆写 pyproject.toml 中的版本号
+                  python3 -c "
+                  import tomli, tomli_w
+                  with open('pyproject.toml', 'rb') as f:
+                      data = tomli.load(f)
+                  if 'project' in data:
+                      data['project']['version'] = '$NEW_VER'
+                  with open('pyproject.toml', 'wb') as f:
+                      tomli_w.dump(data, f)
+                  " 2>/dev/null || true
+
+                  # 编译并发布
+                  python3 -m build
+                  if [ -n "$TWINE_PASSWORD" ]; then
+                    twine upload --skip-existing --non-interactive dist/*
+                    echo "✅ PyPI 发布完成: $PKG_NAME@$NEW_VER"
+                  fi
+                )
+              fi
+
+              # ==================== B. npm 自动同步版本与发布 ====================
+              if [ -f "$mod_dir/package.json" ]; then
+                (
+                  cd "$mod_dir"
+                  NPM_NAME=$(node -p "require('./package.json').name" 2>/dev/null || echo "")
+                  
+                  if [ -n "$NPM_NAME" ]; then
+                    # 获取 npm 线上当前版本
+                    ONLINE_NPM_VER=$(npm view "$NPM_NAME" version 2>/dev/null || echo "")
+                    
+                    if [ -n "$ONLINE_NPM_VER" ]; then
+                      NEW_NPM_VER=$(python3 /tmp/bump_version.py "$NPM_NAME" "$ONLINE_NPM_VER")
+                    else
+                      NEW_NPM_VER=$(node -p "require('./package.json').version || '0.1.0'")
+                    fi
+
+                    echo "🚀 [npm] 包名: $NPM_NAME | 自动推算最新版本号 ➔ $NEW_NPM_VER"
+
+                    # 动态覆写 package.json 版本号
+                    npm version "$NEW_NPM_VER" --no-git-tag-version --allow-same-version
+
+                    if [ -n "$NODE_AUTH_TOKEN" ]; then
+                      npm publish --access public
+                      echo "✅ npm 发布完成: $NPM_NAME@$NEW_NPM_VER"
+                    fi
+                  fi
+                )
+              fi
+
+            fi
+          done

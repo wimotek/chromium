@@ -1,6 +1,40 @@
 <template>
   <div class="cyber-card tab-content-card">
-    <div class="card-header">
+    <!-- 1. 顶栏：集群引导令牌与零信任双模安全管控看板 -->
+    <div class="cluster-security-banner">
+      <div class="banner-left">
+        <div class="token-title-row">
+          <span class="shield-icon">🛡️</span>
+          <b style="color: #f8fafc; font-size: 13px;">集群引导令牌 (Cluster Token):</b>
+          <span class="cluster-token-code">{{ maskedClusterToken }}</span>
+          <button class="btn-xs btn-action" title="一键复制集群通信令牌" @click="copyText(clusterInfo.cluster_token, '集群通信令牌')">
+            📋 复制令牌
+          </button>
+          <button class="btn-xs btn-reset" title="轮换重置令牌 (已在线节点不受影响)" @click="handleRegenerateClusterToken">
+            🔄 轮换重置
+          </button>
+        </div>
+        <div class="banner-hint">
+          新节点首次启动时需凭借此令牌完成 TOFU 身份核验并自动签发专属永久密钥。
+        </div>
+      </div>
+
+      <div class="banner-right">
+        <!-- 自动准入 vs 隔离审批切换开关 -->
+        <div class="switch-box">
+          <label class="switch-label" :title="clusterInfo.auto_approve ? '新节点首次握手自动上线' : '新节点首次握手后进入隔离区，待管理员审批后方可上线'">
+            <input type="checkbox" v-model="clusterInfo.auto_approve" @change="handleToggleAutoApprove" />
+            <span class="switch-text">{{ clusterInfo.auto_approve ? '🟢 自动准入 (快速上线)' : '🔒 待审隔离 (零信任审批)' }}</span>
+          </label>
+        </div>
+        <button class="btn-cyber-primary btn-deploy-snippet" @click="showDeployModal = true">
+          🚀 复制 Docker Compose 部署配置
+        </button>
+      </div>
+    </div>
+
+    <!-- 2. 节点列表表格 -->
+    <div class="card-header" style="margin-top: 15px;">
       <div style="display: flex; align-items: center; gap: 8px;">
         <h3>🌐 节点集群治理与多端调度</h3>
         <span class="badge badge-ready">{{ adminNodes.length }} 个节点</span>
@@ -13,29 +47,40 @@
         <thead>
           <tr>
             <th>节点名称 / 连接地址</th>
+            <th>准入状态</th>
             <th>服务状态</th>
             <th>开放范围策略</th>
             <th>SNI 伪装域名</th>
             <th>公钥 (PublicKey)</th>
             <th>心跳检测状态</th>
-            <th style="width: 250px;">治理操作</th>
+            <th style="width: 260px;">治理操作</th>
           </tr>
         </thead>
         <tbody>
-          <tr v-for="node in adminNodes" :key="node.id" :class="{ 'node-disabled-row': node.status === 0 }">
+          <tr v-for="node in adminNodes" :key="node.id" :class="{ 'node-quarantine-row': node.is_approved === 0, 'node-disabled-row': node.status === 0 }">
             <td>
               <div style="font-weight: 700; color: #f8fafc;">{{ node.name }}</div>
               <div style="font-size: 11px; color: #38bdf8; font-family: monospace;">{{ node.ip }}:{{ node.port }}</div>
             </td>
 
-            <!-- 运行服务状态 -->
+            <!-- 准入状态：已批准 vs 待审批隔离区 -->
+            <td>
+              <span v-if="node.is_approved === 0" class="badge badge-quarantine" title="节点处于待审批隔离区，未下发任何用户">
+                🟡 待审批
+              </span>
+              <span v-else class="badge badge-approved" title="节点已通过身份认证">
+                🛡️ 已准入
+              </span>
+            </td>
+
+            <!-- 服务运行状态 -->
             <td>
               <span class="badge" :class="node.status === 1 ? 'badge-ready' : 'badge-disabled'">
                 {{ node.status === 1 ? '🟢 运行中' : '🛑 已停止' }}
               </span>
             </td>
 
-            <!-- 开放范围策略 (默认全体公开 / 定向授权) -->
+            <!-- 开放范围策略 -->
             <td>
               <span v-if="node.status === 0" class="badge badge-disabled">
                 🚫 服务已停
@@ -55,11 +100,11 @@
               </div>
             </td>
 
-            <!-- 1. 优化：纯净等宽文本呈现，无背景无方框线，附带一键复制 -->
+            <!-- 公钥纯文本 + 复制按钮 -->
             <td>
               <div v-if="node.pbk && node.pbk.length === 43" class="pbk-box">
-                <span class="pbk-clean-text" :title="`完整公钥: ${node.pbk} (点击右侧图标复制)`">{{ formatPbk(node.pbk) }}</span>
-                <button class="btn-copy-icon" title="点击复制完整公钥" @click="copyPbk(node.pbk)">
+                <span class="pbk-clean-text" :title="`完整公钥: ${node.pbk}`">{{ formatPbk(node.pbk) }}</span>
+                <button class="btn-copy-icon" title="点击复制完整公钥" @click="copyText(node.pbk, '节点公钥')">
                   📋
                 </button>
               </div>
@@ -68,7 +113,7 @@
               </div>
             </td>
 
-            <!-- 2. 优化：紧凑小巧状态胶囊，不撑满单元格；鼠标悬停浮显具体时间，移开自动隐藏 -->
+            <!-- 紧凑心跳状态胶囊，悬停浮显时间 -->
             <td>
               <span
                 class="heartbeat-badge"
@@ -82,6 +127,10 @@
 
             <td>
               <div class="action-btn-row">
+                <!-- 若处于待审批隔离区，优先展示高亮准入审批按钮 -->
+                <button v-if="node.is_approved === 0" class="btn-sm btn-approve" @click="handleApproveNode(node)">
+                  ✅ 批准上线
+                </button>
                 <button class="btn-sm btn-edit" @click="openConfigModal(node)">⚙️ 配置</button>
                 <button class="btn-sm btn-perm" @click="openPermModal(node)">🔐 权限</button>
                 <button class="btn-sm btn-reset" @click="handleForceResync(node.node_id)" title="清空公钥让节点重新上报">🔄 接纳</button>
@@ -90,15 +139,36 @@
             </td>
           </tr>
           <tr v-if="adminNodes.length === 0">
-            <td colspan="7" style="text-align: center; color: #64748b; padding: 24px;">
-              集群暂无节点，请在远程节点部署并配置 PANEL_URL 自动接入。
+            <td colspan="8" style="text-align: center; color: #64748b; padding: 24px;">
+              集群暂无节点，请复制上方部署命令在海外服务器启动节点实例。
             </td>
           </tr>
         </tbody>
       </table>
     </div>
 
-    <!-- 弹窗 1：⚙️ 节点网络配置 (连接地址支持 IP 或 域名) -->
+    <!-- 弹窗 1：🚀 专属 Docker Compose 部署配置生成弹窗 -->
+    <div v-if="showDeployModal" class="modal-backdrop" @click="showDeployModal = false">
+      <div class="cyber-modal" style="max-width: 620px; text-align: left;" @click.stop>
+        <h3>🚀 海外节点一键 Docker Compose 部署配置</h3>
+        <p class="modal-tip">
+          在海外 VPS 上创建 <code>docker-compose.yml</code> 并粘贴如下内容，执行 <code>docker compose up -d</code> 即可自动建立 TOFU 信任上线：
+        </p>
+
+        <div class="code-editor-box">
+          <pre class="yaml-code-view">{{ generatedDockerComposeYaml }}</pre>
+        </div>
+
+        <div class="btn-group" style="justify-content: space-between; margin-top: 18px;">
+          <button class="btn-cyber-primary" @click="copyText(generatedDockerComposeYaml, 'Docker Compose 部署配置')">
+            📋 复制完整 YAML 配置
+          </button>
+          <button class="btn-cyber-action" @click="showDeployModal = false">关闭窗口</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 弹窗 2：⚙️ 节点网络配置 -->
     <div v-if="showConfigModal" class="modal-backdrop" @click="showConfigModal = false">
       <div class="cyber-modal" style="max-width: 520px; text-align: left;" @click.stop>
         <h3>⚙️ 节点网络配置 [{{ configForm.name }}]</h3>
@@ -141,7 +211,7 @@
         </div>
 
         <div class="form-item">
-          <label>节点通信密钥 (Node Key)</label>
+          <label>专属通信密钥 (Node Key - TOFU 已固化)</label>
           <input v-model="configForm.node_key" type="text" class="cyber-input modal-input font-mono" />
         </div>
 
@@ -152,7 +222,7 @@
       </div>
     </div>
 
-    <!-- 弹窗 2：🔐 节点启停与权限策略 (单选启停，单选开放范围) -->
+    <!-- 弹窗 3：🔐 节点启停与权限策略 -->
     <div v-if="showPermModal" class="modal-backdrop" @click="showPermModal = false">
       <div class="cyber-modal" style="max-width: 520px; text-align: left;" @click.stop>
         <h3>🔐 节点启停与权限策略 [{{ permForm.name }}]</h3>
@@ -216,7 +286,7 @@
 </template>
 
 <script setup>
-import { ref, reactive, onMounted } from 'vue'
+import { ref, reactive, computed, onMounted } from 'vue'
 import axios from 'axios'
 import { ElMessage } from 'element-plus'
 
@@ -228,6 +298,13 @@ const props = defineProps({
 const emit = defineEmits(['reload-all'])
 
 const adminNodes = ref([])
+const clusterInfo = reactive({
+  cluster_token: '',
+  auto_approve: true,
+  panel_url: ''
+})
+
+const showDeployModal = ref(false)
 const showConfigModal = ref(false)
 const showPermModal = ref(false)
 
@@ -251,62 +328,65 @@ const permForm = reactive({
   allowed_users: ''
 })
 
-// 精简公钥格式 (前6位...后6位)
+const maskedClusterToken = computed(() => {
+  const t = clusterInfo.cluster_token || ''
+  if (t.length <= 12) return t
+  return `${t.slice(0, 7)}...${t.slice(-6)}`
+})
+
+const generatedDockerComposeYaml = computed(() => {
+  const panelUrl = clusterInfo.panel_url || window.location.origin
+  const token = clusterInfo.cluster_token || 'your_cluster_token'
+  return `services:
+  xray-node:
+    image: ghcr.io/wimotek/chromium/xray-core:latest # 或自建节点镜像
+    container_name: xray-node
+    restart: always
+    network_mode: host
+    environment:
+      - PANEL_URL=${panelUrl}
+      - CLUSTER_TOKEN=${token}
+      - PORT=443
+      - DEST=www.microsoft.com:443
+      - SERVER_NAMES=www.microsoft.com,microsoft.com
+    volumes:
+      - ./data:/data
+`
+})
+
 const formatPbk = (pbk) => {
   if (!pbk || pbk.length < 14) return pbk || ''
   return `${pbk.slice(0, 6)}...${pbk.slice(-6)}`
 }
 
-// 复制完整公钥
-const copyPbk = (pbk) => {
-  if (!pbk) return
-  navigator.clipboard.writeText(pbk).then(() => {
-    ElMessage.success('公钥 (PublicKey) 已成功复制！')
+const copyText = (text, label) => {
+  if (!text) return
+  navigator.clipboard.writeText(text).then(() => {
+    ElMessage.success(`${label}已成功复制到剪贴板！`)
   }).catch(() => {
-    ElMessage.error('复制失败，请手动长按复制')
+    ElMessage.error('复制失败，请手动选取复制')
   })
 }
 
-// 动态计算心跳状态：仅输出紧凑状态名，相对时间放入 title 提示中
 const getHeartbeatInfo = (lastHeartbeat) => {
   if (!lastHeartbeat || lastHeartbeat.includes('等待') || lastHeartbeat.includes('下线')) {
-    return {
-      label: lastHeartbeat || '未上线',
-      diff: '无心跳',
-      cls: 'badge-disabled'
-    }
+    return { label: lastHeartbeat || '未上线', diff: '无心跳', cls: 'badge-disabled' }
   }
   const t = new Date(lastHeartbeat.replace(/-/g, '/')).getTime()
   if (isNaN(t)) {
-    return {
-      label: '未知',
-      diff: lastHeartbeat,
-      cls: 'badge-disabled'
-    }
+    return { label: '未知', diff: lastHeartbeat, cls: 'badge-disabled' }
   }
 
   const diffSec = Math.floor((Date.now() - t) / 1000)
   if (diffSec < 0 || diffSec <= 90) {
     const diffText = diffSec <= 10 ? '刚刚' : `${diffSec}秒前`
-    return {
-      label: '在线',
-      diff: diffText,
-      cls: 'badge-ready'
-    }
+    return { label: '在线', diff: diffText, cls: 'badge-ready' }
   } else if (diffSec <= 300) {
     const diffText = `${Math.floor(diffSec / 60)}分钟前`
-    return {
-      label: '延迟',
-      diff: diffText,
-      cls: 'badge-restricted'
-    }
+    return { label: '延迟', diff: diffText, cls: 'badge-restricted' }
   } else {
     const diffText = `${Math.floor(diffSec / 60)}分钟前`
-    return {
-      label: '离线',
-      diff: diffText,
-      cls: 'badge-disabled'
-    }
+    return { label: '离线', diff: diffText, cls: 'badge-disabled' }
   }
 }
 
@@ -319,21 +399,75 @@ const getScopeSummary = (node) => {
 
 const fetchNodes = async () => {
   try {
-    const res = await axios.post('/api/admin/nodes/list', {
+    const res = await axios.post('/api/admin/data', {
       admin_user: props.currentUser.username,
       admin_pwd: props.adminPassword
     })
     if (res.data.code === 200) {
-      adminNodes.value = res.data.data
+      adminNodes.value = res.data.nodes || []
+      if (res.data.cluster_info) {
+        clusterInfo.cluster_token = res.data.cluster_info.cluster_token
+        clusterInfo.auto_approve = res.data.cluster_info.auto_approve
+        clusterInfo.panel_url = res.data.cluster_info.panel_url
+      }
     }
   } catch (_) {
-    ElMessage.error('拉取节点列表失败')
+    ElMessage.error('拉取集群数据失败')
   }
 }
 
 onMounted(() => {
   fetchNodes()
 })
+
+const handleToggleAutoApprove = async () => {
+  try {
+    const res = await axios.post('/api/admin/cluster/token', {
+      admin_user: props.currentUser.username,
+      admin_pwd: props.adminPassword,
+      auto_approve: clusterInfo.auto_approve
+    })
+    if (res.data.code === 200) {
+      ElMessage.success(res.data.msg)
+    }
+  } catch (_) {
+    ElMessage.error('准入模式切换失败')
+  }
+}
+
+const handleRegenerateClusterToken = async () => {
+  if (!confirm('⚠️ 警告：确定轮换重置集群引导令牌吗？\n\n已完成 TOFU 握手的在线节点不受影响（因持有独立专属密钥）；但未来部署的新节点必须使用新令牌。')) return
+  try {
+    const res = await axios.post('/api/admin/cluster/token', {
+      admin_user: props.currentUser.username,
+      admin_pwd: props.adminPassword,
+      action: 'regenerate'
+    })
+    if (res.data.code === 200) {
+      ElMessage.success(res.data.msg)
+      clusterInfo.cluster_token = res.data.cluster_token
+    }
+  } catch (_) {
+    ElMessage.error('令牌重置失败')
+  }
+}
+
+const handleApproveNode = async (node) => {
+  try {
+    const res = await axios.post('/api/admin/nodes/approve', {
+      admin_user: props.currentUser.username,
+      admin_pwd: props.adminPassword,
+      node_id: node.node_id
+    })
+    if (res.data.code === 200) {
+      ElMessage.success(res.data.msg)
+      fetchNodes()
+      emit('reload-all')
+    }
+  } catch (_) {
+    ElMessage.error('审批激活失败')
+  }
+}
 
 const openConfigModal = (node) => {
   configForm.node_id = node.node_id
@@ -434,9 +568,120 @@ const handleRevokeDelete = async (nodeId) => {
 </script>
 
 <style scoped>
+/* 顶栏集群安全管理横幅 */
+.cluster-security-banner {
+  background: linear-gradient(145deg, rgba(15, 23, 42, 0.95), rgba(30, 41, 59, 0.8));
+  border: 1px solid rgba(56, 189, 248, 0.25);
+  border-radius: 8px;
+  padding: 14px 18px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.banner-left {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.token-title-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.cluster-token-code {
+  font-family: monospace;
+  font-size: 12px;
+  color: #38bdf8;
+  background: rgba(0, 0, 0, 0.4);
+  padding: 2px 8px;
+  border-radius: 4px;
+  border: 1px dashed rgba(56, 189, 248, 0.3);
+}
+
+.banner-hint {
+  font-size: 11px;
+  color: #94a3b8;
+}
+
+.banner-right {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.switch-box {
+  background: rgba(0, 0, 0, 0.3);
+  padding: 4px 10px;
+  border-radius: 20px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.switch-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  font-size: 11px;
+  user-select: none;
+}
+
+.btn-deploy-snippet {
+  padding: 6px 14px;
+  font-size: 12px;
+}
+
+/* 待审隔离区行高亮 */
+.node-quarantine-row {
+  background: rgba(245, 158, 11, 0.05);
+  border-left: 3px solid #f59e0b;
+}
+
 .node-disabled-row {
   opacity: 0.6;
-  background: rgba(239, 68, 68, 0.05);
+}
+
+.badge-quarantine {
+  background: rgba(245, 158, 11, 0.2);
+  color: #f59e0b;
+  border: 1px solid rgba(245, 158, 11, 0.4);
+  animation: pulse-border 2s infinite ease-in-out;
+}
+
+.badge-approved {
+  background: rgba(56, 189, 248, 0.15);
+  color: #38bdf8;
+  border: 1px solid rgba(56, 189, 248, 0.3);
+}
+
+.btn-approve {
+  background: linear-gradient(135deg, #10b981, #059669);
+  color: white;
+  border: none;
+  font-weight: 700;
+  box-shadow: 0 0 8px rgba(16, 185, 129, 0.4);
+}
+
+.code-editor-box {
+  background: #090d16;
+  border: 1px solid #1e293b;
+  border-radius: 6px;
+  padding: 12px;
+  max-height: 280px;
+  overflow-y: auto;
+}
+
+.yaml-code-view {
+  font-family: monospace;
+  font-size: 12px;
+  color: #38bdf8;
+  margin: 0;
+  white-space: pre;
 }
 
 .badge-disabled {
@@ -466,7 +711,6 @@ const handleRevokeDelete = async (nodeId) => {
   background: rgba(245, 158, 11, 0.3);
 }
 
-/* 纯净公钥文本排版：无方框线、无底色 */
 .pbk-box {
   display: inline-flex;
   align-items: center;
@@ -480,7 +724,6 @@ const handleRevokeDelete = async (nodeId) => {
   background: transparent !important;
   border: none !important;
   padding: 0;
-  letter-spacing: 0.5px;
 }
 
 .btn-copy-icon {
@@ -497,7 +740,6 @@ const handleRevokeDelete = async (nodeId) => {
   transform: scale(1.2);
 }
 
-/* 极简紧凑心跳状态徽章：自适应宽度、带发光小圆点 */
 .heartbeat-badge {
   display: inline-flex;
   align-items: center;
@@ -509,10 +751,6 @@ const handleRevokeDelete = async (nodeId) => {
   width: fit-content;
   cursor: pointer;
   white-space: nowrap;
-  transition: transform 0.2s;
-}
-.heartbeat-badge:hover {
-  transform: scale(1.05);
 }
 
 .status-dot {

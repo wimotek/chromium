@@ -9,12 +9,15 @@ def init_db_and_jwt():
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
     
-    # 1. 节点表 (包含 enabled 开关)
+    # 1. 节点表 (包含 approval_status 与 conn_type)
     cur.execute('''CREATE TABLE IF NOT EXISTS nodes (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         name TEXT NOT NULL,
         group_name TEXT DEFAULT '默认分组',
         enabled INTEGER DEFAULT 1,
+        approval_status INTEGER DEFAULT 1,     -- 1: 已授权信任入网, 0: TOFU 待认领
+        conn_type TEXT DEFAULT 'direct',       -- 'direct' 直连, 'ssh' 远程, 'reverse' NAT4反向隧道
+        node_uuid TEXT DEFAULT '',             -- 节点容器持久化唯一指纹
         is_source INTEGER DEFAULT 0,
         is_local INTEGER DEFAULT 0,
         direct_host TEXT DEFAULT '127.0.0.1',
@@ -68,8 +71,11 @@ def init_db_and_jwt():
         details TEXT
     )''')
 
-    # 增量字段平滑自动迁移
+    # 增量字段平滑自动迁移 (已有数据库安全升级)
     for col, col_type in [
+        ("approval_status", "INTEGER DEFAULT 1"),
+        ("conn_type", "TEXT DEFAULT 'direct'"),
+        ("node_uuid", "TEXT DEFAULT ''"),
         ("enabled", "INTEGER DEFAULT 1"),
         ("group_name", "TEXT DEFAULT '默认分组'"),
         ("direct_host", "TEXT DEFAULT '127.0.0.1'"),
@@ -101,11 +107,15 @@ def init_db_and_jwt():
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
             ("默认全网智能双向合并", 1, 15, "smart_merge", "all", 0, "", "all", "[]", "", now_str))
 
+    # 生成唯一的集群入网通行证 Token (Join Token)
+    initial_join_token = "hub_join_" + secrets.token_urlsafe(24)
+
     defaults = {
         'admin_username': INIT_USERNAME,
         'admin_password': hash_password(INIT_PASSWORD),
         'jwt_secret': secrets.token_hex(32),
         'api_key': 'cdp_' + secrets.token_urlsafe(24),
+        'cluster_join_token': initial_join_token,  # Edge Agent 认证与 TOFU 凭证
         'direct_port_access_enabled': '1',
         'smtp_host': 'smtp.yeah.net',
         'smtp_port': '465',

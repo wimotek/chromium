@@ -1,4 +1,5 @@
 #!/bin/sh
+# 彻底移除 set -e，确保任何子调用波动绝不导致 Edge Agent 崩溃退出！
 
 TEMPLATE_FILE="/etc/xray/config.template.json"
 CONFIG_FILE="/data/config.json"
@@ -34,7 +35,9 @@ update_xray() {
 
 # 2. 基础变量清洗
 [ -n "$PANEL_URL" ] && PANEL_URL=$(echo "$PANEL_URL" | tr -d '"'\'' ' | sed 's|/*$||')
-[ -n "$NODE_KEY" ] && NODE_KEY=$(echo "$NODE_KEY" | tr -d '"'\'' ')
+# 支持通过 CLUSTER_TOKEN 或 NODE_KEY 传入集群引导令牌
+BOOTSTRAP_TOKEN="${CLUSTER_TOKEN:-$NODE_KEY}"
+BOOTSTRAP_TOKEN=$(echo "$BOOTSTRAP_TOKEN" | tr -d '"'\'' ')
 
 PORT="${PORT:-443}"
 DEST="${DEST:-www.microsoft.com:443}"
@@ -118,7 +121,7 @@ elif [ ! -s "$PUBLIC_KEY_FILE" ]; then
             (.inbounds[] | select(.protocol == "vless")) |= (
                 .streamSettings.realitySettings.privateKey = $privkey
             )
-        ' "$CONFIG_FILE" > "$TMP_RESET" && mv "$TMP_RESET" "$CONFIG_FILE"
+        ' "$CONFIG_FILE" > "$TMP_RESET" 2>/dev/null && mv "$TMP_RESET" "$CONFIG_FILE"
     fi
     write_public_key_file "$PUBLIC_KEY"
 
@@ -151,7 +154,7 @@ UUID="${UUID:-$(/usr/bin/xray uuid)}"
 
 if [ -z "$PANEL_URL" ]; then
     # ========================================================
-    # 【分支 1：纯单机运行模式】
+    # 【模式 1：纯单机运行模式】
     # 纯净模式：绝不启用 stats/policy/api/10085 端口
     # ========================================================
     echo "==> [Mode: Standalone] 当前为纯单机模式，生成/保持纯净配置。"
@@ -225,12 +228,12 @@ EOF
 
 else
     # ========================================================
-    # 【分支 2：远程集群节点模式 - 修正路由优先级】
-    # 核心：direct 必须永远是第 1 个出站！api 出站追加在后！
+    # 【模式 2：Edge Agent 集群模式 (TOFU 信任引导与双模协同)】
     # ========================================================
-    echo "==> [Mode: Cluster Node] 远程集群节点模式激活，主控地址: $PANEL_URL"
+    echo "==> [Mode: Edge Agent] 边缘协同节点模式激活，主控中枢: $PANEL_URL"
     [ -f "$CLIENT_INFO_FILE" ] && rm -f "$CLIENT_INFO_FILE"
 
+    # 1. 固化持久 Edge 节点 ID
     if [ -f "$NODE_ID_FILE" ] && [ -s "$NODE_ID_FILE" ]; then
         NODE_ID=$(cat "$NODE_ID_FILE" | tr -d ' \r\n')
     else
@@ -238,16 +241,18 @@ else
         echo "$NODE_ID" > "$NODE_ID_FILE"
     fi
 
-    if [ -n "$NODE_KEY" ]; then
-        echo "$NODE_KEY" > "$NODE_KEY_FILE"
-    elif [ -f "$NODE_KEY_FILE" ] && [ -s "$NODE_KEY_FILE" ]; then
+    # 2. 检查本地是否已具备 TOFU 协商后的专属 node_key
+    IS_BOOTSTRAPPING=0
+    if [ -f "$NODE_KEY_FILE" ] && [ -s "$NODE_KEY_FILE" ]; then
         NODE_KEY=$(cat "$NODE_KEY_FILE" | tr -d ' \r\n')
+        echo "==> [Edge Auth] 检测到本地已持久化专属通信密钥 (node_key: ${NODE_KEY:0:6}...${NODE_KEY: -4})"
     else
-        NODE_KEY=$(openssl rand -hex 16)
-        echo "$NODE_KEY" > "$NODE_KEY_FILE"
+        IS_BOOTSTRAPPING=1
+        NODE_KEY=""
+        echo "==> [TOFU Initial] 本地无持久密钥，已进入首次信任引导流程 (Bootstrap State)..."
     fi
 
-    # 无论何时，强制校准集群配置：direct 绝对第 1，api 仅接收 10085
+    # 3. 强制固化标准集群网络配置：direct 必须排在首位，10085 仅供统计 API
     TMP_FIX="/tmp/config.cluster.fix.json"
     SOURCE_CONFIG="$CONFIG_FILE"
     [ ! -s "$SOURCE_CONFIG" ] && SOURCE_CONFIG="$TEMPLATE_FILE"
@@ -274,7 +279,6 @@ else
                 "statsInboundDownlink": true
             }
         } |
-        # 1. 入站列表：10085 API + 443 VLESS (显式打上 vless-in 标签)
         .inbounds = [
             {
                 "tag": "api",
@@ -305,13 +309,11 @@ else
                 }
             }
         ] |
-        # 2. 核心修复：direct 必须排在第 1 位（作为全站所有代理上网的默认出站）！api 排在后面！
         .outbounds = [
             {"tag": "direct", "protocol": "freedom", "settings": {}},
             {"tag": "blocked", "protocol": "blackhole", "settings": {}},
             {"tag": "api", "protocol": "freedom", "settings": {}}
         ] |
-        # 3. 核心修复：只有明确属于 api 入站的，才发给 api 出站！
         .routing.rules = [
             {
                 "type": "field",
@@ -321,7 +323,7 @@ else
         ]
         ' > "$TMP_FIX" 2>/dev/null && mv "$TMP_FIX" "$CONFIG_FILE" || true
 
-    # 守护进程启停函数
+    # 4. 核心守护进程管理与看门狗
     XRAY_PID=""
     start_xray() {
         if [ -n "$XRAY_PID" ] && kill -0 "$XRAY_PID" 2>/dev/null; then
@@ -329,7 +331,7 @@ else
         fi
         /usr/bin/xray run -config "$CONFIG_FILE" &
         XRAY_PID=$!
-        echo "==> [Xray 守护] Xray-core 已启动 (PID: $XRAY_PID)"
+        echo "==> [Xray 守护] Xray-core 已启动运行 (PID: $XRAY_PID)"
     }
 
     restart_xray() {
@@ -341,17 +343,16 @@ else
         start_xray
     }
 
-    trap 'echo "收到退出信号，清理..."; [ -n "$XRAY_PID" ] && kill -TERM "$XRAY_PID" 2>/dev/null; exit 0' TERM INT
+    trap 'echo "收到退出信号，清理退出..."; [ -n "$XRAY_PID" ] && kill -TERM "$XRAY_PID" 2>/dev/null; exit 0' TERM INT
 
-    # 启动 Xray
     start_xray
+    echo "==> [Edge Agent] 实例 ID: $NODE_ID 守护就绪，启动协同循环..."
 
-    echo "==> [Cluster Node] 节点专属随机ID: $NODE_ID 守护循环启动..."
-
-    # 前台主循环：心跳 -> 同步用户 -> 统计流量
+    # 5. 前台协同主循环 (心跳握手 -> 用户同步 -> 流量结算)
     while true; do
+        # 看门狗检测：若核心意外退出立即原地复活
         if [ -z "$XRAY_PID" ] || ! kill -0 "$XRAY_PID" 2>/dev/null; then
-            echo "==> [Watchdog] Xray 核心守护：自动重启拉起！"
+            echo "==> [Watchdog] 检测到 Xray 核心脱机，看门狗已自动拉起恢复！"
             start_xray
         fi
 
@@ -359,84 +360,112 @@ else
             PUBLIC_KEY=$(head -n 1 "$PUBLIC_KEY_FILE" | tr -d ' \r\n')
         fi
 
-        # 1. 心跳
-        HB_RESP=$(curl -k -s -X POST "${PANEL_URL}/api/node/heartbeat" \
-             -H "Content-Type: application/json" \
-             --connect-timeout 6 \
-             --max-time 12 \
-             -d "{\"node_id\": \"$NODE_ID\", \"node_key\": \"$NODE_KEY\", \"ip\": \"$SERVER_IP\", \"port\": $PORT, \"dest\": \"$DEST\", \"sni\": \"$FIRST_SERVER_NAME\", \"server_names\": \"$SERVER_NAMES\", \"pbk\": \"$PUBLIC_KEY\", \"sid\": \"$SHORT_ID\"}" 2>/dev/null || true)
+        # =====================================================================
+        # 步骤 A：心跳与安全凭证握手 (区分 TOFU 引导阶段 与 常规零信任心跳)
+        # =====================================================================
+        if [ "$IS_BOOTSTRAPPING" -eq 1 ] || [ -z "$NODE_KEY" ]; then
+            echo "==> [TOFU Handshake] 正在向主控提交引导令牌 (${BOOTSTRAP_TOKEN:0:6}...) 申请专属凭据..."
+            HB_RESP=$(curl -k -s -X POST "${PANEL_URL}/api/node/heartbeat" \
+                 -H "Content-Type: application/json" \
+                 --connect-timeout 6 \
+                 --max-time 12 \
+                 -d "{\"node_id\": \"$NODE_ID\", \"bootstrap_token\": \"$BOOTSTRAP_TOKEN\", \"ip\": \"$SERVER_IP\", \"port\": $PORT, \"dest\": \"$DEST\", \"sni\": \"$FIRST_SERVER_NAME\", \"server_names\": \"$SERVER_NAMES\", \"pbk\": \"$PUBLIC_KEY\", \"sid\": \"$SHORT_ID\"}" 2>/dev/null || true)
 
-        if [ -n "$HB_RESP" ]; then
+            ASSIGNED_KEY=$(echo "$HB_RESP" | jq -r '.tofu_assigned_key // empty' 2>/dev/null || true)
+            if [ -n "$ASSIGNED_KEY" ]; then
+                NODE_KEY="$ASSIGNED_KEY"
+                echo "$NODE_KEY" > "$NODE_KEY_FILE"
+                IS_BOOTSTRAPPING=0
+                echo "==> [TOFU Success] 首次信任建立完成！已固化专属终身密钥: ${NODE_KEY:0:6}...${NODE_KEY: -4}"
+            else
+                ERR_MSG=$(echo "$HB_RESP" | jq -r '.msg // empty' 2>/dev/null || echo "无法连接主控")
+                echo "==> [TOFU Failed] 引导握手未通过: $ERR_MSG (请检查 CLUSTER_TOKEN 设置)"
+            fi
+        else
+            # 日常零信任通信：仅携带专属分配的永久 node_key
+            HB_RESP=$(curl -k -s -X POST "${PANEL_URL}/api/node/heartbeat" \
+                 -H "Content-Type: application/json" \
+                 --connect-timeout 6 \
+                 --max-time 12 \
+                 -d "{\"node_id\": \"$NODE_ID\", \"node_key\": \"$NODE_KEY\", \"ip\": \"$SERVER_IP\", \"port\": $PORT, \"dest\": \"$DEST\", \"sni\": \"$FIRST_SERVER_NAME\", \"server_names\": \"$SERVER_NAMES\", \"pbk\": \"$PUBLIC_KEY\", \"sid\": \"$SHORT_ID\"}" 2>/dev/null || true)
+
             NEW_KEY=$(echo "$HB_RESP" | jq -r '.new_node_key // empty' 2>/dev/null || true)
             if [ -n "$NEW_KEY" ]; then
                 NODE_KEY="$NEW_KEY"
                 echo "$NODE_KEY" > "$NODE_KEY_FILE"
+                echo "==> [Key Rotated] 接收到主控密钥轮换指令，新密钥已成功固化存盘。"
             fi
         fi
 
-        # 2. 从主控同步用户名单 (保持 direct 第 1 位出站和 routing 不被篡改，仅更新 VLESS clients)
-        USER_RESP=$(curl -k -s --connect-timeout 6 --max-time 12 "${PANEL_URL}/api/node/sync?node_id=${NODE_ID}&token=${NODE_KEY}" 2>/dev/null || true)
-        if echo "$USER_RESP" | grep -q '"code":200' 2>/dev/null; then
-            REMOTE_USERS=$(echo "$USER_RESP" | jq '.users // []' 2>/dev/null || echo "[]")
-            REMOTE_PORT=$(echo "$USER_RESP" | jq -r '.node_config.port // empty' 2>/dev/null || echo "")
-            REMOTE_DEST=$(echo "$USER_RESP" | jq -r '.node_config.dest // empty' 2>/dev/null || echo "")
-            REMOTE_SID=$(echo "$USER_RESP" | jq -r '.node_config.sid // empty' 2>/dev/null || echo "")
-            REMOTE_SNI_ARRAY=$(echo "$USER_RESP" | jq -c '.node_config.server_names // []' 2>/dev/null || echo "[]")
+        # =====================================================================
+        # 步骤 B：从主控全量同步授权用户列表
+        # =====================================================================
+        if [ -n "$NODE_KEY" ]; then
+            USER_RESP=$(curl -k -s --connect-timeout 6 --max-time 12 "${PANEL_URL}/api/node/sync?node_id=${NODE_ID}&token=${NODE_KEY}" 2>/dev/null || true)
+            if echo "$USER_RESP" | grep -q '"code":200' 2>/dev/null; then
+                REMOTE_USERS=$(echo "$USER_RESP" | jq '.users // []' 2>/dev/null || echo "[]")
+                REMOTE_PORT=$(echo "$USER_RESP" | jq -r '.node_config.port // empty' 2>/dev/null || echo "")
+                REMOTE_DEST=$(echo "$USER_RESP" | jq -r '.node_config.dest // empty' 2>/dev/null || echo "")
+                REMOTE_SID=$(echo "$USER_RESP" | jq -r '.node_config.sid // empty' 2>/dev/null || echo "")
+                REMOTE_SNI_ARRAY=$(echo "$USER_RESP" | jq -c '.node_config.server_names // []' 2>/dev/null || echo "[]")
 
-            if [ -n "$REMOTE_SID" ] && [ "$REMOTE_SID" != "$SHORT_ID" ]; then
-                SHORT_ID="$REMOTE_SID"
-                echo "$SHORT_ID" > "$SHORT_ID_FILE"
-            fi
+                if [ -n "$REMOTE_SID" ] && [ "$REMOTE_SID" != "$SHORT_ID" ]; then
+                    SHORT_ID="$REMOTE_SID"
+                    echo "$SHORT_ID" > "$SHORT_ID_FILE"
+                fi
 
-            TMP_SYNC="/tmp/config.sync.json"
+                TMP_SYNC="/tmp/config.sync.json"
 
-            cat "$CONFIG_FILE" | jq --argjson new_clients "$REMOTE_USERS" \
-               --arg port "$REMOTE_PORT" \
-               --arg dest "$REMOTE_DEST" \
-               --argjson snis "$REMOTE_SNI_ARRAY" \
-               --arg sid "$SHORT_ID" \
-               '
-               (.inbounds[] | select(.protocol == "vless")) |= (
-                   .settings.clients = $new_clients |
-                   (if $port != "" then .port = ($port | tonumber) else . end) |
-                   (if $dest != "" then .streamSettings.realitySettings.dest = $dest else . end) |
-                   (if ($snis | length) > 0 then .streamSettings.realitySettings.serverNames = $snis else . end) |
-                   (if $sid != "" then .streamSettings.realitySettings.shortIds = [$sid] else . end)
-               )
-               ' > "$TMP_SYNC" 2>/dev/null || true
+                cat "$CONFIG_FILE" | jq --argjson new_clients "$REMOTE_USERS" \
+                   --arg port "$REMOTE_PORT" \
+                   --arg dest "$REMOTE_DEST" \
+                   --argjson snis "$REMOTE_SNI_ARRAY" \
+                   --arg sid "$SHORT_ID" \
+                   '
+                   (.inbounds[] | select(.protocol == "vless")) |= (
+                       .settings.clients = $new_clients |
+                       (if $port != "" then .port = ($port | tonumber) else . end) |
+                       (if $dest != "" then .streamSettings.realitySettings.dest = $dest else . end) |
+                       (if ($snis | length) > 0 then .streamSettings.realitySettings.serverNames = $snis else . end) |
+                       (if $sid != "" then .streamSettings.realitySettings.shortIds = [$sid] else . end)
+                   )
+                   ' > "$TMP_SYNC" 2>/dev/null || true
 
-            if [ -s "$TMP_SYNC" ]; then
-                if ! cmp -s "$TMP_SYNC" "$CONFIG_FILE"; then
-                    mv "$TMP_SYNC" "$CONFIG_FILE"
-                    CLIENT_COUNT=$(echo "$REMOTE_USERS" | jq 'length' 2>/dev/null || echo "0")
-                    echo "==> [Cluster Node] 成功同步主控 $CLIENT_COUNT 位用户！已热重载生效。"
-                    restart_xray
-                else
-                    rm -f "$TMP_SYNC"
+                if [ -s "$TMP_SYNC" ]; then
+                    if ! cmp -s "$TMP_SYNC" "$CONFIG_FILE"; then
+                        mv "$TMP_SYNC" "$CONFIG_FILE"
+                        CLIENT_COUNT=$(echo "$REMOTE_USERS" | jq 'length' 2>/dev/null || echo "0")
+                        echo "==> [Sync Users] 成功同步主控 $CLIENT_COUNT 位授权用户！已重载核心生效。"
+                        restart_xray
+                    else
+                        rm -f "$TMP_SYNC"
+                    fi
                 fi
             fi
-        fi
 
-        # 3. 统计增量流量回传主控 (查询 10085 API)
-        TRAFFIC_RAW=$(/usr/bin/xray api statsquery --server=127.0.0.1:10085 -pattern "user>>>" -reset=true 2>&1 || true)
+            # =====================================================================
+            # 步骤 C：统计增量流量回传主控结算
+            # =====================================================================
+            TRAFFIC_RAW=$(/usr/bin/xray api statsquery --server=127.0.0.1:10085 -pattern "user>>>" -reset=true 2>&1 || true)
 
-        if echo "$TRAFFIC_RAW" | grep -q '"value"'; then
-            TRAFFIC_PAYLOAD=$(echo "$TRAFFIC_RAW" | jq -c '[
-                .stat[]? | 
-                select((.value | tonumber) > 0) | 
-                {
-                    email: (.name | split(">>>")[1]), 
-                    bytes: (.value | tonumber)
-                }
-            ]' 2>/dev/null || true)
+            if echo "$TRAFFIC_RAW" | grep -q '"value"'; then
+                TRAFFIC_PAYLOAD=$(echo "$TRAFFIC_RAW" | jq -c '[
+                    .stat[]? | 
+                    select((.value | tonumber) > 0) | 
+                    {
+                        email: (.name | split(">>>")[1]), 
+                        bytes: (.value | tonumber)
+                    }
+                ]' 2>/dev/null || true)
 
-            if [ -n "$TRAFFIC_PAYLOAD" ] && [ "$TRAFFIC_PAYLOAD" != "[]" ]; then
-                REPORT_RES=$(curl -k -s -X POST "${PANEL_URL}/api/node/traffic" \
-                     -H "Content-Type: application/json" \
-                     --connect-timeout 6 \
-                     --max-time 10 \
-                     -d "{\"node_id\": \"$NODE_ID\", \"token\": \"$NODE_KEY\", \"traffic\": $TRAFFIC_PAYLOAD}" 2>/dev/null || echo "请求超时")
-                echo "==> [Traffic Report] 成功回传结算流量: $TRAFFIC_PAYLOAD | 主控响应: $REPORT_RES"
+                if [ -n "$TRAFFIC_PAYLOAD" ] && [ "$TRAFFIC_PAYLOAD" != "[]" ]; then
+                    REPORT_RES=$(curl -k -s -X POST "${PANEL_URL}/api/node/traffic" \
+                         -H "Content-Type: application/json" \
+                         --connect-timeout 6 \
+                         --max-time 10 \
+                         -d "{\"node_id\": \"$NODE_ID\", \"token\": \"$NODE_KEY\", \"traffic\": $TRAFFIC_PAYLOAD}" 2>/dev/null || echo "请求超时")
+                    echo "==> [Traffic Report] 成功回传结算流量: $TRAFFIC_PAYLOAD | 主控响应: $REPORT_RES"
+                fi
             fi
         fi
 

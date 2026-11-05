@@ -7,27 +7,24 @@ const props = defineProps({
 })
 const emit = defineEmits(['logout'])
 
-// 1. 管理员账号与 API Key
 const profile = reactive({
   username: '',
   new_password: '',
   api_key: ''
 })
 
-// 2. 远程连接开关与使用说明
 const remoteAccess = reactive({
-  direct_port_access_enabled: true
+  direct_port_access_enabled: true,
+  cluster_join_token: ''
 })
-const activeGuideTab = ref('gateway') // 'gateway' | 'direct' | 'api'
+const activeGuideTab = ref('edge') // 'edge' | 'gateway' | 'direct' | 'api'
 
-// 3. 全局 Cookie 策略
 const cookiePolicy = reactive({
   sync_diff_enabled: true,
   sync_include_domains: '',
   sync_exclude_domains: 'doubleclick.net,google-analytics.com'
 })
 
-// 4. SSH 密钥金库
 const keys = ref([])
 const uploadRemark = ref('')
 
@@ -44,23 +41,31 @@ const loadData = async () => {
   Object.assign(remoteAccess, await rRes.json())
 }
 
-// 核心功能：一键复制 API Key 到剪贴板
-const copyApiKey = async () => {
-  if (!profile.api_key) return
+const copyText = async (text, desc) => {
+  if (!text) return
   try {
     if (navigator.clipboard && navigator.clipboard.writeText) {
-      await navigator.clipboard.writeText(profile.api_key)
+      await navigator.clipboard.writeText(text)
     } else {
       const ta = document.createElement('textarea')
-      ta.value = profile.api_key
+      ta.value = text
       document.body.appendChild(ta)
       ta.select()
       document.execCommand('copy')
       document.body.removeChild(ta)
     }
-    props.showToast('API Key 已复制到剪切板', 'success')
+    props.showToast(`${desc} 已复制到剪切板`, 'success')
   } catch (err) {
     props.showToast('复制失败，请手动选择复制', 'error')
+  }
+}
+
+const resetJoinToken = async () => {
+  if (confirm('确认重置集群入网通行码？旧通行码将立即失效，但已通过认领的节点不受影响。')) {
+    const res = await props.api('/api/nodes/reset-join-token', { method: 'POST' })
+    const data = await res.json()
+    remoteAccess.cluster_join_token = data.join_token
+    props.showToast('入网通行码已成功重置', 'success')
   }
 }
 
@@ -202,7 +207,7 @@ onMounted(() => {
 
           <div class="form-field-block">
             <label class="form-label">域名白名单 (Include Domains，选填)</label>
-            <input v-model="cookiePolicy.sync_include_domains" placeholder="例如: google.com, twitter.com, github.com (留空则同步全部)" class="cdp-input cdp-w-normal font-cyan-mono">
+            <input v-model="cookiePolicy.sync_include_domains" placeholder="例如: google.com, twitter.com (留空则同步全部)" class="cdp-input cdp-w-normal font-cyan-mono">
             <p class="form-field-hint">仅同步匹配这些域名的 Cookie，多个域名用英文逗号分隔；留空表示不过滤。</p>
           </div>
 
@@ -220,38 +225,54 @@ onMounted(() => {
 
     </div>
 
-    <!-- 右列：远程连接控制中枢 (含 API Key 一键复制)、使用说明与密钥金库 -->
+    <!-- 右列：远程连接控制中枢、使用说明与密钥金库 -->
     <div style="display:flex; flex-direction:column; gap:20px;">
 
-      <!-- 卡片 3: 远程 CDP 连接与外部 Agent 接入中枢 -->
+      <!-- 卡片 3: 远程连接与边缘接入中枢 -->
       <div class="content-full-card">
         <div class="table-header-bar" style="margin-bottom:10px; padding-bottom:8px;">
-          <h3 class="card-inner-h3">🌐 远程 CDP 连接与外部 Agent 接入中枢</h3>
-          <span class="badge-recommend">支持双模式</span>
+          <h3 class="card-inner-h3">🌐 远程连接与边缘接入控制中枢</h3>
+          <span class="badge-recommend">双模自动穿透</span>
         </div>
 
-        <!-- API Key 展示与一键复制区 -->
+        <!-- 凭据 1: 集群入网通行码 (Join Token) -->
         <div style="background:#09122a; border:1px solid #172554; border-radius:8px; padding:12px; margin-bottom:14px;">
           <div style="display:flex; justify-content:space-between; align-items:center;">
-            <span style="font-size:12px; color:#38bdf8; font-weight:bold;">外部 Agent / 第三方程序调用 Key</span>
-            
-            <div style="display:flex; gap:10px; align-items:center;">
-              <!-- 核心优化：一键复制独立按钮 -->
-              <button type="button" @click="copyApiKey" class="btn-copy-tag" title="一键复制 API Key">
+            <span style="font-size:12px; color:#38bdf8; font-weight:bold;">边缘节点入网通行码 (Join Token)</span>
+            <div style="display:flex; gap:8px; align-items:center;">
+              <button type="button" @click="copyText(remoteAccess.cluster_join_token, '入网通行码')" class="btn-copy-tag">
+                📋 复制 Token
+              </button>
+              <button @click="resetJoinToken" class="link-probe" style="font-size:11px; color:#f87171;">重置通行码</button>
+            </div>
+          </div>
+          <div class="api-key-interactive-box" @click="copyText(remoteAccess.cluster_join_token, '入网通行码')" title="点击整行亦可复制">
+            <span class="font-cyan-mono" style="word-break:break-all; font-size:12px;">{{ remoteAccess.cluster_join_token || '正在获取...' }}</span>
+            <span class="copy-hint-icon">📋</span>
+          </div>
+          <p style="font-size:11px; color:#64748b; margin-top:5px;">
+            用于 noVNC / Kasm 节点批量自动入网认证；不带此 Token 上报时将转入 TOFU 待人工认领审核队列。
+          </p>
+        </div>
+
+        <!-- 凭据 2: API Key -->
+        <div style="background:#09122a; border:1px solid #172554; border-radius:8px; padding:12px; margin-bottom:14px;">
+          <div style="display:flex; justify-content:space-between; align-items:center;">
+            <span style="font-size:12px; color:#38bdf8; font-weight:bold;">外部 Agent / 爬虫调用 Key</span>
+            <div style="display:flex; gap:8px; align-items:center;">
+              <button type="button" @click="copyText(profile.api_key, 'API Key')" class="btn-copy-tag">
                 📋 复制 Key
               </button>
               <button @click="regenApiKey" class="link-probe" style="font-size:11px;">重新生成</button>
             </div>
           </div>
-
-          <!-- 可点击高亮复制框 -->
-          <div class="api-key-interactive-box" @click="copyApiKey" title="点击整行亦可直接复制">
+          <div class="api-key-interactive-box" @click="copyText(profile.api_key, 'API Key')" title="点击整行亦可复制">
             <span class="font-cyan-mono" style="word-break:break-all; font-size:12px;">{{ profile.api_key || '正在获取...' }}</span>
             <span class="copy-hint-icon">📋</span>
           </div>
         </div>
 
-        <!-- 远程连接开关 -->
+        <!-- 远程连接公网端口开关 -->
         <div style="background:#09122a; border:1px solid #1e3a8a; border-radius:6px; padding:12px; margin-bottom:16px;">
           <div style="display:flex; justify-content:space-between; align-items:center;">
             <div>
@@ -274,28 +295,45 @@ onMounted(() => {
           <div style="display:flex; gap:8px; margin-bottom:10px; border-bottom:1px solid #172554; padding-bottom:8px;">
             <button 
               type="button" 
-              @click="activeGuideTab = 'gateway'" 
-              :class="activeGuideTab === 'gateway' ? 'guide-tab-active' : 'guide-tab-normal'"
+              @click="activeGuideTab = 'edge'" 
+              :class="activeGuideTab === 'edge' ? 'guide-tab-active' : 'guide-tab-normal'"
             >
-              方式一：API-Key 安全网关 (推荐)
+              🚀 边缘容器自动入网 (noVNC/Kasm)
             </button>
             <button 
               type="button" 
-              @click="activeGuideTab = 'direct'" 
-              :class="activeGuideTab === 'direct' ? 'guide-tab-active' : 'guide-tab-normal'"
+              @click="activeGuideTab = 'gateway'" 
+              :class="activeGuideTab === 'gateway' ? 'guide-tab-active' : 'guide-tab-normal'"
             >
-              方式二：公网端口直接映射
+              方式一：API-Key 安全网关
             </button>
             <button 
               type="button" 
               @click="activeGuideTab = 'api'" 
               :class="activeGuideTab === 'api' ? 'guide-tab-active' : 'guide-tab-normal'"
             >
-              第三方程序节点列表 API
+              第三方提取 API
             </button>
           </div>
 
-          <!-- 说明 1: WSS 安全网关 -->
+          <!-- 说明 1: 边缘容器自动入网 (TOFU / Edge Agent) -->
+          <div v-if="activeGuideTab === 'edge'" class="guide-content-box">
+            <p style="color:#34d399; font-weight:bold; margin-bottom:6px;">✨ 无公网 IP、NAT4 环境一键穿透自动入网：</p>
+            <p style="font-size:11px; color:#94a3b8; margin-bottom:6px;">
+              容器挂载 <code>edge_agent.py</code>，启动时自动出站连入管理端（无需路由器开端口）：
+            </p>
+            <pre class="code-snippet-box"><code># noVNC / Kasm 节点 docker-compose.yml 环境变量示例:
+environment:
+  - HUB_URL=https://&lt;你的域名&gt;:8443
+  # 方式 A (Edge Agent 自动批准): 填入上面的 Join Token
+  - JOIN_TOKEN={{ remoteAccess.cluster_join_token }}
+  # 方式 B (默认 TOFU 模式): 不填 JOIN_TOKEN，容器启动后进入管理端待认领审批队列
+  - NODE_NAME=北美-Kasm-01
+  - NODE_GROUP=北美自动化组
+  - CDP_PORT=9222</code></pre>
+          </div>
+
+          <!-- 说明 2: WSS 安全网关 -->
           <div v-if="activeGuideTab === 'gateway'" class="guide-content-box">
             <p style="color:#38bdf8; font-weight:bold; margin-bottom:6px;">🌟 优势：仅需 8443 端口，TLS 全量加密，强制校验 API-Key，彻底防扫描。</p>
             <p style="color:#94a3b8; font-size:11px; margin-bottom:8px;">连接地址：<code>wss://&lt;你的域名&gt;:8443/cdp/{节点ID}/ws?api_key={{ profile.api_key }}</code></p>
@@ -308,19 +346,6 @@ async with async_playwright() as p:
     page = await browser.new_page()
     await page.goto("https://ipinfo.io")
     print(await page.title())</code></pre>
-          </div>
-
-          <!-- 说明 2: 公网裸端口 -->
-          <div v-if="activeGuideTab === 'direct'" class="guide-content-box">
-            <p style="color:#fbbf24; font-weight:bold; margin-bottom:6px;">⚠️ 传统模式：需在云防火墙开放 19200-19250 端口，无鉴权机制。</p>
-            <p style="color:#94a3b8; font-size:11px; margin-bottom:8px;">连接地址：<code>http://&lt;你的域名或IP&gt;:{本地穿透端口}</code> (如 19222)</p>
-            <pre class="code-snippet-box"><code># Python Playwright 示例
-from playwright.async_api import async_playwright
-
-async with async_playwright() as p:
-    browser = await p.chromium.connect_over_cdp("http://&lt;IP&gt;:19222")
-    page = await browser.new_page()
-    await page.goto("https://ipinfo.io")</code></pre>
           </div>
 
           <!-- 说明 3: 第三方对接 API -->
@@ -386,7 +411,6 @@ curl -X POST -H "X-API-Key: {{ profile.api_key }}" https://&lt;域名&gt;:8443/a
 </template>
 
 <style scoped>
-/* 一键复制专属按钮样式 */
 .btn-copy-tag {
   background: #1e293b;
   border: 1px solid #3b82f6;
@@ -405,7 +429,6 @@ curl -X POST -H "X-API-Key: {{ profile.api_key }}" https://&lt;域名&gt;:8443/a
   color: #ffffff;
 }
 
-/* 交互式 Key 容器 */
 .api-key-interactive-box {
   display: flex;
   justify-content: space-between;

@@ -1,8 +1,9 @@
 import re
+import secrets
 import datetime
 import traceback
 from flask import Blueprint, request, jsonify
-from core.db import get_db
+from core.db import get_db, get_setting
 from routes import get_node_snis, is_user_allowed_for_node
 
 node_bp = Blueprint('node_bp', __name__)
@@ -12,7 +13,8 @@ def node_heartbeat():
     try:
         data = request.get_json(force=True, silent=True) or {}
         node_id = data.get("node_id", "").strip()
-        node_key = data.get("node_key", "").strip()
+        client_key = data.get("node_key", "").strip()
+        bootstrap_token = data.get("bootstrap_token", "").strip() or client_key
         node_ip = data.get("ip")
         node_port = int(data.get("port", 443))
         raw_pbk = data.get("pbk", "").strip()
@@ -48,51 +50,85 @@ def node_heartbeat():
 
         conn = get_db()
         c = conn.cursor()
-
         c.execute("SELECT * FROM nodes WHERE node_id=?", (node_id,))
         node_row = c.fetchone()
 
+        # =========================================================================
+        # 阶段 1：TOFU 首次信任接入 (该节点在主控数据库未建档)
+        # =========================================================================
         if not node_row:
-            c.execute("SELECT id, ip FROM nodes WHERE ip=? AND port=?", (node_ip, node_port))
+            # 严格核验集群引导通信令牌 (Cluster Token)
+            valid_cluster_token = get_setting("cluster_token", "").strip()
+            if not valid_cluster_token or bootstrap_token != valid_cluster_token:
+                conn.close()
+                return jsonify({"code": 403, "msg": "【安全拦截】未授权的集群接入令牌 (Invalid Cluster Token)！拒绝入库。"}), 403
+
+            # 签发专属终身高强度通信密钥 (Mint Node Key)
+            assigned_node_key = "nk_" + secrets.token_hex(20)
+            
+            # 检查准入审批策略 (Auto Approve)
+            auto_approve = get_setting("node_auto_approve", "true").lower() == "true"
+            status = 1 if auto_approve else 0
+            is_approved = 1 if auto_approve else 0
+
+            # 检查同 IP 同端口僵尸旧实例做平滑接管
+            c.execute("SELECT id FROM nodes WHERE ip=? AND port=?", (node_ip, node_port))
             existing = c.fetchone()
             if existing:
                 c.execute("""
                     UPDATE nodes 
-                    SET node_id=?, node_key=?, pbk=?, sid=?, status=1, last_heartbeat=?, dest=?, sni=?, server_names=?
+                    SET node_id=?, node_key=?, pbk=?, sid=?, status=?, is_approved=?, last_heartbeat=?, dest=?, sni=?, server_names=?
                     WHERE id=?
-                """, (node_id, node_key, pbk, sid, now_str, dest, primary_sni, server_names_str, existing["id"]))
+                """, (node_id, assigned_node_key, pbk, sid, status, is_approved, now_str, dest, primary_sni, server_names_str, existing["id"]))
             else:
                 auto_name = f"节点-{node_ip}"
                 c.execute("""
                     INSERT INTO nodes 
-                    (node_id, node_key, pending_key, name, ip, port, dest, sni, server_names, pbk, sid, status, last_heartbeat, allow_all, allowed_groups, allowed_users) 
-                    VALUES (?, ?, '', ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, 1, '', '')
-                """, (node_id, node_key, auto_name, node_ip, node_port, dest, primary_sni, server_names_str, pbk, sid, now_str))
+                    (node_id, node_key, pending_key, name, ip, port, dest, sni, server_names, pbk, sid, status, last_heartbeat, allow_all, allowed_groups, allowed_users, is_approved) 
+                    VALUES (?, ?, '', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, '', '', ?)
+                """, (node_id, assigned_node_key, auto_name, node_ip, node_port, dest, primary_sni, server_names_str, pbk, sid, status, now_str, is_approved))
 
             conn.commit()
             conn.close()
-            return jsonify({"code": 200, "msg": "节点上线握手成功！"})
 
+            tip = "TOFU 首次握手成功！已为您签发终身通信凭据。" if is_approved else "TOFU 握手成功，已分配凭据。当前处于隔离区，等待管理员审批激活。"
+            return jsonify({
+                "code": 200,
+                "msg": tip,
+                "tofu_assigned_key": assigned_node_key,
+                "is_approved": is_approved
+            })
+
+        # =========================================================================
+        # 阶段 2：日常零信任通信 (核验绑定的专属 node_key)
+        # =========================================================================
         node = dict(node_row)
         current_key = node.get("node_key", "")
         pending_key = node.get("pending_key", "")
 
-        # 核心保护：如果管理员在面板把地址配置成了域名（含英文字符），心跳不覆盖，保留管理员配置的域名！
+        # 保留域名设置，防止心跳反向覆盖
         current_ip = node.get("ip", "")
         is_custom_domain = bool(current_ip and any(ch.isalpha() for ch in current_ip))
         save_ip = current_ip if is_custom_domain else (node_ip or current_ip)
 
+        # 检查是否处于审批隔离区
+        if int(node.get("is_approved", 1)) == 0:
+            conn.close()
+            return jsonify({"code": 403, "msg": "【隔离状态】节点已在主控登记，但尚未获得管理员审批批准上线。"}), 403
+
+        # 管理员触发的主控重置指令
         if pending_key == 'FORCE_RESYNC':
             c.execute("""
                 UPDATE nodes 
-                SET node_key=?, pending_key='', ip=?, pbk=?, sid=COALESCE(NULLIF(?, ''), sid), status=1, last_heartbeat=? 
+                SET node_key=?, pending_key='', ip=?, pbk=?, sid=COALESCE(NULLIF(?, ''), sid), status=1, is_approved=1, last_heartbeat=? 
                 WHERE node_id=?
-            """, (node_key, save_ip, pbk, sid, now_str, node_id))
+            """, (client_key, save_ip, pbk, sid, now_str, node_id))
             conn.commit()
             conn.close()
-            return jsonify({"code": 200, "msg": "重置接纳完成，密钥已更新！"})
+            return jsonify({"code": 200, "msg": "重新接纳完成，密钥已更新！"})
 
-        if pending_key and node_key == current_key:
+        # 主控指令热更密钥
+        if pending_key and client_key == current_key:
             c.execute("""
                 UPDATE nodes 
                 SET node_key=?, pending_key='', ip=?, pbk=?, sid=COALESCE(NULLIF(sid, ''), ?), status=1, last_heartbeat=? 
@@ -100,9 +136,10 @@ def node_heartbeat():
             """, (pending_key, save_ip, pbk, sid, now_str, node_id))
             conn.commit()
             conn.close()
-            return jsonify({"code": 200, "msg": "心跳成功，已下发新密钥", "new_node_key": pending_key})
+            return jsonify({"code": 200, "msg": "心跳正常，已同步新密钥", "new_node_key": pending_key})
 
-        if node_key == current_key or not current_key:
+        # 正常合法心跳
+        if client_key == current_key:
             c.execute("""
                 UPDATE nodes 
                 SET ip=?, pbk=?, sid=COALESCE(NULLIF(sid, ''), ?), last_heartbeat=? 
@@ -113,7 +150,7 @@ def node_heartbeat():
             return jsonify({"code": 200, "msg": "心跳正常"})
 
         conn.close()
-        return jsonify({"code": 403, "msg": "Node Key 验证失败"}), 403
+        return jsonify({"code": 403, "msg": "【安全拦截】节点通信凭据 (node_key) 校验失败，拒绝服务！"}), 403
 
     except Exception as e:
         traceback.print_exc()
@@ -131,15 +168,15 @@ def node_sync_users():
         node_row = c.fetchone()
         if not node_row:
             conn.close()
-            return jsonify({"code": 403, "msg": "节点不存在"}), 403
+            return jsonify({"code": 403, "msg": "节点未授权"}), 403
 
         node = dict(node_row)
         if node.get("node_key") != token and node.get("pending_key") != 'FORCE_RESYNC':
             conn.close()
             return jsonify({"code": 403, "msg": "鉴权失败"}), 403
 
-        # 若节点停止服务 (status=0)，下发空用户切断所有连接
-        if int(node.get("status", 1)) == 0:
+        # 未被审批或已停止服务的节点，坚决下发空列表
+        if int(node.get("is_approved", 1)) == 0 or int(node.get("status", 1)) == 0:
             conn.close()
             snis = get_node_snis(node)
             clean_dest = node["dest"] if (node.get("dest") and ":" in node["dest"]) else f"{node.get('dest', 'www.microsoft.com')}:443"

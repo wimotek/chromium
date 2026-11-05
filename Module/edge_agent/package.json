@@ -1,0 +1,12 @@
+{
+  "name": "wimotek-edge-agent",
+  "version": "1.0.0",
+  "description": "Universal Edge Tunnel Agent CLI Runner",
+  "main": "index.js",
+  "bin": {
+    "edge-agent": "./bin/cli.js"
+  },
+  "keywords": ["edge", "agent", "tunnel", "reverse-proxy", "cdp", "vnc"],
+  "author": "wimotek",
+  "license": "MIT"
+}
