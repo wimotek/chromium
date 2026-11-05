@@ -29,48 +29,14 @@ jobs:
           python3 -m pip install --upgrade pip
           pip install --upgrade build twine tomli-w
 
-      # 3. 安装现代 Node.js 22 LTS 环境 (消除 Node 20 废弃警告)
+      # 3. 安装 Node.js 22 LTS
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
           node-version: '22'
           registry-url: 'https://registry.npmjs.org'
 
-      # 4. 生成独立的版本读写辅助脚本 (彻底杜绝 IndentationError)
-      - name: Prepare Version Helper Script
-        run: |
-          cat << 'EOF' > /tmp/bump_module.py
-          import sys
-          from pathlib import Path
-          try:
-              import tomllib
-          except ImportError:
-              import tomli as tomllib
-          import tomli_w
-
-          mode = sys.argv[1]
-          file_path = Path(sys.argv[2])
-
-          if mode == "read":
-              try:
-                  with open(file_path, "rb") as f:
-                      data = tomllib.load(f)
-                  ver = data.get("project", {}).get("version", "0.1.0")
-                  print(ver.strip())
-              except Exception:
-                  print("0.1.0")
-
-          elif mode == "write":
-              new_ver = sys.argv[3]
-              with open(file_path, "rb") as f:
-                  data = tomllib.load(f)
-              if "project" in data:
-                  data["project"]["version"] = new_ver
-              with open(file_path, "wb") as f:
-                  tomli_w.dump(data, f)
-          EOF
-
-      # 5. 自动检索、前缀版本拼接并发布
+      # 4. 自动检索、前缀版本拼接并发布 (语法 100% 纯净闭合)
       - name: Scan Modules and Auto-Publish
         env:
           TWINE_USERNAME: __token__
@@ -95,64 +61,53 @@ jobs:
 
               # ==================== A. Python / PyPI ====================
               if [ -f "$mod_dir/pyproject.toml" ]; then
-                (
-                  cd "$mod_dir"
-                  rm -rf dist/ build/ *.egg-info
+                pushd "$mod_dir" > /dev/null
+                rm -rf dist/ build/ *.egg-info
 
-                  # 1. 提取 pyproject.toml 中的原始版本号
-                  CONFIG_VER=$(python3 /tmp/bump_module.py read pyproject.toml)
+                # 单行安全提取 pyproject.toml 基础版本号 (无换行、无嵌套括号)
+                CONFIG_VER=$(python3 -c "import tomllib; print(tomllib.load(open('pyproject.toml', 'rb')).get('project', {}).get('version', '0.1.0').strip())" 2>/dev/null || echo "0.1.0")
 
-                  # 2. 拼接版本号：【文件中配置版本号】 + . + 【GitHub 流水号】
-                  FINAL_PYPI_VER="${CONFIG_VER}.${RUN_NUM}"
-                  echo "🐍 [PyPI] 文件配置基线: $CONFIG_VER ➔ 最终自动版本: $FINAL_PYPI_VER"
+                # 拼接：【文件配置版本】 + . + 【流水号】 (如: 0.2.0.15)
+                FINAL_PYPI_VER="${CONFIG_VER}.${RUN_NUM}"
+                echo "🐍 [PyPI] 文件配置基线: $CONFIG_VER ➔ 最终自动版本: $FINAL_PYPI_VER"
 
-                  # 3. 动态更新 pyproject.toml 版本
-                  python3 /tmp/bump_module.py write pyproject.toml "$FINAL_PYPI_VER"
+                # 单行安全回写 pyproject.toml
+                python3 -c "import tomli_w, tomllib; f='pyproject.toml'; d=tomllib.load(open(f, 'rb')); d.setdefault('project', {})['version']='$FINAL_PYPI_VER'; tomli_w.dump(d, open(f, 'wb'))"
 
-                  # 4. 编译打包并发布
-                  python3 -m build
-                  if [ -n "$TWINE_PASSWORD" ]; then
-                    twine upload --skip-existing --non-interactive dist/*
-                    echo "✅ PyPI 发布完成: $MODULE_NAME@$FINAL_PYPI_VER"
-                  else
-                    echo "⚠️ 未配置 PYPI_API_TOKEN Secret，跳过发布。"
-                  fi
-                )
+                python3 -m build
+                if [ -n "$TWINE_PASSWORD" ]; then
+                  twine upload --skip-existing --non-interactive dist/*
+                  echo "✅ PyPI 发布完成: $MODULE_NAME@$FINAL_PYPI_VER"
+                else
+                  echo "⚠️ 未配置 PYPI_API_TOKEN Secret，跳过发布。"
+                fi
+                popd > /dev/null
               fi
 
               # ==================== B. Node.js / npm ====================
               if [ -f "$mod_dir/package.json" ]; then
-                (
-                  cd "$mod_dir"
-                  NPM_NAME=$(node -p "require('./package.json').name" 2>/dev/null || echo "")
-                  CONFIG_NPM_VER=$(node -p "require('./package.json').version" 2>/dev/null || echo "0.1.0")
+                pushd "$mod_dir" > /dev/null
+                NPM_NAME=$(node -p "require('./package.json').name" 2>/dev/null || echo "")
+                CONFIG_NPM_VER=$(node -p "require('./package.json').version" 2>/dev/null || echo "0.1.0")
 
-                  if [ -n "$NPM_NAME" ]; then
-                    # 针对 npm 语义化三段式 (SemVer: X.Y.Z) 进行适配
-                    FINAL_NPM_VER=$(node -e "
-                      const ver = process.argv[1] || '0.1.0';
-                      const run = process.argv[2] || '1';
-                      const parts = ver.split('.');
-                      if (parts.length >= 2) {
-                        console.log(parts[0] + '.' + parts[1] + '.' + run);
-                      } else {
-                        console.log(ver + '.' + run);
-                      }
-                    " "$CONFIG_NPM_VER" "$RUN_NUM")
+                if [ -n "$NPM_NAME" ]; then
+                  # 纯原生 Bash 极简提取 Major.Minor 并拼接，彻底规避跨行 JS 语法解析陷阱
+                  MAJOR=$(echo "$CONFIG_NPM_VER" | cut -d. -f1)
+                  MINOR=$(echo "$CONFIG_NPM_VER" | cut -d. -f2)
+                  FINAL_NPM_VER="${MAJOR:-0}.${MINOR:-1}.${RUN_NUM}"
+                  echo "🟢 [npm] 文件配置基线: $CONFIG_NPM_VER ➔ 最终自动版本: $FINAL_NPM_VER"
 
-                    echo "🟢 [npm] 文件配置基线: $CONFIG_NPM_VER ➔ 最终自动版本: $FINAL_NPM_VER"
+                  npm version "$FINAL_NPM_VER" --no-git-tag-version --allow-same-version
 
-                    # 动态更新 package.json 版本号
-                    npm version "$FINAL_NPM_VER" --no-git-tag-version --allow-same-version
-
-                    if [ -n "$NODE_AUTH_TOKEN" ]; then
-                      npm publish --access public
-                      echo "✅ npm 发布完成: $NPM_NAME@$FINAL_NPM_VER"
-                    else
-                      echo "⚠️ 未配置 NPM_TOKEN Secret，跳过发布。"
-                    fi
+                  if [ -n "$NODE_AUTH_TOKEN" ]; then
+                    npm publish --access public
+                    echo "✅ npm 发布完成: $NPM_NAME@$FINAL_NPM_VER"
+                  else
+                    echo "⚠️ 未配置 NPM_TOKEN Secret，跳过发布。"
                   fi
-                )
+                fi
+                popd > /dev/null
               fi
 
             fi
+          done
