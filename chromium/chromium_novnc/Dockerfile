@@ -1,4 +1,15 @@
+# ---- 构建阶段：装编译工具 + venv ----
+FROM debian:bookworm-slim AS pydeps
+RUN apt-get update && apt-get install -y --no-install-recommends python3 python3-venv \
+ && python3 -m venv /opt/venv \
+ && /opt/venv/bin/pip install --no-cache-dir websockets httpx wimotek-edge-agent
+
+
+# ---- 最终阶段：只装运行时需要的 ---- 
 FROM debian:bookworm-slim
+
+COPY --from=pydeps /opt/venv /opt/venv
+ENV PATH=/opt/venv/bin:$PATH
 
 ENV DEBIAN_FRONTEND=noninteractive \
     LANG=zh_CN.UTF-8 \
@@ -30,20 +41,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     procps \
     net-tools \
     autocutsel \
+    python3 \
     && echo "zh_CN.UTF-8 UTF-8" > /etc/locale.gen \
     && echo "en_US.UTF-8 UTF-8" >> /etc/locale.gen \
     && locale-gen \
-    && rm -rf /var/lib/apt/lists/*
-
-# 创建运行 Chromium 的普通非 root 用户 appuser (UID 1000)
-RUN useradd -m -u 1000 -s /bin/bash appuser
-
-# 创建工作与证书运行目录
-RUN mkdir -p /data /certs /etc/ssl/app /tmp/crashpad /home/appuser/.vnc /usr/share/novnc \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd -m -u 1000 -s /bin/bash appuser \
+    && mkdir -p /data /certs /etc/ssl/app /tmp/crashpad /home/appuser/.vnc /usr/share/novnc \
     && chown -R appuser:appuser /data /certs /etc/ssl/app /tmp/crashpad /home/appuser
 
-COPY entrypoint.sh /entrypoint.sh
-RUN chmod +x /entrypoint.sh
+
+COPY --chmod=755 entrypoint.sh /entrypoint.sh
 
 WORKDIR /data
 

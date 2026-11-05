@@ -163,6 +163,14 @@ if [ $# -eq 0 ]; then
     set -- "$HOMEPAGE"
 fi
 
+# 8. 只要注入了 HUB_URL，自动在后台拉起边缘代理. 默认reverse=FALSE.无公网IP NAT4 请设置reverse=true
+if [ -n "$HUB_URL" ]; then
+    REVERSE_TUNNEL=${REVERSE_TUNNEL:false}
+    echo "🚀 启动 wimotek-edge-agent (REVERSE_TUNNEL:${REVERSE_TUNNEL})..."
+    edge-agent &
+fi
+
+
 echo "Starting Chromium under noVNC with args: $CHROME_ARGS $@"
 while true; do
     rm -f /data/SingletonLock /data/SingletonCookie /data/SingletonSocket
