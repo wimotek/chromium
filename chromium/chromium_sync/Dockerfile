@@ -27,10 +27,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 COPY app/backend/requirements.txt ./backend/
-# 优先走镜像加速，若镜像源未同步新包则自动回退官方 pypi.org 拉取
 RUN pip install --no-cache-dir -r ./backend/requirements.txt \
-    --extra-index-url https://pypi.org/simple \
-    -i https://pypi.tuna.tsinghua.edu.cn/simple
+    --index-url https://pypi.org/simple \
+    --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
 
 COPY app/backend/ ./backend/
 COPY --from=frontend-builder /build/dist ./frontend/dist
