@@ -6,6 +6,7 @@ on:
     paths:
       - 'chromium/chromium_novnc/**'
       - '.github/workflows/build_chromium_novnc.yml'
+      - 'chromium/common/**'
     tags: [ 'v*.*.*' ]
   workflow_dispatch:
 
