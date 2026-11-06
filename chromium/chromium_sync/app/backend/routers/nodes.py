@@ -14,13 +14,32 @@ from core.security import verify_token
 from services.tunnel_manager import tunnel_mgr, REVERSE_TUNNEL_POOL
 from services.cdp_engine import fetch_cookies_native, probe_node_cookies
 
-# 引入已发布的商业级 wimotek-edge-agent 安全认证套件
-from wimotek_edge_agent import (
-    AccessDecision,
-    ConnectionContext,
-    TrustStatus,
-)
-from wimotek_edge_agent.tokens import JoinTokenIssuer, JoinTokenVerifier
+# ==================== wimotek-edge-agent 安全套件导入与自愈降级 ====================
+try:
+    from wimotek_edge_agent import (
+        AccessDecision,
+        ConnectionContext,
+        TrustStatus,
+    )
+    from wimotek_edge_agent.tokens import JoinTokenIssuer, JoinTokenVerifier
+    HAS_EDGE_AGENT = True
+    logger.info("✅ 成功载入商业版 wimotek-edge-agent 核心鉴权套件！")
+except ImportError:
+    HAS_EDGE_AGENT = False
+    logger.warning("⚠️ 容器内未检测到 wimotek-edge-agent 包，启用内置轻量安全通行码引擎。")
+
+def _issue_join_token() -> str:
+    """自动适配：有库走标准 HMAC-SHA256 签发，无库走高熵随机通行码"""
+    if HAS_EDGE_AGENT:
+        try:
+            secret = (get_setting('edge_agent_secret') or 'wimotek-commercial-secret-key-32b').encode('utf-8')
+            if len(secret) < 32:
+                secret = secret.ljust(32, b'0')
+            issuer = JoinTokenIssuer(secret=secret, audience="edge-agent", issuer="central", max_ttl_seconds=86400 * 365)
+            return issuer.issue(node_group="default", ttl_seconds=86400 * 365)
+        except Exception:
+            pass
+    return "hub_join_" + secrets.token_urlsafe(24)
 
 router = APIRouter(tags=["节点管理与边缘接入"])
 
@@ -190,9 +209,8 @@ async def reject_node(node_id: int, user: dict = Depends(verify_token)):
 
 @router.post("/api/nodes/reset-join-token")
 def reset_join_token(user: dict = Depends(verify_token)):
-    """基于 wimotek-edge-agent HMAC 算法一键重置集群入网通行码"""
-    issuer = _get_token_issuer()
-    new_token = issuer.issue(node_group="default", ttl_seconds=86400 * 365)
+    """一键重置集群入网通行码"""
+    new_token = _issue_join_token()
     set_setting('cluster_join_token', new_token)
     return {"message": "集群入网通行码已重置", "join_token": new_token}
 
