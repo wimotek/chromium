@@ -38,6 +38,8 @@ wimotek-edge-agent = "wimotek_edge_agent.agent:main"
 wimotek-agent = "wimotek_edge_agent.agent:main"
 edge-agent = "wimotek_edge_agent.agent:main"
 
-[tool.setuptools.packages.find]
-where = ["."]
-include = ["wimotek_edge_agent*"]
+[tool.setuptools]
+packages = ["wimotek_edge_agent"]
+
+[tool.setuptools.package-data]
+wimotek_edge_agent = ["py.typed"]
