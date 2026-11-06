@@ -148,24 +148,15 @@ def smart_merge_cookies(all_cookie_lists: List[List[dict]], max_per_domain: int 
     return final_pool, trimmed_count
 
 # ==================== NAT4 反向隧道借道调用核心 ====================
-async def send_reverse_tunnel_command(node_id: int, action: str, payload: dict = None, timeout: float = 8.0) -> dict:
-    """借由已打通的 NAT4 反向长连接，向节点下发指令并获取结果"""
-    from services.tunnel_manager import REVERSE_TUNNEL_POOL
-    ws = REVERSE_TUNNEL_POOL.get(node_id)
-    if not ws:
+# 修改 cdp_engine.py 约 134 行起：
+async def send_reverse_tunnel_command(node_id: int, action: str, payload: dict = None, timeout: float = 10.0) -> dict:
+    """借由已打通的 NAT4 反向长连接会话，向边缘 Agent 下发指令并安全截获响应"""
+    from services.tunnel_manager import tunnel_mgr
+    session = tunnel_mgr.get_reverse_session(node_id)
+    if not session or session.is_closed:
         raise ConnectionError(f"节点 ID:{node_id} 的 NAT4 反向通道未在线")
 
-    req_id = int(time.time() * 1000) % 1000000
-    msg = {
-        "req_id": req_id,
-        "action": action,
-        "payload": payload or {}
-    }
-    await ws.send_text(json.dumps(msg))
-    
-    # 等待边缘客户端完成转发并推回结果
-    resp_text = await asyncio.wait_for(ws.receive_text(), timeout=timeout)
-    return json.loads(resp_text)
+    return await session.send_command(action, payload=payload, timeout=timeout)
 
 async def resolve_cdp_endpoint(local_port: int, target_host: str = "127.0.0.1", prefer_page: bool = False) -> tuple[str, str]:
     host_clean = target_host.strip() if target_host else "127.0.0.1"

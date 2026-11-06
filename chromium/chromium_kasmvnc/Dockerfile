@@ -1,4 +1,14 @@
+# ---- 构建阶段：装编译工具 + venv ----
+FROM debian:bookworm-slim AS pydeps
+RUN apt-get update && apt-get install -y --no-install-recommends python3 python3-venv \
+ && python3 -m venv /opt/venv \
+ && /opt/venv/bin/pip install --no-cache-dir websockets httpx wimotek-edge-agent
+
+# ---- 最终阶段 ----
 FROM debian:bookworm-slim
+
+COPY --from=pydeps /opt/venv /opt/venv
+ENV PATH=/opt/venv/bin:$PATH
 
 ENV DEBIAN_FRONTEND=noninteractive \
     LANG=zh_CN.UTF-8 \
@@ -7,9 +17,9 @@ ENV DEBIAN_FRONTEND=noninteractive \
     DISPLAY=:0 \
     RESOLUTION=1920x1080 \
     VNC_PASSWORD= \
-    CHROME_ARGS=
+    CHROME_ARGS= \
+    REVERSE_TUNNEL=
 
-# 1. 安装基础依赖、Chromium、Openbox、socat、gosu、tini、numlockx 及中文字体
 RUN apt-get update && apt-get install -y --no-install-recommends \
     tini \
     gosu \
@@ -25,6 +35,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     wget \
     procps \
     net-tools \
+    python3 \
     libxcomposite1 \
     libxfixes3 \
     libxrandr2 \
@@ -38,7 +49,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && locale-gen \
     && rm -rf /var/lib/apt/lists/*
 
-# 2. 自动检测 CPU 架构并安装官方最新稳定版 KasmVNC Server
 RUN ARCH=$(dpkg --print-architecture) \
     && KASMVNC_VER="1.3.3" \
     && wget -q https://github.com/kasmtech/KasmVNC/releases/download/v${KASMVNC_VER}/kasmvncserver_bookworm_${KASMVNC_VER}_${ARCH}.deb -O /tmp/kasmvnc.deb \
@@ -47,23 +57,19 @@ RUN ARCH=$(dpkg --print-architecture) \
     && rm -f /tmp/kasmvnc.deb \
     && rm -rf /var/lib/apt/lists/*
 
-# 3. 创建 Kasm 专属普通用户 kasm-user (UID 1000)，加入 ssl-cert 组
 RUN useradd -m -u 1000 -s /bin/bash kasm-user \
     && adduser kasm-user ssl-cert
 
-# 4. 创建工作、运行与证书挂载目录
 RUN mkdir -p /data /certs /etc/ssl/app /tmp/crashpad /home/kasm-user/.vnc /etc/kasmvnc \
-    && chown -R kasm-user:kasm-user /data /certs /etc/ssl/app /tmp/crashpad /home/kasm-user /etc/kasmvnc
+    && chown -R kasm-user:kasm-user /data /certs /etc/ssl/app /tmp/crashpad /home/kasm-user /etc/kasmvnc /opt/venv
 
-COPY entrypoint.sh /entrypoint.sh
-RUN chmod +x /entrypoint.sh
+COPY --chmod=755 entrypoint.sh /entrypoint.sh
+COPY --chmod=755 ../common/edge_node_client.py /opt/edge_node_client.py
 
 WORKDIR /data
 
-# 暴露端口：6901(KasmVNC Web 端), 9222(CDP 穿透端口)
-EXPOSE 6901 9222
+# 暴露端口：6901(KasmVNC Web), 9222(CDP原生端口), 9223(socat备用穿透端口)
+EXPOSE 6901 9222 9223
 
-# 使用 tini 接管信号处理
 ENTRYPOINT ["/usr/bin/tini", "--", "/entrypoint.sh"]
-
 CMD []

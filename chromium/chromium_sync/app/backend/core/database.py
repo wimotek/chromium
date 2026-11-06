@@ -3,10 +3,18 @@ import secrets
 from datetime import datetime
 from config import DB_PATH, INIT_USERNAME, INIT_PASSWORD
 
+def get_db_connection() -> sqlite3.Connection:
+    """生产级高并发 SQLite 连接工厂：启用 WAL 预写日志与 15 秒互斥超时缓冲"""
+    conn = sqlite3.connect(DB_PATH, timeout=15.0)
+    conn.execute("PRAGMA journal_mode=WAL;")
+    conn.execute("PRAGMA busy_timeout=5000;")
+    conn.execute("PRAGMA synchronous=NORMAL;")
+    return conn
+
 def init_db_and_jwt():
     from core.security import hash_password
 
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_db_connection()
     cur = conn.cursor()
     
     # 1. 节点表 (包含 approval_status 与 conn_type)
@@ -17,7 +25,8 @@ def init_db_and_jwt():
         enabled INTEGER DEFAULT 1,
         approval_status INTEGER DEFAULT 1,     -- 1: 已授权信任入网, 0: TOFU 待认领
         conn_type TEXT DEFAULT 'direct',       -- 'direct' 直连, 'ssh' 远程, 'reverse' NAT4反向隧道
-        node_uuid TEXT DEFAULT '',             -- 节点容器持久化唯一指纹
+        node_uuid TEXT DEFAULT '',             -- 节点容器持久化唯一标识
+        fingerprint TEXT DEFAULT '',           -- wimotek-edge-agent 证书指纹
         is_source INTEGER DEFAULT 0,
         is_local INTEGER DEFAULT 0,
         direct_host TEXT DEFAULT '127.0.0.1',
@@ -71,11 +80,12 @@ def init_db_and_jwt():
         details TEXT
     )''')
 
-    # 增量字段平滑自动迁移 (已有数据库安全升级)
+    # 增量字段平滑自动迁移
     for col, col_type in [
         ("approval_status", "INTEGER DEFAULT 1"),
         ("conn_type", "TEXT DEFAULT 'direct'"),
         ("node_uuid", "TEXT DEFAULT ''"),
+        ("fingerprint", "TEXT DEFAULT ''"),
         ("enabled", "INTEGER DEFAULT 1"),
         ("group_name", "TEXT DEFAULT '默认分组'"),
         ("direct_host", "TEXT DEFAULT '127.0.0.1'"),
@@ -114,8 +124,9 @@ def init_db_and_jwt():
         'admin_username': INIT_USERNAME,
         'admin_password': hash_password(INIT_PASSWORD),
         'jwt_secret': secrets.token_hex(32),
+        'edge_agent_secret': secrets.token_urlsafe(32),  # 用于 wimotek-edge-agent HMAC 验签
         'api_key': 'cdp_' + secrets.token_urlsafe(24),
-        'cluster_join_token': initial_join_token,  # Edge Agent 认证与 TOFU 凭证
+        'cluster_join_token': initial_join_token,
         'direct_port_access_enabled': '1',
         'smtp_host': 'smtp.yeah.net',
         'smtp_port': '465',
@@ -142,7 +153,7 @@ def init_db_and_jwt():
     conn.close()
 
 def get_setting(key: str, default: str = "") -> str:
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_db_connection()
     cur = conn.cursor()
     cur.execute("SELECT value FROM settings WHERE key=?", (key,))
     row = cur.fetchone()
@@ -150,7 +161,7 @@ def get_setting(key: str, default: str = "") -> str:
     return row[0] if row else default
 
 def set_setting(key: str, value: str):
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_db_connection()
     cur = conn.cursor()
     cur.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, str(value)))
     conn.commit()

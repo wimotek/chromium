@@ -11,3 +11,4 @@ cryptography>=3.3
 python-multipart==0.0.9
 playwright>=1.40.0
 wimotek-chromium-sync
+wimotek-edge-agent

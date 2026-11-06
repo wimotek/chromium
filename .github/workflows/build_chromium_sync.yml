@@ -7,6 +7,9 @@ on:
       - 'chromium/chromium_sync/**'
   workflow_dispatch:
 
+env:
+  WORKING_DIR: ./chromium/chromium_sync
+
 jobs:
   build-and-push:
     runs-on: ubuntu-latest
@@ -40,8 +43,8 @@ jobs:
       - name: 编译并推送到 GHCR 和 Docker Hub
         uses: docker/build-push-action@v6
         with:
-          context: ./chromium/chromium_sync
-          file: ./chromium/chromium_sync/Dockerfile
+          context: ${{ env.WORKING_DIR }}
+          file: ${{ env.WORKING_DIR }}/Dockerfile
           push: true
           tags: |
             ghcr.io/wimotek/chromium:sync

@@ -1,39 +1,106 @@
 import os
+import json
 import sqlite3
 import asyncio
+import secrets
 from typing import Dict, Optional
 from sshtunnel import SSHTunnelForwarder
-from config import DB_PATH, KEYS_DIR, logger
 
-# ==================== NAT4 边缘反向长连接 WebSocket 隧道池 ====================
-# 存放所有从内网/NAT4 内部主动连入管理端的 WebSocket 活跃连接
-# 格式: { node_id: active_websocket }
-REVERSE_TUNNEL_POOL: Dict[int, any] = {}
+from config import KEYS_DIR, logger
+from core.database import get_db_connection
+
+class ReverseTunnelSession:
+    """
+    生产级 NAT4 反向长连接会话管理器：
+    1. 独占 WebSocket 读取，杜绝并发 receive_text 竞态报错
+    2. 基于 req_id 挂载 Future，支持并发 CDP 指令分发
+    3. 支持心跳自动回包，支持下发审批通过广播
+    """
+    def __init__(self, node_id: int, ws):
+        self.node_id = node_id
+        self.ws = ws
+        self.pending_requests: Dict[int, asyncio.Future] = {}
+        self.is_closed = False
+        self._write_lock = asyncio.Lock()
+
+    async def send_command(self, action: str, payload: dict = None, timeout: float = 10.0) -> dict:
+        if self.is_closed:
+            raise ConnectionError(f"节点 ID:{self.node_id} 反向隧道会话已断开")
+
+        loop = asyncio.get_running_loop()
+        req_id = secrets.randbelow(900000) + 100000
+        future = loop.create_future()
+        self.pending_requests[req_id] = future
+
+        msg = {
+            "req_id": req_id,
+            "action": action,
+            "payload": payload or {}
+        }
+
+        try:
+            async with self._write_lock:
+                await self.ws.send_text(json.dumps(msg))
+            return await asyncio.wait_for(future, timeout=timeout)
+        finally:
+            self.pending_requests.pop(req_id, None)
+
+    async def send_raw_json(self, data: dict):
+        """向边缘节点推送非应答类通知 (如审批通过)"""
+        if not self.is_closed:
+            async with self._write_lock:
+                await self.ws.send_text(json.dumps(data))
+
+    def handle_incoming_text(self, text: str):
+        """接收下行数据并派发给对应挂起的 Future"""
+        try:
+            data = json.loads(text)
+            req_id = data.get("req_id")
+            if req_id is not None and req_id in self.pending_requests:
+                fut = self.pending_requests[req_id]
+                if not fut.done():
+                    fut.set_result(data)
+        except Exception:
+            pass
+
+    def close(self):
+        self.is_closed = True
+        for fut in list(self.pending_requests.values()):
+            if not fut.done():
+                fut.set_exception(ConnectionResetError("反向长连接已断开"))
+        self.pending_requests.clear()
 
 class TunnelManager:
     def __init__(self):
         self.tunnels: Dict[int, SSHTunnelForwarder] = {}
+        self.reverse_sessions: Dict[int, ReverseTunnelSession] = {}
 
-    def register_reverse_tunnel(self, node_id: int, ws_client):
-        """登记一个来自 NAT4 内网的反向隧道长连接"""
-        REVERSE_TUNNEL_POOL[node_id] = ws_client
-        logger.info(f"🔌 节点 ID:{node_id} 反向穿透隧道已接入连接池")
+    def register_reverse_tunnel(self, node_id: int, ws_client) -> ReverseTunnelSession:
+        if node_id in self.reverse_sessions:
+            self.reverse_sessions[node_id].close()
+        session = ReverseTunnelSession(node_id, ws_client)
+        self.reverse_sessions[node_id] = session
+        logger.info(f"🔌 节点 ID:{node_id} 反向穿透隧道已接入安全连接池")
+        return session
 
     def unregister_reverse_tunnel(self, node_id: int):
-        """注销反向隧道"""
-        if node_id in REVERSE_TUNNEL_POOL:
-            del REVERSE_TUNNEL_POOL[node_id]
-            logger.info(f"🔌 节点 ID:{node_id} 反向穿透隧道已移出连接池")
+        if node_id in self.reverse_sessions:
+            self.reverse_sessions[node_id].close()
+            del self.reverse_sessions[node_id]
+            logger.info(f"🔌 节点 ID:{node_id} 反向穿透隧道已移出安全连接池")
+
+    def get_reverse_session(self, node_id: int) -> Optional[ReverseTunnelSession]:
+        return self.reverse_sessions.get(node_id)
 
     async def start_tunnel(self, node: dict):
         from services.cdp_engine import probe_node_cookies
         node_id = node['id']
         self.stop_tunnel(node_id)
 
-        # 1. NAT4 反向长连接隧道节点
+        # 1. 反向隧道节点
         if node.get('conn_type') == 'reverse':
-            is_active = (node_id in REVERSE_TUNNEL_POOL)
-            if is_active:
+            session = self.get_reverse_session(node_id)
+            if session and not session.is_closed:
                 count, msg = await probe_node_cookies(node['local_bind_port'], node_id=node_id)
                 self._update_node_status(node_id, "connected" if msg == "OK" else "error: refused", count if msg == "OK" else 0)
                 return True, f"反向隧道在线，探测到 {count} 条 Cookies"
@@ -41,7 +108,7 @@ class TunnelManager:
                 self._update_node_status(node_id, "stopped", 0)
                 return False, "反向隧道未接入 (等待边缘容器启动连入)"
 
-        # 2. 直连节点
+        # 2. 本地直连节点
         if node.get('is_local') == 1:
             direct_host = node.get('direct_host') or '127.0.0.1'
             try:
@@ -56,7 +123,7 @@ class TunnelManager:
                 self._update_node_status(node_id, "error: offline", 0)
                 return False, f"连接异常: {e}"
 
-        # 3. 远程 SSH 节点
+        # 3. 远程 SSH 隧道
         ssh_kwargs = {
             "ssh_address_or_host": (node['ssh_host'], int(node['ssh_port'])),
             "ssh_username": node['ssh_user'],
@@ -77,8 +144,6 @@ class TunnelManager:
             tunnel.start()
             self.tunnels[node_id] = tunnel
             self._update_node_status(node_id, "connected")
-            logger.info(f"节点 [{node['name']}] SSH 隧道启动成功 -> 映射端口 {node['local_bind_port']}")
-
             await asyncio.sleep(1.0)
             count, _ = await probe_node_cookies(node['local_bind_port'], target_host="127.0.0.1")
             self._update_node_status(node_id, "connected", count)
@@ -97,7 +162,7 @@ class TunnelManager:
         self._update_node_status(node_id, "stopped")
 
     def _update_node_status(self, node_id: int, status: str, cookie_count: Optional[int] = None):
-        conn = sqlite3.connect(DB_PATH)
+        conn = get_db_connection()
         cur = conn.cursor()
         if cookie_count is not None:
             cur.execute("UPDATE nodes SET status=?, cookie_count=? WHERE id=?", (status, cookie_count, node_id))
@@ -107,17 +172,16 @@ class TunnelManager:
         conn.close()
 
 tunnel_mgr = TunnelManager()
+REVERSE_TUNNEL_POOL = tunnel_mgr.reverse_sessions
 
-# ==================== 看门狗：每 30 秒巡检探活 ====================
 async def tunnel_watchdog_loop():
     from services.cdp_engine import probe_node_cookies
-    logger.info("启动守护看门狗：维持直连、SSH 隧道与 NAT4 反向隧道在线 (周期: 30秒)...")
+    logger.info("启动守护看门狗：巡检直连、SSH 隧道与 NAT4 反向隧道 (周期: 30秒)...")
     while True:
         try:
-            conn = sqlite3.connect(DB_PATH)
+            conn = get_db_connection()
             conn.row_factory = sqlite3.Row
             cur = conn.cursor()
-            # 仅巡检已启用、已通过 TOFU 认领批准的节点
             cur.execute("SELECT * FROM nodes WHERE enabled=1 AND approval_status=1")
             nodes = [dict(r) for r in cur.fetchall()]
             conn.close()
@@ -126,23 +190,21 @@ async def tunnel_watchdog_loop():
                 node_id = node['id']
                 conn_type = node.get('conn_type', 'direct')
 
-                # 分支 A: NAT4 反向长连接隧道节点
                 if conn_type == 'reverse':
-                    if node_id in REVERSE_TUNNEL_POOL:
+                    session = tunnel_mgr.get_reverse_session(node_id)
+                    if session and not session.is_closed:
                         count, msg = await probe_node_cookies(node['local_bind_port'], node_id=node_id)
                         new_status = "connected" if msg == "OK" else "error: refused"
                         tunnel_mgr._update_node_status(node_id, new_status, count if msg == "OK" else 0)
                     else:
                         tunnel_mgr._update_node_status(node_id, "stopped", 0)
 
-                # 分支 B: 免 SSH 直连节点
                 elif node.get('is_local') == 1:
                     target_h = node.get('direct_host') or '127.0.0.1'
                     count, msg = await probe_node_cookies(node['local_bind_port'], target_host=target_h)
                     new_status = "connected" if msg == "OK" else "error: refused"
                     tunnel_mgr._update_node_status(node_id, new_status, count if msg == "OK" else 0)
 
-                # 分支 C: 远程 SSH 节点
                 else:
                     is_active = (node_id in tunnel_mgr.tunnels and tunnel_mgr.tunnels[node_id].is_active)
                     if not is_active:

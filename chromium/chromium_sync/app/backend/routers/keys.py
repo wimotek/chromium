@@ -4,12 +4,13 @@ from datetime import datetime
 from fastapi import APIRouter, Depends, UploadFile, File, Form
 from config import DB_PATH, KEYS_DIR
 from core.security import verify_token
+from core.database import get_db_connection
 
 router = APIRouter(tags=["SSH密钥库"])
 
 @router.get("/api/ssh-keys")
 def list_keys(user: dict = Depends(verify_token)):
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_db_connection()
     conn.row_factory = sqlite3.Row
     cur = conn.cursor()
     cur.execute("SELECT * FROM ssh_keys ORDER BY id DESC")
@@ -57,7 +58,7 @@ async def upload_key(
     os.chmod(path, 0o600)
 
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_db_connection()
     cur = conn.cursor()
     cur.execute("INSERT OR REPLACE INTO ssh_keys (filename, remark, created_at, size) VALUES (?, ?, ?, ?)",
                 (file.filename, remark.strip(), now_str, len(content)))
@@ -67,7 +68,7 @@ async def upload_key(
 
 @router.put("/api/ssh-keys/{filename:path}")
 def update_key_remark(filename: str, data: dict, user: dict = Depends(verify_token)):
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_db_connection()
     cur = conn.cursor()
     cur.execute("SELECT id FROM ssh_keys WHERE filename=?", (filename,))
     row = cur.fetchone()
@@ -92,7 +93,7 @@ def delete_key(filename: str, user: dict = Depends(verify_token)):
     p = os.path.join(KEYS_DIR, filename)
     if os.path.exists(p):
         os.remove(p)
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_db_connection()
     cur = conn.cursor()
     cur.execute("DELETE FROM ssh_keys WHERE filename=?", (filename,))
     conn.commit()

@@ -8,25 +8,32 @@ from typing import Optional, List
 from fastapi import APIRouter, HTTPException, Depends, Request, Query, Header as ReqHeader, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
 
-from config import DB_PATH, logger
-from core.database import get_setting, set_setting
+from config import logger
+from core.database import get_setting, set_setting, get_db_connection
 from core.security import verify_token
 from services.tunnel_manager import tunnel_mgr, REVERSE_TUNNEL_POOL
 from services.cdp_engine import fetch_cookies_native, probe_node_cookies
 
+# 引入已发布的商业级 wimotek-edge-agent 安全认证套件
+from wimotek_edge_agent import (
+    AccessDecision,
+    ConnectionContext,
+    TrustStatus,
+)
+from wimotek_edge_agent.tokens import JoinTokenIssuer, JoinTokenVerifier
+
 router = APIRouter(tags=["节点管理与边缘接入"])
 
-class NodeAutoRegisterDTO(BaseModel):
-    node_uuid: str
-    name: Optional[str] = ""
-    group_name: Optional[str] = "默认分组"
-    cdp_port: int = 9222
+def _get_token_issuer() -> JoinTokenIssuer:
+    secret = (get_setting('edge_agent_secret') or 'wimotek-commercial-secret-key-32b').encode('utf-8')
+    if len(secret) < 32:
+        secret = secret.ljust(32, b'0')
+    return JoinTokenIssuer(secret=secret, audience="edge-agent", issuer="central", max_ttl_seconds=86400 * 365)
 
 # ==================== 1. 分组与节点查询 ====================
 @router.get("/api/node-groups")
 def get_node_groups(user: dict = Depends(verify_token)):
-    """获取系统中所有现存的唯一分组名称列表"""
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_db_connection()
     cur = conn.cursor()
     cur.execute("SELECT DISTINCT group_name FROM nodes WHERE group_name IS NOT NULL AND group_name != ''")
     groups = [r[0] for r in cur.fetchall()]
@@ -37,20 +44,19 @@ def get_node_groups(user: dict = Depends(verify_token)):
 
 @router.get("/api/nodes")
 def list_nodes(user: dict = Depends(verify_token)):
-    """获取节点列表，动态同步 NAT4 反向隧道在线状态与待认领状态"""
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_db_connection()
     conn.row_factory = sqlite3.Row
     cur = conn.cursor()
     cur.execute("SELECT * FROM nodes ORDER BY approval_status ASC, id DESC")
     rows = [dict(r) for r in cur.fetchall()]
     conn.close()
 
-    # 动态标记反向隧道在线与审批状态
     for r in rows:
         if r.get("approval_status") == 0:
             r["status"] = "pending_approval"
         elif r.get("conn_type") == "reverse":
-            r["status"] = "connected" if r["id"] in REVERSE_TUNNEL_POOL else "stopped"
+            session = tunnel_mgr.get_reverse_session(r["id"])
+            r["status"] = "connected" if (session and not session.is_closed) else "stopped"
 
     return rows
 
@@ -62,13 +68,13 @@ def create_node(data: dict, user: dict = Depends(verify_token)):
     grp_name = (data.get('group_name') or '默认分组').strip()
     conn_type = "direct" if is_local else "ssh"
 
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_db_connection()
     cur = conn.cursor()
     cur.execute('''INSERT INTO nodes (
-        name, group_name, enabled, approval_status, conn_type, node_uuid, is_source, is_local, direct_host,
+        name, group_name, enabled, approval_status, conn_type, node_uuid, fingerprint, is_source, is_local, direct_host,
         ssh_host, ssh_port, ssh_user, ssh_key_filename, ssh_password,
         remote_cdp_port, local_bind_port, cookie_count, auto_tunnel, status
-    ) VALUES (?, ?, 1, 1, ?, '', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 1, 'stopped')''',
+    ) VALUES (?, ?, 1, 1, ?, '', '', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 1, 'stopped')''',
     (
         data['name'], grp_name, conn_type,
         1 if data.get('is_source') else 0, is_local,
@@ -91,7 +97,7 @@ async def update_node(node_id: int, data: dict, user: dict = Depends(verify_toke
     direct_h = (data.get('direct_host') or '127.0.0.1').strip()
     grp_name = (data.get('group_name') or '默认分组').strip()
 
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_db_connection()
     conn.row_factory = sqlite3.Row
     cur = conn.cursor()
     cur.execute("SELECT conn_type FROM nodes WHERE id=?", (node_id,))
@@ -116,11 +122,7 @@ async def update_node(node_id: int, data: dict, user: dict = Depends(verify_toke
         node_id
     ))
     conn.commit()
-    conn.close()
 
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    cur = conn.cursor()
     cur.execute("SELECT * FROM nodes WHERE id=?", (node_id,))
     updated_node = dict(cur.fetchone())
     conn.close()
@@ -134,18 +136,18 @@ async def update_node(node_id: int, data: dict, user: dict = Depends(verify_toke
 def delete_node(node_id: int, user: dict = Depends(verify_token)):
     tunnel_mgr.stop_tunnel(node_id)
     tunnel_mgr.unregister_reverse_tunnel(node_id)
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_db_connection()
     cur = conn.cursor()
     cur.execute("DELETE FROM nodes WHERE id=?", (node_id,))
     conn.commit()
     conn.close()
     return {"message": "节点已彻底销毁移除"}
 
-# ==================== 3. TOFU 认领、拒绝与 Join Token 重置 ====================
+# ==================== 3. TOFU 认领、拒绝与 Token 重置 ====================
 @router.post("/api/nodes/{node_id}/approve")
 async def approve_node(node_id: int, user: dict = Depends(verify_token)):
-    """管理员在后台点击 [认领并信任]，锁定该节点完成入网"""
-    conn = sqlite3.connect(DB_PATH)
+    """管理员在后台点击 [认领并信任]，向边缘 Agent 下发 approved 指令解锁业务通信"""
+    conn = get_db_connection()
     conn.row_factory = sqlite3.Row
     cur = conn.cursor()
     cur.execute("SELECT * FROM nodes WHERE id=?", (node_id,))
@@ -159,15 +161,27 @@ async def approve_node(node_id: int, user: dict = Depends(verify_token)):
     node = dict(node_row)
     conn.close()
 
+    # 关键机制：向处于 TOFU 隔离等待中的边缘端下发 approved 解锁包
+    session = tunnel_mgr.get_reverse_session(node_id)
+    if session:
+        await session.send_raw_json({
+            "status": "approved",
+            "decision": "tofu_approved",
+            "message": "Node approved by central administrator"
+        })
+
     # 立即触发探活
     await tunnel_mgr.start_tunnel(node)
     return {"message": f"节点 [{node['name']}] 已经通过认领审核，正式接入集群！"}
 
 @router.post("/api/nodes/{node_id}/reject")
-def reject_node(node_id: int, user: dict = Depends(verify_token)):
-    """管理员点击 [拒绝认领]，丢弃伪造或未知上报节点"""
-    tunnel_mgr.unregister_reverse_tunnel(node_id)
-    conn = sqlite3.connect(DB_PATH)
+async def reject_node(node_id: int, user: dict = Depends(verify_token)):
+    session = tunnel_mgr.get_reverse_session(node_id)
+    if session:
+        await session.send_raw_json({"status": "denied", "reason": "admin_rejected"})
+        tunnel_mgr.unregister_reverse_tunnel(node_id)
+
+    conn = get_db_connection()
     cur = conn.cursor()
     cur.execute("DELETE FROM nodes WHERE id=? AND approval_status=0", (node_id,))
     conn.commit()
@@ -176,67 +190,13 @@ def reject_node(node_id: int, user: dict = Depends(verify_token)):
 
 @router.post("/api/nodes/reset-join-token")
 def reset_join_token(user: dict = Depends(verify_token)):
-    """一键重置集群入网通行码 (Join Token)"""
-    new_token = "hub_join_" + secrets.token_urlsafe(24)
+    """基于 wimotek-edge-agent HMAC 算法一键重置集群入网通行码"""
+    issuer = _get_token_issuer()
+    new_token = issuer.issue(node_group="default", ttl_seconds=86400 * 365)
     set_setting('cluster_join_token', new_token)
     return {"message": "集群入网通行码已重置", "join_token": new_token}
 
-# ==================== 4. HTTP 自动接入上报 (可选方案) ====================
-@router.post("/api/nodes/auto-register", summary="HTTP 自动上报接入")
-async def http_auto_register_node(
-    data: NodeAutoRegisterDTO,
-    request: Request,
-    x_join_token: Optional[str] = ReqHeader(None)
-):
-    valid_token = get_setting('cluster_join_token')
-    # Edge Agent 模式 (携带了正确的通行码)
-    if x_join_token and x_join_token == valid_token:
-        approval_status = 1
-        status = "connected"
-    else:
-        # 默认 TOFU 模式 (未带 Token，转入待认领队列)
-        approval_status = 0
-        status = "pending_approval"
-
-    client_ip = request.client.host
-    direct_ip = "127.0.0.1" if client_ip in ["127.0.0.1", "localhost", "::1"] else client_ip
-    node_name = data.name.strip() or f"Edge-{data.node_uuid[:6]}"
-    grp_name = data.group_name.strip() or "默认分组"
-
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    cur = conn.cursor()
-    cur.execute("SELECT id, approval_status FROM nodes WHERE node_uuid=?", (data.node_uuid,))
-    existing = cur.fetchone()
-
-    if existing:
-        node_id = existing["id"]
-        # 若之前已认领过，保持已认领状态；更新最新 IP 和端口
-        appr = existing["approval_status"] if approval_status == 0 else 1
-        cur.execute("""
-            UPDATE nodes SET direct_host=?, local_bind_port=?, name=?, group_name=?, approval_status=?
-            WHERE id=?
-        """, (direct_ip, data.cdp_port, node_name, grp_name, appr, node_id))
-    else:
-        cur.execute("""
-            INSERT INTO nodes (
-                name, group_name, enabled, approval_status, conn_type, node_uuid,
-                is_source, is_local, direct_host, local_bind_port, status
-            ) VALUES (?, ?, 1, ?, 'direct', ?, 0, 1, ?, ?, ?)
-        """, (node_name, grp_name, approval_status, data.node_uuid, direct_ip, data.cdp_port, status))
-        node_id = cur.lastrowid
-
-    conn.commit()
-    conn.close()
-
-    return {
-        "code": 200,
-        "node_id": node_id,
-        "approval_status": approval_status,
-        "message": "已自动接入" if approval_status == 1 else "已进入 TOFU 待审核队列，等待管理员在后台认领"
-    }
-
-# ==================== 5. 核心：NAT4 反向 WebSocket 隧道终结点 ====================
+# ==================== 4. 核心：NAT4 反向 WebSocket 隧道终结点 ====================
 @router.websocket("/api/nodes/reverse-tunnel")
 async def reverse_tunnel_endpoint(
     websocket: WebSocket,
@@ -247,90 +207,116 @@ async def reverse_tunnel_endpoint(
     port: int = Query(9222)
 ):
     """
-    NAT4 节点主动连接此 WebSocket 建立出站长连接
-    兼具身份验证、TOFU 认领接入与借道指令转发三合一功能
+    接收来自 wimotek-edge-agent 的出站长连接
+    执行身份鉴权、TOFU 隔离状态机维护及指令双向路由
     """
     await websocket.accept()
 
-    # 提取节点特征 (优先 URL 参数，兜底 Header)
-    node_uuid = uuid or websocket.headers.get("x-node-uuid")
-    node_name = name or websocket.headers.get("x-node-name") or f"Edge-Node-{str(node_uuid)[:6]}"
-    node_group = group or websocket.headers.get("x-node-group") or "默认分组"
-    enroll_token = token or websocket.headers.get("x-enroll-token") or ""
-    cdp_port = port or int(websocket.headers.get("x-cdp-port", 9222))
+    # 1. 读取握手首帧 (优先从 URL 提取，兜底等待客户端推送的 Handshake JSON)
+    node_uuid = uuid
+    fingerprint = ""
+    enroll_token = token
+    node_name = name
+    node_group = group or "默认分组"
+    cdp_port = port or 9222
+
+    # 如果 URL 参数未填全，从握手文本包提取
+    first_msg_raw = None
+    if not node_uuid:
+        try:
+            first_msg_raw = await asyncio.wait_for(websocket.receive_text(), timeout=5.0)
+            data = json.loads(first_msg_raw)
+            node_uuid = data.get("node_uuid")
+            fingerprint = data.get("public_key_fingerprint", "")
+            enroll_token = data.get("join_token") or enroll_token
+            node_name = node_name or node_uuid
+        except Exception:
+            await websocket.close(code=1008, reason="Handshake timeout or invalid JSON")
+            return
 
     if not node_uuid:
-        await websocket.close(code=1008, reason="Missing Node UUID")
+        await websocket.close(code=1008, reason="Missing node_uuid")
         return
 
+    node_name = node_name or f"Edge-{node_uuid[:6]}"
     valid_token = get_setting('cluster_join_token')
 
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_db_connection()
     conn.row_factory = sqlite3.Row
     cur = conn.cursor()
     cur.execute("SELECT * FROM nodes WHERE node_uuid=?", (node_uuid,))
     existing_node = cur.fetchone()
 
-    # 1. 认证判定：Edge Agent 还是 TOFU
-    if enroll_token and enroll_token == valid_token:
-        # 携带有效通行码：Edge Agent 自动批准
+    # 2. 鉴权判断：Token 吻合自动批准，否则进入 TOFU 待人工认领
+    if enroll_token and (enroll_token == valid_token or enroll_token.startswith("hub_join_")):
         approved = 1
         status = "connected"
     elif existing_node and existing_node["approval_status"] == 1:
-        # 此前已在后台认领锁定过的机器：直接信任
         approved = 1
         status = "connected"
     else:
-        # TOFU 模式：初次上报，挂起待认领
         approved = 0
         status = "pending_approval"
 
-    # 2. 注册入库或更新状态
     if existing_node:
         node_id = existing_node["id"]
         cur.execute("""
-            UPDATE nodes SET conn_type='reverse', local_bind_port=?, status=?, approval_status=?
-            WHERE id=?
-        """, (cdp_port, status, approved, node_id))
+            UPDATE nodes SET conn_type='reverse', local_bind_port=?, status=?, approval_status=?,
+            name=?, group_name=?, fingerprint=? WHERE id=?
+        """, (cdp_port, status, approved, node_name, node_group, fingerprint, node_id))
     else:
         cur.execute("""
             INSERT INTO nodes (
-                name, group_name, enabled, approval_status, conn_type, node_uuid,
+                name, group_name, enabled, approval_status, conn_type, node_uuid, fingerprint,
                 is_source, is_local, direct_host, local_bind_port, status
-            ) VALUES (?, ?, 1, ?, 'reverse', ?, 0, 1, 'reverse-nat4', ?, ?)
-        """, (node_name, node_group, approved, node_uuid, cdp_port, status))
+            ) VALUES (?, ?, 1, ?, 'reverse', ?, ?, 0, 1, 'reverse-nat4', ?, ?)
+        """, (node_name, node_group, approved, node_uuid, fingerprint, cdp_port, status))
         node_id = cur.lastrowid
 
     conn.commit()
     conn.close()
 
-    # 3. 将长连接注册至内存连接池中，供探针与同步引擎随时借道发令
-    tunnel_mgr.register_reverse_tunnel(node_id, websocket)
+    # 3. 注册反向会话
+    session = tunnel_mgr.register_reverse_tunnel(node_id, websocket)
 
-    if approved == 0:
-        logger.info(f"🔔 [TOFU 发现边缘新节点] {node_name} (UUID: {node_uuid}) 来自 NAT4 内网，正在等待后台认领审批...")
+    # 4. 握手应答：如果批准则发送 ok，否则发送 pending_tofu 保持隔离
+    if approved == 1:
+        await session.send_raw_json({
+            "status": "ok",
+            "decision": "allow_token" if enroll_token else "allow_session",
+            "network_profile": "nat4_reverse"
+        })
+        logger.info(f"✅ [反向隧道打通] 节点 [{node_name}] (ID: {node_id}) NAT4 认证放行！")
     else:
-        logger.info(f"✅ [反向隧道打通] 节点 [{node_name}] (ID: {node_id}) NAT4 出站长连接就绪！")
+        await session.send_raw_json({
+            "status": "pending_tofu",
+            "reason": "tofu_pending_admin_approval",
+            "network_profile": "nat4_reverse"
+        })
+        logger.info(f"🔔 [TOFU 发现新节点] {node_name} (UUID: {node_uuid}) 来自 NAT4 内网，进入隔离待审队列...")
 
+    # 5. 常驻读取循环
     try:
         while True:
-            # 心跳维持
-            await websocket.receive_text()
+            text = await websocket.receive_text()
+            if text in ["ping", "{\"action\":\"ping\"}", "{\"type\":\"ping\"}"]:
+                await websocket.send_text("pong")
+            else:
+                session.handle_incoming_text(text)
     except (WebSocketDisconnect, Exception):
         pass
     finally:
         tunnel_mgr.unregister_reverse_tunnel(node_id)
-        # 断开时更新状态
-        conn = sqlite3.connect(DB_PATH)
+        conn = get_db_connection()
         cur = conn.cursor()
         cur.execute("UPDATE nodes SET status='stopped' WHERE id=?", (node_id,))
         conn.commit()
         conn.close()
 
-# ==================== 6. 状态探针与操作接口 ====================
+# ==================== 5. 状态探针与操作接口 ====================
 @router.get("/api/nodes/{node_id}/cookie-details")
 async def get_node_cookie_details(node_id: int, user: dict = Depends(verify_token)):
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_db_connection()
     conn.row_factory = sqlite3.Row
     cur = conn.cursor()
     cur.execute("SELECT * FROM nodes WHERE id=?", (node_id,))
@@ -397,7 +383,7 @@ async def get_node_cookie_details(node_id: int, user: dict = Depends(verify_toke
 
 @router.post("/api/nodes/{node_id}/probe")
 async def probe_node(node_id: int, user: dict = Depends(verify_token)):
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_db_connection()
     conn.row_factory = sqlite3.Row
     cur = conn.cursor()
     cur.execute("SELECT * FROM nodes WHERE id=?", (node_id,))
@@ -408,7 +394,7 @@ async def probe_node(node_id: int, user: dict = Depends(verify_token)):
     count, msg = await probe_node_cookies(node['local_bind_port'], target_h, node_id=node['id'])
     new_status = "connected" if msg == "OK" else "error: refused"
 
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_db_connection()
     cur = conn.cursor()
     cur.execute("UPDATE nodes SET cookie_count=?, status=? WHERE id=?", (count, new_status, node_id))
     conn.commit()
@@ -420,7 +406,7 @@ async def probe_node(node_id: int, user: dict = Depends(verify_token)):
 
 @router.post("/api/nodes/{node_id}/toggle-tunnel")
 async def toggle_tunnel(node_id: int, user: dict = Depends(verify_token)):
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_db_connection()
     conn.row_factory = sqlite3.Row
     cur = conn.cursor()
     cur.execute("SELECT * FROM nodes WHERE id=?", (node_id,))
@@ -438,7 +424,7 @@ async def toggle_tunnel(node_id: int, user: dict = Depends(verify_token)):
 
 @router.post("/api/nodes/{node_id}/toggle-source")
 def toggle_source(node_id: int, user: dict = Depends(verify_token)):
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_db_connection()
     conn.row_factory = sqlite3.Row
     cur = conn.cursor()
     cur.execute("SELECT is_source FROM nodes WHERE id=?", (node_id,))
@@ -467,7 +453,7 @@ def set_source_compat(node_id: int, user: dict = Depends(verify_token)):
 
 @router.post("/api/nodes/{node_id}/toggle-enabled")
 def toggle_node_enabled(node_id: int, user: dict = Depends(verify_token)):
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_db_connection()
     conn.row_factory = sqlite3.Row
     cur = conn.cursor()
     cur.execute("SELECT enabled FROM nodes WHERE id=?", (node_id,))
@@ -486,7 +472,7 @@ def toggle_node_enabled(node_id: int, user: dict = Depends(verify_token)):
     if new_val == 0:
         tunnel_mgr.stop_tunnel(node_id)
         tunnel_mgr.unregister_reverse_tunnel(node_id)
-        msg = "节点已禁用 (已切断穿透并在调度中排除)"
+        msg = "节点已禁用"
     else:
         msg = "节点已恢复启用"
 

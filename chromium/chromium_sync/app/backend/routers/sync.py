@@ -5,7 +5,7 @@ from typing import Optional, List
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from config import DB_PATH
-from core.database import get_setting, set_setting
+from core.database import get_setting, set_setting, get_db_connection
 from core.security import verify_token
 from services.sync_service import reschedule_all_policies, execute_policy_task
 
@@ -14,7 +14,7 @@ router = APIRouter(tags=["同步中心与多策略"])
 # 策略列表查询
 @router.get("/api/sync/policies")
 def list_policies(user: dict = Depends(verify_token)):
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_db_connection()
     conn.row_factory = sqlite3.Row
     cur = conn.cursor()
     cur.execute("SELECT * FROM sync_policies ORDER BY id DESC")
@@ -25,7 +25,7 @@ def list_policies(user: dict = Depends(verify_token)):
 # 添加新策略
 @router.post("/api/sync/policies")
 def create_policy(data: dict, user: dict = Depends(verify_token)):
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_db_connection()
     cur = conn.cursor()
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     cur.execute('''INSERT INTO sync_policies 
@@ -51,7 +51,7 @@ def create_policy(data: dict, user: dict = Depends(verify_token)):
 # 修改策略
 @router.put("/api/sync/policies/{policy_id}")
 def update_policy(policy_id: int, data: dict, user: dict = Depends(verify_token)):
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_db_connection()
     cur = conn.cursor()
     cur.execute('''UPDATE sync_policies SET 
         name=?, enabled=?, interval_minutes=?, sync_type=?, source_type=?, source_id=?, 
@@ -77,7 +77,7 @@ def update_policy(policy_id: int, data: dict, user: dict = Depends(verify_token)
 # 删除策略 (核心防护：仅剩 1 条时强制禁止删除)
 @router.delete("/api/sync/policies/{policy_id}")
 def delete_policy(policy_id: int, user: dict = Depends(verify_token)):
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_db_connection()
     cur = conn.cursor()
     cur.execute("SELECT count(*) FROM sync_policies")
     count = cur.fetchone()[0]
@@ -94,7 +94,7 @@ def delete_policy(policy_id: int, user: dict = Depends(verify_token)):
 # 启用/停用策略开关
 @router.post("/api/sync/policies/{policy_id}/toggle")
 def toggle_policy(policy_id: int, user: dict = Depends(verify_token)):
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_db_connection()
     conn.row_factory = sqlite3.Row
     cur = conn.cursor()
     cur.execute("SELECT enabled FROM sync_policies WHERE id=?", (policy_id,))
@@ -137,7 +137,7 @@ def save_cookie_policy(data: dict, user: dict = Depends(verify_token)):
 # 结构化审计流水：严格显示最近 20 条
 @router.get("/api/sync/logs")
 def get_logs(user: dict = Depends(verify_token)):
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_db_connection()
     conn.row_factory = sqlite3.Row
     cur = conn.cursor()
     cur.execute("""
@@ -152,7 +152,7 @@ def get_logs(user: dict = Depends(verify_token)):
 # 手动清空全部审计流水
 @router.delete("/api/sync/logs")
 def clear_all_sync_logs(user: dict = Depends(verify_token)):
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_db_connection()
     cur = conn.cursor()
     cur.execute("DELETE FROM sync_logs")
     conn.commit()

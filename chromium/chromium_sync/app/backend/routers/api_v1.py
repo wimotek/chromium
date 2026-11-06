@@ -2,7 +2,7 @@ import sqlite3
 from typing import Optional
 from fastapi import APIRouter, HTTPException, Depends, Request, Query
 from config import DB_PATH
-from core.database import get_setting, set_setting
+from core.database import get_setting, set_setting, get_db_connection
 from core.security import verify_token, verify_agent_access
 from services.cdp_engine import fetch_cookies_native
 from services.sync_service import execute_sync_task
@@ -24,7 +24,7 @@ def save_remote_access_settings(data: dict, user: dict = Depends(verify_token)):
 
 @router.get("/api/v1/nodes", summary="获取所有在线 CDP 节点列表 (支持双连接方式生成)")
 def external_list_nodes(request: Request, auth: dict = Depends(verify_agent_access)):
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_db_connection()
     conn.row_factory = sqlite3.Row
     cur = conn.cursor()
     cur.execute("SELECT * FROM nodes")
@@ -85,7 +85,7 @@ def external_list_nodes(request: Request, auth: dict = Depends(verify_agent_acce
 
 @router.get("/api/v1/nodes/{node_id}/cookies", summary="提取目标节点全量 Cookies")
 async def external_get_cookies(node_id: int, auth: dict = Depends(verify_agent_access)):
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_db_connection()
     conn.row_factory = sqlite3.Row
     cur = conn.cursor()
     cur.execute("SELECT * FROM nodes WHERE id=?", (node_id,))

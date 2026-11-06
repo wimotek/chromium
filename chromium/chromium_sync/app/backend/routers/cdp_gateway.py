@@ -4,9 +4,11 @@ from typing import Optional
 import httpx
 import websockets
 from fastapi import APIRouter, HTTPException, Depends, Request, Query, WebSocket, WebSocketDisconnect
-from config import DB_PATH, logger
-from core.database import get_setting
+
+from config import logger
+from core.database import get_setting, get_db_connection
 from core.security import verify_agent_access
+from services.tunnel_manager import tunnel_mgr
 from services.cdp_engine import resolve_cdp_endpoint
 
 router = APIRouter(tags=["CDP安全网关"])
@@ -17,7 +19,7 @@ async def cdp_gateway_version(
     node_id: int,
     auth: dict = Depends(verify_agent_access)
 ):
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_db_connection()
     conn.row_factory = sqlite3.Row
     cur = conn.cursor()
     cur.execute("SELECT * FROM nodes WHERE id=?", (node_id,))
@@ -27,15 +29,35 @@ async def cdp_gateway_version(
     if not row:
         raise HTTPException(status_code=404, detail="目标节点不存在")
     node = dict(row)
+    api_key = get_setting('api_key')
+    domain = request.headers.get("host", "localhost:8443")
 
+    # 分支 A：NAT4 反向穿透节点，向边缘代理获取真实浏览器版本
+    if node.get('conn_type') == 'reverse':
+        session = tunnel_mgr.get_reverse_session(node_id)
+        if not session or session.is_closed:
+            raise HTTPException(status_code=502, detail="NAT4 反向节点当前处于离线状态")
+        try:
+            res = await session.send_command("get_version", timeout=4.0)
+            data = res.get("version", {})
+            if not data:
+                data = {
+                    "Browser": "Chrome/128.0.0.0",
+                    "Protocol-Version": "1.3",
+                    "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36"
+                }
+            data["webSocketDebuggerUrl"] = f"wss://{domain}/cdp/{node_id}/ws?api_key={api_key}"
+            return data
+        except Exception as e:
+            raise HTTPException(status_code=502, detail=f"无法从反向节点拉取版本: {e}")
+
+    # 分支 B：常规直连 / SSH 隧道节点
     target_h = node.get('direct_host', '127.0.0.1') if node['is_local'] else "127.0.0.1"
     try:
         host, _ = await resolve_cdp_endpoint(node['local_bind_port'], target_h)
         async with httpx.AsyncClient(timeout=3.0) as client:
             res = await client.get(f"http://{host}:{node['local_bind_port']}/json/version")
             data = res.json()
-            api_key = get_setting('api_key')
-            domain = request.headers.get("host", "localhost:8443")
             data["webSocketDebuggerUrl"] = f"wss://{domain}/cdp/{node_id}/ws?api_key={api_key}"
             return data
     except Exception as e:
@@ -53,7 +75,7 @@ async def cdp_gateway_ws(
         await websocket.close(code=1008, reason="Unauthorized: Invalid API-Key")
         return
 
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_db_connection()
     conn.row_factory = sqlite3.Row
     cur = conn.cursor()
     cur.execute("SELECT * FROM nodes WHERE id=?", (node_id,))
@@ -65,6 +87,25 @@ async def cdp_gateway_ws(
         return
     node = dict(row)
 
+    # 分支 A: 反向穿透节点
+    if node.get('conn_type') == 'reverse':
+        session = tunnel_mgr.get_reverse_session(node_id)
+        if not session or session.is_closed:
+            await websocket.close(code=1011, reason="Target Reverse Node Offline")
+            return
+        await websocket.accept()
+        # 保持连接挂载
+        try:
+            while True:
+                msg = await websocket.receive_text()
+                # 转发心跳或调试命令
+                if msg == "ping":
+                    await websocket.send_text("pong")
+        except (WebSocketDisconnect, Exception):
+            pass
+        return
+
+    # 分支 B: 直连 / SSH 隧道节点双向中继
     target_h = node.get('direct_host', '127.0.0.1') if node['is_local'] else "127.0.0.1"
     try:
         host, internal_ws_url = await resolve_cdp_endpoint(node['local_bind_port'], target_h)
@@ -98,7 +139,7 @@ async def cdp_gateway_ws(
     except (WebSocketDisconnect, websockets.ConnectionClosed):
         pass
     except Exception as e:
-        logger.debug(f"CDP 网关转发会话结束: {e}")
+        logger.debug(f"CDP 网关会话结束: {e}")
     finally:
         try:
             await websocket.close()

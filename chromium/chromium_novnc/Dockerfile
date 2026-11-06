@@ -4,8 +4,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends python3 python3
  && python3 -m venv /opt/venv \
  && /opt/venv/bin/pip install --no-cache-dir websockets httpx wimotek-edge-agent
 
-
-# ---- 最终阶段：只装运行时需要的 ---- 
+# ---- 最终阶段 ----
 FROM debian:bookworm-slim
 
 COPY --from=pydeps /opt/venv /opt/venv
@@ -18,9 +17,9 @@ ENV DEBIAN_FRONTEND=noninteractive \
     DISPLAY=:0 \
     RESOLUTION=1920x1080 \
     VNC_PASSWORD= \
-    CHROME_ARGS=
+    CHROME_ARGS= \
+    REVERSE_TUNNEL=
 
-# 安装 tini、Chromium、TigerVNC 全套工具、Openbox、noVNC、socat、gosu、numlockx 及中文字体
 RUN apt-get update && apt-get install -y --no-install-recommends \
     tini \
     gosu \
@@ -48,18 +47,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/* \
     && useradd -m -u 1000 -s /bin/bash appuser \
     && mkdir -p /data /certs /etc/ssl/app /tmp/crashpad /home/appuser/.vnc /usr/share/novnc \
-    && chown -R appuser:appuser /data /certs /etc/ssl/app /tmp/crashpad /home/appuser
-
+    && chown -R appuser:appuser /data /certs /etc/ssl/app /tmp/crashpad /home/appuser /opt/venv
 
 COPY --chmod=755 entrypoint.sh /entrypoint.sh
+COPY --chmod=755 ../common/edge_node_client.py /opt/edge_node_client.py
 
 WORKDIR /data
 
-# 暴露端口：6080(HTTP), 6443(HTTPS), 9222(CDP 穿透端口)
-EXPOSE 6080 6443 9222
+# 暴露端口：6080(HTTP), 6443(HTTPS), 9222(CDP原生端口), 9223(socat穿透端口)
+EXPOSE 6080 6443 9222 9223
 
-# 使用 tini 接管信号与子进程回收
 ENTRYPOINT ["/usr/bin/tini", "--", "/entrypoint.sh"]
-
-# 保持原版 CMD []，完全由外部运行时传参决定
 CMD []

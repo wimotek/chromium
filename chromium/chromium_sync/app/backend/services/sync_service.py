@@ -10,7 +10,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.events import EVENT_JOB_EXECUTED, EVENT_JOB_ERROR
 
 from config import DB_PATH, KEYS_DIR, ChromiumSync, logger
-from core.database import get_setting
+from core.database import get_setting, get_db_connection
 from services.cdp_engine import (
     fetch_cookies_native,
     inject_cookies_native,
@@ -25,6 +25,12 @@ from services.notification import dispatch_notification
 scheduler = BackgroundScheduler(timezone="Asia/Shanghai")
 
 _is_sync_running = False
+_main_loop: Optional[asyncio.AbstractEventLoop] = None
+
+def set_main_event_loop(loop: asyncio.AbstractEventLoop):
+    """注入 FastAPI 主事件循环，供调度器跨线程安全调度 WebSocket 通道"""
+    global _main_loop
+    _main_loop = loop
 
 def _job_listener(event):
     if event.exception:
@@ -41,17 +47,22 @@ def _execute_policy_job_wrapper(policy_id: int):
         return
 
     try:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        try:
-            loop.run_until_complete(execute_policy_task(policy_id))
-        finally:
-            loop.close()
+        # 如果主循环有效，安全抛至主循环线程执行 (确保使用主循环的 WebSocket 连接，杜绝跨事件循环崩溃)
+        if _main_loop and _main_loop.is_running():
+            future = asyncio.run_coroutine_threadsafe(execute_policy_task(policy_id), _main_loop)
+            future.result(timeout=180)  # 策略最大容忍 3 分钟超时
+        else:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                loop.run_until_complete(execute_policy_task(policy_id))
+            finally:
+                loop.close()
     except Exception as e:
         logger.error(f"定时调度任务异常 (策略ID: {policy_id}): {e}", exc_info=True)
 
 def reschedule_all_policies():
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_db_connection()
     conn.row_factory = sqlite3.Row
     cur = conn.cursor()
     cur.execute("SELECT * FROM sync_policies WHERE enabled=1")
@@ -79,6 +90,7 @@ def reschedule_all_policies():
             except Exception:
                 first_run = now_dt + timedelta(minutes=interval)
 
+        # 核心防坑：严禁传入 next_run_time=None，锁定具体时间对象
         scheduler.add_job(
             _execute_policy_job_wrapper,
             'interval',
@@ -141,8 +153,10 @@ async def run_chromium_sync_instance(source_node: dict, target_node: dict, inclu
 
 async def execute_policy_task(policy_id: int):
     """
-    根据多策略规则执行同步：
-    严格过滤 approval_status=1 (排除未认领节点)，并无缝穿透 NAT4 反向通道
+    多策略执行引擎：
+    1. 严格过滤 approval_status=1 (排除未认领节点)，支持穿透 NAT4 反向通道
+    2. 全局互斥锁与定时器下次时间自动顺延
+    3. 前置差异研判 (0差异秒级跳过) 与垃圾清理
     """
     global _is_sync_running
     if _is_sync_running:
@@ -153,13 +167,13 @@ async def execute_policy_task(policy_id: int):
     start_ts = time.time()
 
     try:
-        conn = sqlite3.connect(DB_PATH)
+        conn = get_db_connection()
         conn.row_factory = sqlite3.Row
         cur = conn.cursor()
         cur.execute("SELECT * FROM sync_policies WHERE id=?", (policy_id,))
         policy_row = cur.fetchone()
         
-        # 核心：必须同时满足 enabled=1 (已启用) 与 approval_status=1 (已认领信任)
+        # 必须同时满足已启用 (enabled=1) 与已信任入网 (approval_status=1)
         cur.execute("SELECT * FROM nodes WHERE enabled=1 AND approval_status=1")
         all_enabled_nodes = [dict(r) for r in cur.fetchall()]
         conn.close()
@@ -187,7 +201,7 @@ async def execute_policy_task(policy_id: int):
         target_nodes_desc = ""
         cookie_count_metric = 0
 
-        # 解析目标节点
+        # 解析目标范围
         scope_targets = []
         if policy["target_type"] == "group":
             group_all = [n for n in all_enabled_nodes if n.get("group_name") == policy["target_group"]]
@@ -212,7 +226,6 @@ async def execute_policy_task(policy_id: int):
                     log_detail.append("⚠️ 无可用在线活跃节点，本次智能合并自动挂起跳过")
                     status = "SKIPPED"
                 else:
-                    # 并发提取 (携带 node_id 以便借道 NAT4 反向隧道)
                     fetch_tasks = [
                         fetch_cookies_native(
                             n['local_bind_port'],
@@ -251,7 +264,7 @@ async def execute_policy_task(policy_id: int):
                             nodes_to_inject.append({"node": n, "diff_cookies": diff_c, "skipped": skipped})
                             total_diff_count += len(diff_c)
 
-                    # 全局无变化秒级跳过
+                    # 0 增量秒级跳过机制
                     if total_diff_count == 0 and total_dropped == 0 and cap_trimmed == 0:
                         elapsed_fast = f"{(time.time() - start_ts):.2f}s"
                         log_detail.append(f"⚡ [前置比对无差异] 各节点凭据已 100% 保持最新且完全对齐，跳过写入 (耗时: {elapsed_fast})")
@@ -259,7 +272,6 @@ async def execute_policy_task(policy_id: int):
                     else:
                         log_detail.append(f"✨ 黄金凭据池聚拢完成: 共 {cookie_count_metric} 条最新 Cookies (发现 {total_diff_count} 项增量需对齐)")
                         
-                        # 仅写入有差异的节点
                         for item in node_in_memory_data:
                             n = item["node"]
                             match_inject = next((x for x in nodes_to_inject if x["node"]["id"] == n["id"]), None)
@@ -272,7 +284,7 @@ async def execute_policy_task(policy_id: int):
                                 await inject_cookies_native(n['local_bind_port'], diff_c, target_h, node_id=n['id'])
                                 c_cnt, _ = await probe_node_cookies(n['local_bind_port'], target_h, node_id=n['id'])
                                 
-                                conn = sqlite3.connect(DB_PATH)
+                                conn = get_db_connection()
                                 cur = conn.cursor()
                                 cur.execute("UPDATE nodes SET cookie_count=?, last_sync=? WHERE id=?", (c_cnt, sync_time, n['id']))
                                 conn.commit()
@@ -364,7 +376,7 @@ async def execute_policy_task(policy_id: int):
                                 injected_any = True
                                 await purge_stale_cookies_on_node(target['local_bind_port'], target_h, exclude_domains, node_id=target['id'])
                                 if ChromiumSync is not None and target.get('conn_type') == 'ssh':
-                                    sync_res = await run_chromium_sync_instance(source, target, include_domains, exclude_domains, diff_enabled)
+                                    await run_chromium_sync_instance(source, target, include_domains, exclude_domains, diff_enabled)
                                     target_count, _ = await probe_node_cookies(target['local_bind_port'], target_h, node_id=target['id'])
                                     log_detail.append(f"-> 目标节点 [{target['name']}] 模块同步完成，现存: {target_count}")
                                 else:
@@ -382,7 +394,8 @@ async def execute_policy_task(policy_id: int):
 
         duration_str = f"{time.time() - start_ts:.2f}s"
 
-        conn = sqlite3.connect(DB_PATH)
+        # 写入结构化审计记录，严格定容滚动裁剪保留最近 20 条
+        conn = get_db_connection()
         cur = conn.cursor()
         cur.execute("""
             INSERT INTO sync_logs (timestamp, source_node, target_nodes, cookie_count, duration, status, details)
@@ -402,6 +415,7 @@ async def execute_policy_task(policy_id: int):
         conn.commit()
         conn.close()
 
+        # 手动执行后自动顺延下一次定时触发时间 (防撞车)
         try:
             job_id = f"policy_job_{policy_id}"
             job = scheduler.get_job(job_id)
@@ -423,7 +437,7 @@ async def execute_sync_task(policy_id: Optional[int] = None):
         await execute_policy_task(policy_id)
         return
 
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_db_connection()
     conn.row_factory = sqlite3.Row
     cur = conn.cursor()
     cur.execute("SELECT id FROM sync_policies WHERE enabled=1 ORDER BY id ASC")

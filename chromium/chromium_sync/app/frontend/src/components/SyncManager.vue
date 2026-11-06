@@ -350,7 +350,10 @@ onUnmounted(() => {
               <td>
                 <span class="cookie-stat-badge">🍪 {{ l.cookie_count || 0 }} 条</span>
               </td>
-<!-- 状态胶囊 -->
+              <!-- 核心修复：补齐缺失的耗时列，解决所有列向左错位问题 -->
+              <td class="font-mono text-duration">{{ l.duration || '0.00s' }}</td>
+
+              <!-- 状态胶囊 (正确对应「状态」表头) -->
               <td style="text-align: center;">
                 <span v-if="l.status==='SUCCESS'" class="status-pill-ok">● 成功</span>
                 <span v-else-if="l.status==='NO_CHANGE'" class="status-pill-skip">● 一致跳过</span>

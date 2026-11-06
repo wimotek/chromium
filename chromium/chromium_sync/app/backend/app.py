@@ -32,8 +32,14 @@ from routers.api_v1 import router as api_v1_router
 init_db_and_jwt()
 
 # 2. 现代 Lifespan 上下文生命周期管理
+# 修改 app.py 的 lifespan
+from services.sync_service import scheduler, reschedule_all_policies, set_main_event_loop
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # 核心：将 FastAPI 主事件循环注入同步服务
+    set_main_event_loop(asyncio.get_running_loop())
+    
     # 启动 APScheduler 定时调度器，并自动加载所有已启用的策略任务
     scheduler.start()
     reschedule_all_policies()
@@ -48,6 +54,11 @@ async def lifespan(app: FastAPI):
         for t in list(tunnel_mgr.tunnels.values()):
             try:
                 t.stop()
+            except Exception:
+                pass
+        for s in list(tunnel_mgr.reverse_sessions.values()):
+            try:
+                s.close()
             except Exception:
                 pass
     except Exception:
