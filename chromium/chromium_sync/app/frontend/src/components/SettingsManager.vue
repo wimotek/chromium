@@ -1,5 +1,5 @@
 <script setup>
-import { ref, reactive, onMounted } from 'vue'
+import { ref, reactive, computed, onMounted } from 'vue'
 
 const props = defineProps({
   api: Function,
@@ -14,10 +14,11 @@ const profile = reactive({
 })
 
 const remoteAccess = reactive({
-  direct_port_access_enabled: true,
-  cluster_join_token: ''
+  direct_port_access_enabled: true
 })
-const activeGuideTab = ref('edge') // 'edge' | 'gateway' | 'direct' | 'api'
+
+// 移除 edge tab，默认定位到 WSS 安全网关与外部 API
+const activeGuideTab = ref('gateway') // 'gateway' | 'api'
 
 const cookiePolicy = reactive({
   sync_diff_enabled: true,
@@ -27,6 +28,14 @@ const cookiePolicy = reactive({
 
 const keys = ref([])
 const uploadRemark = ref('')
+
+const currentHubHost = computed(() => {
+  return window.location.host
+})
+
+const currentHubUrl = computed(() => {
+  return `${window.location.protocol}//${window.location.host}`
+})
 
 const loadData = async () => {
   const [pRes, kRes, cRes, rRes] = await Promise.all([
@@ -57,15 +66,6 @@ const copyText = async (text, desc) => {
     props.showToast(`${desc} 已复制到剪切板`, 'success')
   } catch (err) {
     props.showToast('复制失败，请手动选择复制', 'error')
-  }
-}
-
-const resetJoinToken = async () => {
-  if (confirm('确认重置集群入网通行码？旧通行码将立即失效，但已通过认领的节点不受影响。')) {
-    const res = await props.api('/api/nodes/reset-join-token', { method: 'POST' })
-    const data = await res.json()
-    remoteAccess.cluster_join_token = data.join_token
-    props.showToast('入网通行码已成功重置', 'success')
   }
 }
 
@@ -166,8 +166,8 @@ onMounted(() => {
 <template>
   <div class="grid-2col-fluid">
     
-    <!-- 左列：管理员账号 + 全局 Cookie 策略 -->
-    <div style="display:flex; flex-direction:column; gap:20px;">
+    <!-- ==================== 左列：管理员账号 + 全局 Cookie 策略 ==================== -->
+    <div class="layout-column-item">
       
       <!-- 卡片 1: 管理员账号 -->
       <div class="content-full-card">
@@ -193,7 +193,7 @@ onMounted(() => {
         <p style="font-size:11px; color:#64748b; margin-bottom:14px;">全局通用生效，作用于所有后台定时调度、即时同步及 API 提取流程。</p>
         
         <form @submit.prevent="saveCookiePolicy" class="form-v-stack">
-          <div style="background:#09122a; border:1px solid #1e3a8a; border-radius:6px; padding:12px; width:100%; max-width:440px;">
+          <div style="background:#09122a; border:1px solid #1e3a8a; border-radius:6px; padding:12px; width:100%; box-sizing:border-box;">
             <div style="display:flex; align-items:center; gap:8px;">
               <input type="checkbox" v-model="cookiePolicy.sync_diff_enabled" id="diff_toggle" class="check-box-blue">
               <label for="diff_toggle" style="font-size:12px; color:#38bdf8; font-weight:bold; cursor:pointer;">
@@ -225,40 +225,20 @@ onMounted(() => {
 
     </div>
 
-    <!-- 右列：远程连接控制中枢、使用说明与密钥金库 -->
-    <div style="display:flex; flex-direction:column; gap:20px;">
+    <!-- ==================== 右列：外部 API 准入控制、安全网关指南与密钥库 ==================== -->
+    <div class="layout-column-item">
 
-      <!-- 卡片 3: 远程连接与边缘接入中枢 -->
+      <!-- 卡片 3: 外部 Agent 开放 API 与安全控制中枢 -->
       <div class="content-full-card">
         <div class="table-header-bar" style="margin-bottom:10px; padding-bottom:8px;">
-          <h3 class="card-inner-h3">🌐 远程连接与边缘接入控制中枢</h3>
-          <span class="badge-recommend">双模自动穿透</span>
+          <h3 class="card-inner-h3">🌐 外部 Agent 开放 API 与安全控制</h3>
+          <span class="badge-recommend">8443 统一鉴权</span>
         </div>
 
-        <!-- 凭据 1: 集群入网通行码 (Join Token) -->
-        <div style="background:#09122a; border:1px solid #172554; border-radius:8px; padding:12px; margin-bottom:14px;">
-          <div style="display:flex; justify-content:space-between; align-items:center;">
-            <span style="font-size:12px; color:#38bdf8; font-weight:bold;">边缘节点入网通行码 (Join Token)</span>
-            <div style="display:flex; gap:8px; align-items:center;">
-              <button type="button" @click="copyText(remoteAccess.cluster_join_token, '入网通行码')" class="btn-copy-tag">
-                📋 复制 Token
-              </button>
-              <button @click="resetJoinToken" class="link-probe" style="font-size:11px; color:#f87171;">重置通行码</button>
-            </div>
-          </div>
-          <div class="api-key-interactive-box" @click="copyText(remoteAccess.cluster_join_token, '入网通行码')" title="点击整行复制">
-            <span class="font-cyan-mono token-truncate-text">{{ remoteAccess.cluster_join_token || '正在获取...' }}</span>
-            <span class="copy-hint-icon">📋</span>
-          </div>
-          <p style="font-size:11px; color:#64748b; margin-top:5px;">
-            用于 noVNC / Kasm 节点批量自动入网认证；不带此 Token 上报时将转入 TOFU 待人工认领审核队列。
-          </p>
-        </div>
-
-        <!-- 凭据 2: API Key -->
-        <div style="background:#09122a; border:1px solid #172554; border-radius:8px; padding:12px; margin-bottom:14px;">
-          <div style="display:flex; justify-content:space-between; align-items:center;">
-            <span style="font-size:12px; color:#38bdf8; font-weight:bold;">外部 Agent / 爬虫调用 Key</span>
+        <!-- 凭据: 外部 Agent API Key -->
+        <div class="credential-box-card">
+          <div class="credential-header-flex">
+            <span style="font-size:12px; color:#38bdf8; font-weight:bold;">外部 Agent / 爬虫调用 Key (X-API-Key)</span>
             <div style="display:flex; gap:8px; align-items:center;">
               <button type="button" @click="copyText(profile.api_key, 'API Key')" class="btn-copy-tag">
                 📋 复制 Key
@@ -266,99 +246,82 @@ onMounted(() => {
               <button @click="regenApiKey" class="link-probe" style="font-size:11px;">重新生成</button>
             </div>
           </div>
-          <div class="api-key-interactive-box" @click="copyText(profile.api_key, 'API Key')" title="点击整行亦可复制">
+
+          <div class="api-key-interactive-box" @click="copyText(profile.api_key, 'API Key')" title="点击整行复制">
             <span class="font-cyan-mono token-truncate-text">{{ profile.api_key || '正在获取...' }}</span>
             <span class="copy-hint-icon">📋</span>
           </div>
+          <p style="font-size:11px; color:#64748b; margin-top:5px;">
+            外部程序（Playwright、Puppeteer、AI Agent 或第三方系统）通过 WSS 反向网关操作 CDP 时的强制校验凭据。
+          </p>
         </div>
 
-        <!-- 远程连接公网端口开关 -->
+        <!-- 远程连接公网裸端口开关 -->
         <div style="background:#09122a; border:1px solid #1e3a8a; border-radius:6px; padding:12px; margin-bottom:16px;">
           <div style="display:flex; justify-content:space-between; align-items:center;">
             <div>
-              <span style="font-size:13px; font-weight:bold; color:#ffffff;">公网端口直接映射访问 (19200-19250)</span>
+              <span style="font-size:13px; font-weight:bold; color:#ffffff;">公网裸端口直接映射访问 (19200-19250)</span>
               <p style="font-size:11px; color:#64748b; margin-top:3px;">
-                开启后允许第三方程序通过公网直接访问裸端口；关闭时将仅允许安全 WSS 鉴权网关。
+                开启后允许第三方程序绕过鉴权直接访问宿主机裸端口；关闭时将强制收敛于 8443 安全网关。
               </p>
             </div>
             <div style="display:flex; align-items:center; gap:8px;">
               <input type="checkbox" v-model="remoteAccess.direct_port_access_enabled" id="direct_port_toggle" class="check-box-blue" @change="saveRemoteAccess">
               <label for="direct_port_toggle" style="font-size:12px; color:#38bdf8; font-weight:bold; cursor:pointer;">
-                {{ remoteAccess.direct_port_access_enabled ? '已开启直连' : '已关闭直连' }}
+                {{ remoteAccess.direct_port_access_enabled ? '已开启' : '已关闭' }}
               </label>
             </div>
           </div>
         </div>
 
-        <!-- 使用说明 Tab 切换 -->
+        <!-- 对外调用指南 Tab 切换 (仅保留 2 个核心外部对接方式) -->
         <div>
           <div style="display:flex; gap:8px; margin-bottom:10px; border-bottom:1px solid #172554; padding-bottom:8px;">
-            <button 
-              type="button" 
-              @click="activeGuideTab = 'edge'" 
-              :class="activeGuideTab === 'edge' ? 'guide-tab-active' : 'guide-tab-normal'"
-            >
-              🚀 边缘容器自动入网 (noVNC/Kasm)
-            </button>
             <button 
               type="button" 
               @click="activeGuideTab = 'gateway'" 
               :class="activeGuideTab === 'gateway' ? 'guide-tab-active' : 'guide-tab-normal'"
             >
-              方式一：API-Key 安全网关
+              🔒 方式一：安全 WSS 鉴权网关 (8443 推荐)
             </button>
             <button 
               type="button" 
               @click="activeGuideTab = 'api'" 
               :class="activeGuideTab === 'api' ? 'guide-tab-active' : 'guide-tab-normal'"
             >
-              第三方提取 API
+              ⚡ 方式二：第三方自动化 API
             </button>
           </div>
 
-          <!-- 说明 1: 边缘容器自动入网 (TOFU / Edge Agent) -->
-          <div v-if="activeGuideTab === 'edge'" class="guide-content-box">
-            <p style="color:#34d399; font-weight:bold; margin-bottom:6px;">✨ 无公网 IP、NAT4 环境一键穿透自动入网：</p>
-            <p style="font-size:11px; color:#94a3b8; margin-bottom:6px;">
-              容器挂载 <code>edge_agent.py</code>，启动时自动出站连入管理端（无需路由器开端口）：
-            </p>
-            <pre class="code-snippet-box"><code># noVNC / Kasm 节点 docker-compose.yml 环境变量示例:
-environment:
-  - HUB_URL=https://&lt;你的域名&gt;:8443
-  # 方式 A (Edge Agent 自动批准): 填入上面的 Join Token
-  - JOIN_TOKEN={{ remoteAccess.cluster_join_token }}
-  # 方式 B (默认 TOFU 模式): 不填 JOIN_TOKEN，容器启动后进入管理端待认领审批队列
-  - NODE_NAME=北美-Kasm-01
-  - NODE_GROUP=北美自动化组
-  - CDP_PORT=9222</code></pre>
-          </div>
-
-          <!-- 说明 2: WSS 安全网关 -->
+          <!-- 说明 1: WSS 安全网关 -->
           <div v-if="activeGuideTab === 'gateway'" class="guide-content-box">
-            <p style="color:#38bdf8; font-weight:bold; margin-bottom:6px;">🌟 优势：仅需 8443 端口，TLS 全量加密，强制校验 API-Key，彻底防扫描。</p>
-            <p style="color:#94a3b8; font-size:11px; margin-bottom:8px;">连接地址：<code>wss://&lt;你的域名&gt;:8443/cdp/{节点ID}/ws?api_key={{ profile.api_key }}</code></p>
-            <pre class="code-snippet-box"><code># Python Playwright 示例
+            <p style="color:#38bdf8; font-weight:bold; margin-bottom:6px;">🌟 核心优势：仅暴露 8443 单端口，全量 TLS 加密，强制 API-Key 鉴权，支持穿透控制 NAT4 内网节点。</p>
+            <p style="color:#94a3b8; font-size:11px; margin-bottom:8px;">
+              统一连接端点：<code>wss://{{ currentHubHost }}/cdp/{节点ID}/ws?api_key={{ profile.api_key }}</code>
+            </p>
+            <pre class="code-snippet-box"><code># Python Playwright 示例 (无视目标节点是否在内网/NAT4，秒级操控)
 from playwright.async_api import async_playwright
 
 async with async_playwright() as p:
-    cdp_url = "wss://&lt;域名&gt;:8443/cdp/1/ws?api_key={{ profile.api_key }}"
+    cdp_url = "wss://{{ currentHubHost }}/cdp/1/ws?api_key={{ profile.api_key }}"
     browser = await p.chromium.connect_over_cdp(cdp_url)
     page = await browser.new_page()
     await page.goto("https://ipinfo.io")
-    print(await page.title())</code></pre>
+    print("页面标题:", await page.title())
+    await browser.close()</code></pre>
           </div>
 
-          <!-- 说明 3: 第三方对接 API -->
+          <!-- 说明 2: 第三方对接 API -->
           <div v-if="activeGuideTab === 'api'" class="guide-content-box">
-            <p style="color:#34d399; font-weight:bold; margin-bottom:6px;">⚡ 第三方程序或 Agent 一键获取全部节点的两种接入方式：</p>
-            <pre class="code-snippet-box"><code># 1. 查询全部节点 (返回包含两种方式的完整地址)
-curl -H "X-API-Key: {{ profile.api_key }}" https://&lt;域名&gt;:8443/api/v1/nodes
+            <p style="color:#34d399; font-weight:bold; margin-bottom:6px;">⚡ 第三方程序或 Agent 自动化调度与数据提取接口：</p>
+            <pre class="code-snippet-box"><code># 1. 查询全网所有在线节点与双连接地址
+curl -H "X-API-Key: {{ profile.api_key }}" {{ currentHubUrl }}/api/v1/nodes
 
-# 2. 一键抓取目标节点全量 Cookies
-curl -H "X-API-Key: {{ profile.api_key }}" https://&lt;域名&gt;:8443/api/v1/nodes/1/cookies
+# 2. 一键抓取目标节点全量 Cookies JSON
+curl -H "X-API-Key: {{ profile.api_key }}" {{ currentHubUrl }}/api/v1/nodes/1/cookies
 
-# 3. 外部 Webhook 触发全网同步
-curl -X POST -H "X-API-Key: {{ profile.api_key }}" https://&lt;域名&gt;:8443/api/v1/sync</code></pre>
+# 3. 外部 Webhook 触发全网调度策略同步
+curl -X POST -H "X-API-Key: {{ profile.api_key }}" {{ currentHubUrl }}/api/v1/sync</code></pre>
           </div>
         </div>
       </div>
@@ -392,7 +355,7 @@ curl -X POST -H "X-API-Key: {{ profile.api_key }}" https://&lt;域名&gt;:8443/a
                 <td style="color:#cbd5e1;">{{ k.remark || '---' }}</td>
                 <td style="color:#64748b;">{{ k.created_at }}</td>
                 <td style="color:#64748b;">{{ k.size }} B</td>
-                <td style="text-align:right; space-x:2;">
+                <td style="text-align:right;">
                   <button @click="updateRemark(k)" class="link-probe" style="margin-right:8px;">编辑备注</button>
                   <button @click="deleteKey(k.filename)" class="link-probe" style="color:#f87171;">销毁</button>
                 </td>
@@ -411,6 +374,39 @@ curl -X POST -H "X-API-Key: {{ profile.api_key }}" https://&lt;域名&gt;:8443/a
 </template>
 
 <style scoped>
+.layout-column-item {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  min-width: 0 !important;
+  width: 100%;
+}
+
+.credential-box-card {
+  background: #09122a;
+  border: 1px solid #172554;
+  border-radius: 8px;
+  padding: 12px;
+  margin-bottom: 14px;
+  box-sizing: border-box;
+}
+
+.credential-header-flex {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+}
+
+.badge-recommend {
+  background: rgba(14, 165, 233, 0.2);
+  border: 1px solid #0284c7;
+  color: #38bdf8;
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 4px;
+}
+
 .btn-copy-tag {
   background: #1e293b;
   border: 1px solid #3b82f6;
@@ -430,24 +426,39 @@ curl -X POST -H "X-API-Key: {{ profile.api_key }}" https://&lt;域名&gt;:8443/a
 }
 
 .api-key-interactive-box {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
+  display: flex !important;
+  justify-content: space-between !important;
+  align-items: center !important;
   background: #060b17;
   border: 1px solid #172554;
-  padding: 8px 10px;
-  border-radius: 4px;
+  padding: 8px 12px;
+  border-radius: 6px;
   margin-top: 8px;
   cursor: pointer;
   transition: all 0.2s;
+  width: 100% !important;
+  box-sizing: border-box !important;
+  min-width: 0 !important;
 }
 .api-key-interactive-box:hover {
   border-color: #00f0ff;
   background: #08112b;
 }
 
+.token-truncate-text {
+  overflow: hidden !important;
+  text-overflow: ellipsis !important;
+  white-space: nowrap !important;
+  flex: 1 !important;
+  min-width: 0 !important;
+  font-size: 12px !important;
+  letter-spacing: 0.5px;
+}
+
 .copy-hint-icon {
-  font-size: 12px;
+  margin-left: 8px;
+  flex-shrink: 0;
+  font-size: 13px;
   opacity: 0.7;
 }
 .api-key-interactive-box:hover .copy-hint-icon {
@@ -498,36 +509,5 @@ curl -X POST -H "X-API-Key: {{ profile.api_key }}" https://&lt;域名&gt;:8443/a
   overflow-x: auto;
   line-height: 1.5;
   margin: 0;
-}
-
-.api-key-interactive-box {
-  display: flex !important;
-  justify-content: space-between !important;
-  align-items: center !important;
-  background: #060b17;
-  border: 1px solid #172554;
-  padding: 8px 12px;
-  border-radius: 6px;
-  margin-top: 8px;
-  cursor: pointer;
-  transition: all 0.2s;
-  width: 100% !important;
-  box-sizing: border-box !important;
-  min-width: 0 !important; /* 核心：防止撑破 flex */
-}
-
-.token-truncate-text {
-  overflow: hidden !important;
-  text-overflow: ellipsis !important;
-  white-space: nowrap !important;
-  flex: 1 !important;
-  min-width: 0 !important; /* 核心：防止长文本撑宽父容器 */
-  font-size: 12px !important;
-}
-
-.copy-hint-icon {
-  margin-left: 8px;
-  flex-shrink: 0;
-  font-size: 13px;
 }
 </style>

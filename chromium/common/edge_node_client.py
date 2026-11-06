@@ -5,7 +5,7 @@ Wimotek Edge Node Client Runner
   * None  (默认): 触发双向回声探针智能自适应检测 (有公网走直连，NAT4/防火墙无感切穿透)
   * True  (强制): 强制建立出站 WSS 反向长连接隧道
   * False (强制): 强制执行 HTTP 直连上报登记
-- 端口直连：直接操作 Chromium 原生端口 127.0.0.1:9222 (绝不再经由 socat 中转)
+- 端口直连：直接操作 Chromium 原生端口 127.0.0.1:9222 (支持 CDP_PORT / DIRECT_PORT / EXTERNAL_PORT 自定义)
 - 状态固化：/data/.edge_identity.json 持久化 UUID 与公钥指纹，容器重启永不产生幽灵节点
 """
 
@@ -25,8 +25,9 @@ import websockets
 from wimotek_edge_agent import Config, EdgeAgent
 from wimotek_edge_agent.transport import JsonLineTransport, TunnelDialer
 
-# 原生直连端口
-LOCAL_CDP_HTTP = "http://127.0.0.1:9222"
+# 容器内部直连 Chromium 原生端口 (默认 9222)
+CDP_PORT = int(os.getenv("CDP_PORT", "9222"))
+LOCAL_CDP_HTTP = f"http://127.0.0.1:{CDP_PORT}"
 
 
 def ensure_identity(data_dir: Path) -> Tuple[str, str]:
@@ -46,7 +47,7 @@ def ensure_identity(data_dir: Path) -> Tuple[str, str]:
             with open(id_file, "r", encoding="utf-8") as f:
                 d = json.load(f)
                 if env_name and d.get("node_uuid") != env_name:
-                    pass  # 用户修改了环境变量名称，重新生成对应指纹
+                    pass
                 else:
                     return d["node_uuid"], d["fingerprint"]
         except Exception:
@@ -87,10 +88,10 @@ def ensure_identity(data_dir: Path) -> Tuple[str, str]:
 
 def parse_reverse_tunnel_mode() -> Optional[bool]:
     """
-    100% 对齐 wimotek_edge_agent.Config 的 Optional[bool] 三态标准：
-    - 返回 None:  未指定、留空、auto、none，均触发【智能回声自适应探测】
-    - 返回 True:  显式指定 true/1/yes，触发【强制反向隧道穿透】
-    - 返回 False: 显式指定 false/0/no，触发【强制直连登记】
+    对齐 wimotek_edge_agent.Config 的 Optional[bool] 三态标准：
+    - 返回 None:  未指定、留空、auto、none ➔ 【智能回声自适应探测】
+    - 返回 True:  显式指定 true/1/yes ➔ 【强制反向隧道穿透】
+    - 返回 False: 显式指定 false/0/no ➔ 【强制直连登记】
     """
     val = os.getenv("REVERSE_TUNNEL")
     if val is None:
@@ -110,7 +111,7 @@ def parse_reverse_tunnel_mode() -> Optional[bool]:
 
 async def check_hub_can_reach_me(hub_url: str, cdp_port: int = 9222) -> Tuple[bool, str, int]:
     """
-    【双向回声探针】：请求 Hub 尝试反向握手本机的 CDP 端口。
+    【双向回声探针】：请求 Hub 尝试反向握手本机的宿主机暴露端口。
     能在 2 秒内打通说明具备真实公网/局域网直连能力；打不通判定为处于 NAT4 或防火墙后。
     """
     detect_api = f"{hub_url}/api/nodes/detect-mode?cdp_port={cdp_port}"
@@ -147,7 +148,7 @@ async def execute_http_auto_register(hub_url: str, node_uuid: str, cdp_port: int
         "cdp_port": cdp_port,
     }
 
-    print(f"📡 [Direct Register] 正在向 Hub 发送直连登记包: {api_url} (端口: {cdp_port})")
+    print(f"📡 [Direct Register] 正在向 Hub 发送直连登记包: {api_url} (直连端口: {cdp_port})")
     async with httpx.AsyncClient(verify=False, timeout=8.0) as client:
         try:
             res = await client.post(api_url, json=payload, headers=headers)
@@ -203,7 +204,7 @@ class WebSocketTunnelDialer:
 async def cdp_data_handler(transport: JsonLineTransport, ctx):
     """
     反向隧道业务处理器：
-    接收 Hub 借道发来的指令，直连本地原生 127.0.0.1:9222 操控 Chromium 并推回结果
+    接收 Hub 借道发来的指令，直连本地原生 127.0.0.1:CDP_PORT 操控 Chromium 并推回结果
     """
     async with httpx.AsyncClient(timeout=4.0) as client:
         while True:
@@ -295,15 +296,20 @@ def main():
     data_dir = Path("/data")
     node_uuid, fingerprint = ensure_identity(data_dir)
 
-    # 精准解析三态：None (智能) | True (强制穿透) | False (强制直连)
+    # 动态获取宿主机暴露端口 (例如 -p 1922:9222 启动时传入 DIRECT_PORT=1922)
+    ext_direct_port = int(
+        os.getenv("DIRECT_PORT") or os.getenv("EXTERNAL_PORT") or os.getenv("CDP_PORT") or 9222
+    )
+
+    # 解析三态：None (智能) | True (强制穿透) | False (强制直连)
     tunnel_mode: Optional[bool] = parse_reverse_tunnel_mode()
 
     # -------------------------------------------------------------
     # 分支 1：False ➔ 强制直连登记
     # -------------------------------------------------------------
     if tunnel_mode is False:
-        print("⚙️ [Edge Mode] reverse_tunnel=False ➔ 【强制直连模式】")
-        asyncio.run(execute_http_auto_register(hub_url, node_uuid, cdp_port=9222))
+        print(f"⚙️ [Edge Mode] reverse_tunnel=False ➔ 【强制直连模式 (目标端口: {ext_direct_port})】")
+        asyncio.run(execute_http_auto_register(hub_url, node_uuid, cdp_port=ext_direct_port))
         return
 
     # -------------------------------------------------------------
@@ -316,10 +322,12 @@ def main():
     # 分支 3：None ➔ 原生智能自动探测 (Default)
     # -------------------------------------------------------------
     else:
-        print("🧠 [Edge Mode] reverse_tunnel=None ➔ 【智能自适应模式 (默认)】...")
-        print("   -> 正在向 Hub 发送回声探针，检测 Hub 能否直接反向连通本机 9222 端口...")
+        print(f"🧠 [Edge Mode] reverse_tunnel=None ➔ 【智能自适应模式 (探测目标端口: {ext_direct_port})】...")
+        print("   -> 正在向 Hub 发送回声探针，检测 Hub 能否直接反向连通本机的直连端口...")
 
-        can_direct, detected_ip, rec_port = asyncio.run(check_hub_can_reach_me(hub_url, cdp_port=9222))
+        can_direct, detected_ip, rec_port = asyncio.run(
+            check_hub_can_reach_me(hub_url, cdp_port=ext_direct_port)
+        )
 
         if can_direct:
             print(f"🎯 [Smart Check] 探测成功！Hub 可直接反向连通本机 ({detected_ip}:{rec_port})")
@@ -327,17 +335,17 @@ def main():
             asyncio.run(execute_http_auto_register(hub_url, node_uuid, cdp_port=rec_port))
             return
         else:
-            print("🛡️ [Smart Check] 探测确认：无法从外部直连 (处于 NAT4/家宽大内网/防火墙拦截)")
+            print(f"🛡️ [Smart Check] 探测确认：无法通过 {detected_ip}:{ext_direct_port} 直连 (处于 NAT4/防火墙拦截)")
             print("   -> 自动无感切换为【NAT4 出站反向长连接穿透模式】！")
 
     # 启动反向长连接隧道
     config = Config.from_env()
-    
-    # 【核心修复】：为客户端注入默认 32 字节密钥与 /data 数据目录，满足 EdgeAgent 实例化硬性要求
-    config.data_dir = Path("/data")
+    config.data_dir = data_dir
+
+    # 满足 EdgeAgent 实例化至少 32 字节密钥硬性要求
     if not config.token_secret:
         config.token_secret = b"wimotek-edge-node-client-secret-32b-ok"
-        
+
     config.node_uuid = node_uuid
     config.public_key_fingerprint = fingerprint
     config.join_token = os.getenv("JOIN_TOKEN", "").strip() or None
@@ -348,14 +356,14 @@ def main():
 
     ssl_ctx = ssl.create_default_context()
     ssl_ctx.check_hostname = False
-    ssl_ctx.verify_mode = ssl.CERT_NONE  # 允许自签证书握手
+    ssl_ctx.verify_mode = ssl.CERT_NONE
 
     print(f"🚀 [Edge Client] 出站反向隧道启动 -> 目标: {tunnel_url}")
-    print(f"   -> 节点名称: {node_uuid}")
-    print(f"   -> 节点指纹: {fingerprint}")
-    print(f"   -> 本地 CDP: {LOCAL_CDP_HTTP} (原生 9222 直连)")
+    print(f"   -> 节点标识 (UUID): {node_uuid}")
+    print(f"   -> 证书指纹 (FP)  : {fingerprint}")
+    print(f"   -> 本地 Chromium : {LOCAL_CDP_HTTP} (原生直连)")
 
-    # 运行反向隧道，断线具备内置指数退避重连
+    # 运行反向隧道 (内置指数退避自愈重连)
     asyncio.run(agent.run_reverse_tunnel(
         url=tunnel_url,
         dialer=WebSocketTunnelDialer(),
