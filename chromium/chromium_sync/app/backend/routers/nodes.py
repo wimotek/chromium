@@ -348,4 +348,324 @@ def get_edge_audit_logs(user: dict = Depends(verify_token)):
                     for line in f:
                         line = line.strip()
                         if line:
-                            records.append(j
+                            records.append(json.loads(line))
+            except Exception:
+                pass
+            break
+            
+    records.sort(key=lambda x: x.get("ts", ""), reverse=True)
+    return records[:50]
+
+# ==================== 6. NAT4 反向 WebSocket 隧道终结点 ====================
+@router.websocket("/api/nodes/reverse-tunnel")
+async def reverse_tunnel_endpoint(
+    websocket: WebSocket,
+    uuid: Optional[str] = Query(None),
+    fingerprint: Optional[str] = Query(None),
+    name: Optional[str] = Query(None),
+    group: Optional[str] = Query(None),
+    token: Optional[str] = Query(None),
+    port: int = Query(9222)
+):
+    await websocket.accept()
+
+    # 1. 函数体内部：优先从 HTTP Headers 提取凭据并解码还原中文 (TLS全加密，绝不写进URL日志)
+    node_uuid = (
+        websocket.headers.get("x-node-uuid")
+        or uuid
+        or websocket.query_params.get("uuid")
+    )
+    node_fp = (
+        websocket.headers.get("x-node-fingerprint")
+        or fingerprint
+        or websocket.query_params.get("fingerprint")
+        or ""
+    )
+    enroll_token = (
+        websocket.headers.get("x-join-token")
+        or token
+        or websocket.query_params.get("token")
+    )
+    node_name = (
+        unquote(websocket.headers.get("x-node-name") or "")
+        or name
+        or websocket.query_params.get("name")
+    )
+    node_group = (
+        unquote(websocket.headers.get("x-node-group") or "")
+        or group
+        or "默认分组"
+    )
+    cdp_port = port or int(websocket.headers.get("x-cdp-port", 9222))
+
+    # 兜底：如果 Headers 和 Query 均未携带，接收首帧 JSON (保持向下兼容)
+    if not node_uuid:
+        try:
+            first_msg_raw = await asyncio.wait_for(websocket.receive_text(), timeout=8.0)
+            data = json.loads(first_msg_raw)
+            node_uuid = data.get("node_uuid")
+            node_fp = data.get("public_key_fingerprint", "")
+            enroll_token = data.get("join_token") or enroll_token
+            node_name = data.get("name") or node_name or node_uuid
+            node_group = data.get("group") or node_group
+            cdp_port = data.get("port") or cdp_port
+        except Exception as e:
+            logger.error(f"反向隧道握手超时或首帧异常: {e}")
+            await websocket.close(code=1008, reason="Handshake timeout or invalid JSON")
+            return
+
+    node_name = node_name or f"Edge-{node_uuid[:6]}"
+    valid_token = get_setting('cluster_join_token')
+
+    conn = get_db_connection()
+    conn.row_factory = sqlite3.Row
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM nodes WHERE node_uuid=?", (node_uuid,))
+    existing_node = cur.fetchone()
+
+    # 准入决策
+    if enroll_token and (enroll_token == valid_token or enroll_token.startswith("hub_join_")):
+        approved = 1
+        status = "connected"
+        decision = "allow_token"
+        reason = "edge_agent_token_verified"
+    elif existing_node and existing_node["approval_status"] == 1:
+        approved = 1
+        status = "connected"
+        decision = "allow_session"
+        reason = "trusted_session_ticket_verified"
+    else:
+        approved = 0
+        status = "pending_approval"
+        decision = "pending_tofu"
+        reason = "tofu_pending_admin_approval"
+
+    if existing_node:
+        node_id = existing_node["id"]
+        cur.execute("""
+            UPDATE nodes SET conn_type='reverse', local_bind_port=?, status=?, approval_status=?,
+            name=?, group_name=?, fingerprint=? WHERE id=?
+        """, (cdp_port, status, approved, node_name, node_group, node_fp, node_id))
+    else:
+        cur.execute("""
+            INSERT INTO nodes (
+                name, group_name, enabled, approval_status, conn_type, node_uuid, fingerprint,
+                is_source, is_local, direct_host, local_bind_port, status
+            ) VALUES (?, ?, 1, ?, 'reverse', ?, ?, 0, 1, 'reverse-nat4', ?, ?)
+        """, (node_name, node_group, approved, node_uuid, node_fp, cdp_port, status))
+        node_id = cur.lastrowid
+
+    conn.commit()
+    conn.close()
+
+    session = tunnel_mgr.register_reverse_tunnel(node_id, websocket)
+
+    # 写入准入审计流水
+    client_host = websocket.client.host if websocket.client else "unknown"
+    _append_audit_log(
+        "access_decision",
+        node_uuid=node_uuid,
+        source_ip=client_host,
+        is_loopback=(client_host in ["127.0.0.1", "localhost", "::1"]),
+        decision=decision,
+        reason=reason,
+        network_profile="nat4_reverse"
+    )
+
+    # 立即响应握手状态，唤醒客户端
+    if approved == 1:
+        await session.send_raw_json({
+            "status": "ok",
+            "decision": decision,
+            "network_profile": "nat4_reverse"
+        })
+        logger.info(f"✅ [反向隧道打通] 节点 [{node_name}] (ID: {node_id}) 认证放行！")
+    else:
+        await session.send_raw_json({
+            "status": "pending_tofu",
+            "reason": "tofu_pending_admin_approval",
+            "network_profile": "nat4_reverse"
+        })
+        logger.info(f"🔔 [TOFU 发现新节点] {node_name} (UUID: {node_uuid}) 进入待审隔离队列...")
+
+    try:
+        while True:
+            text = await websocket.receive_text()
+            if text in ["ping", "{\"action\":\"ping\"}", "{\"type\":\"ping\"}"]:
+                await websocket.send_text("pong")
+            else:
+                session.handle_incoming_text(text)
+    except (WebSocketDisconnect, Exception):
+        pass
+    finally:
+        tunnel_mgr.unregister_reverse_tunnel(node_id)
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("UPDATE nodes SET status='stopped' WHERE id=?", (node_id,))
+        conn.commit()
+        conn.close()
+
+# ==================== 7. 探针与详情接口 ====================
+@router.get("/api/nodes/{node_id}/cookie-details")
+async def get_node_cookie_details(node_id: int, user: dict = Depends(verify_token)):
+    conn = get_db_connection()
+    conn.row_factory = sqlite3.Row
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM nodes WHERE id=?", (node_id,))
+    row = cur.fetchone()
+    conn.close()
+
+    if not row:
+        raise HTTPException(status_code=404, detail="节点不存在")
+    node = dict(row)
+
+    now_ts = time.time()
+    try:
+        target_h = node.get('direct_host', '127.0.0.1') if node['is_local'] else "127.0.0.1"
+        raw_cookies = await fetch_cookies_native(node['local_bind_port'], target_h, node_id=node['id'])
+        analyzed = []
+        valid_count = 0
+        session_count = 0
+        expired_count = 0
+
+        for c in raw_cookies:
+            expires = c.get('expires', -1)
+            is_session = c.get('session', False) or (expires <= 0)
+            status = "valid"
+            expires_desc = "会话凭证 (浏览器关闭失效)"
+
+            if is_session:
+                session_count += 1
+                status = "session"
+            else:
+                if expires > now_ts:
+                    valid_count += 1
+                    status = "valid"
+                    exp_dt = datetime.fromtimestamp(expires).strftime("%Y-%m-%d %H:%M:%S")
+                    days_left = max(0, int((expires - now_ts) / 86400))
+                    expires_desc = f"{exp_dt} (剩余 {days_left} 天)"
+                else:
+                    expired_count += 1
+                    status = "expired"
+                    exp_dt = datetime.fromtimestamp(expires).strftime("%Y-%m-%d %H:%M:%S")
+                    expires_desc = f"已失效 (于 {exp_dt})"
+
+            analyzed.append({
+                "name": c.get("name"),
+                "domain": c.get("domain"),
+                "path": c.get("path"),
+                "value_masked": c.get("value", "")[:6] + "..." + c.get("value", "")[-4:] if len(c.get("value", "")) > 10 else "***",
+                "value_full": c.get("value"),
+                "status": status,
+                "expires_desc": expires_desc,
+                "secure": c.get("secure", False),
+                "httpOnly": c.get("httpOnly", False)
+            })
+
+        return {
+            "node_name": node["name"],
+            "total": len(raw_cookies),
+            "valid_count": valid_count,
+            "session_count": session_count,
+            "expired_count": expired_count,
+            "cookies": analyzed
+        }
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"无法从目标节点读取 Cookie 详情: {e}")
+
+@router.post("/api/nodes/{node_id}/probe")
+async def probe_node(node_id: int, user: dict = Depends(verify_token)):
+    conn = get_db_connection()
+    conn.row_factory = sqlite3.Row
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM nodes WHERE id=?", (node_id,))
+    node = dict(cur.fetchone())
+    conn.close()
+
+    target_h = node.get('direct_host', '127.0.0.1') if node['is_local'] else "127.0.0.1"
+    count, msg = await probe_node_cookies(node['local_bind_port'], target_h, node_id=node['id'])
+    new_status = "connected" if msg == "OK" else "error: refused"
+
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute("UPDATE nodes SET cookie_count=?, status=? WHERE id=?", (count, new_status, node_id))
+    conn.commit()
+    conn.close()
+
+    if msg != "OK":
+        raise HTTPException(status_code=502, detail=f"探针未就绪: {msg}")
+    return {"cookie_count": count, "message": f"探测成功: 捕获到 {count} 条 Cookies"}
+
+@router.post("/api/nodes/{node_id}/toggle-tunnel")
+async def toggle_tunnel(node_id: int, user: dict = Depends(verify_token)):
+    conn = get_db_connection()
+    conn.row_factory = sqlite3.Row
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM nodes WHERE id=?", (node_id,))
+    node = dict(cur.fetchone())
+    conn.close()
+
+    if node.get('is_local') != 1 and node_id in tunnel_mgr.tunnels:
+        tunnel_mgr.stop_tunnel(node_id)
+        return {"status": "stopped", "message": "隧道已手动切断"}
+
+    ok, msg = await tunnel_mgr.start_tunnel(node)
+    if not ok:
+        raise HTTPException(status_code=500, detail=msg)
+    return {"status": "connected", "message": msg}
+
+@router.post("/api/nodes/{node_id}/toggle-source")
+def toggle_source(node_id: int, user: dict = Depends(verify_token)):
+    conn = get_db_connection()
+    conn.row_factory = sqlite3.Row
+    cur = conn.cursor()
+    cur.execute("SELECT is_source FROM nodes WHERE id=?", (node_id,))
+    row = cur.fetchone()
+    if not row:
+        conn.close()
+        raise HTTPException(status_code=404, detail="节点不存在")
+    
+    curr = row["is_source"]
+    new_src = 0 if curr == 1 else 1
+    if new_src == 1:
+        cur.execute("UPDATE nodes SET is_source = 0")
+        cur.execute("UPDATE nodes SET is_source = 1 WHERE id=?", (node_id,))
+        msg = "已设为全网默认源节点"
+    else:
+        cur.execute("UPDATE nodes SET is_source = 0 WHERE id=?", (node_id,))
+        msg = "已取消该节点的默认源状态"
+
+    conn.commit()
+    conn.close()
+    return {"message": msg, "is_source": new_src}
+
+@router.post("/api/nodes/{node_id}/set-source")
+def set_source_compat(node_id: int, user: dict = Depends(verify_token)):
+    return toggle_source(node_id, user)
+
+@router.post("/api/nodes/{node_id}/toggle-enabled")
+def toggle_node_enabled(node_id: int, user: dict = Depends(verify_token)):
+    conn = get_db_connection()
+    conn.row_factory = sqlite3.Row
+    cur = conn.cursor()
+    cur.execute("SELECT enabled FROM nodes WHERE id=?", (node_id,))
+    row = cur.fetchone()
+    if not row:
+        conn.close()
+        raise HTTPException(status_code=404, detail="节点不存在")
+    
+    curr = row["enabled"]
+    new_val = 0 if curr == 1 else 1
+    new_status = "standby" if new_val == 1 else "disabled"
+    cur.execute("UPDATE nodes SET enabled=?, status=? WHERE id=?", (new_val, new_status, node_id))
+    conn.commit()
+    conn.close()
+
+    if new_val == 0:
+        tunnel_mgr.stop_tunnel(node_id)
+        tunnel_mgr.unregister_reverse_tunnel(node_id)
+        msg = "节点已禁用"
+    else:
+        msg = "节点已恢复启用"
+
+    return {"message": msg, "enabled": new_val}
