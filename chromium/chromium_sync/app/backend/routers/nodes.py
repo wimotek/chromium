@@ -187,7 +187,7 @@ async def approve_node(node_id: int, user: dict = Depends(verify_token)):
     node = dict(node_row)
     conn.close()
 
-    # 向长连接通道推送 approved 指令
+    # 向长连接通道推送 approved 指令，唤醒边缘 Agent
     session = tunnel_mgr.get_reverse_session(node_id)
     if session:
         await session.send_raw_json({
@@ -360,6 +360,7 @@ def get_edge_audit_logs(user: dict = Depends(verify_token)):
 async def reverse_tunnel_endpoint(
     websocket: WebSocket,
     uuid: Optional[str] = Query(None),
+    fingerprint: Optional[str] = Query(None),
     name: Optional[str] = Query(None),
     group: Optional[str] = Query(None),
     token: Optional[str] = Query(None),
@@ -367,28 +368,50 @@ async def reverse_tunnel_endpoint(
 ):
     await websocket.accept()
 
-    node_uuid = uuid
-    fingerprint = ""
-    enroll_token = token
-    node_name = name
-    node_group = group or "默认分组"
-    cdp_port = port or 9222
+    # 1. 优先从 HTTP 握手请求头提取 (TLS 加密，绝不在 URL 访问日志泄漏 Token)
+    node_uuid = (
+        websocket.headers.get("x-node-uuid")
+        or uuid
+        or websocket.query_params.get("uuid")
+    )
+    node_fp = (
+        websocket.headers.get("x-node-fingerprint")
+        or fingerprint
+        or websocket.query_params.get("fingerprint")
+        or ""
+    )
+    enroll_token = (
+        websocket.headers.get("x-join-token")
+        or token
+        or websocket.query_params.get("token")
+    )
+    node_name = (
+        websocket.headers.get("x-node-name")
+        or name
+        or websocket.query_params.get("name")
+    )
+    node_group = (
+        websocket.headers.get("x-node-group")
+        or group
+        or "默认分组"
+    )
+    cdp_port = port or int(websocket.headers.get("x-cdp-port", 9222))
 
+    # 如果 Headers 和 Query 均未携带，兜底接收首帧 JSON (兼容老旧客户端)
     if not node_uuid:
         try:
-            first_msg_raw = await asyncio.wait_for(websocket.receive_text(), timeout=5.0)
+            first_msg_raw = await asyncio.wait_for(websocket.receive_text(), timeout=8.0)
             data = json.loads(first_msg_raw)
             node_uuid = data.get("node_uuid")
-            fingerprint = data.get("public_key_fingerprint", "")
+            node_fp = data.get("public_key_fingerprint", "")
             enroll_token = data.get("join_token") or enroll_token
-            node_name = node_name or node_uuid
-        except Exception:
+            node_name = data.get("name") or node_name or node_uuid
+            node_group = data.get("group") or node_group
+            cdp_port = data.get("port") or cdp_port
+        except Exception as e:
+            logger.error(f"反向隧道握手超时或首帧异常: {e}")
             await websocket.close(code=1008, reason="Handshake timeout or invalid JSON")
             return
-
-    if not node_uuid:
-        await websocket.close(code=1008, reason="Missing node_uuid")
-        return
 
     node_name = node_name or f"Edge-{node_uuid[:6]}"
     valid_token = get_setting('cluster_join_token')
@@ -399,7 +422,7 @@ async def reverse_tunnel_endpoint(
     cur.execute("SELECT * FROM nodes WHERE node_uuid=?", (node_uuid,))
     existing_node = cur.fetchone()
 
-    # 鉴权决策
+    # 决策准入
     if enroll_token and (enroll_token == valid_token or enroll_token.startswith("hub_join_")):
         approved = 1
         status = "connected"
@@ -421,14 +444,14 @@ async def reverse_tunnel_endpoint(
         cur.execute("""
             UPDATE nodes SET conn_type='reverse', local_bind_port=?, status=?, approval_status=?,
             name=?, group_name=?, fingerprint=? WHERE id=?
-        """, (cdp_port, status, approved, node_name, node_group, fingerprint, node_id))
+        """, (cdp_port, status, approved, node_name, node_group, node_fp, node_id))
     else:
         cur.execute("""
             INSERT INTO nodes (
                 name, group_name, enabled, approval_status, conn_type, node_uuid, fingerprint,
                 is_source, is_local, direct_host, local_bind_port, status
             ) VALUES (?, ?, 1, ?, 'reverse', ?, ?, 0, 1, 'reverse-nat4', ?, ?)
-        """, (node_name, node_group, approved, node_uuid, fingerprint, cdp_port, status))
+        """, (node_name, node_group, approved, node_uuid, node_fp, cdp_port, status))
         node_id = cur.lastrowid
 
     conn.commit()
@@ -436,7 +459,7 @@ async def reverse_tunnel_endpoint(
 
     session = tunnel_mgr.register_reverse_tunnel(node_id, websocket)
 
-    # 记录审计流水
+    # 写入准入审计流水
     client_host = websocket.client.host if websocket.client else "unknown"
     _append_audit_log(
         "access_decision",
@@ -448,6 +471,7 @@ async def reverse_tunnel_endpoint(
         network_profile="nat4_reverse"
     )
 
+    # 立即响应握手状态，唤醒客户端
     if approved == 1:
         await session.send_raw_json({
             "status": "ok",
