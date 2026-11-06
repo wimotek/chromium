@@ -54,6 +54,22 @@ class TrustStore:
                 )
                 """
             )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS issued_tokens (
+                    token TEXT PRIMARY KEY,
+                    jti TEXT NOT NULL UNIQUE,
+                    exp INTEGER NOT NULL,
+                    iat INTEGER NOT NULL,
+                    aud TEXT NOT NULL,
+                    iss TEXT NOT NULL,
+                    node_group TEXT NOT NULL,
+                    node_uuid TEXT,
+                    allowed_ip_cidr TEXT,
+                    created_at TEXT NOT NULL
+                )
+                """
+            )
 
     def get_node(self, node_uuid: str) -> Optional[NodeRecord]:
         with self._connect() as conn:
@@ -232,14 +248,78 @@ class TrustStore:
             "used_tokens_count": used_tokens_count,
         }
 
-    def consume_token(self, jti: str, expires_at: int) -> bool:
+    def save_issued_token(self, token: str, claims) -> None:
+        """
+        持久化 40 字符紧凑 Token 对应的 claims 载荷。
+        """
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO issued_tokens
+                (token, jti, exp, iat, aud, iss, node_group, node_uuid, allowed_ip_cidr, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    token,
+                    claims.jti,
+                    claims.exp,
+                    claims.iat,
+                    claims.aud,
+                    claims.iss,
+                    claims.node_group,
+                    claims.node_uuid,
+                    claims.allowed_ip_cidr,
+                    _utc_now(),
+                ),
+            )
+
+    def get_issued_token(self, token: str):
+        """
+        读取 Token 对应的 claims 载荷并过滤过期项。
+        """
+        from .tokens import JoinTokenClaims
+
+        now_ts = int(time.time())
+        with self._connect() as conn:
+            conn.execute("DELETE FROM issued_tokens WHERE exp < ?", (now_ts,))
+            row = conn.execute(
+                "SELECT * FROM issued_tokens WHERE token = ?", (token,)
+            ).fetchone()
+        if row is None:
+            return None
+        return JoinTokenClaims(
+            jti=row["jti"],
+            exp=row["exp"],
+            iat=row["iat"],
+            aud=row["aud"],
+            iss=row["iss"],
+            node_group=row["node_group"],
+            node_uuid=row["node_uuid"],
+            allowed_ip_cidr=row["allowed_ip_cidr"],
+        )
+
+    def is_token_used(self, jti: str) -> bool:
+        """
+        检查指定 jti 是否已被核销使用。
+        """
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM used_tokens WHERE jti = ?", (jti,)
+            ).fetchone()
+            return row is not None
+
+    def consume_token(self, jti: str, expires_at: int, token: Optional[str] = None) -> bool:
         """
         返回 True 表示首次使用；False 表示重放。
+        单次原子核销：写入 used_tokens 并从 issued_tokens 移除。
         """
         now_ts = int(time.time())
         with self._connect() as conn:
             conn.execute(
                 "DELETE FROM used_tokens WHERE expires_at < ?", (now_ts,)
+            )
+            conn.execute(
+                "DELETE FROM issued_tokens WHERE exp < ?", (now_ts,)
             )
             try:
                 conn.execute(
@@ -249,6 +329,10 @@ class TrustStore:
                     """,
                     (jti, expires_at, _utc_now()),
                 )
+                if token:
+                    conn.execute("DELETE FROM issued_tokens WHERE token = ?", (token,))
+                else:
+                    conn.execute("DELETE FROM issued_tokens WHERE jti = ?", (jti,))
                 return True
             except sqlite3.IntegrityError:
                 return False

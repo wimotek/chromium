@@ -375,7 +375,8 @@ Ship this structured log file to your central logging pipeline (Loki, ELK, Cloud
 ## Security model
 
 - **Token Secret**: >= 32 bytes HMAC secret.
-- **Single-Use Replay Protection**: `jti` is stored in SQLite `used_tokens` until expiration. Subsequent attempts are rejected with `token replay detected`.
+- **Compact 40-Character Single-Use HMAC Token**: 14-byte high-entropy ID (112 bits) + 16-byte HMAC-SHA256 signature (128 bits) = 30 raw bytes, Base64URL encoded to strictly 40 characters without padding. Replaces legacy verbose >200-character JWT-style strings while maintaining `O(1)` cryptographic tamper-proof validation.
+- **Single-Use Replay Protection**: Claims are stored in SQLite `issued_tokens` and atomically transferred to `used_tokens` upon first verification. Subsequent attempts are rejected with `token replay detected`.
 - **Identity & Network Binding**: Tokens can be bound to specific `node_uuid` and `allowed_ip_cidr` networks.
 - **TOFU Quarantine**: Unapproved nodes only exchange heartbeats; business data relay is strictly forbidden.
 - **No Downgrade**: Trusted nodes presenting without credentials cannot downgrade to TOFU.

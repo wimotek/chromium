@@ -756,3 +756,37 @@ input:-webkit-autofill:focus {
   margin-top: 3px;
   line-height: 1.5;
 }
+
+/* 修复通行码过长导致卡片被撑破的问题 */
+.api-key-interactive-box {
+  display: flex !important;
+  justify-content: space-between !important;
+  align-items: center !important;
+  background: #060b17;
+  border: 1px solid #172554;
+  padding: 8px 12px;
+  border-radius: 6px;
+  margin-top: 8px;
+  cursor: pointer;
+  transition: all 0.2s;
+  min-width: 0 !important; /* 关键：允许子元素在 flex 布局中正常收缩 */
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.api-key-interactive-box span.font-cyan-mono {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+  min-width: 0;
+  font-size: 13px;
+  color: #00f0ff;
+  letter-spacing: 0.5px;
+}
+
+.copy-hint-icon {
+  margin-left: 10px;
+  flex-shrink: 0;
+  font-size: 14px;
+}

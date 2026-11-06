@@ -49,6 +49,7 @@ class EdgeAgent:
 
         self.token_issuer = JoinTokenIssuer(
             secret=config.token_secret,
+            store=self.trust_store,
             audience=config.token_audience,
             issuer=config.token_issuer,
             max_ttl_seconds=config.token_max_ttl_seconds,
@@ -56,6 +57,7 @@ class EdgeAgent:
         self.token_verifier = JoinTokenVerifier(
             secret=config.token_secret,
             replay_store=self.trust_store,
+            store=self.trust_store,
             audience=config.token_audience,
             issuer=config.token_issuer,
             max_ttl_seconds=config.token_max_ttl_seconds,
