@@ -246,8 +246,8 @@ onMounted(() => {
               <button @click="resetJoinToken" class="link-probe" style="font-size:11px; color:#f87171;">重置通行码</button>
             </div>
           </div>
-          <div class="api-key-interactive-box" @click="copyText(remoteAccess.cluster_join_token, '入网通行码')" title="点击整行亦可复制">
-            <span class="font-cyan-mono" style="word-break:break-all; font-size:12px;">{{ remoteAccess.cluster_join_token || '正在获取...' }}</span>
+          <div class="api-key-interactive-box" @click="copyText(remoteAccess.cluster_join_token, '入网通行码')" title="点击整行复制">
+            <span class="font-cyan-mono token-truncate-text">{{ remoteAccess.cluster_join_token || '正在获取...' }}</span>
             <span class="copy-hint-icon">📋</span>
           </div>
           <p style="font-size:11px; color:#64748b; margin-top:5px;">
@@ -267,7 +267,7 @@ onMounted(() => {
             </div>
           </div>
           <div class="api-key-interactive-box" @click="copyText(profile.api_key, 'API Key')" title="点击整行亦可复制">
-            <span class="font-cyan-mono" style="word-break:break-all; font-size:12px;">{{ profile.api_key || '正在获取...' }}</span>
+            <span class="font-cyan-mono token-truncate-text">{{ profile.api_key || '正在获取...' }}</span>
             <span class="copy-hint-icon">📋</span>
           </div>
         </div>
@@ -498,5 +498,36 @@ curl -X POST -H "X-API-Key: {{ profile.api_key }}" https://&lt;域名&gt;:8443/a
   overflow-x: auto;
   line-height: 1.5;
   margin: 0;
+}
+
+.api-key-interactive-box {
+  display: flex !important;
+  justify-content: space-between !important;
+  align-items: center !important;
+  background: #060b17;
+  border: 1px solid #172554;
+  padding: 8px 12px;
+  border-radius: 6px;
+  margin-top: 8px;
+  cursor: pointer;
+  transition: all 0.2s;
+  width: 100% !important;
+  box-sizing: border-box !important;
+  min-width: 0 !important; /* 核心：防止撑破 flex */
+}
+
+.token-truncate-text {
+  overflow: hidden !important;
+  text-overflow: ellipsis !important;
+  white-space: nowrap !important;
+  flex: 1 !important;
+  min-width: 0 !important; /* 核心：防止长文本撑宽父容器 */
+  font-size: 12px !important;
+}
+
+.copy-hint-icon {
+  margin-left: 8px;
+  flex-shrink: 0;
+  font-size: 13px;
 }
 </style>

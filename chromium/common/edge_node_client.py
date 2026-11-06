@@ -332,6 +332,12 @@ def main():
 
     # 启动反向长连接隧道
     config = Config.from_env()
+    
+    # 【核心修复】：为客户端注入默认 32 字节密钥与 /data 数据目录，满足 EdgeAgent 实例化硬性要求
+    config.data_dir = Path("/data")
+    if not config.token_secret:
+        config.token_secret = b"wimotek-edge-node-client-secret-32b-ok"
+        
     config.node_uuid = node_uuid
     config.public_key_fingerprint = fingerprint
     config.join_token = os.getenv("JOIN_TOKEN", "").strip() or None
