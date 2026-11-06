@@ -1,6 +1,6 @@
 {
   "name": "wimotek-edge-agent",
-  "version": "1.0.0",
+  "version": "1.0",
   "description": "Universal Edge Reverse Proxy & Service Bridge Agent CLI Runner",
   "bin": {
     "wimotek-edge-agent": "./bin/cli.js",
