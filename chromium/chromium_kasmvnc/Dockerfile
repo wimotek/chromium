@@ -64,7 +64,7 @@ RUN mkdir -p /data /certs /etc/ssl/app /tmp/crashpad /home/kasm-user/.vnc /etc/k
     && chown -R kasm-user:kasm-user /data /certs /etc/ssl/app /tmp/crashpad /home/kasm-user /etc/kasmvnc /opt/venv
 
 COPY --chmod=755 entrypoint.sh /entrypoint.sh
-COPY --chmod=755 ../common/edge_node_client.py /opt/edge_node_client.py
+COPY --chmod=755 edge_node_client.py /opt/edge_node_client.py
 
 WORKDIR /data
 

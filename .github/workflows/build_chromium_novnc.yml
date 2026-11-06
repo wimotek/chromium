@@ -24,6 +24,11 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Prepare common client
+        run: |
+        cp chromium/common/edge_node_client.py chromium/chromium_novnc/edge_node_client.py
+        cp chromium/common/edge_node_client.py chromium/chromium_kasmvnc/edge_node_client.py
+
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
 

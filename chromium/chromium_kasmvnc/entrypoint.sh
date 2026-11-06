@@ -127,11 +127,19 @@ socat TCP-LISTEN:9223,fork,reuseaddr TCP:127.0.0.1:9222 &
 echo "[Ready] KasmVNC Web 端运行于 :6901 (HTTPS), 外部备用 CDP 映射于 :9223, 原生 CDP 位于 :9222"
 
 # ==============================================================================
-# 【核心增强】：启动 wimotek-edge-agent 驱动 (直连 127.0.0.1:9222)
+#  【核心增强】：启动 Wimotek Agent 守护进程 (带故障自动拉起与自愈)
 # ==============================================================================
 if [ -n "$HUB_URL" ]; then
-    echo "[Edge] 检测到 HUB_URL 配置 ($HUB_URL)，拉起 Wimotek 边缘接入 Agent..."
-    python3 /opt/edge_node_client.py &
+    echo "[Edge] 检测到 HUB_URL 配置 ($HUB_URL)，拉起 Agent 后台守护看门狗..."
+    (
+        # 守护子进程独立后台运行，主进程继续向下启动 Chromium
+        while true; do
+            echo "[Edge Watchdog] 正在拉起 edge_node_client 进程..."
+            python3 /opt/edge_node_client.py || true
+            echo "[Edge Watchdog] ⚠️ 警告: edge_node_client 异常退出，3 秒后自动重生拉起..."
+            sleep 3
+        done
+    ) &
 fi
 
 # ==============================================================================

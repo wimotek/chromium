@@ -50,7 +50,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && chown -R appuser:appuser /data /certs /etc/ssl/app /tmp/crashpad /home/appuser /opt/venv
 
 COPY --chmod=755 entrypoint.sh /entrypoint.sh
-COPY --chmod=755 ../common/edge_node_client.py /opt/edge_node_client.py
+COPY --chmod=755 edge_node_client.py /opt/edge_node_client.py
 
 WORKDIR /data
 
