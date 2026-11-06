@@ -185,6 +185,53 @@ class TrustStore:
             return False
         return True
 
+    def list_nodes(self, status: Optional[TrustStatus] = None) -> list[NodeRecord]:
+        with self._connect() as conn:
+            if status is not None:
+                rows = conn.execute(
+                    "SELECT * FROM nodes WHERE status = ? ORDER BY first_seen DESC",
+                    (status.value,),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM nodes ORDER BY first_seen DESC"
+                ).fetchall()
+        return [
+            NodeRecord(
+                node_uuid=r["node_uuid"],
+                fingerprint=r["fingerprint"],
+                status=TrustStatus(r["status"]),
+                first_seen=r["first_seen"],
+                approved_at=r["approved_at"],
+                network_profile=r["network_profile"],
+                metadata=json.loads(r["metadata"] or "{}"),
+            )
+            for r in rows
+        ]
+
+    def delete_node(self, node_uuid: str) -> bool:
+        with self._connect() as conn:
+            cur = conn.execute("DELETE FROM nodes WHERE node_uuid = ?", (node_uuid,))
+            return cur.rowcount > 0
+
+    def get_stats(self) -> dict[str, int]:
+        with self._connect() as conn:
+            nodes_rows = conn.execute(
+                "SELECT status, COUNT(*) as cnt FROM nodes GROUP BY status"
+            ).fetchall()
+            status_counts = {r["status"]: r["cnt"] for r in nodes_rows}
+            used_tokens_count = conn.execute(
+                "SELECT COUNT(*) as cnt FROM used_tokens"
+            ).fetchone()["cnt"]
+
+        return {
+            "total_nodes": sum(status_counts.values()),
+            "trusted_nodes": status_counts.get(TrustStatus.TRUSTED.value, 0),
+            "pending_nodes": status_counts.get(TrustStatus.PENDING.value, 0),
+            "revoked_nodes": status_counts.get(TrustStatus.REVOKED.value, 0),
+            "used_tokens_count": used_tokens_count,
+        }
+
     def consume_token(self, jti: str, expires_at: int) -> bool:
         """
         返回 True 表示首次使用；False 表示重放。

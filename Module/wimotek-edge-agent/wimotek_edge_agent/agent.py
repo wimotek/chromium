@@ -4,6 +4,7 @@ import asyncio
 import ipaddress
 import ssl
 import time
+from pathlib import Path
 from typing import Awaitable, Callable, Optional
 
 from .audit import AuditLogger
@@ -359,3 +360,274 @@ class EdgeAgent:
                     await transport.close()
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2, 60)
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="wimotek-edge-agent",
+        description="Universal Edge Tunnel & Access Policy Agent",
+    )
+    parser.add_argument(
+        "--data-dir",
+        type=str,
+        default=None,
+        help="Custom path for edge agent data directory",
+    )
+    parser.add_argument(
+        "--secret",
+        type=str,
+        default=None,
+        help="HMAC secret key (min 32 bytes) or env EDGE_AGENT_TOKEN_SECRET",
+    )
+
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    # 1. listen
+    p_listen = subparsers.add_parser("listen", help="Start direct TLS/TCP listener")
+    p_listen.add_argument("--host", default="0.0.0.0", help="Listen host (default 0.0.0.0)")
+    p_listen.add_argument("--port", type=int, default=8443, help="Listen port (default 8443)")
+    p_listen.add_argument("--cert", default=None, help="Path to TLS certificate file")
+    p_listen.add_argument("--key", default=None, help="Path to TLS private key file")
+
+    # 2. approve
+    p_app = subparsers.add_parser("approve", help="Approve a pending TOFU node")
+    p_app.add_argument("--node-uuid", required=True, help="Target node UUID")
+    p_app.add_argument("--fingerprint", default=None, help="Expected public key fingerprint")
+
+    # 3. revoke
+    p_rev = subparsers.add_parser("revoke", help="Revoke a trusted node")
+    p_rev.add_argument("--node-uuid", required=True, help="Target node UUID")
+
+    # 4. show-node
+    p_show = subparsers.add_parser("show-node", help="Inspect a node record")
+    p_show.add_argument("--node-uuid", required=True, help="Target node UUID")
+
+    # 5. list-nodes
+    p_list = subparsers.add_parser("list-nodes", help="List nodes in Trust Store")
+    p_list.add_argument(
+        "--status",
+        choices=["pending", "trusted", "revoked", "all"],
+        default="all",
+        help="Filter by trust status",
+    )
+    p_list.add_argument("--json", action="store_true", help="Output JSON lines")
+
+    # 6. delete-node
+    p_del = subparsers.add_parser("delete-node", help="Delete a node record")
+    p_del.add_argument("--node-uuid", required=True, help="Target node UUID")
+
+    # 7. issue-token
+    p_iss = subparsers.add_parser("issue-token", help="Issue single-use HMAC join token")
+    p_iss.add_argument("--node-group", default="default", help="Node group tag")
+    p_iss.add_argument("--ttl", type=int, default=300, help="TTL in seconds (default 300)")
+    p_iss.add_argument("--node-uuid", default=None, help="Bind token to specific node UUID")
+    p_iss.add_argument("--allowed-ip-cidr", default=None, help="Bind token to source IP/CIDR")
+
+    # 8. verify-token
+    p_ver = subparsers.add_parser("verify-token", help="Verify a join token")
+    p_ver.add_argument("--token", required=True, help="Join token string")
+    p_ver.add_argument("--source-ip", default="127.0.0.1", help="Source IP to test against")
+    p_ver.add_argument("--node-uuid", default="", help="Node UUID to test against")
+
+    # 9. generate-secret
+    subparsers.add_parser("generate-secret", help="Generate a high-entropy 48-byte secret")
+
+    # 10. bypass-token
+    subparsers.add_parser("bypass-token", help="Ensure and show local bypass token")
+
+    # 11. stats
+    subparsers.add_parser("stats", help="Show summary statistics of Trust Store")
+
+    # 12. simulate
+    p_sim = subparsers.add_parser("simulate", help="Simulate Access Policy handshake")
+    p_sim.add_argument("--source-ip", default="127.0.0.1")
+    p_sim.add_argument("--node-uuid", default="sim-node-1")
+    p_sim.add_argument("--fingerprint", default="sha256:simulated")
+    p_sim.add_argument("--join-token", default=None)
+    p_sim.add_argument("--local-bypass-token", default=None)
+    p_sim.add_argument("--session-ticket", default=None)
+    p_sim.add_argument("--reverse-tunnel", action="store_true")
+    p_sim.add_argument("--nat-type", default="unknown")
+
+    return parser
+
+
+def _init_agent_for_cli(args: argparse.Namespace) -> EdgeAgent:
+    config = Config.from_env()
+    if args.data_dir:
+        config.data_dir = Path(args.data_dir)
+    if args.secret:
+        config.token_secret = args.secret.encode("utf-8")
+    elif not config.token_secret:
+        # Default fallback secret for CLI inspection if not configured
+        config.token_secret = b"edge-agent-commercial-default-hmac-secret-32b"
+    return EdgeAgent(config)
+
+
+def main(argv: Optional[list[str]] = None) -> int:
+    import json
+    import sys
+    from dataclasses import asdict
+
+    parser = build_parser()
+    args = parser.parse_args(argv)
+
+    if args.command == "generate-secret":
+        import secrets
+        secret = secrets.token_urlsafe(48)
+        print(secret)
+        return 0
+
+    agent = _init_agent_for_cli(args)
+
+    if args.command == "bypass-token":
+        token = agent.local_bypass.ensure_token()
+        print(json.dumps({
+            "token": token,
+            "path": str(agent.config.local_bypass_token_path),
+            "required": agent.config.require_local_bypass_token,
+        }, indent=2))
+        return 0
+
+    if args.command == "stats":
+        stats = agent.trust_store.get_stats()
+        print(json.dumps(stats, indent=2))
+        return 0
+
+    if args.command == "show-node":
+        node = agent.trust_store.get_node(args.node_uuid)
+        if node is None:
+            sys.stderr.write(f"Node '{args.node_uuid}' not found in trust store.\n")
+            return 1
+        print(json.dumps(asdict(node), indent=2, ensure_ascii=False))
+        return 0
+
+    if args.command == "list-nodes":
+        status_filter = None
+        if args.status and args.status != "all":
+            status_filter = TrustStatus(args.status)
+        nodes = agent.trust_store.list_nodes(status_filter)
+        if args.json:
+            for n in nodes:
+                print(json.dumps(asdict(n), ensure_ascii=False))
+        else:
+            print(json.dumps([asdict(n) for n in nodes], indent=2, ensure_ascii=False))
+        return 0
+
+    if args.command == "approve":
+        ok = agent.trust_store.approve_tofu(args.node_uuid, args.fingerprint)
+        if ok:
+            agent.audit.emit("node_approved", node_uuid=args.node_uuid, fingerprint=args.fingerprint)
+            print(json.dumps({"status": "ok", "message": f"Node '{args.node_uuid}' approved as TRUSTED"}, indent=2))
+            return 0
+        else:
+            sys.stderr.write(f"Failed to approve node '{args.node_uuid}' (not found or fingerprint mismatch).\n")
+            return 1
+
+    if args.command == "revoke":
+        ok = agent.trust_store.revoke(args.node_uuid)
+        if ok:
+            agent.audit.emit("node_revoked", node_uuid=args.node_uuid)
+            print(json.dumps({"status": "ok", "message": f"Node '{args.node_uuid}' marked as REVOKED"}, indent=2))
+            return 0
+        else:
+            sys.stderr.write(f"Node '{args.node_uuid}' not found.\n")
+            return 1
+
+    if args.command == "delete-node":
+        ok = agent.trust_store.delete_node(args.node_uuid)
+        if ok:
+            agent.audit.emit("node_deleted", node_uuid=args.node_uuid)
+            print(json.dumps({"status": "ok", "message": f"Node '{args.node_uuid}' deleted"}, indent=2))
+            return 0
+        else:
+            sys.stderr.write(f"Node '{args.node_uuid}' not found.\n")
+            return 1
+
+    if args.command == "issue-token":
+        try:
+            token = agent.token_issuer.issue(
+                node_group=args.node_group,
+                ttl_seconds=args.ttl,
+                node_uuid=args.node_uuid,
+                allowed_ip_cidr=args.allowed_ip_cidr,
+            )
+            print(token)
+            return 0
+        except Exception as e:
+            sys.stderr.write(f"Failed to issue token: {e}\n")
+            return 1
+
+    if args.command == "verify-token":
+        try:
+            claims = agent.token_verifier.verify(
+                token=args.token,
+                source_ip=args.source_ip,
+                node_uuid=args.node_uuid,
+            )
+            print(json.dumps(asdict(claims), indent=2))
+            return 0
+        except Exception as e:
+            sys.stderr.write(f"Token verification failed: {e}\n")
+            return 1
+
+    if args.command == "simulate":
+        is_loop = agent._is_loopback(args.source_ip)
+        ctx = ConnectionContext(
+            source_ip=args.source_ip,
+            is_loopback=is_loop,
+            node_uuid=args.node_uuid,
+            public_key_fingerprint=args.fingerprint,
+            join_token=args.join_token,
+            local_bypass_token=args.local_bypass_token,
+            session_ticket=args.session_ticket,
+            nat_type=args.nat_type,
+            reverse_tunnel=args.reverse_tunnel,
+        )
+        res = agent.authenticate(ctx)
+        out = {
+            "decision": res.decision.value,
+            "reason": res.reason,
+            "network_profile": res.network_profile,
+            "node_status": res.node_status.value if res.node_status else None,
+        }
+        print(json.dumps(out, indent=2))
+        return 0
+
+    if args.command == "listen":
+        ssl_ctx = None
+        if args.cert and args.key:
+            import ssl
+            ssl_ctx = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
+            ssl_ctx.load_cert_chain(certfile=args.cert, keyfile=args.key)
+
+        async def _run_server():
+            server = await asyncio.start_server(
+                lambda r, w: agent.handle_connection(
+                    JsonLineTransport(r, w),
+                    w.get_extra_info("peername")[0] if w.get_extra_info("peername") else "unknown",
+                ),
+                host=args.host,
+                port=args.port,
+                ssl=ssl_ctx,
+            )
+            proto = "TLS" if ssl_ctx else "Plain TCP"
+            sys.stderr.write(f"[edge-agent] Listening on {args.host}:{args.port} ({proto})\n")
+            async with server:
+                await server.serve_forever()
+
+        try:
+            asyncio.run(_run_server())
+        except KeyboardInterrupt:
+            sys.stderr.write("[edge-agent] Server stopped by user\n")
+            return 0
+
+    return 0
+
+
+if __name__ == "__main__":
+    import argparse
+    import sys
+    sys.exit(main())
+else:
+    import argparse
