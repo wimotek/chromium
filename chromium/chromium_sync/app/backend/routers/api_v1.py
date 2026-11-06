@@ -1,6 +1,8 @@
 import sqlite3
+import secrets
 from typing import Optional
 from fastapi import APIRouter, HTTPException, Depends, Request, Query
+
 from config import DB_PATH
 from core.database import get_setting, set_setting, get_db_connection
 from core.security import verify_token, verify_agent_access
@@ -9,19 +11,39 @@ from services.sync_service import execute_sync_task
 
 router = APIRouter(tags=["外部 Agent 开放 API"])
 
+# ==================== 1. 远程访问与入网通行码设置 ====================
 @router.get("/api/remote-access")
 def get_remote_access_settings(user: dict = Depends(verify_token)):
+    token = get_setting("cluster_join_token")
+    
+    # 自愈兜底：若数据库里为空，自动签发一个并持久化
+    if not token:
+        try:
+            from wimotek_edge_agent.tokens import JoinTokenIssuer
+            secret = (get_setting('edge_agent_secret') or 'wimotek-commercial-secret-key-32b').encode('utf-8')
+            if len(secret) < 32:
+                secret = secret.ljust(32, b'0')
+            issuer = JoinTokenIssuer(secret=secret, audience="edge-agent", issuer="central", max_ttl_seconds=86400 * 365)
+            token = issuer.issue(node_group="default", ttl_seconds=86400 * 365)
+        except Exception:
+            token = "hub_join_" + secrets.token_urlsafe(24)
+        set_setting("cluster_join_token", token)
+
     return {
         "direct_port_access_enabled": get_setting("direct_port_access_enabled", "1") == "1",
-        "api_key": get_setting("api_key")
+        "api_key": get_setting("api_key"),
+        "cluster_join_token": token  # 👈 核心修复：补齐字段，彻底消除「正在获取...」
     }
 
 @router.post("/api/remote-access")
 def save_remote_access_settings(data: dict, user: dict = Depends(verify_token)):
     if "direct_port_access_enabled" in data:
         set_setting("direct_port_access_enabled", "1" if data["direct_port_access_enabled"] else "0")
+    if "cluster_join_token" in data and data["cluster_join_token"]:
+        set_setting("cluster_join_token", data["cluster_join_token"].strip())
     return {"message": "远程连接策略已更新"}
 
+# ==================== 2. 对外 Agent 节点列表与双模式查询 ====================
 @router.get("/api/v1/nodes", summary="获取所有在线 CDP 节点列表 (支持双连接方式生成)")
 def external_list_nodes(request: Request, auth: dict = Depends(verify_agent_access)):
     conn = get_db_connection()
@@ -54,7 +76,7 @@ def external_list_nodes(request: Request, auth: dict = Depends(verify_agent_acce
             "direct": {
                 "type": "direct_port_mapping",
                 "enabled": direct_port_enabled,
-                "description": "公网直接端口映射模式 (需防火墙放行该端口，无鉴权)",
+                "description": "公网直接端口映射模式 (需防火墙放行该端口)",
                 "port": bind_port,
                 "http_endpoint": f"http://{host_only}:{bind_port}",
                 "ws_endpoint_hint": f"http://{host_only}:{bind_port}/json/version"
@@ -65,6 +87,7 @@ def external_list_nodes(request: Request, auth: dict = Depends(verify_agent_acce
             "id": node_id,
             "name": r["name"],
             "group_name": r.get("group_name") or "默认分组",
+            "conn_type": r.get("conn_type", "direct"),
             "is_source": bool(r["is_source"]),
             "is_local": is_loc,
             "direct_host": direct_h if is_loc else None,
@@ -83,6 +106,7 @@ def external_list_nodes(request: Request, auth: dict = Depends(verify_agent_acce
         "nodes": nodes_result
     }
 
+# ==================== 3. 提取目标节点全量 Cookies ====================
 @router.get("/api/v1/nodes/{node_id}/cookies", summary="提取目标节点全量 Cookies")
 async def external_get_cookies(node_id: int, auth: dict = Depends(verify_agent_access)):
     conn = get_db_connection()
@@ -98,7 +122,7 @@ async def external_get_cookies(node_id: int, auth: dict = Depends(verify_agent_a
 
     try:
         target_h = node.get('direct_host', '127.0.0.1') if node['is_local'] else "127.0.0.1"
-        cookies = await fetch_cookies_native(node['local_bind_port'], target_h)
+        cookies = await fetch_cookies_native(node['local_bind_port'], target_h, node_id=node['id'])
         return {
             "code": 200,
             "node_id": node_id,
@@ -109,6 +133,7 @@ async def external_get_cookies(node_id: int, auth: dict = Depends(verify_agent_a
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"提取 Cookies 失败: {e}")
 
+# ==================== 4. 外部自动化触发同步 ====================
 @router.post("/api/v1/sync", summary="外部自动化触发全网同步")
 async def external_trigger_sync(
     policy_id: Optional[int] = Query(None, description="指定策略ID，留空则执行全部已启用策略"),
