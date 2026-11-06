@@ -1,0 +1,118 @@
+from __future__ import annotations
+
+import os
+import secrets
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Optional
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on", "y"}
+
+
+def _env_opt_bool(name: str) -> Optional[bool]:
+    value = os.getenv(name)
+    if value is None:
+        return None
+    return value.strip().lower() in {"1", "true", "yes", "on", "y"}
+
+
+@dataclass
+class Config:
+    """
+    商业模块配置。
+
+    安全默认：
+    - 本地回环连接也要求 local_bypass_token，避免同主机其他进程直接利用 127.0.0.1。
+    - 如需兼容“本地连接默认放行”的旧逻辑，设置：
+      EDGE_AGENT_REQUIRE_LOCAL_BYPASS_TOKEN=false
+    """
+
+    data_dir: Path = Path("./edge_agent_data")
+
+    require_local_bypass_token: bool = True
+
+    token_secret: bytes = b""
+    token_audience: str = "edge-agent"
+    token_issuer: str = "central"
+    token_max_ttl_seconds: int = 600
+
+    session_ticket_ttl_seconds: int = 300
+    tofu_heartbeat_seconds: int = 10
+
+    # None 表示自动判断；True 表示强制反向隧道；False 表示强制直连。
+    reverse_tunnel: Optional[bool] = None
+    nat_type: Optional[str] = None
+
+    tls_server_name: Optional[str] = None
+    certificate_pin_sha256: Optional[str] = None
+
+    # 反向隧道模式下 Agent 自身身份
+    node_uuid: str = ""
+    public_key_fingerprint: str = ""
+    join_token: Optional[str] = None
+
+    @property
+    def trust_db_path(self) -> Path:
+        return self.data_dir / "trust_store.sqlite3"
+
+    @property
+    def audit_log_path(self) -> Path:
+        return self.data_dir / "audit.jsonl"
+
+    @property
+    def local_bypass_token_path(self) -> Path:
+        return self.data_dir / "local_bypass.token"
+
+    def ensure_dirs(self) -> None:
+        self.data_dir.mkdir(parents=True, exist_ok=True)
+        for path in (
+            self.trust_db_path.parent,
+            self.audit_log_path.parent,
+            self.local_bypass_token_path.parent,
+        ):
+            path.mkdir(parents=True, exist_ok=True)
+
+    @classmethod
+    def from_env(cls) -> "Config":
+        token_secret_raw = os.getenv("EDGE_AGENT_TOKEN_SECRET", "")
+        token_secret = token_secret_raw.encode("utf-8") if token_secret_raw else b""
+
+        return cls(
+            data_dir=Path(os.getenv("EDGE_AGENT_DATA_DIR", "./edge_agent_data")),
+            require_local_bypass_token=_env_bool(
+                "EDGE_AGENT_REQUIRE_LOCAL_BYPASS_TOKEN", True
+            ),
+            token_secret=token_secret,
+            token_audience=os.getenv("EDGE_AGENT_TOKEN_AUDIENCE", "edge-agent"),
+            token_issuer=os.getenv("EDGE_AGENT_TOKEN_ISSUER", "central"),
+            token_max_ttl_seconds=int(
+                os.getenv("EDGE_AGENT_TOKEN_MAX_TTL_SECONDS", "600")
+            ),
+            session_ticket_ttl_seconds=int(
+                os.getenv("EDGE_AGENT_SESSION_TICKET_TTL_SECONDS", "300")
+            ),
+            tofu_heartbeat_seconds=int(
+                os.getenv("EDGE_AGENT_TOFU_HEARTBEAT_SECONDS", "10")
+            ),
+            reverse_tunnel=_env_opt_bool("EDGE_AGENT_REVERSE_TUNNEL"),
+            nat_type=os.getenv("EDGE_AGENT_NAT_TYPE") or None,
+            tls_server_name=os.getenv("EDGE_AGENT_TLS_SERVER_NAME") or None,
+            certificate_pin_sha256=(
+                os.getenv("EDGE_AGENT_CERTIFICATE_PIN_SHA256") or None
+            ),
+            node_uuid=os.getenv("EDGE_AGENT_NODE_UUID", ""),
+            public_key_fingerprint=os.getenv(
+                "EDGE_AGENT_PUBLIC_KEY_FINGERPRINT", ""
+            ),
+            join_token=os.getenv("EDGE_AGENT_JOIN_TOKEN") or None,
+        )
+
+
+def generate_token_secret() -> str:
+    """仅供初始化部署时生成一个高熵 secret。"""
+    return secrets.token_urlsafe(48)

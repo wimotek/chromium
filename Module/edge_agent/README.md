@@ -1,219 +1,285 @@
-# Wimotek Edge Agent (wimotek-edge-agent)
+# edge_agent commercial module
 
-[![PyPI version](https://img.shields.io/pypi/v/wimotek-edge-agent.svg?color=blue)](https://pypi.org/project/wimotek-edge-agent/)
-[![npm version](https://img.shields.io/npm/v/wimotek-edge-agent.svg?color=red)](https://www.npmjs.com/package/wimotek-edge-agent)
-[![Python Version](https://img.shields.io/pypi/pyversions/wimotek-edge-agent.svg)](https://pypi.org/project/wimotek-edge-agent/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](https://opensource.org/licenses/MIT)
+Commercial-grade edge agent with explicit access policy, TOFU quarantine,
+Edge Agent token verification, session fast re-auth, and NAT4 reverse tunnel.
 
-轻量、通用、零侵入的边缘节点出站反向代理与服务中继客户端（Universal Edge Reverse Tunnel & Service Bridge Agent）。
+## Table of contents
 
-专为处于 **无公网 IP、NAT4、移动宽带、家用路由器或严格云防火墙** 环境下的容器（noVNC、Kasm Workspaces、Headless Chromium、自动化爬虫等）与边缘服务器设计，提供全自动设备确权、双模身份认证与本地端口透明反向穿透能力。
+- [Design goals](#design-goals)
+- [Architecture](#architecture)
+- [Decision matrix](#decision-matrix)
+- [Install](#install)
+- [Environment variables](#environment-variables)
+- [CLI usage](#cli-usage)
+- [Programmatic usage](#programmatic-usage)
+- [Reverse tunnel / NAT4](#reverse-tunnel--nat4)
+- [Audit log](#audit-log)
+- [Security model](#security-model)
+- [Commercial deployment checklist](#commercial-deployment-checklist)
+- [Publishing](#publishing)
+- [License](#license)
 
----
+## Design goals
 
-## 🌟 核心特性
+1. **Local connections default allow**, gated by a `local_bypass_token`
+   written with mode `0600`, so other processes on the same host cannot
+   trivially reuse `127.0.0.1`.
+2. **External connections default TOFU**. A node without a token is
+   placed in a quarantine that only exchanges heartbeats. No business
+   data is relayed until an administrator approves the node.
+3. **External connections with token use Edge Agent mode**. The token is
+   verified for signature, TTL, audience, issuer, `node_uuid` binding,
+   optional source IP CIDR binding, and single-use replay protection.
+4. **NAT4 / no public IP uses reverse tunnel**. Authentication strength
+   does not downgrade when the network profile is `nat4_reverse`.
+5. **Trusted nodes re-auth with short-lived session tickets**. A trusted
+   node without token or session is denied, preventing downgrade to TOFU.
 
-- **⚡ 出站长连接 NAT4 极速穿透**：通过单向发起 Outbound WebSocket (WSS/TLS) 长连接直达中心管理端，彻底突破多层 NAT 与企业内网防火墙，**节点无需公网 IP、无需路由器端口映射**。
-- **🛡️ 生产级双模身份认证与防伪造（TOFU + Edge Agent）**：
-  - **默认 TOFU 模式（Trust On First Use）**：零配置启动，节点自动生成硬件指纹 UUID，管理端后台实时弹出审核认领，管理员「一键信任锁定」后完成公钥防篡改绑定。
-  - **Edge Agent 模式**：批量注入 `JOIN_TOKEN`，节点开机秒级自验证入网，支持 CI/CD 与大规模集群全自动挂靠。
-- **🤖 智能命名与设备自协商**：自动探测出口公网 IP 或物理网卡 IP 智能拼接命名（如 `Node-123.45.67.89`），嗅探失败平滑降级为容器主机名。
-- **🔌 通用本地服务透明桥接（Decoupled & Multi-Service）**：业务完全解耦，不仅支持 Chromium CDP（9222），亦可同时中继 VNC 桌面（6080）、Web 业务 API（8080）等任意本地端口。
-- **🌐 跨语言分发与 CLI 驱动**：同时发布至 PyPI 与 npm，支持系统级全局命令 `edge-agent` 与 `npx wimotek-edge-agent`。
-
----
-
-## 🏗️ 架构原理
+## Architecture
 
 ```text
- ┌────────────────────────────────────────────────────────┐
- │ 边缘内网节点 (家用宽带 / NAT4 / 容器无公网IP)           │
- │                                                        │
- │   - Chromium CDP (:9222)                               │
- │   - noVNC 桌面 (:6080)                                 │
- │   - 自定义业务服务 (:8080)                             │
- └──────────────────────────┬─────────────────────────────┘
-                            ▲ 本地 127.0.0.1 访问
-                            ▼
- ┌────────────────────────────────────────────────────────┐
- │               wimotek-edge-agent 客户端                │
- │                                                        │
- │   职责: 硬件指纹生成 + TOFU/Token协商 + 本地服务透明中继 │
- └──────────────────────────┬─────────────────────────────┘
-                            │
-                            │ 主动发起出站反向长连接 (Outbound TLS/WSS)
-                            │ 仅需中心管理端暴露 8443 端口，无视客户端网络环境
-                            ▼
- ┌────────────────────────────────────────────────────────┐
- │              中心控制端 (Central Hub)                  │
- │                                                        │
- │   - 管理员在线认领锁定 (TOFU) / Token 自动化放行       │
- │   - 借由反向长连接随时下发指令、Cookie同步、采集探针   │
- └────────────────────────────────────────────────────────┘
+                 +---------------------------+
+   loopback ---> |  AccessPolicyEngine       | ---> ALLOW_LOCAL
+                 |  (single decision point)  |
+   external ---> |                           | ---> ALLOW_TOKEN
+   + token       |  1. local bypass token    |
+                 |  2. join token verify     | ---> ALLOW_SESSION
+   external ---> |  3. session ticket        |
+   no token      |  4. TOFU pending          | ---> PENDING_TOFU
+                 |  5. revoked / mismatch    |
+   nat4_rev ---> |                           | ---> DENY
+                 +---------------------------+
+                              |
+                              v
+                    +-------------------+
+                    | TrustStore        |
+                    | pending/trusted/  |
+                    | revoked + jti     |
+                    +-------------------+
+                              |
+                              v
+                    +-------------------+
+                    | AuditLogger       |
+                    | JSON Lines        |
+                    +-------------------+
 ```
 
----
+## Decision matrix
 
-## 📦 安装与调用
+| Source | Loopback | Join token | Session ticket | Existing trust | Decision |
+|--------|----------|------------|----------------|----------------|----------|
+| direct | yes | - | - | any | `ALLOW_LOCAL` if bypass token ok, else `DENY` |
+| direct | no | valid | - | any | `ALLOW_TOKEN`, bind trust |
+| direct | no | invalid | - | any | `DENY` |
+| direct | no | - | valid | trusted | `ALLOW_SESSION` |
+| direct | no | - | - | trusted | `DENY` (no downgrade) |
+| direct | no | - | - | pending, same fp | `PENDING_TOFU` |
+| direct | no | - | - | pending, diff fp | `DENY` |
+| direct | no | - | - | none | `PENDING_TOFU` |
+| direct | no | - | - | revoked | `DENY` |
+| nat4_reverse | no | valid | - | any | `ALLOW_TOKEN` |
+| nat4_reverse | no | - | - | none | `PENDING_TOFU` |
 
-### 1. Python / PyPI 安装（推荐）
+## Install
+
 ```bash
-pip install wimotek-edge-agent
+pip install edge-agent-commercial
 ```
-安装后直接获得系统全局命令 **`edge-agent`**。
 
-### 2. Node.js / npm 免安装执行
+From source:
+
 ```bash
-npx wimotek-edge-agent --hub-url https://hub.yourdomain.com:8443
+git clone https://github.com/yourorg/edge-agent.git
+cd edge-agent
+pip install -e ".[dev]"
 ```
-或全局安装：
+
+## Environment variables
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `EDGE_AGENT_DATA_DIR` | no | `./edge_agent_data` | Data directory for trust DB, audit log, local bypass token |
+| `EDGE_AGENT_TOKEN_SECRET` | yes | - | HMAC secret, >= 32 bytes |
+| `EDGE_AGENT_TOKEN_AUDIENCE` | no | `edge-agent` | Token audience |
+| `EDGE_AGENT_TOKEN_ISSUER` | no | `central` | Token issuer |
+| `EDGE_AGENT_TOKEN_MAX_TTL_SECONDS` | no | `600` | Max token TTL |
+| `EDGE_AGENT_SESSION_TICKET_TTL_SECONDS` | no | `300` | Session ticket TTL |
+| `EDGE_AGENT_TOFU_HEARTBEAT_SECONDS` | no | `10` | TOFU quarantine heartbeat interval |
+| `EDGE_AGENT_REQUIRE_LOCAL_BYPASS_TOKEN` | no | `true` | Require local bypass token for loopback |
+| `EDGE_AGENT_REVERSE_TUNNEL` | no | auto | `true` / `false` / unset |
+| `EDGE_AGENT_NAT_TYPE` | no | `unknown` | `nat4`, `symmetric`, etc. |
+| `EDGE_AGENT_NODE_UUID` | reverse only | - | Agent node UUID |
+| `EDGE_AGENT_PUBLIC_KEY_FINGERPRINT` | reverse only | - | Agent public key fingerprint |
+| `EDGE_AGENT_JOIN_TOKEN` | reverse only | - | Join token for Edge Agent mode |
+| `EDGE_AGENT_TLS_SERVER_NAME` | no | - | TLS SNI |
+| `EDGE_AGENT_CERTIFICATE_PIN_SHA256` | no | - | TLS certificate pin |
+
+Generate a secret:
+
 ```bash
-npm install -g wimotek-edge-agent
+python -c "import secrets; print(secrets.token_urlsafe(48))"
 ```
 
----
+## CLI usage
 
-## 🚀 快速上手
+Start a direct TLS JSON-line server:
 
-### 1. 命令行直接启动 (CLI)
 ```bash
-# 最简启动 (直连模式，自动嗅探 IP 命名)
-edge-agent --hub-url https://hub.yourdomain.com:8443
-
-# NAT4 穿透模式 (无公网 IP 环境)
-edge-agent --hub-url https://hub.yourdomain.com:8443 --reverse
-
-# 批量免审批模式 (携带集群入网通行码)
-edge-agent --hub-url https://hub.yourdomain.com:8443 --join-token hub_join_xxxxxx --reverse
+edge-agent listen --host 0.0.0.0 --port 8443 \
+  --cert /path/server.crt --key /path/server.key
 ```
 
-### 2. 环境变量一键启动（容器化最佳实践）
-无需修改命令，直接传入环境变量：
+Approve a pending TOFU node (admin, out-of-band):
+
 ```bash
-export HUB_URL="https://hub.yourdomain.com:8443"
-export JOIN_TOKEN="hub_join_xxxxxx" # 可选，不填走 TOFU 待认领模式
-export REVERSE_TUNNEL="true"        # 可选，默认 false；NAT4 无公网环境设为 true
-edge-agent
+edge-agent approve --node-uuid node-xxx --fingerprint sha256:...
 ```
 
-### 3. Python 脚本编程式集成
+Revoke a trusted node:
+
+```bash
+edge-agent revoke --node-uuid node-xxx
+```
+
+Show a node record:
+
+```bash
+edge-agent show-node --node-uuid node-xxx
+```
+
+Issue a single-use Edge Agent join token:
+
+```bash
+edge-agent issue-token \
+  --node-group group-a \
+  --ttl 300 \
+  --node-uuid node-xxx \
+  --allowed-ip-cidr 203.0.113.0/24
+```
+
+## Programmatic usage
+
 ```python
-from wimotek_edge_agent import EdgeAgent
+import asyncio
+from edge_agent import Config, EdgeAgent
 
-agent = EdgeAgent(
-    hub_url="https://hub.yourdomain.com:8443",
-    join_token="hub_join_xxxxxx",     # 可选
-    node_name="Seoul-Worker-01",      # 可选，留空自动按 IP 拼接
-    node_group="爬虫矩阵组",           # 默认: 默认分组
-    cdp_port=9222,                    # 默认: 9222
-    reverse_tunnel=True               # 开启 NAT4 反向长连接
+async def main() -> None:
+    config = Config.from_env()
+    agent = EdgeAgent(config)
+
+    async def data_handler(transport, ctx):
+        while True:
+            msg = await transport.read_message()
+            if msg.get("type") == "ping":
+                await transport.write_message({"type": "pong"})
+
+    agent.data_handler = data_handler
+
+    server = await asyncio.start_server(
+        lambda r, w: agent.handle_connection(
+            __import__("edge_agent.transport", fromlist=["JsonLineTransport"]).JsonLineTransport(r, w),
+            w.get_extra_info("peername")[0],
+        ),
+        host="0.0.0.0",
+        port=8443,
+    )
+    async with server:
+        await server.serve_forever()
+
+asyncio.run(main())
+```
+
+## Reverse tunnel / NAT4
+
+`transport.TunnelDialer` is a protocol. Implement it with your existing
+WebSocket stack, then call:
+
+```python
+await agent.run_reverse_tunnel(
+    url="wss://central.example.com/tunnel",
+    dialer=your_dialer,
+    ssl_context=ssl_context,
+    server_hostname="central.example.com",
 )
-
-# 启动后台代理 (阻塞运行)
-agent.run()
 ```
 
----
+The reverse tunnel:
 
-## ⚙️ 环境变量与参数字典
+- uses TLS and supports certificate pinning via
+  `EDGE_AGENT_CERTIFICATE_PIN_SHA256`;
+- sends the same handshake fields as direct mode (`node_uuid`,
+  `public_key_fingerprint`, `join_token`, `nat_type`, `reverse_tunnel`);
+- keeps waiting on `pending_tofu` until the central side sends
+  `approved` or `denied`;
+- applies exponential backoff on reconnect.
 
-| 环境变量名 | CLI 参数 | 默认值 | 描述 |
-| :--- | :--- | :--- | :--- |
-| `HUB_URL` | `--hub-url` | *无 (必填)* | 中心管理端 HTTPS/WSS 地址，如 `https://hub.domain.com:8443` |
-| `JOIN_TOKEN` | `--join-token` | `""` (空) | 集群入网通行码。**留空走 TOFU 后台审核认领**；填入则走 Edge Agent 自动放行入网 |
-| `REVERSE_TUNNEL`| `--reverse` / `--direct` | `false` | 是否开启出站反向长连接隧道。**无公网 IP/NAT4 环境设为 `true`**；有公网/局域网设为 `false` |
-| `NODE_NAME` | `--node-name` | 自动嗅探 | 节点名称。未设置时自动以出口 IP 命名（如 `Node-123.45.67.89`），兜底为主机名 |
-| `NODE_GROUP` | `--group` | `默认分组` | 节点所属集群分组，便于多策略调度分类 |
-| `CDP_PORT` | `--port` | `9222` | 容器本地需要中继的主服务端口（如 Chromium 调试端口） |
-| `LOCAL_CDP_HOST`| `--cdp-host` | `127.0.0.1` | 节点本地被中继服务的绑定地址 |
-| `SERVICES` | `--services` | *无* | 多服务端口定义，格式：`cdp:9222,vnc:6080,api:8080` |
-| `UUID_FILE` | `--uuid-file` | `/data/node_machine.id` | 硬件指纹持久化文件路径，保障重启后身份不漂移 |
+Authentication is performed by the central side using the same
+`AccessPolicyEngine`. The network profile is `nat4_reverse`; the auth
+strength is identical to direct mode.
 
----
+## Audit log
 
-## 🐳 Docker 生产环境集成示例
+Every `AccessDecision` is written to `EDGE_AGENT_DATA_DIR/audit.jsonl`:
 
-### 场景 1：noVNC / Kasm 节点 Dockerfile 集成
-在现有的浏览器镜像中，只需增加 `pip install` 即可：
-
-```dockerfile
-FROM debian:bookworm-slim
-
-# 安装 Chromium、noVNC 及基础环境
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    chromium xvfb x11vnc novnc websockify python3 python3-pip curl \
-    && rm -rf /var/lib/apt/lists/*
-
-# 一行安装通用边缘 Agent
-RUN pip3 install --no-cache-dir --break-system-packages wimotek-edge-agent
-
-COPY entrypoint.sh /app/entrypoint.sh
-RUN chmod +x /app/entrypoint.sh
-ENTRYPOINT ["/app/entrypoint.sh"]
+```json
+{"ts":"2026-11-06T12:00:00+00:00","event":"access_decision","node_uuid":"node-xxx","source_ip":"203.0.113.10","is_loopback":false,"decision":"allow_token","reason":"edge_agent_token_verified","network_profile":"direct","nat_type":"unknown","fingerprint":"sha256:...","node_status":"trusted"}
 ```
 
-在 `entrypoint.sh` 中只需一行后台唤起：
+Ship this file to your central log platform (Loki, ELK, CloudWatch, etc.).
+Do not store the raw join token in the audit log; only record the decision.
+
+## Security model
+
+- **Token secret**: >= 32 bytes. Rotate by restarting with a new secret;
+  old tokens become invalid immediately.
+- **Token single use**: `jti` is stored in `used_tokens` until `exp`.
+- **Token binding**: optional `node_uuid` and `allowed_ip_cidr`.
+- **TOFU quarantine**: pending nodes exchange heartbeat only. No data
+  relay, no business messages.
+- **Fingerprint mismatch**: pending node presenting a different
+  fingerprint is denied; trusted node presenting a different fingerprint
+  is denied.
+- **No downgrade**: trusted node without token or session is denied.
+- **Local bypass**: `local_bypass.token` is written with mode `0600`.
+  Set `EDGE_AGENT_REQUIRE_LOCAL_BYPASS_TOKEN=false` only if you fully
+  trust every process on the host.
+- **TLS pinning**: optional SHA-256 pin of the peer certificate.
+- **Audit**: every decision is logged. Revocation is immediate on the
+  next handshake.
+
+## Commercial deployment checklist
+
+- [ ] Rotate `EDGE_AGENT_TOKEN_SECRET` per environment.
+- [ ] Store `EDGE_AGENT_DATA_DIR` on persistent, encrypted storage.
+- [ ] Ship `audit.jsonl` to central logging with retention policy.
+- [ ] Enable TLS with a valid certificate; set
+      `EDGE_AGENT_CERTIFICATE_PIN_SHA256` for reverse tunnel.
+- [ ] Restrict `edge-agent approve` to an admin-only host or CI job.
+- [ ] Monitor `tofu_pending_queue_size`, `token_replay_rejections`,
+      `reverse_tunnel_reconnect_count`.
+- [ ] Run `edge-agent revoke` on node decommission.
+- [ ] Back up `trust_store.sqlite3` before upgrades.
+- [ ] Pin Python and Node versions in CI.
+- [ ] Publish PyPI and npm from tagged releases only.
+
+## Publishing
+
+PyPI:
+
 ```bash
-#!/bin/bash
-# 启动本地服务 (如 Chromium 9222)
-chromium --remote-debugging-port=9222 --remote-allow-origins=* &
-
-# 只要注入了 HUB_URL，自动在后台拉起边缘代理
-if [ -n "$HUB_URL" ]; then
-    echo "🚀 启动 wimotek-edge-agent ..."
-    edge-agent &
-fi
-
-wait -n
+python -m build
+python -m twine check dist/*
+python -m twine upload dist/*
 ```
 
-### 场景 2：`docker-compose.yml` 极简部署
+npm (CLI wrapper):
 
-#### 无公网 IP / 家用宽带 / NAT4（开启反向长连接）：
-```yaml
-version: '3.8'
-
-services:
-  browser-node:
-    image: your-browser-image:latest
-    restart: unless-stopped
-    ports:
-      - "6080:6080"  # 仅供内网访问桌面，公网无需暴露 9222
-    environment:
-      - HUB_URL=https://hub.yourdomain.com:8443
-      - JOIN_TOKEN=hub_join_abcdef1234567890   # 可选：留空在控制台一键点击认领
-      - REVERSE_TUNNEL=true                    # NAT4 穿透开关
-      - NODE_GROUP=北美爬虫矩阵组
-    volumes:
-      - ./data:/data
+```bash
+cd npm
+npm pack --dry-run
+npm publish --access public
 ```
 
-#### 拥有独立公网 IP 的云服务器（直连心跳上报）：
-```yaml
-version: '3.8'
+## License
 
-services:
-  browser-node:
-    image: your-browser-image:latest
-    restart: unless-stopped
-    ports:
-      - "9222:9222"  # 防火墙已开放端口
-    environment:
-      - HUB_URL=https://hub.yourdomain.com:8443
-      - REVERSE_TUNNEL=false  # 默认即为 false，仅发起轻量 HTTP 登记，零长连接开销
-```
-
----
-
-## 🔒 安全性考量
-
-1. **防恶意伪造（SSRF 防御）**：在直连上报模式下，管理端强制从底层 TCP 握手来源直接锁定节点的真实来源 IP，杜绝假冒内网私网地址。
-2. **防公网扫描冒充**：未携带 `JOIN_TOKEN` 的未知连接一律进入隔离待审核队列（TOFU），未经管理端管理员后台显式认领的节点，绝不参与任何数据交互。
-3. **安全通信**：长连接反向通道强制基于 TLS (WSS) 传输，天然防御中间人窃听与数据篡改。
-
----
-
-## 📄 License
-
-MIT License © 2026 [Wimotek](https://github.com/wimotek)
-```
+MIT. See `LICENSE`.
