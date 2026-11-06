@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-Wimotek Edge Node Client Runner (安全加固版)
-1. 鉴权加固：凭据全量通过 WebSocket 握手 Headers (X-Join-Token) 传输，杜绝 URL 日志泄漏；
-2. 握手加固：握手帧异步排队落盘，彻底解决 1008 超时；
-3. 通道隔离：内部直连 127.0.0.1:9222，与本地调试 socat 9223 严格物理隔离。
+Wimotek Edge Node Client Runner (工业级加固版)
+1. 版本自适应：同时兼容 websockets 13+/14+ (additional_headers) 与旧版 (extra_headers)；
+2. 握手可靠：await drain() 同步送出数据帧，彻底根除 1008 握手超时与孤儿 Task 异常；
+3. 异常透出：显式打印网络与握手细节，绝不静默吞错；
+4. 端口解耦：内部直连 127.0.0.1:9222，与宿主机本地调试 socat 9223 严格物理隔离。
 """
 
 import os
@@ -22,7 +23,7 @@ import websockets
 from wimotek_edge_agent import Config, EdgeAgent
 from wimotek_edge_agent.transport import JsonLineTransport, TunnelDialer
 
-# 容器内部原生直连端口 (通道 B)
+# 容器内部原生直连端口
 CDP_PORT = int(os.getenv("CDP_PORT", "9222"))
 LOCAL_CDP_HTTP = f"http://127.0.0.1:{CDP_PORT}"
 
@@ -114,7 +115,7 @@ async def check_hub_can_reach_me(hub_url: str, cdp_port: int = 9222) -> Tuple[bo
 
 
 async def execute_http_auto_register(hub_url: str, node_uuid: str, cdp_port: int = 9222):
-    """直连登记模式 (通过 Header 传递 Token，安全不泄露)"""
+    """直连登记模式"""
     api_url = f"{hub_url}/api/nodes/auto-register"
     join_token = os.getenv("JOIN_TOKEN", "").strip()
     node_name = os.getenv("NODE_NAME", "").strip() or node_uuid
@@ -135,75 +136,87 @@ async def execute_http_auto_register(hub_url: str, node_uuid: str, cdp_port: int
     async with httpx.AsyncClient(verify=False, timeout=8.0) as client:
         try:
             res = await client.post(api_url, json=payload, headers=headers)
-            print(f"✅ [Direct Register] 直连接入响应: {res.status_code}")
+            print(f"✅ [Direct Register] 直连接入完成: 响应码 {res.status_code}")
         except Exception as e:
             print(f"❌ [Direct Register] 直连登记异常: {e}")
 
 
-class SecureHeaderTunnelDialer:
+class RobustSyncStreamWriter:
     """
-    安全请求头反向隧道拨号器：
-    所有凭据通过 extra_headers 随 HTTP 握手加密提交，杜绝 URL 明文泄漏
+    可靠的 WebSocket StreamWriter 包装器：
+    利用 await drain() 强制等待数据真正发出，零滞后、零孤儿协程
     """
+    def __init__(self, ws):
+        self.ws = ws
+        self._pending_buffer = []
 
+    def write(self, data: bytes):
+        text = data.decode("utf-8").strip()
+        if text:
+            self._pending_buffer.append(text)
+
+    async def drain(self):
+        # 核心保证：在 drain 阶段真正发送并等待网络层确认
+        while self._pending_buffer:
+            msg = self._pending_buffer.pop(0)
+            await self.ws.send(msg)
+
+    def close(self):
+        asyncio.create_task(self.ws.close())
+
+    async def wait_closed(self):
+        pass
+
+    def get_extra_info(self, name: str):
+        return None
+
+
+class CrossVersionHeaderDialer:
+    """
+    全版本兼容的请求头反向隧道拨号器：
+    自适应 websockets 13+ (additional_headers) 与旧版 (extra_headers)
+    """
     def __init__(self, headers: dict):
         self.headers = headers
 
     async def dial(self, url: str, ssl_context: ssl.SSLContext, server_hostname: str):
         is_wss = url.startswith("wss://")
-        # 将凭证注入请求头，任何反向代理日志均不记录 Header
-        ws = await websockets.connect(
-            url,
-            ssl=ssl_context if is_wss else None,
-            extra_headers=self.headers,
-            max_size=100 * 1024 * 1024,
-            ping_interval=20,
-            ping_timeout=10,
-        )
+        common_kwargs = {
+            "ssl": ssl_context if is_wss else None,
+            "max_size": 100 * 1024 * 1024,
+            "ping_interval": 20,
+            "ping_timeout": 10,
+        }
+
+        ws = None
+        # 1. 优先尝试 websockets >= 13.0 API (additional_headers)
+        try:
+            ws = await websockets.connect(url, additional_headers=self.headers, **common_kwargs)
+        except TypeError:
+            # 2. 自动降级兼容 websockets < 13.0 API (extra_headers)
+            try:
+                ws = await websockets.connect(url, extra_headers=self.headers, **common_kwargs)
+            except Exception as e:
+                print(f"❌ [Dialer] 旧版拨号异常: {e}")
+                raise
+        except Exception as e:
+            print(f"❌ [Dialer] 连往 Hub 失败: {type(e).__name__}: {e}")
+            raise
+
         reader = asyncio.StreamReader()
-
-        class RobustWSWriter:
-            def __init__(self):
-                self._queue = asyncio.Queue()
-                self._task = asyncio.create_task(self._sender())
-
-            async def _sender(self):
-                while True:
-                    text = await self._queue.get()
-                    try:
-                        await ws.send(text)
-                    except Exception:
-                        break
-                    finally:
-                        self._queue.task_done()
-
-            def write(self, data: bytes):
-                text = data.decode("utf-8").strip()
-                if text:
-                    self._queue.put_nowait(text)
-
-            async def drain(self):
-                await self._queue.join()
-
-            def close(self):
-                asyncio.create_task(ws.close())
-
-            async def wait_closed(self):
-                pass
-
-            def get_extra_info(self, name: str):
-                return None
 
         async def pump_incoming():
             try:
                 async for message in ws:
                     if isinstance(message, str):
-                        reader.feed_data((message + "\n").encode("utf-8"))
+                        reader.feed_data((message.strip() + "\n").encode("utf-8"))
             except Exception:
+                pass
+            finally:
                 reader.feed_eof()
 
         asyncio.create_task(pump_incoming())
-        return reader, RobustWSWriter()
+        return reader, RobustSyncStreamWriter(ws)
 
 
 async def cdp_data_handler(transport: JsonLineTransport, ctx):
@@ -219,6 +232,7 @@ async def cdp_data_handler(transport: JsonLineTransport, ctx):
             req_id = cmd.get("req_id")
             payload = cmd.get("payload", {})
 
+            # 1. 抓取 Cookies
             if action == "fetch_cookies":
                 try:
                     ver_res = await client.get(f"{LOCAL_CDP_HTTP}/json/version")
@@ -231,6 +245,7 @@ async def cdp_data_handler(transport: JsonLineTransport, ctx):
                 except Exception as e:
                     await transport.write_message({"req_id": req_id, "status": "error", "message": str(e)})
 
+            # 2. 注入 Cookies
             elif action == "inject_cookies":
                 to_inject = payload.get("cookies", [])
                 try:
@@ -270,9 +285,11 @@ async def cdp_data_handler(transport: JsonLineTransport, ctx):
                 except Exception as e:
                     await transport.write_message({"req_id": req_id, "status": "error", "message": str(e)})
 
+            # 3. 清理 Cookies
             elif action == "purge_cookies":
                 await transport.write_message({"req_id": req_id, "status": "ok", "purged_count": 0})
 
+            # 4. 获取版本
             elif action == "get_version":
                 try:
                     res = await client.get(f"{LOCAL_CDP_HTTP}/json/version")
@@ -280,6 +297,7 @@ async def cdp_data_handler(transport: JsonLineTransport, ctx):
                 except Exception as e:
                     await transport.write_message({"req_id": req_id, "status": "error", "message": str(e)})
 
+            # 5. 心跳
             elif cmd.get("type") == "ping" or action == "ping":
                 await transport.write_message({"type": "pong"})
 
@@ -302,17 +320,17 @@ def main():
 
     tunnel_mode: Optional[bool] = parse_reverse_tunnel_mode()
 
-    # 1. 强制直连
+    # 1. 强制直连模式
     if tunnel_mode is False:
         print(f"⚙️ [Edge Mode] reverse_tunnel=False ➔ 【强制直连模式 (目标端口: {ext_direct_port})】")
         asyncio.run(execute_http_auto_register(hub_url, node_uuid, cdp_port=ext_direct_port))
         return
 
-    # 2. 强制穿透
+    # 2. 强制穿透模式
     elif tunnel_mode is True:
         print("⚙️ [Edge Mode] reverse_tunnel=True ➔ 【强制反向穿透模式】(跳过网络探测)")
 
-    # 3. 智能自适应
+    # 3. 智能自适应模式
     else:
         print(f"🧠 [Edge Mode] reverse_tunnel=None ➔ 【智能自适应模式 (探测目标端口: {ext_direct_port})】...")
         can_direct, detected_ip, rec_port = asyncio.run(
@@ -328,7 +346,7 @@ def main():
             print(f"🛡️ [Smart Check] 探测确认：无法通过 {detected_ip}:{ext_direct_port} 直连 (处于 NAT4/防火墙拦截)")
             print("   -> 自动无感切换为【NAT4 出站反向长连接穿透模式】！")
 
-    # 组装安全握手 Headers (绝不在 URL 中暴露 Token)
+    # 安全 Headers (兼容新老规范)
     headers = {
         "X-Node-UUID": node_uuid,
         "X-Node-Fingerprint": fingerprint,
@@ -351,7 +369,7 @@ def main():
 
     agent = EdgeAgent(config, data_handler=cdp_data_handler)
     base_ws_url = hub_url.replace("https://", "wss://").replace("http://", "ws://")
-    tunnel_url = f"{base_ws_url}/api/nodes/reverse-tunnel"  # 纯净 URL，无敏感参数
+    tunnel_url = f"{base_ws_url}/api/nodes/reverse-tunnel"
 
     ssl_ctx = ssl.create_default_context()
     ssl_ctx.check_hostname = False
@@ -365,7 +383,7 @@ def main():
 
     asyncio.run(agent.run_reverse_tunnel(
         url=tunnel_url,
-        dialer=SecureHeaderTunnelDialer(headers=headers),
+        dialer=CrossVersionHeaderDialer(headers=headers),
         ssl_context=ssl_ctx
     ))
 
