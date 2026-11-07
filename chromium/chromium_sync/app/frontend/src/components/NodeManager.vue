@@ -35,7 +35,6 @@ const nodeForm = reactive({
   name: '',
   group_name: '默认分组',
   conn_type: 'direct',
-  topo_profile: 'direct',
   is_local: true,
   node_uuid: '',
   fingerprint: '',
@@ -138,7 +137,6 @@ const openCreateModal = () => {
     name: '',
     group_name: selectedFilterGroup.value || '默认分组',
     conn_type: 'direct',
-    topo_profile: 'direct',
     is_local: true,
     node_uuid: '',
     fingerprint: '',
@@ -160,8 +158,7 @@ const openEditModal = (node) => {
   Object.assign(nodeForm, {
     name: node.name,
     group_name: node.group_name || '默认分组',
-    conn_type: node.conn_type || 'direct',
-    topo_profile: node.topo_profile || 'direct',
+    conn_type: node.conn_type || (node.is_local ? 'direct' : 'ssh'),
     is_local: Boolean(node.is_local),
     node_uuid: node.node_uuid || '',
     fingerprint: node.fingerprint || '',
@@ -254,7 +251,7 @@ onMounted(() => {
 <template>
   <div class="content-full-card">
 
-    <!-- ==================== 1. 入网凭证与一键部署横幅 (单行紧凑自适应 HUD) ==================== -->
+    <!-- ==================== 1. 入网凭证与一键部署横幅 ==================== -->
     <div class="token-deploy-banner">
       <div class="token-bar-flex">
         <div class="token-left-wrap">
@@ -377,10 +374,8 @@ services:
           </tr>
         </thead>
         <tbody>
-          <!-- 核心继承：原版 row-node-disabled (禁用行置灰55%) 与 row-node-pending -->
           <tr v-for="node in filteredNodes" :key="node.id" :class="[node.enabled === 0 ? 'row-node-disabled' : '', node.approval_status === 0 ? 'row-node-pending' : '']">
             <td>
-              <!-- 核心继承：原版 tag-group-pill 分组蓝色胶囊 -->
               <span class="tag-group-pill">📁 {{ node.group_name || '默认分组' }}</span>
             </td>
 
@@ -404,9 +399,9 @@ services:
               <span v-else class="status-standby">○ 离线</span>
             </td>
 
+            <!-- 端点展示：反向长连接清晰显示其映射端口 -->
             <td class="font-cyan-mono">
-              <span v-if="node.topo_profile === 'public_wss'">WSS: {{ node.direct_host }}:{{ node.local_bind_port }}</span>
-              <span v-else-if="node.topo_profile === 'nat4_reverse'">WSS: 内部打通(:{{ node.local_bind_port }})</span>
+              <span v-if="node.conn_type === 'reverse'">Reverse-WSS (:{{ node.local_bind_port }})</span>
               <span v-else>{{ node.is_local ? (node.direct_host || '127.0.0.1') : '127.0.0.1' }}:{{ node.local_bind_port }}</span>
             </td>
 
@@ -416,11 +411,11 @@ services:
               </div>
             </td>
 
+            <!-- 网络拓扑：明确区分为 WSS 反向长连、直连、SSH -->
             <td>
-              <span v-if="node.topo_profile === 'public_wss'" class="tag-topo-public-wss">公网 WSS</span>
-              <span v-else-if="node.topo_profile === 'nat4_reverse'" class="tag-topo-reverse">NAT4 反穿</span>
-              <span v-else-if="node.topo_profile === 'ssh'" class="tag-topo-ssh">SSH 穿透</span>
-              <span v-else class="tag-topo-direct">端口直连</span>
+              <span v-if="node.conn_type === 'reverse'" class="tag-topo-reverse">WSS 反向长连</span>
+              <span v-else-if="node.conn_type === 'ssh'" class="tag-topo-ssh">SSH 穿透</span>
+              <span v-else class="tag-topo-direct">本地直连</span>
             </td>
 
             <td>
@@ -435,7 +430,6 @@ services:
                   <button @click="rejectNode(node)" class="btn-micro btn-trash">❌ 拒绝</button>
                 </template>
                 <template v-else>
-                  <!-- 核心继承：原版动态类名 btn-resume-node (绿色) 与 btn-pause-node (灰色) 完美恢复！ -->
                   <button 
                     @click="toggleNodeEnabled(node)" 
                     :class="['btn-micro', node.enabled === 0 ? 'btn-resume-node' : 'btn-pause-node']"
@@ -494,7 +488,7 @@ services:
             </td>
             <td class="font-mono text-reason" :title="log.reason">{{ log.reason || '-' }}</td>
             <td>
-              <span class="font-mono" :style="{ color: log.network_profile === 'public_wss' ? '#06b6d4' : (log.network_profile === 'nat4_reverse' ? '#a78bfa' : '#38bdf8') }">
+              <span class="font-mono" :style="{ color: log.network_profile === 'nat4_reverse' ? '#a78bfa' : '#38bdf8' }">
                 {{ log.network_profile || '-' }}
               </span>
             </td>
@@ -506,7 +500,7 @@ services:
       </table>
     </div>
 
-    <!-- ==================== 弹窗：按 4 大类别严谨隔离编辑 ==================== -->
+    <!-- ==================== 弹窗：按类别隔离编辑 (反向长连节点通道锁死) ==================== -->
     <div v-if="showNodeModal" class="modal-backdrop">
       <div class="modal-card">
         <div class="modal-title-bar">
@@ -521,29 +515,18 @@ services:
 
         <form @submit.prevent="submitNodeForm" class="form-v-stack" style="margin-top:14px;">
           
-          <!-- 类别 1: 公网 WSS 长连 -->
-          <div v-if="isEditMode && nodeForm.conn_type === 'reverse' && nodeForm.topo_profile === 'public_wss'" class="reverse-node-locked-box" style="border-color:#0891b2; background:#082f49;">
+          <!-- 类别 1: WSS 反向长连接节点 (系统托管，禁止切换为直连或 SSH) -->
+          <div v-if="isEditMode && nodeForm.conn_type === 'reverse'" class="reverse-node-locked-box">
             <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">
-              <span style="color:#38bdf8; font-size:12px; font-weight:bold;">🌐 接入类别：公网 WSS 长连接 (安全直连通道)</span>
-              <span class="locked-tag-lock">🔒 边缘 Agent 托管长连</span>
+              <span class="locked-badge-purple">🌐 接入类别：WSS 反向长连接</span>
+              <span class="locked-tag-lock">🔒 边缘 Agent 托管信道 (不可切换)</span>
             </div>
             <p style="font-size:11px; color:#cbd5e1; margin:0; line-height:1.5;">
-              节点拥有独立公网 IP，通过出站 WSS 安全长连接入，免在公网开放高危入站端口，通信全量加密。
+              该节点通过出站 WSS 建立长连接，通信由加密反向隧道承载，无需配置直连 IP。
             </p>
           </div>
 
-          <!-- 类别 2: NAT4 反向穿透长连接 -->
-          <div v-else-if="isEditMode && nodeForm.conn_type === 'reverse'" class="reverse-node-locked-box">
-            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">
-              <span class="locked-badge-purple">🟣 接入类别：NAT4 反向穿透 (内网长连接)</span>
-              <span class="locked-tag-lock">🔒 边缘 Agent 托管长连</span>
-            </div>
-            <p style="font-size:11px; color:#cbd5e1; margin:0; line-height:1.5;">
-              节点处于无公网/家宽/NAT4 环境，由边缘 Agent 自动出站穿透入网。
-            </p>
-          </div>
-
-          <!-- 类别 3 & 4: 手动直连 / SSH 节点的模式切换 -->
+          <!-- 类别 2: 手动创建或直连/SSH 节点的模式切换 -->
           <div v-else class="form-field-block">
             <label class="form-label">接入类型</label>
             <div class="row-flex-gap">
@@ -558,7 +541,7 @@ services:
             </div>
           </div>
 
-          <!-- 业务参数 (名称与分组自由编辑) -->
+          <!-- 业务参数 (名称与分组可自由修改) -->
           <div class="row-flex-gap">
             <div class="form-field-block" style="flex:1;">
               <label class="form-label">节点名称</label>
@@ -573,12 +556,12 @@ services:
             </div>
           </div>
 
-          <!-- 专属表单区 A：WSS 长连节点 (展示真实来源 IP，锁定敏感项) -->
+          <!-- ==================== 场景 A：WSS 反向长连专属表单 (隐藏伪 IP，通道与指纹锁定) ==================== -->
           <div v-if="isEditMode && nodeForm.conn_type === 'reverse'" class="form-v-stack">
             <div class="row-flex-gap">
               <div class="form-field-block" style="flex:1;">
-                <label class="form-label">节点来源公网/出口 IP <span style="color:#64748b;">[自动识别]</span></label>
-                <input v-model="nodeForm.direct_host" disabled class="cdp-input cdp-disabled font-cyan-mono" style="width:100% !important;">
+                <label class="form-label">通信通道 <span style="color:#64748b;">[反向隧道托管]</span></label>
+                <input value="reverse-nat4 (WSS长连接信道)" disabled class="cdp-input cdp-disabled font-cyan-mono" style="width:100% !important;">
               </div>
               <div class="form-field-block" style="flex:1;">
                 <label class="form-label">申报/映射 CDP 端口 (如 3030)</label>
@@ -598,7 +581,7 @@ services:
             </div>
           </div>
 
-          <!-- 专属表单区 B：本地/局域网直连 -->
+          <!-- ==================== 场景 B：本地/局域网直连专属表单 ==================== -->
           <div v-else-if="nodeForm.is_local" style="background:#09122a; padding:12px; border-radius:6px; border:1px solid #172554;">
             <div class="row-flex-gap">
               <div class="form-field-block" style="flex:1;">
@@ -612,7 +595,7 @@ services:
             </div>
           </div>
 
-          <!-- 专属表单区 C：远程 SSH 隧道 -->
+          <!-- ==================== 场景 C：远程 SSH 隧道专属表单 ==================== -->
           <div v-else class="form-v-stack">
             <div class="row-flex-gap">
               <div class="form-field-block" style="flex:1;">
@@ -722,7 +705,6 @@ services:
 
 <style scoped>
 /* ==================== 原版核心专属样式 (全量 100% 恢复保留) ==================== */
-/* 待审核节点专属横幅 */
 .tofu-alert-banner {
   background: rgba(217, 119, 6, 0.12);
   border: 1px solid #d97706;
@@ -752,7 +734,6 @@ services:
   margin: 2px 0 0 0;
 }
 
-/* 核心原版：分组蓝色药丸标签 */
 .tag-group-pill {
   background: #0f1f42;
   border: 1px solid #1d4ed8;
@@ -765,17 +746,14 @@ services:
   white-space: nowrap;
 }
 
-/* 核心原版：禁用行整行置灰 55% */
 .row-node-disabled {
   opacity: 0.55;
   filter: grayscale(0.8);
 }
-/* 核心原版：待审行浅色标注 */
 .row-node-pending {
   background: rgba(217, 119, 6, 0.05);
 }
 
-/* 核心原版：启停状态动态变色按钮 (灰色暂停 / 绿色恢复启动) */
 .btn-pause-node {
   background-color: #334155 !important;
   color: #cbd5e1 !important;
@@ -795,8 +773,7 @@ services:
   color: #fff !important;
 }
 
-/* ==================== 新增功能专属样式 (与原版完美兼容融入) ==================== */
-/* 紧凑型通行码横幅 (单行高聚合 HUD) */
+/* ==================== 紧凑 HUD 与拓扑样式 ==================== */
 .token-deploy-banner {
   background: #09122a;
   border: 1px solid #1e3a8a;
@@ -942,7 +919,7 @@ services:
   font-weight: bold;
 }
 
-/* 准入状态徽章 (去英文化纯正规范) */
+/* 准入状态徽章 */
 .badge-status-trusted {
   background: rgba(16, 185, 129, 0.15);
   border: 1px solid #059669;
@@ -962,17 +939,7 @@ services:
   font-weight: 500;
 }
 
-/* 拓扑标签四大分类体系 */
-.tag-topo-public-wss {
-  background: rgba(8, 145, 178, 0.2);
-  border: 1px solid #06b6d4;
-  color: #22d3ee;
-  border-radius: 4px;
-  padding: 2px 8px;
-  font-family: monospace;
-  font-size: 11px;
-  font-weight: bold;
-}
+/* 拓扑标签体系 */
 .tag-topo-reverse {
   background: rgba(139, 92, 246, 0.2);
   border: 1px solid #8b5cf6;
@@ -981,6 +948,7 @@ services:
   padding: 2px 8px;
   font-family: monospace;
   font-size: 11px;
+  font-weight: 500;
 }
 .tag-topo-direct {
   background: rgba(2, 132, 199, 0.15);

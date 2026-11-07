@@ -3,7 +3,6 @@ import json
 import time
 import sqlite3
 import secrets
-import ipaddress
 from datetime import datetime, timezone
 from urllib.parse import unquote
 from typing import Optional, List
@@ -18,14 +17,6 @@ from services.tunnel_manager import tunnel_mgr, REVERSE_TUNNEL_POOL
 from services.cdp_engine import fetch_cookies_native, probe_node_cookies
 
 router = APIRouter(tags=["节点管理与边缘接入"])
-
-def _is_public_ip(ip_str: str) -> bool:
-    """精准判断是否为真正的公网 IP (排除回环、局域网私网 RFC1918 及运营商 CGNAT)"""
-    try:
-        ip = ipaddress.ip_address(ip_str)
-        return not (ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_multicast)
-    except ValueError:
-        return False
 
 def _issue_join_token() -> str:
     return "hub_join_" + secrets.token_urlsafe(24)
@@ -50,7 +41,7 @@ class NodeAutoRegisterDTO(BaseModel):
     group_name: Optional[str] = "默认分组"
     cdp_port: int = 9222
 
-# ==================== 1. 分组与节点查询 (动态计算拓扑类型) ====================
+# ==================== 1. 分组与节点查询 ====================
 @router.get("/api/node-groups")
 def get_node_groups(user: dict = Depends(verify_token)):
     conn = get_db_connection()
@@ -72,23 +63,15 @@ def list_nodes(user: dict = Depends(verify_token)):
     conn.close()
 
     for r in rows:
-        # 动态计算真实网络拓扑属性，区分公网 WSS 与 NAT4 反穿
-        d_host = r.get("direct_host") or ""
-        if r.get("conn_type") == "reverse":
-            session = tunnel_mgr.get_reverse_session(r["id"])
-            r["status"] = "connected" if (session and not session.is_closed) else "stopped"
-            r["topo_profile"] = "public_wss" if _is_public_ip(d_host) else "nat4_reverse"
-        elif r.get("conn_type") == "ssh":
-            r["topo_profile"] = "ssh"
-        else:
-            r["topo_profile"] = "direct"
-
         if r.get("approval_status") == 0:
             r["status"] = "pending_approval"
+        elif r.get("conn_type") == "reverse":
+            session = tunnel_mgr.get_reverse_session(r["id"])
+            r["status"] = "connected" if (session and not session.is_closed) else "stopped"
 
     return rows
 
-# ==================== 2. 常规手动节点 CRUD (严格分类与权限防篡改) ====================
+# ==================== 2. 常规手动节点 CRUD ====================
 @router.post("/api/nodes")
 def create_node(data: dict, user: dict = Depends(verify_token)):
     is_local = 1 if data.get('is_local') else 0
@@ -135,7 +118,7 @@ async def update_node(node_id: int, data: dict, user: dict = Depends(verify_toke
     name = (data.get('name') or orig_node['name']).strip()
     l_port = int(data.get('local_bind_port') or orig_node['local_bind_port'])
 
-    # 核心安全控制：WSS 长连反穿节点，严禁篡改通道与物理 IP，只更新业务名称、分组与申报端口
+    # 规范锁定：反向长连节点严禁篡改通道与网络类型，只允许修改业务名称、分组与申报端口
     if orig_node["conn_type"] == "reverse":
         cur.execute("""
             UPDATE nodes SET name=?, group_name=?, local_bind_port=? WHERE id=?
@@ -206,7 +189,7 @@ async def approve_node(node_id: int, user: dict = Depends(verify_token)):
         await session.send_raw_json({
             "status": "approved",
             "decision": "tofu_approved",
-            "network_profile": "public_wss" if _is_public_ip(node.get("direct_host", "")) else "nat4_reverse"
+            "network_profile": "nat4_reverse"
         })
 
     _append_audit_log(
@@ -362,7 +345,7 @@ def get_edge_audit_logs(user: dict = Depends(verify_token)):
     records.sort(key=lambda x: x.get("ts", ""), reverse=True)
     return records[:50]
 
-# ==================== 6. 反向 WSS 隧道终结点 (精准区分公网 IP 与 NAT4) ====================
+# ==================== 6. NAT4 反向 WebSocket 隧道终结点 (固化 reverse-nat4 架构) ====================
 @router.websocket("/api/nodes/reverse-tunnel")
 async def reverse_tunnel_endpoint(
     websocket: WebSocket,
@@ -374,7 +357,6 @@ async def reverse_tunnel_endpoint(
     port: Optional[int] = Query(None)
 ):
     await websocket.accept()
-    client_host = websocket.client.host if websocket.client else "127.0.0.1"
 
     node_id: Optional[int] = None
 
@@ -411,7 +393,7 @@ async def reverse_tunnel_endpoint(
         or "默认分组"
     )
 
-    # 兜底首帧 JSON
+    # 兜底接收首帧 JSON
     if not node_uuid:
         try:
             first_msg_raw = await asyncio.wait_for(websocket.receive_text(), timeout=8.0)
@@ -429,10 +411,6 @@ async def reverse_tunnel_endpoint(
 
     node_name = node_name or f"Edge-{node_uuid[:6]}"
     valid_token = get_setting('cluster_join_token')
-
-    # 【核心区分】：判断来源是否拥有独立公网 IP (如甲骨文云 193.123.x.x)
-    has_public = _is_public_ip(client_host)
-    network_profile = "public_wss" if has_public else "nat4_reverse"
 
     conn = get_db_connection()
     conn.row_factory = sqlite3.Row
@@ -457,7 +435,7 @@ async def reverse_tunnel_endpoint(
             decision = "pending_tofu"
             reason = "tofu_pending_admin_approval"
 
-    # 核心：将真实的来源 IP (如 193.123.239.66) 存入 direct_host，彻底告别写死的 'reverse-nat4'
+    # 核心回归：固化 direct_host='reverse-nat4' 纯正标志，永不再动态猜测改动
     try:
         cur.execute("SELECT id FROM nodes WHERE node_uuid=?", (node_uuid,))
         existing_row = cur.fetchone()
@@ -466,18 +444,18 @@ async def reverse_tunnel_endpoint(
             node_id = existing_row["id"]
             cur.execute("""
                 UPDATE nodes SET 
-                    conn_type='reverse', direct_host=?, local_bind_port=?, status=?, approval_status=?,
+                    conn_type='reverse', direct_host='reverse-nat4', local_bind_port=?, status=?, approval_status=?,
                     name=?, group_name=?, fingerprint=?
                 WHERE id=?
-            """, (client_host, cdp_port, status, approved, node_name, node_group, node_fp, node_id))
+            """, (cdp_port, status, approved, node_name, node_group, node_fp, node_id))
         else:
             cur.execute("""
                 INSERT INTO nodes (
                     name, group_name, enabled, approval_status, conn_type, node_uuid, fingerprint,
                     is_source, is_local, direct_host, ssh_host, ssh_port, ssh_user,
                     ssh_key_filename, ssh_password, remote_cdp_port, local_bind_port, status
-                ) VALUES (?, ?, 1, ?, 'reverse', ?, ?, 0, 1, ?, '', 22, '', '', '', 9222, ?, ?)
-            """, (node_name, node_group, approved, node_uuid, node_fp, client_host, cdp_port, status))
+                ) VALUES (?, ?, 1, ?, 'reverse', ?, ?, 0, 1, 'reverse-nat4', '', 22, '', '', '', 9222, ?, ?)
+            """, (node_name, node_group, approved, node_uuid, node_fp, cdp_port, status))
             node_id = cur.lastrowid
 
         conn.commit()
@@ -491,6 +469,7 @@ async def reverse_tunnel_endpoint(
 
     session = tunnel_mgr.register_reverse_tunnel(node_id, websocket)
 
+    client_host = websocket.client.host if websocket.client else "unknown"
     _append_audit_log(
         "access_decision",
         node_uuid=node_uuid,
@@ -498,40 +477,39 @@ async def reverse_tunnel_endpoint(
         is_loopback=(client_host in ["127.0.0.1", "localhost", "::1"]),
         decision=decision,
         reason=reason,
-        network_profile=network_profile
+        network_profile="nat4_reverse"
     )
 
     if approved == 1:
         await session.send_raw_json({
             "status": "ok",
             "decision": decision,
-            "network_profile": network_profile
+            "network_profile": "nat4_reverse"
         })
-        topo_desc = "公网 WSS 长连" if has_public else "NAT4 反向穿透"
-        logger.info(f"✅ [{topo_desc}打通] 节点 [{node_name}] (来源IP: {client_host}, 端口: {cdp_port}) 认证放行！")
+        logger.info(f"✅ [反向长连接打通] 节点 [{node_name}] (ID: {node_id}, 端口: {cdp_port}) 认证放行！")
         
-        # 连接成功后 1.5 秒自动探活刷新 Cookie 存量
+        # 核心加固：连接建立 1.2 秒后自动在后台触发全量探活，实时更新 Cookie 数量，杜绝显示 0 条！
         async def _auto_probe_on_connect(nid: int, lport: int):
             try:
-                await asyncio.sleep(1.5)
+                await asyncio.sleep(1.2)
                 c_cnt, _ = await probe_node_cookies(lport, node_id=nid)
                 c_conn = get_db_connection()
                 c_cur = c_conn.cursor()
                 c_cur.execute("UPDATE nodes SET cookie_count=? WHERE id=?", (c_cnt, nid))
                 c_conn.commit()
                 c_conn.close()
-                logger.info(f"🍪 [节点初始化探针] 节点 ID:{nid} 初始 Cookie 捕获成功: {c_cnt} 条")
+                logger.info(f"🍪 [开机探活刷新] 节点 ID:{nid} 真实 Cookie 存量更新完毕: {c_cnt} 条")
             except Exception as e:
-                logger.debug(f"初始探活失败: {e}")
+                logger.debug(f"开机探活跳过: {e}")
         asyncio.create_task(_auto_probe_on_connect(node_id, cdp_port))
 
     else:
         await session.send_raw_json({
             "status": "pending_tofu",
             "reason": "tofu_pending_admin_approval",
-            "network_profile": network_profile
+            "network_profile": "nat4_reverse"
         })
-        logger.info(f"🔔 [TOFU 发现新节点] 节点 [{node_name}] (UUID: {node_uuid}, 来源: {client_host}) 进入待审队列...")
+        logger.info(f"🔔 [TOFU 发现新节点] 节点 [{node_name}] (UUID: {node_uuid}, 端口: {cdp_port}) 进入待审队列...")
 
     try:
         while True:

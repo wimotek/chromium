@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Wimotek Edge Node Client Runner (全透明诊断与加固终极版)
-- 全透明：收发握手帧明文打印，彻底消灭静默断开死循环；
-- 端口直透：启动强制打印 DIRECT_PORT，并将 3030 端口同步报给 Hub；
-- 原生直连：内部直连 127.0.0.1:9222，与本地调试 socat 9223 严格物理隔离。
+Wimotek Edge Node Client Runner (深度穿透全能版)
+1. 深度 Cookie 提取：通过 Network.enable + Network.getAllCookies 真实抓取 Chromium CookieJar，彻底解决 0 条问题；
+2. 握手可靠传输：双向帧即时刷盘，连接生命周期全透明输出；
+3. 通道隔离规范：内部直连 127.0.0.1:9222，本地调试通道 9223 严格物理隔离。
 """
 
 import os
@@ -21,7 +21,7 @@ import uuid
 import socket
 from urllib.parse import quote
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Optional, Tuple, List
 import httpx
 import websockets
 
@@ -132,17 +132,65 @@ async def execute_http_auto_register(hub_url: str, node_uuid: str, cdp_port: int
         "cdp_port": cdp_port,
     }
 
-    print(f"📡 [Direct Register] 正在向 Hub 发送直连登记包: {api_url} (直连端口: {cdp_port})", flush=True)
+    print(f"📡 [Direct Register] 正在向 Hub 发起直连登记: {api_url} (端口: {cdp_port})", flush=True)
     async with httpx.AsyncClient(verify=False, timeout=8.0) as client:
         try:
             res = await client.post(api_url, json=payload, headers=headers)
-            print(f"✅ [Direct Register] 直连接入响应: {res.status_code} | {res.text}", flush=True)
+            print(f"✅ [Direct Register] 直连接入完成: 响应码 {res.status_code}", flush=True)
         except Exception as e:
             print(f"❌ [Direct Register] 直连登记异常: {e}", flush=True)
 
 
-async def handle_cdp_command(ws, http_client, cmd_text: str):
-    """就地操纵 127.0.0.1:9222 执行指令并将结果推回 Hub"""
+async def extract_all_cookies_from_chromium(http_client: httpx.AsyncClient) -> List[dict]:
+    """
+    核心修复：采用 Network.enable + Network.getAllCookies 真实导出 Chromium 全量 CookieJar，
+    并自动降级跨端点回退，彻底解决只返回空列表的问题。
+    """
+    # 策略 1: 优先从浏览器主调试端点 /json/version 调用 Network.getAllCookies
+    try:
+        ver_res = await http_client.get(f"{LOCAL_CDP_HTTP}/json/version")
+        ws_url = ver_res.json()["webSocketDebuggerUrl"]
+        async with websockets.connect(ws_url, timeout=5.0) as ws:
+            # 必须先激活 Network 域
+            await ws.send(json.dumps({"id": 1, "method": "Network.enable"}))
+            await ws.recv()
+            # 获取全量 CookieJar 存储
+            await ws.send(json.dumps({"id": 2, "method": "Network.getAllCookies"}))
+            raw = await asyncio.wait_for(ws.recv(), timeout=5.0)
+            cookies = json.loads(raw).get("result", {}).get("cookies", [])
+            if cookies:
+                return cookies
+            # 兜底调用 Storage.getCookies
+            await ws.send(json.dumps({"id": 3, "method": "Storage.getCookies"}))
+            raw_s = await asyncio.wait_for(ws.recv(), timeout=5.0)
+            cookies_s = json.loads(raw_s).get("result", {}).get("cookies", [])
+            if cookies_s:
+                return cookies_s
+    except Exception as e:
+        pass
+
+    # 策略 2: 降级尝试从活跃的 Page 页面端点 /json/list 调用
+    try:
+        list_res = await http_client.get(f"{LOCAL_CDP_HTTP}/json/list")
+        pages = [t for t in list_res.json() if t.get("type") == "page" and "webSocketDebuggerUrl" in t]
+        if pages:
+            page_ws_url = pages[0]["webSocketDebuggerUrl"]
+            async with websockets.connect(page_ws_url, timeout=5.0) as page_ws:
+                await page_ws.send(json.dumps({"id": 11, "method": "Network.enable"}))
+                await page_ws.recv()
+                await page_ws.send(json.dumps({"id": 12, "method": "Network.getAllCookies"}))
+                raw_p = await asyncio.wait_for(page_ws.recv(), timeout=5.0)
+                cookies_p = json.loads(raw_p).get("result", {}).get("cookies", [])
+                if cookies_p:
+                    return cookies_p
+    except Exception:
+        pass
+
+    return []
+
+
+async def handle_cdp_command(ws, http_client: httpx.AsyncClient, cmd_text: str):
+    """就地操纵 127.0.0.1:9222 执行业务指令"""
     try:
         cmd = json.loads(cmd_text)
     except Exception:
@@ -152,18 +200,17 @@ async def handle_cdp_command(ws, http_client, cmd_text: str):
     req_id = cmd.get("req_id")
     payload = cmd.get("payload", {})
 
+    # 1. 抓取全量 Cookies (调用深度提取器)
     if action == "fetch_cookies":
         try:
-            ver_res = await http_client.get(f"{LOCAL_CDP_HTTP}/json/version")
-            ws_url = ver_res.json()["webSocketDebuggerUrl"]
-            async with websockets.connect(ws_url, timeout=5.0) as cdp_ws:
-                await cdp_ws.send(json.dumps({"id": 1, "method": "Storage.getCookies"}))
-                raw = await asyncio.wait_for(cdp_ws.recv(), timeout=5.0)
-                cookies = json.loads(raw).get("result", {}).get("cookies", [])
+            cookies = await extract_all_cookies_from_chromium(http_client)
+            print(f"🍪 [CDP] 成功捕获并上报 {len(cookies)} 条真实 Cookie", flush=True)
             await ws.send(json.dumps({"req_id": req_id, "status": "ok", "cookies": cookies}))
         except Exception as e:
+            print(f"❌ [CDP] 提取 Cookie 异常: {e}", flush=True)
             await ws.send(json.dumps({"req_id": req_id, "status": "error", "message": str(e)}))
 
+    # 2. 注入 Cookies
     elif action == "inject_cookies":
         to_inject = payload.get("cookies", [])
         try:
@@ -195,9 +242,11 @@ async def handle_cdp_command(ws, http_client, cmd_text: str):
         except Exception as e:
             await ws.send(json.dumps({"req_id": req_id, "status": "error", "message": str(e)}))
 
+    # 3. 清理 Cookies
     elif action == "purge_cookies":
         await ws.send(json.dumps({"req_id": req_id, "status": "ok", "purged_count": 0}))
 
+    # 4. 获取版本
     elif action == "get_version":
         try:
             res = await http_client.get(f"{LOCAL_CDP_HTTP}/json/version")
@@ -205,12 +254,13 @@ async def handle_cdp_command(ws, http_client, cmd_text: str):
         except Exception as e:
             await ws.send(json.dumps({"req_id": req_id, "status": "error", "message": str(e)}))
 
+    # 5. 心跳保活
     elif cmd.get("type") == "ping" or action == "ping":
         await ws.send(json.dumps({"type": "pong"}))
 
 
 async def run_tunnel_client(tunnel_url: str, headers: dict, handshake_payload: dict):
-    """透明双向反向隧道执行器 (带全量日志追踪)"""
+    """透明双向反向隧道执行器"""
     is_wss = tunnel_url.startswith("wss://")
     ssl_ctx = ssl.create_default_context()
     ssl_ctx.check_hostname = False
@@ -237,7 +287,6 @@ async def run_tunnel_client(tunnel_url: str, headers: dict, handshake_payload: d
             print("✅ [Tunnel] 底层 WebSocket 连接建立成功！正在发送身份握手包...", flush=True)
             await ws.send(json.dumps(handshake_payload))
 
-            # 接收 Hub 握手响应
             raw_resp = await asyncio.wait_for(ws.recv(), timeout=8.0)
             print(f"📥 [Hub 握手应答] {raw_resp}", flush=True)
 
@@ -258,11 +307,9 @@ async def run_tunnel_client(tunnel_url: str, headers: dict, handshake_payload: d
             # 开始全双工双向指令监听
             async with httpx.AsyncClient(timeout=4.0) as http_client:
                 async for msg_text in ws:
-                    # 收到 approved 唤醒通知
                     if '"status":"approved"' in msg_text or '"status": "approved"' in msg_text:
                         print("✨ [TOFU 审核通过] 管理员已在后台批准该节点，正式激活业务通信！", flush=True)
                         continue
-                    # 收到业务指令
                     asyncio.create_task(handle_cdp_command(ws, http_client, msg_text))
 
         except Exception as e:
@@ -283,34 +330,33 @@ def main():
     node_name = os.getenv("NODE_NAME", "").strip() or node_uuid
     group_name = os.getenv("NODE_GROUP", "默认分组").strip()
 
-    # 关键加固：读取 DIRECT_PORT 并在日志中明确展示
     ext_direct_port = int(
         os.getenv("DIRECT_PORT") or os.getenv("EXTERNAL_PORT") or os.getenv("CDP_PORT") or 9222
     )
 
     tunnel_mode: Optional[bool] = parse_reverse_tunnel_mode()
 
-    print(f"📋 [节点参数] 名称: {node_name} | DIRECT_PORT: {ext_direct_port} | 模式: {tunnel_mode}", flush=True)
+    print(f"📋 [节点参数] 名称: {node_name} | 映射端口: {ext_direct_port} | 模式: {tunnel_mode}", flush=True)
 
-    # 1. 强制直连模式
+    # 1. 强制直连
     if tunnel_mode is False:
-        print(f"⚙️ [Edge Mode] reverse_tunnel=False ➔ 【强制直连登记 (目标端口: {ext_direct_port})】", flush=True)
+        print(f"⚙️ [Edge Mode] reverse_tunnel=False ➔ 【强制直连登记 (端口: {ext_direct_port})】", flush=True)
         asyncio.run(execute_http_auto_register(hub_url, node_uuid, cdp_port=ext_direct_port))
         return
 
-    # 2. 强制穿透模式
+    # 2. 强制穿透
     elif tunnel_mode is True:
-        print(f"⚙️ [Edge Mode] reverse_tunnel=True ➔ 【强制反向穿透 (携带端口: {ext_direct_port})】", flush=True)
+        print(f"⚙️ [Edge Mode] reverse_tunnel=True ➔ 【强制反向穿透 (端口: {ext_direct_port})】", flush=True)
 
-    # 3. 智能自适应模式
+    # 3. 智能自适应
     else:
-        print(f"🧠 [Edge Mode] reverse_tunnel=None ➔ 【智能自适应探测 (测试端口: {ext_direct_port})】...", flush=True)
+        print(f"🧠 [Edge Mode] reverse_tunnel=None ➔ 【智能自适应探测 (端口: {ext_direct_port})】...", flush=True)
         can_direct, detected_ip, rec_port = asyncio.run(
             check_hub_can_reach_me(hub_url, cdp_port=ext_direct_port)
         )
 
         if can_direct:
-            print(f"🎯 [Smart Check] 探测成功！Hub 可直接反向连通本机 ({detected_ip}:{rec_port})", flush=True)
+            print(f"🎯 [Smart Check] 探测成功！Hub 可直接反向连通本机 ({detected_ip}:{rec_port})")
             print("   -> 自动判定为直连网络，执行直连注册，不占用 WebSocket 反向连接池。", flush=True)
             asyncio.run(execute_http_auto_register(hub_url, node_uuid, cdp_port=rec_port))
             return
@@ -318,7 +364,6 @@ def main():
             print(f"🛡️ [Smart Check] 探测确认：无法通过 {detected_ip}:{ext_direct_port} 直连 (处于 NAT4/防火墙拦截)", flush=True)
             print("   -> 自动无感切换为【NAT4 出站反向长连接穿透模式】！", flush=True)
 
-    # 组装 Headers 与握手包 (携带真实的 3030 端口)
     headers = {
         "X-Node-UUID": node_uuid,
         "X-Node-Fingerprint": fingerprint,
