@@ -283,11 +283,13 @@ async def http_auto_register_node(
             WHERE id=?
         """, (direct_ip, data.cdp_port, node_name, grp_name, appr, node_id))
     else:
+        # 显式补齐 ssh_host 等字段，杜绝 NOT NULL 约束报错
         cur.execute("""
             INSERT INTO nodes (
-                name, group_name, enabled, approval_status, conn_type, node_uuid,
-                is_source, is_local, direct_host, local_bind_port, status
-            ) VALUES (?, ?, 1, ?, 'direct', ?, 0, 1, ?, ?, ?)
+                name, group_name, enabled, approval_status, conn_type, node_uuid, fingerprint,
+                is_source, is_local, direct_host, ssh_host, ssh_port, ssh_user,
+                ssh_key_filename, ssh_password, remote_cdp_port, local_bind_port, status
+            ) VALUES (?, ?, 1, ?, 'direct', ?, '', 0, 1, ?, '', 22, '', '', '', 9222, ?, ?)
         """, (node_name, grp_name, approval_status, data.node_uuid, direct_ip, data.cdp_port, status))
         node_id = cur.lastrowid
 
@@ -331,7 +333,7 @@ def get_edge_audit_logs(user: dict = Depends(verify_token)):
     records.sort(key=lambda x: x.get("ts", ""), reverse=True)
     return records[:50]
 
-# ==================== 6. NAT4 反向 WebSocket 隧道终结点 (纯净业务逻辑) ====================
+# ==================== 6. NAT4 反向 WebSocket 隧道终结点 ====================
 @router.websocket("/api/nodes/reverse-tunnel")
 async def reverse_tunnel_endpoint(
     websocket: WebSocket,
@@ -346,7 +348,6 @@ async def reverse_tunnel_endpoint(
 
     node_id: Optional[int] = None
 
-    # 1. 优先从 Header 提取端口与参数 (3030 正确生效)
     header_port_str = websocket.headers.get("x-cdp-port")
     try:
         cdp_port = int(header_port_str) if header_port_str else (port or 9222)
@@ -380,7 +381,7 @@ async def reverse_tunnel_endpoint(
         or "默认分组"
     )
 
-    # 兜底接收首帧 JSON
+    # 兜底首帧 JSON
     if not node_uuid:
         try:
             first_msg_raw = await asyncio.wait_for(websocket.receive_text(), timeout=8.0)
@@ -392,7 +393,7 @@ async def reverse_tunnel_endpoint(
             node_group = data.get("group") or node_group
             cdp_port = data.get("port") or cdp_port
         except Exception as e:
-            logger.error(f"❌ [Tunnel 握手失败] 未收到节点身份信息: {e}")
+            logger.error(f"❌ [Tunnel 握手失败] 未收到节点身份: {e}")
             await websocket.close(code=1008, reason="Handshake timeout or invalid JSON")
             return
 
@@ -423,7 +424,7 @@ async def reverse_tunnel_endpoint(
             decision = "pending_tofu"
             reason = "tofu_pending_admin_approval"
 
-    # 标准清晰的数据库写入，无需动态分支探测
+    # ==================== 核心修复：显式填充全部历史字段，杜绝 NOT NULL 约束冲突 ====================
     try:
         cur.execute("SELECT id FROM nodes WHERE node_uuid=?", (node_uuid,))
         existing_row = cur.fetchone()
@@ -431,15 +432,18 @@ async def reverse_tunnel_endpoint(
         if existing_row:
             node_id = existing_row["id"]
             cur.execute("""
-                UPDATE nodes SET conn_type='reverse', local_bind_port=?, status=?, approval_status=?,
-                name=?, group_name=?, fingerprint=? WHERE id=?
+                UPDATE nodes SET 
+                    conn_type='reverse', local_bind_port=?, status=?, approval_status=?,
+                    name=?, group_name=?, fingerprint=?
+                WHERE id=?
             """, (cdp_port, status, approved, node_name, node_group, node_fp, node_id))
         else:
             cur.execute("""
                 INSERT INTO nodes (
                     name, group_name, enabled, approval_status, conn_type, node_uuid, fingerprint,
-                    is_source, is_local, direct_host, local_bind_port, status
-                ) VALUES (?, ?, 1, ?, 'reverse', ?, ?, 0, 1, 'reverse-nat4', ?, ?)
+                    is_source, is_local, direct_host, ssh_host, ssh_port, ssh_user,
+                    ssh_key_filename, ssh_password, remote_cdp_port, local_bind_port, status
+                ) VALUES (?, ?, 1, ?, 'reverse', ?, ?, 0, 1, 'reverse-nat4', '', 22, '', '', '', 9222, ?, ?)
             """, (node_name, node_group, approved, node_uuid, node_fp, cdp_port, status))
             node_id = cur.lastrowid
 
@@ -480,7 +484,6 @@ async def reverse_tunnel_endpoint(
         })
         logger.info(f"🔔 [TOFU 发现新节点] 节点 [{node_name}] (UUID: {node_uuid}, 端口: {cdp_port}) 进入待审隔离队列...")
 
-    # 进入长连接消息监听
     try:
         while True:
             text = await websocket.receive_text()
