@@ -1,5 +1,5 @@
 <script setup>
-import { ref, reactive, computed, onMounted } from 'vue'
+import { ref, reactive, computed, onMounted, onUnmounted } from 'vue'
 
 const props = defineProps({
   api: Function,
@@ -59,7 +59,7 @@ const currentHubUrl = computed(() => {
   return `${window.location.protocol}//${window.location.host}`
 })
 
-// 加载基础数据
+// 加载基础数据 (全量拉取)
 const loadBaseData = async () => {
   const [nRes, kRes, gRes, rRes, tRes] = await Promise.all([
     props.api('/api/nodes'),
@@ -77,6 +77,34 @@ const loadBaseData = async () => {
     Object.assign(tofuSettings, await tRes.json())
   }
   emit('update-nodes')
+}
+
+// ==================== 生产级 3 秒实时状态探活轮询 ====================
+let pollTimer = null
+let isPolling = false
+
+const pollNodeStatus = async () => {
+  // 当标签页切入后台或上一个请求仍在飞时，自动跳过，杜绝堆积卡死
+  if (document.hidden || isPolling) return
+  isPolling = true
+  try {
+    const res = await props.api('/api/nodes')
+    if (res.ok) {
+      nodes.value = await res.json()
+      emit('update-nodes')
+    }
+    // 若当前正在查看审计 Tab，同步静默刷新审计日志
+    if (activeTab.value === 'audit') {
+      const aRes = await props.api('/api/nodes/audit-logs')
+      if (aRes.ok) {
+        auditLogs.value = await aRes.json()
+      }
+    }
+  } catch (e) {
+    // 轮询异常静默，避免打扰正常操作
+  } finally {
+    isPolling = false
+  }
 }
 
 // 保存 TOFU 开关策略设置
@@ -305,6 +333,16 @@ const deleteNode = async (id) => {
 onMounted(() => {
   loadBaseData()
   loadAuditLogs()
+  // 启动 3 秒高敏定时探活轮询：新节点接入、心跳、在线状态与 Cookie 存量全自动秒级刷新
+  pollTimer = setInterval(pollNodeStatus, 3000)
+})
+
+onUnmounted(() => {
+  // 页面离开时彻底销毁轮询器，严防内存泄露
+  if (pollTimer) {
+    clearInterval(pollTimer)
+    pollTimer = null
+  }
 })
 </script>
 
@@ -331,7 +369,7 @@ onMounted(() => {
           </button>
         </div>
 
-        <!-- 中间：TOFU 准入控制开关集群 (重点新增) -->
+        <!-- 中间：TOFU 准入控制开关集群 -->
         <div class="tofu-controls-cluster">
           <label class="switch-inline-label" title="开启后允许未配置 Token 的新设备上报进入待审队列">
             <input type="checkbox" v-model="tofuSettings.tofu_enabled" @change="updateTofuSettings" class="check-box-blue">

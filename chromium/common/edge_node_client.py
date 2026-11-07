@@ -16,7 +16,7 @@ sys.stderr.reconfigure(line_buffering=True)
 
 import json
 import ssl
-import time       # 【关键修复】补齐遗漏的 time 模块，杜绝 NameError
+import time
 import asyncio
 import hashlib
 import uuid
@@ -190,7 +190,9 @@ async def extract_all_cookies(http_client: httpx.AsyncClient) -> List[dict]:
         pages = [t for t in list_res.json() if t.get("type") == "page" and "webSocketDebuggerUrl" in t]
         if pages:
             page_ws_url = pages[0]["webSocketDebuggerUrl"]
-            async with websockets.connect(page_ws_url, timeout=5.0) as page_ws:
+            # 修复：移除错误的 timeout 参数，使用 open_timeout 并由 wait_for 守护
+            ws_conn = websockets.connect(page_ws_url, open_timeout=5.0)
+            async with ws_conn as page_ws:
                 await send_cdp_json_command(page_ws, "Network.enable", req_id=201)
                 res_page = await send_cdp_json_command(page_ws, "Network.getAllCookies", req_id=202)
                 cookies_p = res_page.get("cookies", [])
@@ -203,7 +205,9 @@ async def extract_all_cookies(http_client: httpx.AsyncClient) -> List[dict]:
     try:
         ver_res = await http_client.get(f"{local_base}/json/version", timeout=3.0)
         ws_url = ver_res.json()["webSocketDebuggerUrl"]
-        async with websockets.connect(ws_url, timeout=5.0) as ws:
+        # 修复：移除错误的 timeout 参数，使用 open_timeout 并由 wait_for 守护
+        ws_conn = websockets.connect(ws_url, open_timeout=5.0)
+        async with ws_conn as ws:
             await send_cdp_json_command(ws, "Network.enable", req_id=101)
             res_all = await send_cdp_json_command(ws, "Network.getAllCookies", req_id=102)
             cookies = res_all.get("cookies", [])
@@ -257,7 +261,8 @@ async def handle_cdp_command(ws, http_client: httpx.AsyncClient, cmd_text: str):
                 ver_res = await http_client.get(f"{local_base}/json/version", timeout=3.0)
                 target_ws = ver_res.json()["webSocketDebuggerUrl"]
 
-            async with websockets.connect(target_ws, timeout=8.0) as cdp_ws:
+            # 修复：移除错误的 timeout 参数，使用 open_timeout
+            async with websockets.connect(target_ws, open_timeout=8.0) as cdp_ws:
                 await send_cdp_json_command(cdp_ws, "Network.enable", req_id=301)
                 await send_cdp_json_command(cdp_ws, "Network.setCookies", {"cookies": to_inject}, req_id=302)
 
@@ -305,6 +310,7 @@ async def run_tunnel_client(tunnel_url: str, headers: dict, handshake_payload: d
         "max_size": 100 * 1024 * 1024,
         "ping_interval": 20,
         "ping_timeout": 10,
+        "open_timeout": 10,
     }
 
     backoff = 2
