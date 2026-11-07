@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
 """
-Wimotek Edge Node Client Runner (稳定保活与真实全量 CookieJar 提取版)
-1. 真实全量提取：通过 Network.enable + Network.getAllCookies 真实导出全量 CookieJar；
-2. 异步事件过滤：过滤掉 CDP 内部异步事件噪音，精确匹配请求 ID 响应；
-3. 通道解耦隔离：内部原生直连 9222，本地调试 socat 9223 严格物理隔离。
+Wimotek Edge Node Client Runner
+- 架构对齐：wimotek-edge-agent Optional[bool] 三态标准 (None/True/False)
+- 主动心跳：每 5 秒推送应用层 ping，彻底终结 no close frame 闪断重连
+- 真实抓取：Network.enable + Network.getAllCookies 穿透提取 CookieJar
+- 端口直连：内部直连 127.0.0.1:9222，本地调试通道 9223 严格物理隔离
 """
 
 import os
 import sys
 
-# 开启全局实时输出
+# 开启全局实时输出，避免 Docker 日志缓冲滞后
 sys.stdout.reconfigure(line_buffering=True)
 sys.stderr.reconfigure(line_buffering=True)
 
@@ -33,6 +34,7 @@ LOCAL_CDP_HTTP = f"http://127.0.0.1:{CDP_PORT}"
 
 
 def ensure_identity(data_dir: Path) -> Tuple[str, str]:
+    """生成或读取持久化的 node_uuid 与 fingerprint"""
     data_dir.mkdir(parents=True, exist_ok=True)
     id_file = data_dir / ".edge_identity.json"
     env_name = os.getenv("NODE_NAME", "").strip()
@@ -82,6 +84,7 @@ def ensure_identity(data_dir: Path) -> Tuple[str, str]:
 
 
 def parse_reverse_tunnel_mode() -> Optional[bool]:
+    """解析运行模式: None (智能) | True (穿透) | False (直连)"""
     val = os.getenv("REVERSE_TUNNEL")
     if val is None:
         val = os.getenv("EDGE_AGENT_REVERSE_TUNNEL")
@@ -99,6 +102,7 @@ def parse_reverse_tunnel_mode() -> Optional[bool]:
 
 
 async def check_hub_can_reach_me(hub_url: str, cdp_port: int) -> Tuple[bool, str, int]:
+    """回声探针：检测 Hub 是否能直接连入"""
     detect_api = f"{hub_url}/api/nodes/detect-mode?cdp_port={cdp_port}"
     async with httpx.AsyncClient(verify=False, timeout=3.5) as client:
         try:
@@ -116,6 +120,7 @@ async def check_hub_can_reach_me(hub_url: str, cdp_port: int) -> Tuple[bool, str
 
 
 async def execute_http_auto_register(hub_url: str, node_uuid: str, cdp_port: int):
+    """直连登记模式"""
     api_url = f"{hub_url}/api/nodes/auto-register"
     join_token = os.getenv("JOIN_TOKEN", "").strip()
     node_name = os.getenv("NODE_NAME", "").strip() or node_uuid
@@ -136,7 +141,7 @@ async def execute_http_auto_register(hub_url: str, node_uuid: str, cdp_port: int
     async with httpx.AsyncClient(verify=False, timeout=8.0) as client:
         try:
             res = await client.post(api_url, json=payload, headers=headers)
-            print(f"✅ [Direct Register] 直连接入完成: 响应码 {res.status_code}", flush=True)
+            print(f"✅ [Direct Register] 直连接入响应: {res.status_code}", flush=True)
         except Exception as e:
             print(f"❌ [Direct Register] 直连登记受阻: {e}", flush=True)
 
@@ -157,9 +162,9 @@ async def send_cdp_json_command(ws, method: str, params: dict = None, req_id: in
     return {}
 
 
-async def extract_all_cookies_from_chromium(http_client: httpx.AsyncClient) -> List[dict]:
-    """通过 Network.enable + Network.getAllCookies 真实导出全量 CookieJar"""
-    # 策略 1: 优先从活跃 Page 页面端点抓取 (最具实效性)
+async def extract_all_cookies(http_client: httpx.AsyncClient) -> List[dict]:
+    """真实穿透提取 Chromium 全量 CookieJar"""
+    # 策略 1: 优先从活跃 Page 端点抓取
     try:
         list_res = await http_client.get(f"{LOCAL_CDP_HTTP}/json/list", timeout=3.0)
         pages = [t for t in list_res.json() if t.get("type") == "page" and "webSocketDebuggerUrl" in t]
@@ -174,7 +179,7 @@ async def extract_all_cookies_from_chromium(http_client: httpx.AsyncClient) -> L
     except Exception:
         pass
 
-    # 策略 2: 兜底从主调试端点 /json/version 抓取
+    # 策略 2: 兜底从主端点 /json/version 抓取
     try:
         ver_res = await http_client.get(f"{LOCAL_CDP_HTTP}/json/version", timeout=3.0)
         ws_url = ver_res.json()["webSocketDebuggerUrl"]
@@ -184,7 +189,6 @@ async def extract_all_cookies_from_chromium(http_client: httpx.AsyncClient) -> L
             cookies = res_all.get("cookies", [])
             if cookies:
                 return cookies
-
             res_storage = await send_cdp_json_command(ws, "Storage.getCookies", req_id=103)
             cookies_s = res_storage.get("cookies", [])
             if cookies_s:
@@ -196,7 +200,7 @@ async def extract_all_cookies_from_chromium(http_client: httpx.AsyncClient) -> L
 
 
 async def handle_cdp_command(ws, http_client: httpx.AsyncClient, cmd_text: str):
-    """业务指令调度"""
+    """业务指令调度执行器"""
     try:
         cmd = json.loads(cmd_text)
     except Exception:
@@ -208,7 +212,7 @@ async def handle_cdp_command(ws, http_client: httpx.AsyncClient, cmd_text: str):
 
     if action == "fetch_cookies":
         try:
-            cookies = await extract_all_cookies_from_chromium(http_client)
+            cookies = await extract_all_cookies(http_client)
             print(f"🍪 [CDP] 捕获并推回 {len(cookies)} 条真实 Cookie", flush=True)
             await ws.send(json.dumps({"req_id": req_id, "status": "ok", "cookies": cookies}))
         except Exception as e:
@@ -220,7 +224,7 @@ async def handle_cdp_command(ws, http_client: httpx.AsyncClient, cmd_text: str):
         try:
             target_ws = None
             try:
-                list_res = await http_client.get(f"{LOCAL_CDP_HTTP}/json/list")
+                list_res = await http_client.get(f"{LOCAL_CDP_HTTP}/json/list", timeout=3.0)
                 targets = list_res.json()
                 page_targets = [t for t in targets if t.get("type") == "page" and "webSocketDebuggerUrl" in t]
                 if page_targets:
@@ -229,7 +233,7 @@ async def handle_cdp_command(ws, http_client: httpx.AsyncClient, cmd_text: str):
                 pass
 
             if not target_ws:
-                ver_res = await http_client.get(f"{LOCAL_CDP_HTTP}/json/version")
+                ver_res = await http_client.get(f"{LOCAL_CDP_HTTP}/json/version", timeout=3.0)
                 target_ws = ver_res.json()["webSocketDebuggerUrl"]
 
             async with websockets.connect(target_ws, timeout=8.0) as cdp_ws:
@@ -245,13 +249,26 @@ async def handle_cdp_command(ws, http_client: httpx.AsyncClient, cmd_text: str):
 
     elif action == "get_version":
         try:
-            res = await http_client.get(f"{LOCAL_CDP_HTTP}/json/version")
+            res = await http_client.get(f"{LOCAL_CDP_HTTP}/json/version", timeout=3.0)
             await ws.send(json.dumps({"req_id": req_id, "status": "ok", "version": res.json()}))
         except Exception as e:
             await ws.send(json.dumps({"req_id": req_id, "status": "error", "message": str(e)}))
 
     elif cmd.get("type") == "ping" or action == "ping":
         await ws.send(json.dumps({"type": "pong"}))
+
+
+async def keep_alive_heartbeat(ws):
+    """
+    核心心跳守护：每 5 秒主动向 Hub 发送一次应用层 ping
+    彻底防止网络中间网关超时断开连接
+    """
+    while True:
+        await asyncio.sleep(5)
+        try:
+            await ws.send(json.dumps({"action": "ping"}))
+        except Exception:
+            break
 
 
 async def run_tunnel_client(tunnel_url: str, headers: dict, handshake_payload: dict):
@@ -299,12 +316,21 @@ async def run_tunnel_client(tunnel_url: str, headers: dict, handshake_payload: d
                 await asyncio.sleep(10)
                 continue
 
-            async with httpx.AsyncClient(timeout=4.0) as http_client:
-                async for msg_text in ws:
-                    if '"status":"approved"' in msg_text or '"status": "approved"' in msg_text:
-                        print("✨ [TOFU 审核通过] 管理员已在后台批准该节点，正式激活业务通信！", flush=True)
-                        continue
-                    asyncio.create_task(handle_cdp_command(ws, http_client, msg_text))
+            # 激活后台 5 秒主动心跳任务
+            heartbeat_task = asyncio.create_task(keep_alive_heartbeat(ws))
+
+            try:
+                async with httpx.AsyncClient(timeout=4.0) as http_client:
+                    async for msg_text in ws:
+                        if '"status":"approved"' in msg_text or '"status": "approved"' in msg_text:
+                            print("✨ [TOFU 审核通过] 管理员已在后台批准该节点，正式激活业务通信！", flush=True)
+                            continue
+                        # 忽略心跳回包 pong
+                        if msg_text == "pong" or '"type":"pong"' in msg_text:
+                            continue
+                        asyncio.create_task(handle_cdp_command(ws, http_client, msg_text))
+            finally:
+                heartbeat_task.cancel()
 
         except Exception as e:
             print(f"⚠️ [Tunnel 异常中断] {type(e).__name__}: {e}，将在 {backoff} 秒后自动重连...", flush=True)
@@ -351,14 +377,14 @@ def main():
 
         if can_direct:
             print(f"🎯 [Smart Check] 探测成功！Hub 可直接反向连通本机 ({detected_ip}:{rec_port})")
-            print("   -> 自动判定为直连网络，执行直连注册，不占用 WebSocket 反向连接池。")
+            print("   -> 自动判定为直连网络，执行直连注册，不占用 WebSocket 反向连接池。", flush=True)
             asyncio.run(execute_http_auto_register(hub_url, node_uuid, cdp_port=rec_port))
             return
         else:
             print(f"🛡️ [Smart Check] 探测确认：无法通过 {detected_ip}:{ext_direct_port} 直连 (处于 NAT4/防火墙拦截)")
             print("   -> 自动无感切换为【NAT4 出站反向长连接穿透模式】！", flush=True)
 
-    # 先行等待本地 Chromium 完全启动就绪
+    # 预先等待 Chromium 9222 完全就绪
     async def _wait_cdp_ready():
         async with httpx.AsyncClient(timeout=2.0) as client:
             for _ in range(15):
