@@ -16,6 +16,7 @@ sys.stderr.reconfigure(line_buffering=True)
 
 import json
 import ssl
+import time       # 【关键修复】补齐遗漏的 time 模块，杜绝 NameError
 import asyncio
 import hashlib
 import uuid
@@ -28,9 +29,26 @@ import websockets
 
 from wimotek_edge_agent import Config, EdgeAgent
 
-# 容器内部原生直连端口
+# 容器内部 Chromium 原生监听标准端口
 CDP_PORT = int(os.getenv("CDP_PORT", "9222"))
-LOCAL_CDP_HTTP = f"http://127.0.0.1:{CDP_PORT}"
+
+
+async def get_local_cdp_base() -> str:
+    """智能嗅探本地 Chromium 调试端口 (容器内优先 9222 回环)"""
+    candidate_ports = [9222]
+    if CDP_PORT != 9222:
+        candidate_ports.append(CDP_PORT)
+
+    for p in candidate_ports:
+        url = f"http://127.0.0.1:{p}"
+        try:
+            async with httpx.AsyncClient(timeout=1.2) as client:
+                res = await client.get(f"{url}/json/version")
+                if res.status_code == 200:
+                    return url
+        except Exception:
+            continue
+    return "http://127.0.0.1:9222"
 
 
 def ensure_identity(data_dir: Path) -> Tuple[str, str]:
@@ -164,9 +182,11 @@ async def send_cdp_json_command(ws, method: str, params: dict = None, req_id: in
 
 async def extract_all_cookies(http_client: httpx.AsyncClient) -> List[dict]:
     """真实穿透提取 Chromium 全量 CookieJar"""
-    # 策略 1: 优先从活跃 Page 端点抓取
+    local_base = await get_local_cdp_base()
+
+    # 策略 1: 优先从活跃 Page 端点抓取 (全量 CookieJar)
     try:
-        list_res = await http_client.get(f"{LOCAL_CDP_HTTP}/json/list", timeout=3.0)
+        list_res = await http_client.get(f"{local_base}/json/list", timeout=3.0)
         pages = [t for t in list_res.json() if t.get("type") == "page" and "webSocketDebuggerUrl" in t]
         if pages:
             page_ws_url = pages[0]["webSocketDebuggerUrl"]
@@ -176,12 +196,12 @@ async def extract_all_cookies(http_client: httpx.AsyncClient) -> List[dict]:
                 cookies_p = res_page.get("cookies", [])
                 if cookies_p:
                     return cookies_p
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"⚠️ [CDP 探针] 策略 1 (Page 端点) 未捕获到 Cookie: {e}", flush=True)
 
     # 策略 2: 兜底从主端点 /json/version 抓取
     try:
-        ver_res = await http_client.get(f"{LOCAL_CDP_HTTP}/json/version", timeout=3.0)
+        ver_res = await http_client.get(f"{local_base}/json/version", timeout=3.0)
         ws_url = ver_res.json()["webSocketDebuggerUrl"]
         async with websockets.connect(ws_url, timeout=5.0) as ws:
             await send_cdp_json_command(ws, "Network.enable", req_id=101)
@@ -193,8 +213,8 @@ async def extract_all_cookies(http_client: httpx.AsyncClient) -> List[dict]:
             cookies_s = res_storage.get("cookies", [])
             if cookies_s:
                 return cookies_s
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"⚠️ [CDP 探针] 策略 2 (Version 端点) 未捕获到 Cookie: {e}", flush=True)
 
     return []
 
@@ -222,9 +242,10 @@ async def handle_cdp_command(ws, http_client: httpx.AsyncClient, cmd_text: str):
     elif action == "inject_cookies":
         to_inject = payload.get("cookies", [])
         try:
+            local_base = await get_local_cdp_base()
             target_ws = None
             try:
-                list_res = await http_client.get(f"{LOCAL_CDP_HTTP}/json/list", timeout=3.0)
+                list_res = await http_client.get(f"{local_base}/json/list", timeout=3.0)
                 targets = list_res.json()
                 page_targets = [t for t in targets if t.get("type") == "page" and "webSocketDebuggerUrl" in t]
                 if page_targets:
@@ -233,7 +254,7 @@ async def handle_cdp_command(ws, http_client: httpx.AsyncClient, cmd_text: str):
                 pass
 
             if not target_ws:
-                ver_res = await http_client.get(f"{LOCAL_CDP_HTTP}/json/version", timeout=3.0)
+                ver_res = await http_client.get(f"{local_base}/json/version", timeout=3.0)
                 target_ws = ver_res.json()["webSocketDebuggerUrl"]
 
             async with websockets.connect(target_ws, timeout=8.0) as cdp_ws:
@@ -249,7 +270,8 @@ async def handle_cdp_command(ws, http_client: httpx.AsyncClient, cmd_text: str):
 
     elif action == "get_version":
         try:
-            res = await http_client.get(f"{LOCAL_CDP_HTTP}/json/version", timeout=3.0)
+            local_base = await get_local_cdp_base()
+            res = await http_client.get(f"{local_base}/json/version", timeout=3.0)
             await ws.send(json.dumps({"req_id": req_id, "status": "ok", "version": res.json()}))
         except Exception as e:
             await ws.send(json.dumps({"req_id": req_id, "status": "error", "message": str(e)}))
@@ -325,7 +347,6 @@ async def run_tunnel_client(tunnel_url: str, headers: dict, handshake_payload: d
                         if '"status":"approved"' in msg_text or '"status": "approved"' in msg_text:
                             print("✨ [TOFU 审核通过] 管理员已在后台批准该节点，正式激活业务通信！", flush=True)
                             continue
-                        # 忽略心跳回包 pong
                         if msg_text == "pong" or '"type":"pong"' in msg_text:
                             continue
                         asyncio.create_task(handle_cdp_command(ws, http_client, msg_text))
@@ -384,14 +405,15 @@ def main():
             print(f"🛡️ [Smart Check] 探测确认：无法通过 {detected_ip}:{ext_direct_port} 直连 (处于 NAT4/防火墙拦截)")
             print("   -> 自动无感切换为【NAT4 出站反向长连接穿透模式】！", flush=True)
 
-    # 预先等待 Chromium 9222 完全就绪
+    # 预先等待 Chromium 内部 9222 端口完全就绪
     async def _wait_cdp_ready():
         async with httpx.AsyncClient(timeout=2.0) as client:
             for _ in range(15):
                 try:
-                    res = await client.get(f"{LOCAL_CDP_HTTP}/json/version")
+                    local_url = await get_local_cdp_base()
+                    res = await client.get(f"{local_url}/json/version")
                     if res.status_code == 200:
-                        print("✅ [CDP Ready] 本地 Chromium 调试端口已就绪！", flush=True)
+                        print(f"✅ [CDP Ready] 本地 Chromium 调试端口已就绪 ({local_url})！", flush=True)
                         return
                 except Exception:
                     pass
