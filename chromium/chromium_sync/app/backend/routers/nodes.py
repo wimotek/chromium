@@ -16,7 +16,7 @@ from core.security import verify_token
 from services.tunnel_manager import tunnel_mgr, REVERSE_TUNNEL_POOL
 from services.cdp_engine import fetch_cookies_native, probe_node_cookies
 
-# ==================== wimotek-edge-agent 安全套件导入与自愈降级 ====================
+# ==================== 安全套件导入与降级 ====================
 try:
     from wimotek_edge_agent import (
         AccessDecision,
@@ -33,7 +33,7 @@ except ImportError:
 router = APIRouter(tags=["节点管理与边缘接入"])
 
 def _issue_join_token() -> str:
-    """生成标准紧凑型高熵通行码 (约 40 字符，工整美观，绝不撑破排版)"""
+    """生成标准紧凑型高熵通行码 (约 40 字符)"""
     return "hub_join_" + secrets.token_urlsafe(24)
 
 def _append_audit_log(event: str, **kwargs):
@@ -48,6 +48,14 @@ def _append_audit_log(event: str, **kwargs):
         os.makedirs(os.path.dirname(audit_path), exist_ok=True)
         with open(audit_path, "a", encoding="utf-8") as f:
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+
+def _ensure_db_schema_migrated(conn):
+    """自愈函数：确保 nodes 表拥有 fingerprint 等最新字段"""
+    try:
+        conn.execute("ALTER TABLE nodes ADD COLUMN fingerprint TEXT DEFAULT ''")
+        conn.commit()
     except Exception:
         pass
 
@@ -74,6 +82,7 @@ def list_nodes(user: dict = Depends(verify_token)):
     conn = get_db_connection()
     conn.row_factory = sqlite3.Row
     cur = conn.cursor()
+    _ensure_db_schema_migrated(conn)
     cur.execute("SELECT * FROM nodes ORDER BY approval_status ASC, id DESC")
     rows = [dict(r) for r in cur.fetchall()]
     conn.close()
@@ -96,6 +105,7 @@ def create_node(data: dict, user: dict = Depends(verify_token)):
     conn_type = "direct" if is_local else "ssh"
 
     conn = get_db_connection()
+    _ensure_db_schema_migrated(conn)
     cur = conn.cursor()
     cur.execute('''INSERT INTO nodes (
         name, group_name, enabled, approval_status, conn_type, node_uuid, fingerprint, is_source, is_local, direct_host,
@@ -125,6 +135,7 @@ async def update_node(node_id: int, data: dict, user: dict = Depends(verify_toke
     grp_name = (data.get('group_name') or '默认分组').strip()
 
     conn = get_db_connection()
+    _ensure_db_schema_migrated(conn)
     conn.row_factory = sqlite3.Row
     cur = conn.cursor()
     cur.execute("SELECT conn_type FROM nodes WHERE id=?", (node_id,))
@@ -173,7 +184,7 @@ def delete_node(node_id: int, user: dict = Depends(verify_token)):
 # ==================== 3. TOFU 认领、拒绝与 Token 重置 ====================
 @router.post("/api/nodes/{node_id}/approve")
 async def approve_node(node_id: int, user: dict = Depends(verify_token)):
-    """管理员点击 [认领并信任]，下发 approved 指令解锁通信"""
+    """管理员在后台点击 [认领并信任]"""
     conn = get_db_connection()
     conn.row_factory = sqlite3.Row
     cur = conn.cursor()
@@ -188,7 +199,7 @@ async def approve_node(node_id: int, user: dict = Depends(verify_token)):
     node = dict(node_row)
     conn.close()
 
-    # 向长连接通道推送 approved 指令，唤醒边缘 Agent
+    # 向长连接通道推送 approved 指令
     session = tunnel_mgr.get_reverse_session(node_id)
     if session:
         await session.send_raw_json({
@@ -197,7 +208,6 @@ async def approve_node(node_id: int, user: dict = Depends(verify_token)):
             "network_profile": "nat4_reverse"
         })
 
-    # 记录审计日志
     _append_audit_log(
         "node_approved",
         node_uuid=node.get("node_uuid") or node.get("name"),
@@ -225,18 +235,13 @@ async def reject_node(node_id: int, user: dict = Depends(verify_token)):
     conn.commit()
     conn.close()
 
-    # 记录审计日志
     if node:
-        _append_audit_log(
-            "node_revoked",
-            node_uuid=node.get("node_uuid") or node.get("name")
-        )
+        _append_audit_log("node_revoked", node_uuid=node.get("node_uuid") or node.get("name"))
 
     return {"message": "已拒绝并清除该待审节点"}
 
 @router.post("/api/nodes/reset-join-token")
 def reset_join_token(user: dict = Depends(verify_token)):
-    """一键重置集群入网通行码 (约 40 字符紧凑标准)"""
     new_token = _issue_join_token()
     set_setting('cluster_join_token', new_token)
     return {"message": "集群入网通行码已重置", "join_token": new_token}
@@ -294,6 +299,7 @@ async def http_auto_register_node(
     grp_name = data.group_name.strip() or "默认分组"
 
     conn = get_db_connection()
+    _ensure_db_schema_migrated(conn)
     conn.row_factory = sqlite3.Row
     cur = conn.cursor()
     cur.execute("SELECT id, approval_status FROM nodes WHERE node_uuid=?", (data.node_uuid,))
@@ -318,7 +324,6 @@ async def http_auto_register_node(
     conn.commit()
     conn.close()
 
-    # 写入准入审计日志
     _append_audit_log(
         "access_decision",
         node_uuid=data.node_uuid,
@@ -365,11 +370,17 @@ async def reverse_tunnel_endpoint(
     name: Optional[str] = Query(None),
     group: Optional[str] = Query(None),
     token: Optional[str] = Query(None),
-    port: int = Query(9222)
+    port: Optional[int] = Query(None)
 ):
     await websocket.accept()
 
-    # 1. 函数体内部：优先从 HTTP Headers 提取凭据并解码还原中文 (TLS全加密，绝不写进URL日志)
+    # 1. 核心修复：优先从 Header 取端口，防止 Query(9222) 覆盖 DIRECT_PORT=3030
+    header_port_str = websocket.headers.get("x-cdp-port")
+    try:
+        cdp_port = int(header_port_str) if header_port_str else (port or 9222)
+    except Exception:
+        cdp_port = port or 9222
+
     node_uuid = (
         websocket.headers.get("x-node-uuid")
         or uuid
@@ -396,9 +407,7 @@ async def reverse_tunnel_endpoint(
         or group
         or "默认分组"
     )
-    cdp_port = port or int(websocket.headers.get("x-cdp-port", 9222))
 
-    # 兜底：如果 Headers 和 Query 均未携带，接收首帧 JSON (保持向下兼容)
     if not node_uuid:
         try:
             first_msg_raw = await asyncio.wait_for(websocket.receive_text(), timeout=8.0)
@@ -418,12 +427,13 @@ async def reverse_tunnel_endpoint(
     valid_token = get_setting('cluster_join_token')
 
     conn = get_db_connection()
+    _ensure_db_schema_migrated(conn)
     conn.row_factory = sqlite3.Row
     cur = conn.cursor()
     cur.execute("SELECT * FROM nodes WHERE node_uuid=?", (node_uuid,))
     existing_node = cur.fetchone()
 
-    # 准入决策
+    # 准入判定
     if enroll_token and (enroll_token == valid_token or enroll_token.startswith("hub_join_")):
         approved = 1
         status = "connected"
@@ -440,27 +450,32 @@ async def reverse_tunnel_endpoint(
         decision = "pending_tofu"
         reason = "tofu_pending_admin_approval"
 
-    if existing_node:
-        node_id = existing_node["id"]
-        cur.execute("""
-            UPDATE nodes SET conn_type='reverse', local_bind_port=?, status=?, approval_status=?,
-            name=?, group_name=?, fingerprint=? WHERE id=?
-        """, (cdp_port, status, approved, node_name, node_group, node_fp, node_id))
-    else:
-        cur.execute("""
-            INSERT INTO nodes (
-                name, group_name, enabled, approval_status, conn_type, node_uuid, fingerprint,
-                is_source, is_local, direct_host, local_bind_port, status
-            ) VALUES (?, ?, 1, ?, 'reverse', ?, ?, 0, 1, 'reverse-nat4', ?, ?)
-        """, (node_name, node_group, approved, node_uuid, node_fp, cdp_port, status))
-        node_id = cur.lastrowid
+    try:
+        if existing_node:
+            node_id = existing_node["id"]
+            cur.execute("""
+                UPDATE nodes SET conn_type='reverse', local_bind_port=?, status=?, approval_status=?,
+                name=?, group_name=?, fingerprint=? WHERE id=?
+            """, (cdp_port, status, approved, node_name, node_group, node_fp, node_id))
+        else:
+            cur.execute("""
+                INSERT INTO nodes (
+                    name, group_name, enabled, approval_status, conn_type, node_uuid, fingerprint,
+                    is_source, is_local, direct_host, local_bind_port, status
+                ) VALUES (?, ?, 1, ?, 'reverse', ?, ?, 0, 1, 'reverse-nat4', ?, ?)
+            """, (node_name, node_group, approved, node_uuid, node_fp, cdp_port, status))
+            node_id = cur.lastrowid
+        conn.commit()
+    except Exception as db_err:
+        logger.error(f"❌ [DB 错误] 写入节点表失败: {db_err}")
+        conn.close()
+        await websocket.close(code=1011, reason="Database Error")
+        return
 
-    conn.commit()
     conn.close()
 
     session = tunnel_mgr.register_reverse_tunnel(node_id, websocket)
 
-    # 写入准入审计流水
     client_host = websocket.client.host if websocket.client else "unknown"
     _append_audit_log(
         "access_decision",
@@ -472,21 +487,20 @@ async def reverse_tunnel_endpoint(
         network_profile="nat4_reverse"
     )
 
-    # 立即响应握手状态，唤醒客户端
     if approved == 1:
         await session.send_raw_json({
             "status": "ok",
             "decision": decision,
             "network_profile": "nat4_reverse"
         })
-        logger.info(f"✅ [反向隧道打通] 节点 [{node_name}] (ID: {node_id}) 认证放行！")
+        logger.info(f"✅ [反向隧道打通] 节点 [{node_name}] (ID: {node_id}, 端口: {cdp_port}) 认证放行！")
     else:
         await session.send_raw_json({
             "status": "pending_tofu",
             "reason": "tofu_pending_admin_approval",
             "network_profile": "nat4_reverse"
         })
-        logger.info(f"🔔 [TOFU 发现新节点] {node_name} (UUID: {node_uuid}) 进入待审隔离队列...")
+        logger.info(f"🔔 [TOFU 发现新节点] {node_name} (UUID: {node_uuid}, 端口: {cdp_port}) 进入待审隔离队列...")
 
     try:
         while True:

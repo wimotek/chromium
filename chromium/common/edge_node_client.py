@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """
-Wimotek Edge Node Client Runner (纯净节点端，绝无 FastAPI 依赖)
-1. 强制无缓冲：开启 sys.stdout 实时行缓冲，杜绝 Docker 日志滞后；
-2. ASCII Header 加固：对中文名称与分组使用 quote() 编码，根除 UnicodeEncodeError；
-3. 拨号透出：显式拦截并打印所有网络错误，杜绝静默吞错；
-4. 端口解耦：内部直连 127.0.0.1:9222，与宿主机本地调试 socat 9223 严格物理隔离。
+Wimotek Edge Node Client Runner (生产防死锁终极版)
+- 强制无缓冲输出
+- ASCII Header 加固 (quote 中文)
+- DIRECT_PORT 完整透出展示
 """
 
 import os
@@ -29,13 +28,11 @@ import websockets
 from wimotek_edge_agent import Config, EdgeAgent
 from wimotek_edge_agent.transport import JsonLineTransport, TunnelDialer
 
-# 容器内部原生直连端口
 CDP_PORT = int(os.getenv("CDP_PORT", "9222"))
 LOCAL_CDP_HTTP = f"http://127.0.0.1:{CDP_PORT}"
 
 
 def ensure_identity(data_dir: Path) -> Tuple[str, str]:
-    """持久化 UUID 与公钥指纹生成机制"""
     data_dir.mkdir(parents=True, exist_ok=True)
     id_file = data_dir / ".edge_identity.json"
     env_name = os.getenv("NODE_NAME", "").strip()
@@ -85,7 +82,6 @@ def ensure_identity(data_dir: Path) -> Tuple[str, str]:
 
 
 def parse_reverse_tunnel_mode() -> Optional[bool]:
-    """解析运行模式: None (智能) | True (穿透) | False (直连)"""
     val = os.getenv("REVERSE_TUNNEL")
     if val is None:
         val = os.getenv("EDGE_AGENT_REVERSE_TUNNEL")
@@ -103,7 +99,6 @@ def parse_reverse_tunnel_mode() -> Optional[bool]:
 
 
 async def check_hub_can_reach_me(hub_url: str, cdp_port: int = 9222) -> Tuple[bool, str, int]:
-    """回声探针：检测 Hub 是否能直接连入"""
     detect_api = f"{hub_url}/api/nodes/detect-mode?cdp_port={cdp_port}"
     async with httpx.AsyncClient(verify=False, timeout=3.5) as client:
         try:
@@ -121,7 +116,6 @@ async def check_hub_can_reach_me(hub_url: str, cdp_port: int = 9222) -> Tuple[bo
 
 
 async def execute_http_auto_register(hub_url: str, node_uuid: str, cdp_port: int = 9222):
-    """直连登记模式"""
     api_url = f"{hub_url}/api/nodes/auto-register"
     join_token = os.getenv("JOIN_TOKEN", "").strip()
     node_name = os.getenv("NODE_NAME", "").strip() or node_uuid
@@ -148,7 +142,6 @@ async def execute_http_auto_register(hub_url: str, node_uuid: str, cdp_port: int
 
 
 class RobustSyncStreamWriter:
-    """可靠的 WebSocket StreamWriter 包装器"""
     def __init__(self, ws):
         self.ws = ws
         self._pending_buffer = []
@@ -174,7 +167,6 @@ class RobustSyncStreamWriter:
 
 
 class CrossVersionHeaderDialer:
-    """全版本兼容的请求头反向隧道拨号器"""
     def __init__(self, headers: dict):
         self.headers = headers
 
@@ -220,7 +212,6 @@ class CrossVersionHeaderDialer:
 
 
 async def cdp_data_handler(transport: JsonLineTransport, ctx):
-    """业务指令处理器"""
     print("✨ [Edge Bridge] 反向数据通道全双工激活，就地接管 127.0.0.1:9222 业务指令！", flush=True)
     async with httpx.AsyncClient(timeout=4.0) as client:
         while True:
@@ -233,7 +224,6 @@ async def cdp_data_handler(transport: JsonLineTransport, ctx):
             req_id = cmd.get("req_id")
             payload = cmd.get("payload", {})
 
-            # 1. 抓取 Cookies
             if action == "fetch_cookies":
                 try:
                     ver_res = await client.get(f"{LOCAL_CDP_HTTP}/json/version")
@@ -246,7 +236,6 @@ async def cdp_data_handler(transport: JsonLineTransport, ctx):
                 except Exception as e:
                     await transport.write_message({"req_id": req_id, "status": "error", "message": str(e)})
 
-            # 2. 注入 Cookies
             elif action == "inject_cookies":
                 to_inject = payload.get("cookies", [])
                 try:
@@ -286,11 +275,9 @@ async def cdp_data_handler(transport: JsonLineTransport, ctx):
                 except Exception as e:
                     await transport.write_message({"req_id": req_id, "status": "error", "message": str(e)})
 
-            # 3. 清理 Cookies
             elif action == "purge_cookies":
                 await transport.write_message({"req_id": req_id, "status": "ok", "purged_count": 0})
 
-            # 4. 获取版本
             elif action == "get_version":
                 try:
                     res = await client.get(f"{LOCAL_CDP_HTTP}/json/version")
@@ -298,7 +285,6 @@ async def cdp_data_handler(transport: JsonLineTransport, ctx):
                 except Exception as e:
                     await transport.write_message({"req_id": req_id, "status": "error", "message": str(e)})
 
-            # 5. 心跳
             elif cmd.get("type") == "ping" or action == "ping":
                 await transport.write_message({"type": "pong"})
 
@@ -315,25 +301,23 @@ def main():
     node_name = os.getenv("NODE_NAME", "").strip() or node_uuid
     group_name = os.getenv("NODE_GROUP", "默认分组").strip()
 
+    # 关键加固：读取 DIRECT_PORT 并显式打印
     ext_direct_port = int(
         os.getenv("DIRECT_PORT") or os.getenv("EXTERNAL_PORT") or os.getenv("CDP_PORT") or 9222
     )
 
     tunnel_mode: Optional[bool] = parse_reverse_tunnel_mode()
 
-    # 1. 强制直连模式
     if tunnel_mode is False:
         print(f"⚙️ [Edge Mode] reverse_tunnel=False ➔ 【强制直连模式 (目标端口: {ext_direct_port})】", flush=True)
         asyncio.run(execute_http_auto_register(hub_url, node_uuid, cdp_port=ext_direct_port))
         return
 
-    # 2. 强制穿透模式
     elif tunnel_mode is True:
-        print("⚙️ [Edge Mode] reverse_tunnel=True ➔ 【强制反向穿透模式】(跳过网络探测)", flush=True)
+        print(f"⚙️ [Edge Mode] reverse_tunnel=True ➔ 【强制反向穿透模式】(跳过网络探测 | 携带直连端口: {ext_direct_port})", flush=True)
 
-    # 3. 智能自适应模式
     else:
-        print(f"🧠 [Edge Mode] reverse_tunnel=None ➔ 【智能自适应模式 (探测目标端口: {ext_direct_port})】...", flush=True)
+        print(f"🧠 [Edge Mode] reverse_tunnel=None ➔ 【智能自适应模式 (探测外部端口: {ext_direct_port})】...", flush=True)
         can_direct, detected_ip, rec_port = asyncio.run(
             check_hub_can_reach_me(hub_url, cdp_port=ext_direct_port)
         )
@@ -347,7 +331,7 @@ def main():
             print(f"🛡️ [Smart Check] 探测确认：无法通过 {detected_ip}:{ext_direct_port} 直连 (处于 NAT4/防火墙拦截)", flush=True)
             print("   -> 自动无感切换为【NAT4 出站反向长连接穿透模式】！", flush=True)
 
-    # 核心：使用 quote 编码中文，防止 Latin-1 编码崩溃
+    # 组装安全 Header (携带 3030 端口，且对中文 quote 转义)
     headers = {
         "X-Node-UUID": node_uuid,
         "X-Node-Fingerprint": fingerprint,
@@ -379,6 +363,7 @@ def main():
     print(f"🚀 [Edge Client] 出站反向隧道启动 -> 目标: {tunnel_url}", flush=True)
     print(f"   -> 节点标识 (UUID): {node_uuid}", flush=True)
     print(f"   -> 证书指纹 (FP)  : {fingerprint}", flush=True)
+    print(f"   -> 申报直连端口   : {ext_direct_port}", flush=True)
     print(f"   -> 本地 Chromium : {LOCAL_CDP_HTTP} (原生 9222 直连)", flush=True)
     print(f"   -> 鉴权安全级别  : Headers 加密传输 (零 URL 日志泄漏)", flush=True)
 
