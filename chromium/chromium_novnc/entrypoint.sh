@@ -2,16 +2,21 @@
 set -e
 
 # ==============================================================================
-# 阶段 1：Root 权限自愈与宝塔证书安全合成 (绝对不触碰宿主机 /certs 权限)
+# 阶段 1：Root 权限自愈、首页硬链接与宝塔证书安全合成 (绝对不触碰宿主机 /certs)
 # ==============================================================================
 if [ "$(id -u)" = "0" ]; then
-    echo "[Init] (Root阶段) 正在执行权限自愈与宝塔证书挂载扫描..."
-    mkdir -p /tmp/.X11-unix /data /etc/ssl/app /tmp/crashpad /home/appuser/.vnc
+    echo "[Init] (Root阶段) 正在执行权限自愈、noVNC首页硬链接与证书扫描..."
+    mkdir -p /tmp/.X11-unix /data /etc/ssl/app /tmp/crashpad /home/appuser/.vnc /usr/share/novnc
     chmod 1777 /tmp /tmp/.X11-unix /tmp/crashpad
 
     rm -rf /tmp/.X0-lock /tmp/.X11-unix/X0 /data/SingletonLock /data/SingletonCookie /data/SingletonSocket
 
-    # 1. 扫描宿主机挂载的证书 (支持宝塔、Certbot 等各种命名规则)
+    # 1. 核心修复：建立 index.html 物理硬链接，彻底杜绝 Directory listing for /
+    if [ -f "/usr/share/novnc/vnc.html" ]; then
+        ln -f /usr/share/novnc/vnc.html /usr/share/novnc/index.html
+    fi
+
+    # 2. 扫描宿主机挂载的证书 (支持宝塔、Certbot 等格式)
     CERTS_DIR="/certs"
     SSL_OUT_DIR="/etc/ssl/app"
     CERT_FILE=""
@@ -56,7 +61,7 @@ if [ "$(id -u)" = "0" ]; then
         fi
     fi
 
-    # 核心安全准则：只对容器自有的 /data 和 /etc/ssl/app 过户，绝对不 chown 宿主机的 /certs
+    # 隔离权限过户：绝对不触碰宿主机 /certs
     chown -R appuser:appuser /data /home/appuser "$SSL_OUT_DIR" /opt/venv 2>/dev/null || true
     chmod 600 "$SSL_OUT_DIR/novnc.pem" 2>/dev/null || true
 
@@ -112,13 +117,13 @@ fi
 # 4. 启动窗口管理器 Openbox
 openbox &
 
-# 5. 【双端口启动】：同时启动 HTTP:6080 与 HTTPS:6443
+# 5. 【双端口启动】：同时启动 HTTP:6080 与 HTTPS:6443 (显式挂载 --web 网页根目录)
 # 5.1 启动 HTTP 端口 (6080)
-/usr/share/novnc/utils/novnc_proxy --vnc 127.0.0.1:5900 --listen 6080 &
+/usr/share/novnc/utils/novnc_proxy --vnc 127.0.0.1:5900 --listen 6080 --web /usr/share/novnc &
 
 # 5.2 启动 HTTPS 端口 (6443, 挂载宝塔证书 / 自签证书)
 if [ -f "$FINAL_PEM" ]; then
-    /usr/share/novnc/utils/novnc_proxy --vnc 127.0.0.1:5900 --listen 6443 --cert "$FINAL_PEM" &
+    /usr/share/novnc/utils/novnc_proxy --vnc 127.0.0.1:5900 --listen 6443 --cert "$FINAL_PEM" --web /usr/share/novnc &
 fi
 
 # 6. 【本地调试备用通道】：socat 监听 9223 转发至原生 9222

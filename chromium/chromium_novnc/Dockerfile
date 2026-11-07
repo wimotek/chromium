@@ -47,7 +47,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/* \
     && useradd -m -u 1000 -s /bin/bash appuser \
     && mkdir -p /data /certs /etc/ssl/app /tmp/crashpad /home/appuser/.vnc /usr/share/novnc \
-    && chown -R appuser:appuser /data /certs /etc/ssl/app /tmp/crashpad /home/appuser /opt/venv
+    && chown -R appuser:appuser /data /certs /etc/ssl/app /tmp/crashpad /home/appuser /opt/venv \
+    && ln -f /usr/share/novnc/vnc.html /usr/share/novnc/index.html
 
 COPY --chmod=755 entrypoint.sh /entrypoint.sh
 COPY --chmod=755 edge_node_client.py /opt/edge_node_client.py
