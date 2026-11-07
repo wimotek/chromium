@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-Wimotek Edge Node Client Runner (精准提取加固版)
-1. 稳健 CDP 调用：严格过滤 CDP 异步事件，通过 Network.enable + Network.getAllCookies 真实抓取 CookieJar；
-2. 开机就绪等待：开机先探测 127.0.0.1:9222 是否就绪，杜绝竞争空响应；
+Wimotek Edge Node Client Runner (稳定保活与真实全量 CookieJar 提取版)
+1. 真实全量提取：通过 Network.enable + Network.getAllCookies 真实导出全量 CookieJar；
+2. 异步事件过滤：过滤掉 CDP 内部异步事件噪音，精确匹配请求 ID 响应；
 3. 通道解耦隔离：内部原生直连 9222，本地调试 socat 9223 严格物理隔离。
 """
 
@@ -27,7 +27,7 @@ import websockets
 
 from wimotek_edge_agent import Config, EdgeAgent
 
-# 容器内部原生直连端口 (绝不过 socat)
+# 容器内部原生直连端口
 CDP_PORT = int(os.getenv("CDP_PORT", "9222"))
 LOCAL_CDP_HTTP = f"http://127.0.0.1:{CDP_PORT}"
 
@@ -141,8 +141,8 @@ async def execute_http_auto_register(hub_url: str, node_uuid: str, cdp_port: int
             print(f"❌ [Direct Register] 直连登记受阻: {e}", flush=True)
 
 
-async def send_cdp_command_and_wait(ws, method: str, params: dict = None, req_id: int = 1) -> dict:
-    """带 ID 匹配的安全 CDP 指令调用器 (自动滤除异步事件噪音)"""
+async def send_cdp_json_command(ws, method: str, params: dict = None, req_id: int = 1) -> dict:
+    """发送 CDP 命令并过滤匹配 ID 响应 (忽略异步事件噪音)"""
     msg = {"id": req_id, "method": method}
     if params:
         msg["params"] = params
@@ -158,40 +158,37 @@ async def send_cdp_command_and_wait(ws, method: str, params: dict = None, req_id
 
 
 async def extract_all_cookies_from_chromium(http_client: httpx.AsyncClient) -> List[dict]:
-    """真实穿透提取 Chromium 全量 CookieJar"""
-    # 策略 1: 优先从主调试端点 /json/version 抓取
-    try:
-        ver_res = await http_client.get(f"{LOCAL_CDP_HTTP}/json/version", timeout=3.0)
-        ws_url = ver_res.json()["webSocketDebuggerUrl"]
-        async with websockets.connect(ws_url, timeout=5.0) as ws:
-            # 1. 激活 Network
-            await send_cdp_command_and_wait(ws, "Network.enable", req_id=101)
-            # 2. 调用 Network.getAllCookies 导出全量凭证
-            res_all = await send_cdp_command_and_wait(ws, "Network.getAllCookies", req_id=102)
-            cookies = res_all.get("cookies", [])
-            if cookies:
-                return cookies
-
-            # 3. 兜底 Storage.getCookies
-            res_storage = await send_cdp_command_and_wait(ws, "Storage.getCookies", req_id=103)
-            cookies_s = res_storage.get("cookies", [])
-            if cookies_s:
-                return cookies_s
-    except Exception:
-        pass
-
-    # 策略 2: 降级尝试从活跃 Page 页面端点 /json/list 抓取
+    """通过 Network.enable + Network.getAllCookies 真实导出全量 CookieJar"""
+    # 策略 1: 优先从活跃 Page 页面端点抓取 (最具实效性)
     try:
         list_res = await http_client.get(f"{LOCAL_CDP_HTTP}/json/list", timeout=3.0)
         pages = [t for t in list_res.json() if t.get("type") == "page" and "webSocketDebuggerUrl" in t]
         if pages:
             page_ws_url = pages[0]["webSocketDebuggerUrl"]
             async with websockets.connect(page_ws_url, timeout=5.0) as page_ws:
-                await send_cdp_command_and_wait(page_ws, "Network.enable", req_id=201)
-                res_page = await send_cdp_command_and_wait(page_ws, "Network.getAllCookies", req_id=202)
+                await send_cdp_json_command(page_ws, "Network.enable", req_id=201)
+                res_page = await send_cdp_json_command(page_ws, "Network.getAllCookies", req_id=202)
                 cookies_p = res_page.get("cookies", [])
                 if cookies_p:
                     return cookies_p
+    except Exception:
+        pass
+
+    # 策略 2: 兜底从主调试端点 /json/version 抓取
+    try:
+        ver_res = await http_client.get(f"{LOCAL_CDP_HTTP}/json/version", timeout=3.0)
+        ws_url = ver_res.json()["webSocketDebuggerUrl"]
+        async with websockets.connect(ws_url, timeout=5.0) as ws:
+            await send_cdp_json_command(ws, "Network.enable", req_id=101)
+            res_all = await send_cdp_json_command(ws, "Network.getAllCookies", req_id=102)
+            cookies = res_all.get("cookies", [])
+            if cookies:
+                return cookies
+
+            res_storage = await send_cdp_json_command(ws, "Storage.getCookies", req_id=103)
+            cookies_s = res_storage.get("cookies", [])
+            if cookies_s:
+                return cookies_s
     except Exception:
         pass
 
@@ -236,8 +233,8 @@ async def handle_cdp_command(ws, http_client: httpx.AsyncClient, cmd_text: str):
                 target_ws = ver_res.json()["webSocketDebuggerUrl"]
 
             async with websockets.connect(target_ws, timeout=8.0) as cdp_ws:
-                await send_cdp_command_and_wait(cdp_ws, "Network.enable", req_id=301)
-                await send_cdp_command_and_wait(cdp_ws, "Network.setCookies", {"cookies": to_inject}, req_id=302)
+                await send_cdp_json_command(cdp_ws, "Network.enable", req_id=301)
+                await send_cdp_json_command(cdp_ws, "Network.setCookies", {"cookies": to_inject}, req_id=302)
 
             await ws.send(json.dumps({"req_id": req_id, "status": "ok", "injected_count": len(to_inject)}))
         except Exception as e:
@@ -354,7 +351,7 @@ def main():
 
         if can_direct:
             print(f"🎯 [Smart Check] 探测成功！Hub 可直接反向连通本机 ({detected_ip}:{rec_port})")
-            print("   -> 自动判定为直连网络，执行直连注册，不占用 WebSocket 反向连接池。", flush=True)
+            print("   -> 自动判定为直连网络，执行直连注册，不占用 WebSocket 反向连接池。")
             asyncio.run(execute_http_auto_register(hub_url, node_uuid, cdp_port=rec_port))
             return
         else:
