@@ -41,7 +41,29 @@ class NodeAutoRegisterDTO(BaseModel):
     group_name: Optional[str] = "默认分组"
     cdp_port: int = 9222
 
-# ==================== 1. 分组与节点查询 ====================
+class TofuSettingsDTO(BaseModel):
+    tofu_enabled: bool
+    tofu_auto_approve: bool
+    tofu_timeout_notify_minutes: Optional[int] = 10
+
+# ==================== 1. TOFU 准入策略与配置管理 ====================
+@router.get("/api/nodes/tofu-settings", summary="获取 TOFU 准入策略配置")
+def get_tofu_settings(user: dict = Depends(verify_token)):
+    return {
+        "tofu_enabled": get_setting("tofu_enabled", "1") == "1",
+        "tofu_auto_approve": get_setting("tofu_auto_approve", "0") == "1",
+        "tofu_timeout_notify_minutes": int(get_setting("tofu_timeout_notify_minutes", "10"))
+    }
+
+@router.post("/api/nodes/tofu-settings", summary="保存 TOFU 准入策略配置")
+def save_tofu_settings(data: TofuSettingsDTO, user: dict = Depends(verify_token)):
+    set_setting("tofu_enabled", "1" if data.tofu_enabled else "0")
+    set_setting("tofu_auto_approve", "1" if data.tofu_auto_approve else "0")
+    if data.tofu_timeout_notify_minutes is not None:
+        set_setting("tofu_timeout_notify_minutes", str(max(0, data.tofu_timeout_notify_minutes)))
+    return {"message": "TOFU 准入策略已更新"}
+
+# ==================== 2. 分组与节点查询 ====================
 @router.get("/api/node-groups")
 def get_node_groups(user: dict = Depends(verify_token)):
     conn = get_db_connection()
@@ -71,7 +93,7 @@ def list_nodes(user: dict = Depends(verify_token)):
 
     return rows
 
-# ==================== 2. 常规手动节点 CRUD ====================
+# ==================== 3. 常规手动节点 CRUD ====================
 @router.post("/api/nodes")
 def create_node(data: dict, user: dict = Depends(verify_token)):
     is_local = 1 if data.get('is_local') else 0
@@ -118,7 +140,6 @@ async def update_node(node_id: int, data: dict, user: dict = Depends(verify_toke
     name = (data.get('name') or orig_node['name']).strip()
     l_port = int(data.get('local_bind_port') or orig_node['local_bind_port'])
 
-    # 规范锁定：反向长连节点严禁篡改通道与网络类型，只允许修改业务名称、分组与申报端口
     if orig_node["conn_type"] == "reverse":
         cur.execute("""
             UPDATE nodes SET name=?, group_name=?, local_bind_port=? WHERE id=?
@@ -167,7 +188,7 @@ def delete_node(node_id: int, user: dict = Depends(verify_token)):
     conn.close()
     return {"message": "节点已彻底销毁移除"}
 
-# ==================== 3. TOFU 认领、拒绝与 Token 重置 ====================
+# ==================== 4. TOFU 认领、拒绝与 Token 重置 ====================
 @router.post("/api/nodes/{node_id}/approve")
 async def approve_node(node_id: int, user: dict = Depends(verify_token)):
     conn = get_db_connection()
@@ -230,7 +251,7 @@ def reset_join_token(user: dict = Depends(verify_token)):
     set_setting('cluster_join_token', new_token)
     return {"message": "集群入网通行码已重置", "join_token": new_token}
 
-# ==================== 4. 智能回声探测与 HTTP 直连登记 ====================
+# ==================== 5. 智能回声探测与 HTTP 直连登记 ====================
 @router.get("/api/nodes/detect-mode", summary="为边缘节点提供双向回声探活检测")
 async def detect_node_reachability(request: Request, cdp_port: int = Query(9222)):
     client_ip = request.client.host
@@ -266,11 +287,24 @@ async def http_auto_register_node(
     x_join_token: Optional[str] = ReqHeader(None)
 ):
     valid_token = get_setting('cluster_join_token')
+    tofu_enabled = (get_setting("tofu_enabled", "1") == "1")
+    tofu_auto_approve = (get_setting("tofu_auto_approve", "0") == "1")
+
+    # 准入规则判定
     if x_join_token and (x_join_token == valid_token or x_join_token.startswith("hub_join_")):
         approval_status = 1
         status = "connected"
         decision = "allow_token"
         reason = "edge_agent_token_verified"
+    elif not tofu_enabled:
+        # TOFU 开关已关闭，无 Token 直接拒绝
+        raise HTTPException(status_code=403, detail="TOFU 未授权接入功能已关闭，请配置合法 JOIN_TOKEN")
+    elif tofu_auto_approve:
+        # TOFU 开启了自动审批
+        approval_status = 1
+        status = "connected"
+        decision = "allow_token"
+        reason = "tofu_auto_approved"
     else:
         approval_status = 0
         status = "pending_approval"
@@ -325,7 +359,7 @@ async def http_auto_register_node(
         "message": "已自动接入" if approval_status == 1 else "已进入 TOFU 待审核队列"
     }
 
-# ==================== 5. 准入审计日志 API ====================
+# ==================== 6. 准入审计日志 API (查询与一键清空) ====================
 @router.get("/api/nodes/audit-logs", summary="获取零信任准入决策审计流水")
 def get_edge_audit_logs(user: dict = Depends(verify_token)):
     audit_files = ["/data/audit.jsonl", "edge_agent_data/audit.jsonl"]
@@ -343,9 +377,21 @@ def get_edge_audit_logs(user: dict = Depends(verify_token)):
             break
             
     records.sort(key=lambda x: x.get("ts", ""), reverse=True)
-    return records[:50]
+    return records[:100]
 
-# ==================== 6. NAT4 反向 WebSocket 隧道终结点 (固化 reverse-nat4 架构) ====================
+@router.delete("/api/nodes/audit-logs", summary="彻底清空所有准入审计日志")
+def clear_edge_audit_logs(user: dict = Depends(verify_token)):
+    audit_files = ["/data/audit.jsonl", "edge_agent_data/audit.jsonl"]
+    for fp in audit_files:
+        if os.path.exists(fp):
+            try:
+                with open(fp, "w", encoding="utf-8") as f:
+                    f.truncate(0)
+            except Exception:
+                pass
+    return {"message": "准入审计流水已清空"}
+
+# ==================== 7. NAT4 反向 WebSocket 隧道终结点 ====================
 @router.websocket("/api/nodes/reverse-tunnel")
 async def reverse_tunnel_endpoint(
     websocket: WebSocket,
@@ -393,7 +439,6 @@ async def reverse_tunnel_endpoint(
         or "默认分组"
     )
 
-    # 兜底接收首帧 JSON
     if not node_uuid:
         try:
             first_msg_raw = await asyncio.wait_for(websocket.receive_text(), timeout=8.0)
@@ -411,11 +456,14 @@ async def reverse_tunnel_endpoint(
 
     node_name = node_name or f"Edge-{node_uuid[:6]}"
     valid_token = get_setting('cluster_join_token')
+    tofu_enabled = (get_setting("tofu_enabled", "1") == "1")
+    tofu_auto_approve = (get_setting("tofu_auto_approve", "0") == "1")
 
     conn = get_db_connection()
     conn.row_factory = sqlite3.Row
     cur = conn.cursor()
 
+    # 核心准入逻辑判定
     if enroll_token and (enroll_token == valid_token or enroll_token.startswith("hub_join_")):
         approved = 1
         status = "connected"
@@ -429,13 +477,36 @@ async def reverse_tunnel_endpoint(
             status = "connected"
             decision = "allow_session"
             reason = "trusted_session_ticket_verified"
+        elif not tofu_enabled:
+            # TOFU 被禁用：无 Token 的未知设备直接断开拦截
+            decision = "deny"
+            reason = "tofu_access_disabled"
+            client_host = websocket.client.host if websocket.client else "unknown"
+            _append_audit_log(
+                "access_decision",
+                node_uuid=node_uuid,
+                source_ip=client_host,
+                is_loopback=(client_host in ["127.0.0.1", "localhost", "::1"]),
+                decision="deny",
+                reason=reason,
+                network_profile="nat4_reverse"
+            )
+            conn.close()
+            await websocket.close(code=1008, reason="TOFU Access Disabled")
+            logger.warning(f"🚫 [TOFU 拦截] 未知节点 [{node_name}] 无 Token 且 TOFU 已关闭，直接拒绝！")
+            return
+        elif tofu_auto_approve:
+            # TOFU 开启全自动免审放行
+            approved = 1
+            status = "connected"
+            decision = "allow_token"
+            reason = "tofu_auto_approved"
         else:
             approved = 0
             status = "pending_approval"
             decision = "pending_tofu"
             reason = "tofu_pending_admin_approval"
 
-    # 核心回归：固化 direct_host='reverse-nat4' 纯正标志，永不再动态猜测改动
     try:
         cur.execute("SELECT id FROM nodes WHERE node_uuid=?", (node_uuid,))
         existing_row = cur.fetchone()
@@ -488,7 +559,6 @@ async def reverse_tunnel_endpoint(
         })
         logger.info(f"✅ [反向长连接打通] 节点 [{node_name}] (ID: {node_id}, 端口: {cdp_port}) 认证放行！")
         
-        # 核心加固：连接建立 1.2 秒后自动在后台触发全量探活，实时更新 Cookie 数量，杜绝显示 0 条！
         async def _auto_probe_on_connect(nid: int, lport: int):
             try:
                 await asyncio.sleep(1.2)
@@ -532,7 +602,7 @@ async def reverse_tunnel_endpoint(
             except Exception:
                 pass
 
-# ==================== 7. 探针与详情接口 ====================
+# ==================== 8. 探针与详情接口 ====================
 @router.get("/api/nodes/{node_id}/cookie-details")
 async def get_node_cookie_details(node_id: int, user: dict = Depends(verify_token)):
     conn = get_db_connection()

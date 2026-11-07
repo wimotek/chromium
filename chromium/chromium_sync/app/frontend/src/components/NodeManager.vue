@@ -15,9 +15,16 @@ const selectedFilterGroup = ref('')
 const clusterJoinToken = ref('')
 
 // 视图与抽屉状态
-const activeTab = ref('nodes')
-const deployTab = ref('docker')
+const activeTab = ref('nodes') // 'nodes' | 'pending' | 'audit'
+const deployTab = ref('docker') // 'docker' | 'compose'
 const showDeployGuide = ref(false)
+
+// TOFU 准入策略开关模型
+const tofuSettings = reactive({
+  tofu_enabled: true,
+  tofu_auto_approve: false,
+  tofu_timeout_notify_minutes: 10
+})
 
 // 准入审计日志
 const auditLogs = ref([])
@@ -52,21 +59,41 @@ const currentHubUrl = computed(() => {
   return `${window.location.protocol}//${window.location.host}`
 })
 
+// 加载基础数据
 const loadBaseData = async () => {
-  const [nRes, kRes, gRes, rRes] = await Promise.all([
+  const [nRes, kRes, gRes, rRes, tRes] = await Promise.all([
     props.api('/api/nodes'),
     props.api('/api/ssh-keys'),
     props.api('/api/node-groups'),
-    props.api('/api/remote-access')
+    props.api('/api/remote-access'),
+    props.api('/api/nodes/tofu-settings')
   ])
   nodes.value = await nRes.json()
   keys.value = await kRes.json()
   groups.value = await gRes.json()
   const rData = await rRes.json()
   clusterJoinToken.value = rData.cluster_join_token || ''
+  if (tRes.ok) {
+    Object.assign(tofuSettings, await tRes.json())
+  }
   emit('update-nodes')
 }
 
+// 保存 TOFU 开关策略设置
+const updateTofuSettings = async () => {
+  const res = await props.api('/api/nodes/tofu-settings', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(tofuSettings)
+  })
+  if (res.ok) {
+    props.showToast('TOFU 准入策略已实时生效', 'success')
+  } else {
+    props.showToast('更新策略失败', 'error')
+  }
+}
+
+// 加载审计流水
 const loadAuditLogs = async () => {
   const res = await props.api('/api/nodes/audit-logs')
   if (res.ok) {
@@ -74,13 +101,30 @@ const loadAuditLogs = async () => {
   }
 }
 
+// 一键清空审计流水
+const clearAuditLogs = async () => {
+  if (confirm('确认清空所有历史准入审计流水？清空后不可恢复！')) {
+    const res = await props.api('/api/nodes/audit-logs', { method: 'DELETE' })
+    if (res.ok) {
+      props.showToast('准入审计流水已清空', 'success')
+      auditLogs.value = []
+    }
+  }
+}
+
+// 已信任正式节点队列
+const trustedNodes = computed(() => nodes.value.filter(n => n.approval_status === 1))
+
+// 待认领 TOFU 队列
 const pendingNodes = computed(() => nodes.value.filter(n => n.approval_status === 0))
 
+// 正式节点分组过滤
 const filteredNodes = computed(() => {
-  if (!selectedFilterGroup.value) return nodes.value
-  return nodes.value.filter(n => n.group_name === selectedFilterGroup.value)
+  if (!selectedFilterGroup.value) return trustedNodes.value
+  return trustedNodes.value.filter(n => n.group_name === selectedFilterGroup.value)
 })
 
+// 复制通用方法
 const copyText = async (text, desc) => {
   if (!text) return
   try {
@@ -97,6 +141,7 @@ const copyText = async (text, desc) => {
   }
 }
 
+// 重置入网通行码
 const resetJoinToken = async () => {
   if (confirm('确认重置集群入网通行码？旧通行码将立即失效，但已通过审批的节点不受影响。')) {
     const res = await props.api('/api/nodes/reset-join-token', { method: 'POST' })
@@ -106,6 +151,7 @@ const resetJoinToken = async () => {
   }
 }
 
+// 审批认领通过
 const approveNode = async (node) => {
   const res = await props.api(`/api/nodes/${node.id}/approve`, { method: 'POST' })
   const data = await res.json()
@@ -113,6 +159,7 @@ const approveNode = async (node) => {
   loadBaseData()
 }
 
+// 拒绝待审节点
 const rejectNode = async (node) => {
   if (confirm(`确认拒绝并清除待审节点 [${node.name}]？`)) {
     const res = await props.api(`/api/nodes/${node.id}/reject`, { method: 'POST' })
@@ -122,14 +169,27 @@ const rejectNode = async (node) => {
   }
 }
 
+// 一键信任全部待审批节点
 const approveAllPending = async () => {
   for (const n of pendingNodes.value) {
     await props.api(`/api/nodes/${n.id}/approve`, { method: 'POST' })
   }
-  props.showToast(`已信任 ${pendingNodes.value.length} 个节点`, 'success')
+  props.showToast(`已成功信任 ${pendingNodes.value.length} 个节点`, 'success')
   loadBaseData()
 }
 
+// 一键拒绝全部待审批节点
+const rejectAllPending = async () => {
+  if (confirm(`确认一键拒绝并清空全部 ${pendingNodes.value.length} 个待审批节点？`)) {
+    for (const n of pendingNodes.value) {
+      await props.api(`/api/nodes/${n.id}/reject`, { method: 'POST' })
+    }
+    props.showToast('已全部拒绝清理', 'success')
+    loadBaseData()
+  }
+}
+
+// 弹窗表单操作
 const openCreateModal = () => {
   isEditMode.value = false
   editingNodeId.value = null
@@ -251,9 +311,11 @@ onMounted(() => {
 <template>
   <div class="content-full-card">
 
-    <!-- ==================== 1. 入网凭证与一键部署横幅 ==================== -->
+    <!-- ==================== 1. 入网凭证与 TOFU 准入控制横幅 (单行高聚合排版) ==================== -->
     <div class="token-deploy-banner">
       <div class="token-bar-flex">
+        
+        <!-- 左侧：通行码紧凑展示 -->
         <div class="token-left-wrap">
           <div class="token-title-group">
             <span class="token-key-icon">🔑</span>
@@ -264,19 +326,43 @@ onMounted(() => {
             <span class="token-chip-val font-cyan-mono">{{ clusterJoinToken || '正在生成...' }}</span>
             <span class="token-copy-tag">复制</span>
           </div>
-        </div>
-
-        <div class="token-right-wrap">
           <button @click="resetJoinToken" class="btn-micro btn-ghost-red" title="重置入网通行码">
             🔄 重置
           </button>
+        </div>
+
+        <!-- 中间：TOFU 准入控制开关集群 (重点新增) -->
+        <div class="tofu-controls-cluster">
+          <label class="switch-inline-label" title="开启后允许未配置 Token 的新设备上报进入待审队列">
+            <input type="checkbox" v-model="tofuSettings.tofu_enabled" @change="updateTofuSettings" class="check-box-blue">
+            <span :style="{ color: tofuSettings.tofu_enabled ? '#38bdf8' : '#64748b' }">允许 TOFU 待审接入</span>
+          </label>
+
+          <label 
+            class="switch-inline-label" 
+            :style="{ opacity: tofuSettings.tofu_enabled ? 1 : 0.4, cursor: tofuSettings.tofu_enabled ? 'pointer' : 'not-allowed' }"
+            title="开启后，所有通过 TOFU 上报的无 Token 节点将直接全自动审批放行"
+          >
+            <input 
+              type="checkbox" 
+              v-model="tofuSettings.tofu_auto_approve" 
+              :disabled="!tofuSettings.tofu_enabled"
+              @change="updateTofuSettings" 
+              class="check-box-blue"
+            >
+            <span :style="{ color: tofuSettings.tofu_auto_approve && tofuSettings.tofu_enabled ? '#34d399' : '#64748b' }">自动免审放行</span>
+          </label>
+        </div>
+
+        <!-- 右侧：部署命令抽屉开关 -->
+        <div class="token-right-wrap">
           <button @click="showDeployGuide = !showDeployGuide" class="btn-micro btn-guide-toggle">
             {{ showDeployGuide ? '收起命令 ▲' : '🚀 节点运行命令 ▼' }}
           </button>
         </div>
       </div>
 
-      <!-- 部署代码抽屉 -->
+      <!-- 部署代码折叠抽屉 -->
       <div v-if="showDeployGuide" class="deploy-guide-panel">
         <div style="display:flex; gap:10px; margin-bottom:8px; border-bottom:1px solid #1e3a8a; padding-bottom:6px;">
           <button @click="deployTab = 'docker'" :class="['tab-guide-btn', deployTab === 'docker' ? 'tab-guide-active' : '']">Docker CLI (标准命令)</button>
@@ -317,48 +403,56 @@ services:
       </div>
     </div>
 
-    <!-- ==================== 2. 原版 TOFU 待审批边缘节点提示条 ==================== -->
-    <div v-if="pendingNodes.length > 0" class="tofu-alert-banner">
-      <div class="tofu-banner-left">
-        <span class="tofu-bell-icon">🔔</span>
-        <div>
-          <h4 class="tofu-title-text">TOFU 隔离区正在拦截 {{ pendingNodes.length }} 个未审批边缘节点</h4>
-          <p class="tofu-sub-text">节点当前在独立信道中仅交换心跳（无业务转发）。经管理员核验公钥指纹后方可转为受信任状态。</p>
-        </div>
-      </div>
-      <div class="tofu-banner-actions">
-        <button @click="approveAllPending" class="btn-micro" style="background:#059669;">
-          ⚡ 一键信任全部 ({{ pendingNodes.length }})
-        </button>
-      </div>
-    </div>
-
-    <!-- ==================== 3. 导航药丸切换 ==================== -->
+    <!-- ==================== 2. 三大板块 Tab 导航 (正式节点 / 独立待审批隔离区 / 准入审计) ==================== -->
     <div class="table-header-bar">
-      <div style="display:flex; gap:16px; align-items:center;">
+      <div style="display:flex; gap:12px; align-items:center; flex-wrap:wrap;">
         <button @click="activeTab = 'nodes'" :class="['nav-pill-btn', activeTab === 'nodes' ? 'nav-pill-active' : '']">
-          👥 CDP 节点实例治理列表 ({{ nodes.length }})
+          👥 已受信任节点 ({{ trustedNodes.length }})
         </button>
+
+        <!-- 独立待审批隔离区 Tab (带高亮待办角标) -->
+        <button @click="activeTab = 'pending'" :class="['nav-pill-btn', activeTab === 'pending' ? 'nav-pill-active' : '']" style="position:relative;">
+          ⏳ 待审批隔离区
+          <span v-if="pendingNodes.length > 0" class="badge-pending-counter">{{ pendingNodes.length }}</span>
+        </button>
+
+        <!-- 准入审计日志 Tab -->
         <button @click="activeTab = 'audit'; loadAuditLogs()" :class="['nav-pill-btn', activeTab === 'audit' ? 'nav-pill-active' : '']">
           📜 零信任准入审计日志
         </button>
       </div>
 
+      <!-- Tab 1 右侧操作：正式节点过滤与新增 -->
       <div v-if="activeTab === 'nodes'" style="display:flex; gap:10px; align-items:center;">
         <select v-model="selectedFilterGroup" class="sync-input font-mono" style="width:auto; height:32px; font-size:12px;">
-          <option value="">📂 全部分组 ({{ nodes.length }})</option>
+          <option value="">📂 全部分组 ({{ trustedNodes.length }})</option>
           <option v-for="g in groups" :key="g" :value="g">📁 {{ g }}</option>
         </select>
         <button @click="openCreateModal" class="btn-primary-gradient">+ 新增接入节点</button>
         <button @click="loadBaseData" class="btn-primary-gradient">🔄 刷新</button>
       </div>
 
-      <div v-else>
-        <button @click="loadAuditLogs" class="btn-primary-gradient">🔄 刷新审计流水</button>
+      <!-- Tab 2 右侧操作：待审批专属批量审批操作台 -->
+      <div v-else-if="activeTab === 'pending'" style="display:flex; gap:8px; align-items:center;">
+        <button @click="approveAllPending" :disabled="pendingNodes.length === 0" class="btn-micro" style="background:#059669; padding:6px 12px; height:32px;">
+          ⚡ 一键信任全部 ({{ pendingNodes.length }})
+        </button>
+        <button @click="rejectAllPending" :disabled="pendingNodes.length === 0" class="btn-micro btn-trash" style="padding:6px 12px; height:32px;">
+          ❌ 批量拒绝清理
+        </button>
+        <button @click="loadBaseData" class="btn-primary-gradient">🔄 刷新</button>
+      </div>
+
+      <!-- Tab 3 右侧操作：审计日志刷新与一键清空 -->
+      <div v-else style="display:flex; gap:8px; align-items:center;">
+        <button @click="clearAuditLogs" :disabled="auditLogs.length === 0" class="btn-micro btn-trash" style="padding:6px 12px; height:32px;">
+          🗑️ 清空审计流水
+        </button>
+        <button @click="loadAuditLogs" class="btn-primary-gradient">🔄 刷新审计</button>
       </div>
     </div>
 
-    <!-- ==================== 视图 1：节点治理列表 ==================== -->
+    <!-- ==================== 视图 1：已受信任节点正式列表 ==================== -->
     <div v-if="activeTab === 'nodes'" class="table-responsive">
       <table class="cdp-fluid-table">
         <thead>
@@ -374,7 +468,7 @@ services:
           </tr>
         </thead>
         <tbody>
-          <tr v-for="node in filteredNodes" :key="node.id" :class="[node.enabled === 0 ? 'row-node-disabled' : '', node.approval_status === 0 ? 'row-node-pending' : '']">
+          <tr v-for="node in filteredNodes" :key="node.id" :class="[node.enabled === 0 ? 'row-node-disabled' : '']">
             <td>
               <span class="tag-group-pill">📁 {{ node.group_name || '默认分组' }}</span>
             </td>
@@ -382,8 +476,7 @@ services:
             <td>
               <div class="cell-main-name">
                 {{ node.name }}
-                <span v-if="node.approval_status === 0" style="font-size:10px; color:#fbbf24; margin-left:4px;">[待审核]</span>
-                <span v-else-if="node.enabled === 0" style="font-size:10px; color:#f87171; margin-left:4px;">[已禁用]</span>
+                <span v-if="node.enabled === 0" style="font-size:10px; color:#f87171; margin-left:4px;">[已禁用]</span>
               </div>
               <div class="cell-sub-desc">
                 <span v-if="node.conn_type === 'reverse'">指纹: {{ node.fingerprint ? node.fingerprint.slice(0, 16) + '...' : (node.node_uuid || 'Client') }}</span>
@@ -393,13 +486,11 @@ services:
             </td>
 
             <td>
-              <span v-if="node.approval_status === 0" class="badge-status-pending">⏳ 待审批</span>
-              <span v-else-if="node.enabled === 0" class="status-standby">○ 已禁用</span>
+              <span v-if="node.enabled === 0" class="status-standby">○ 已禁用</span>
               <span v-else-if="node.status === 'connected'" class="badge-status-trusted">● 已信任</span>
               <span v-else class="status-standby">○ 离线</span>
             </td>
 
-            <!-- 端点展示：反向长连接清晰显示其映射端口 -->
             <td class="font-cyan-mono">
               <span v-if="node.conn_type === 'reverse'">Reverse-WSS (:{{ node.local_bind_port }})</span>
               <span v-else>{{ node.is_local ? (node.direct_host || '127.0.0.1') : '127.0.0.1' }}:{{ node.local_bind_port }}</span>
@@ -411,7 +502,6 @@ services:
               </div>
             </td>
 
-            <!-- 网络拓扑：明确区分为 WSS 反向长连、直连、SSH -->
             <td>
               <span v-if="node.conn_type === 'reverse'" class="tag-topo-reverse">WSS 反向长连</span>
               <span v-else-if="node.conn_type === 'ssh'" class="tag-topo-ssh">SSH 穿透</span>
@@ -425,33 +515,92 @@ services:
 
             <td style="text-align: right;">
               <div class="btn-group-row">
-                <template v-if="node.approval_status === 0">
-                  <button @click="approveNode(node)" class="btn-micro" style="background:#059669;">✅ 批准</button>
-                  <button @click="rejectNode(node)" class="btn-micro btn-trash">❌ 拒绝</button>
-                </template>
-                <template v-else>
-                  <button 
-                    @click="toggleNodeEnabled(node)" 
-                    :class="['btn-micro', node.enabled === 0 ? 'btn-resume-node' : 'btn-pause-node']"
-                    :title="node.enabled === 0 ? '点击恢复启用此节点' : '点击禁用此节点'"
-                  >
-                    {{ node.enabled === 0 ? '▶️' : '⏸️' }}
-                  </button>
-                  <button @click="toggleTunnel(node)" :disabled="node.enabled === 0 || node.conn_type === 'reverse'" class="btn-micro btn-orange">
-                    🔑 {{ node.conn_type === 'reverse' ? '长连' : (node.status === 'connected' ? '断开' : '穿透') }}
-                  </button>
-                  <button @click="probeNode(node)" :disabled="node.enabled === 0" class="btn-micro btn-purple">探针</button>
-                  <button @click="openEditModal(node)" class="btn-micro" style="background:#2563eb;">✏️</button>
-                  <button @click="deleteNode(node.id)" class="btn-micro btn-trash">🗑️</button>
-                </template>
+                <button 
+                  @click="toggleNodeEnabled(node)" 
+                  :class="['btn-micro', node.enabled === 0 ? 'btn-resume-node' : 'btn-pause-node']"
+                  :title="node.enabled === 0 ? '点击恢复启用此节点' : '点击禁用此节点'"
+                >
+                  {{ node.enabled === 0 ? '▶️' : '⏸️' }}
+                </button>
+                <button @click="toggleTunnel(node)" :disabled="node.enabled === 0 || node.conn_type === 'reverse'" class="btn-micro btn-orange">
+                  🔑 {{ node.conn_type === 'reverse' ? '长连' : (node.status === 'connected' ? '断开' : '穿透') }}
+                </button>
+                <button @click="probeNode(node)" :disabled="node.enabled === 0" class="btn-micro btn-purple">探针</button>
+                <button @click="openEditModal(node)" class="btn-micro" style="background:#2563eb;">✏️</button>
+                <button @click="deleteNode(node.id)" class="btn-micro btn-trash">🗑️</button>
               </div>
+            </td>
+          </tr>
+          <tr v-if="filteredNodes.length === 0">
+            <td colspan="8" style="text-align:center; color:#64748b; padding:32px;">暂无已信任的正式节点</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <!-- ==================== 视图 2：独立待审批隔离区子卡 (支持大数据量与批量处理) ==================== -->
+    <div v-else-if="activeTab === 'pending'" class="table-responsive">
+      <div v-if="pendingNodes.length > 0" class="pending-workbench-header">
+        <span style="font-size:12px; color:#fbbf24;">
+          ⚠️ 隔离区当前共有 <b>{{ pendingNodes.length }}</b> 个设备等待审核。这些节点在独立信道中仅交换心跳，业务已完全阻断，经核验后方可接入。
+        </span>
+      </div>
+
+      <table class="cdp-fluid-table">
+        <thead>
+          <tr>
+            <th style="width: 22%;">待审节点标识 (UUID / Name)</th>
+            <th style="width: 15%;">准入判定状态</th>
+            <th style="width: 14%;">申报直连端口</th>
+            <th style="width: 24%;">公钥证书指纹 (Fingerprint)</th>
+            <th style="width: 11%;">接入信道</th>
+            <th style="width: 14%; text-align: right;">审批操作</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr v-for="node in pendingNodes" :key="node.id" class="row-node-pending">
+            <td>
+              <div class="cell-main-name" style="color:#fbbf24;">{{ node.name }}</div>
+              <div class="cell-sub-desc">UUID: {{ node.node_uuid }}</div>
+            </td>
+
+            <td>
+              <span class="badge-status-pending">⏳ 待人工审批</span>
+            </td>
+
+            <td class="font-cyan-mono">
+              :{{ node.local_bind_port }}
+            </td>
+
+            <td class="font-cyan-mono" style="font-size:11px;" :title="node.fingerprint">
+              {{ node.fingerprint || '未上报指纹' }}
+            </td>
+
+            <td>
+              <span class="tag-topo-reverse">WSS 隔离通道</span>
+            </td>
+
+            <td style="text-align: right;">
+              <div class="btn-group-row">
+                <button @click="approveNode(node)" class="btn-micro" style="background:#059669; padding:4px 10px;">
+                  ✅ 批准入网
+                </button>
+                <button @click="rejectNode(node)" class="btn-micro btn-trash" style="padding:4px 10px;">
+                  ❌ 拒绝清理
+                </button>
+              </div>
+            </td>
+          </tr>
+          <tr v-if="pendingNodes.length === 0">
+            <td colspan="6" style="text-align:center; color:#34d399; padding:48px;">
+              🎉 待审批隔离区已清空，当前暂无挂起的新接入设备！
             </td>
           </tr>
         </tbody>
       </table>
     </div>
 
-    <!-- ==================== 视图 2：零信任准入审计流水表格 ==================== -->
+    <!-- ==================== 视图 3：零信任准入审计流水表格 (7列标准规范) ==================== -->
     <div v-else class="table-responsive">
       <table class="cdp-fluid-table audit-decision-table">
         <thead>
@@ -500,7 +649,7 @@ services:
       </table>
     </div>
 
-    <!-- ==================== 弹窗：按类别隔离编辑 (反向长连节点通道锁死) ==================== -->
+    <!-- ==================== 弹窗：按类别隔离编辑 (反向长连通道只读锁定) ==================== -->
     <div v-if="showNodeModal" class="modal-backdrop">
       <div class="modal-card">
         <div class="modal-title-bar">
@@ -556,7 +705,7 @@ services:
             </div>
           </div>
 
-          <!-- ==================== 场景 A：WSS 反向长连专属表单 (隐藏伪 IP，通道与指纹锁定) ==================== -->
+          <!-- 场景 A：WSS 反向长连专属表单 (隐藏伪 IP，通道与指纹锁定) -->
           <div v-if="isEditMode && nodeForm.conn_type === 'reverse'" class="form-v-stack">
             <div class="row-flex-gap">
               <div class="form-field-block" style="flex:1;">
@@ -581,7 +730,7 @@ services:
             </div>
           </div>
 
-          <!-- ==================== 场景 B：本地/局域网直连专属表单 ==================== -->
+          <!-- 场景 B：本地/局域网直连专属表单 -->
           <div v-else-if="nodeForm.is_local" style="background:#09122a; padding:12px; border-radius:6px; border:1px solid #172554;">
             <div class="row-flex-gap">
               <div class="form-field-block" style="flex:1;">
@@ -595,7 +744,7 @@ services:
             </div>
           </div>
 
-          <!-- ==================== 场景 C：远程 SSH 隧道专属表单 ==================== -->
+          <!-- 场景 C：远程 SSH 隧道专属表单 -->
           <div v-else class="form-v-stack">
             <div class="row-flex-gap">
               <div class="form-field-block" style="flex:1;">
@@ -704,76 +853,7 @@ services:
 </template>
 
 <style scoped>
-/* ==================== 原版核心专属样式 (全量 100% 恢复保留) ==================== */
-.tofu-alert-banner {
-  background: rgba(217, 119, 6, 0.12);
-  border: 1px solid #d97706;
-  border-radius: 8px;
-  padding: 12px 16px;
-  margin-bottom: 16px;
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: 12px;
-}
-.tofu-banner-left {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-}
-.tofu-bell-icon { font-size: 20px; }
-.tofu-title-text {
-  font-size: 13px;
-  font-weight: bold;
-  color: #fbbf24;
-  margin: 0;
-}
-.tofu-sub-text {
-  font-size: 11px;
-  color: #cbd5e1;
-  margin: 2px 0 0 0;
-}
-
-.tag-group-pill {
-  background: #0f1f42;
-  border: 1px solid #1d4ed8;
-  color: #60a5fa;
-  border-radius: 4px;
-  padding: 2px 8px;
-  font-size: 11px;
-  display: inline-flex;
-  align-items: center;
-  white-space: nowrap;
-}
-
-.row-node-disabled {
-  opacity: 0.55;
-  filter: grayscale(0.8);
-}
-.row-node-pending {
-  background: rgba(217, 119, 6, 0.05);
-}
-
-.btn-pause-node {
-  background-color: #334155 !important;
-  color: #cbd5e1 !important;
-}
-.btn-pause-node:hover {
-  background-color: #475569 !important;
-  color: #fff !important;
-}
-
-.btn-resume-node {
-  background-color: #065f46 !important;
-  color: #34d399 !important;
-  border: 1px solid #059669 !important;
-}
-.btn-resume-node:hover {
-  background-color: #047857 !important;
-  color: #fff !important;
-}
-
-/* ==================== 紧凑 HUD 与拓扑样式 ==================== */
+/* 紧凑型通行码与策略横幅 */
 .token-deploy-banner {
   background: #09122a;
   border: 1px solid #1e3a8a;
@@ -794,7 +874,7 @@ services:
 .token-left-wrap {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: 10px;
   flex-wrap: wrap;
   min-width: 0;
 }
@@ -847,6 +927,32 @@ services:
 .token-compact-chip:hover .token-copy-tag {
   background: #0284c7;
   color: #ffffff;
+}
+
+/* 中间：TOFU 准入开关组件 */
+.tofu-controls-cluster {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  background: #060b17;
+  border: 1px solid #172554;
+  padding: 4px 12px;
+  border-radius: 6px;
+}
+.switch-inline-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 500;
+  user-select: none;
+  cursor: pointer;
+}
+.check-box-blue {
+  width: 14px;
+  height: 14px;
+  accent-color: #0284c7;
+  cursor: pointer;
 }
 
 .token-right-wrap {
@@ -902,6 +1008,7 @@ services:
   overflow-x: auto;
 }
 
+/* 导航药丸切换 */
 .nav-pill-btn {
   background: transparent;
   border: 1px solid #334155;
@@ -911,6 +1018,9 @@ services:
   font-size: 12px;
   cursor: pointer;
   transition: all 0.2s;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
 }
 .nav-pill-active {
   background: #1e3a8a;
@@ -918,8 +1028,31 @@ services:
   color: #ffffff;
   font-weight: bold;
 }
+.badge-pending-counter {
+  background: #d97706;
+  color: #ffffff;
+  font-size: 10px;
+  font-weight: bold;
+  padding: 1px 6px;
+  border-radius: 9999px;
+  animation: pulse 2s infinite;
+}
+@keyframes pulse {
+  0% { transform: scale(1); }
+  50% { transform: scale(1.15); }
+  100% { transform: scale(1); }
+}
 
-/* 准入状态徽章 */
+/* 待审工作台头部 */
+.pending-workbench-header {
+  background: rgba(217, 119, 6, 0.1);
+  border: 1px solid #d97706;
+  border-radius: 6px;
+  padding: 8px 12px;
+  margin-bottom: 12px;
+}
+
+/* 状态徽章 */
 .badge-status-trusted {
   background: rgba(16, 185, 129, 0.15);
   border: 1px solid #059669;
@@ -969,7 +1102,7 @@ services:
   font-size: 11px;
 }
 
-/* 锁定与只读展示容器 */
+/* 锁定与只读容器 */
 .reverse-node-locked-box {
   background: #0f172a;
   border: 1px solid #3b82f6;
@@ -1036,5 +1169,42 @@ services:
   overflow: hidden;
   text-overflow: ellipsis;
   max-width: 260px;
+}
+
+/* 原版继承样式 */
+.tag-group-pill {
+  background: #0f1f42;
+  border: 1px solid #1d4ed8;
+  color: #60a5fa;
+  border-radius: 4px;
+  padding: 2px 8px;
+  font-size: 11px;
+  display: inline-flex;
+  align-items: center;
+  white-space: nowrap;
+}
+.row-node-disabled {
+  opacity: 0.55;
+  filter: grayscale(0.8);
+}
+.row-node-pending {
+  background: rgba(217, 119, 6, 0.05);
+}
+.btn-pause-node {
+  background-color: #334155 !important;
+  color: #cbd5e1 !important;
+}
+.btn-pause-node:hover {
+  background-color: #475569 !important;
+  color: #fff !important;
+}
+.btn-resume-node {
+  background-color: #065f46 !important;
+  color: #34d399 !important;
+  border: 1px solid #059669 !important;
+}
+.btn-resume-node:hover {
+  background-color: #047857 !important;
+  color: #fff !important;
 }
 </style>

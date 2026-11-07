@@ -85,9 +85,7 @@ def init_db_and_jwt():
         details TEXT
     )''')
 
-    # =========================================================================
-    # 【集中式一次性补丁迁移区】：统一扫描老旧数据库并自动补全缺失字段
-    # =========================================================================
+    # 集中式一次性补丁迁移区：自动补全历史数据库缺失字段
     cur.execute("PRAGMA table_info(nodes)")
     existing_node_cols = {col[1] for col in cur.fetchall()}
     
@@ -95,8 +93,8 @@ def init_db_and_jwt():
         ("approval_status", "INTEGER DEFAULT 1"),
         ("conn_type", "TEXT DEFAULT 'direct'"),
         ("node_uuid", "TEXT DEFAULT ''"),
-        ("fingerprint", "TEXT DEFAULT ''"),    # 补齐 edge-agent 指纹字段
-        ("created_at", "TEXT DEFAULT ''"),     # 补齐待审超时计算时间戳
+        ("fingerprint", "TEXT DEFAULT ''"),
+        ("created_at", "TEXT DEFAULT ''"),
         ("enabled", "INTEGER DEFAULT 1"),
         ("group_name", "TEXT DEFAULT '默认分组'"),
         ("direct_host", "TEXT DEFAULT '127.0.0.1'"),
@@ -125,7 +123,6 @@ def init_db_and_jwt():
             except Exception:
                 pass
 
-    # 首次自动补齐默认策略
     cur.execute("SELECT count(*) FROM sync_policies")
     if cur.fetchone()[0] == 0:
         now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -155,7 +152,9 @@ def init_db_and_jwt():
         'email_notify_to': '',
         'serverchan_enabled': '0',
         'serverchan_key': '',
-        'tofu_timeout_notify_minutes': '10',
+        'tofu_enabled': '1',                  # 1: 允许无 Token 的未知设备通过 TOFU 上报接入; 0: 关闭 TOFU
+        'tofu_auto_approve': '0',             # 1: 开启全自动免审放行; 0: 必须人工认领
+        'tofu_timeout_notify_minutes': '10',  # 待审挂起超 10 分钟自动预警
         'sync_diff_enabled': '1',
         'sync_include_domains': '',
         'sync_exclude_domains': 'doubleclick.net,google-analytics.com'
