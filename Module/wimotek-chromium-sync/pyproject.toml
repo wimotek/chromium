@@ -16,8 +16,8 @@ dependencies = [
 ]
 
 [project.scripts]
-chromium-sync = "chromium_sync.cli:main"
+chromium-sync = "wimotek_chromium_sync.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["chromium_sync*"]
+include = ["wimotek_chromium_sync*"]
