@@ -65,7 +65,6 @@ def filter_cookies_by_domains(cookies: List[dict], include_domains: List[str], e
     if not include_domains and not exclude_domains:
         return cookies, 0, 0
 
-    original_len = len(cookies)
     filtered = []
     clean_inc = [inc.lower().lstrip('.') for inc in include_domains if inc.strip()]
     clean_exc = [exc.lower().lstrip('.') for exc in exclude_domains if exc.strip()]
@@ -147,18 +146,8 @@ def smart_merge_cookies(all_cookie_lists: List[List[dict]], max_per_domain: int 
 
     return final_pool, trimmed_count
 
-# ==================== NAT4 反向隧道借道调用核心 ====================
-# 修改 cdp_engine.py 约 134 行起：
-async def send_reverse_tunnel_command(node_id: int, action: str, payload: dict = None, timeout: float = 10.0) -> dict:
-    """借由已打通的 NAT4 反向长连接会话，向边缘 Agent 下发指令并安全截获响应"""
-    from services.tunnel_manager import tunnel_mgr
-    session = tunnel_mgr.get_reverse_session(node_id)
-    if not session or session.is_closed:
-        raise ConnectionError(f"节点 ID:{node_id} 的 NAT4 反向通道未在线")
-
-    return await session.send_command(action, payload=payload, timeout=timeout)
-
 async def resolve_cdp_endpoint(local_port: int, target_host: str = "127.0.0.1", prefer_page: bool = False) -> tuple[str, str]:
+    """直连/SSH 节点专用：探测并解析 CDP WebSocket 调试端点"""
     host_clean = target_host.strip() if target_host else "127.0.0.1"
     if host_clean in ["127.0.0.1", "localhost"]:
         candidate_hosts = ["127.0.0.1", "host.docker.internal", "172.17.0.1"]
@@ -187,42 +176,120 @@ async def resolve_cdp_endpoint(local_port: int, target_host: str = "127.0.0.1", 
                 continue
     raise ConnectionRefusedError(f"无法连通主机 {host_clean}:{local_port} 的 CDP 调试端口")
 
+# ==================== 核心穿透分支：严格区分反向长连与直连 ====================
 async def fetch_cookies_native(local_port: int, target_host: str = "127.0.0.1", node_id: Optional[int] = None) -> List[dict]:
-    """提取 Cookies (支持借道反向隧道或直连)"""
-    # 优先分支：若是 NAT4 反向隧道节点，直接借道反向 WebSocket 提取
-    from services.tunnel_manager import REVERSE_TUNNEL_POOL
-    if node_id and node_id in REVERSE_TUNNEL_POOL:
+    """提取 Cookies：反向节点严格走隧道，彻底杜绝尝试访问 reverse-nat4 伪域名"""
+    from services.tunnel_manager import tunnel_mgr
+
+    # 判定为反向长连节点
+    is_reverse = (target_host in ["reverse-nat4", "reverse"]) or (node_id and tunnel_mgr.get_reverse_session(node_id))
+    if is_reverse:
+        session = tunnel_mgr.get_reverse_session(node_id) if node_id else None
+        if not session or session.is_closed:
+            raise ConnectionRefusedError(f"节点 ID:{node_id} 的 WSS 反向长连接未建立或已离线")
         try:
-            res = await send_reverse_tunnel_command(node_id, "fetch_cookies")
+            res = await session.send_command("fetch_cookies", timeout=8.0)
+            if res.get("status") == "error":
+                raise RuntimeError(res.get("message", "边缘提取失败"))
             return res.get("cookies", [])
         except Exception as e:
-            logger.debug(f"反向隧道抓取 Cookie 异常 (Node {node_id}): {e}")
+            raise ConnectionRefusedError(f"反向长连抓取 Cookie 失败: {e}")
 
+    # 常规直连/SSH 节点分支
     host, ws_url = await resolve_cdp_endpoint(local_port, target_host, prefer_page=False)
     async with websockets.connect(ws_url, timeout=5.0) as ws:
-        await ws.send(json.dumps({"id": 1, "method": "Storage.getCookies"}))
+        await ws.send(json.dumps({"id": 1, "method": "Network.enable"}))
+        await ws.recv()
+        await ws.send(json.dumps({"id": 2, "method": "Network.getAllCookies"}))
         resp = await asyncio.wait_for(ws.recv(), timeout=5.0)
-        data = json.loads(resp)
-        cookies = data.get("result", {}).get("cookies", [])
+        cookies = json.loads(resp).get("result", {}).get("cookies", [])
         if cookies:
             return cookies
 
-        await ws.send(json.dumps({"id": 2, "method": "Network.enable"}))
-        await ws.recv()
-        await ws.send(json.dumps({"id": 3, "method": "Network.getAllCookies"}))
+        await ws.send(json.dumps({"id": 3, "method": "Storage.getCookies"}))
         resp2 = await asyncio.wait_for(ws.recv(), timeout=5.0)
-        data2 = json.loads(resp2)
-        return data2.get("result", {}).get("cookies", [])
+        return json.loads(resp2).get("result", {}).get("cookies", [])
+
+async def inject_cookies_native(local_port: int, cookies: List[dict], target_host: str = "127.0.0.1", node_id: Optional[int] = None) -> int:
+    """写入 Cookies"""
+    if not cookies:
+        return 0
+
+    valid_params = [norm for c in cookies if (norm := normalize_cookie_for_cdp(c))]
+    if not valid_params:
+        return 0
+
+    from services.tunnel_manager import tunnel_mgr
+    is_reverse = (target_host in ["reverse-nat4", "reverse"]) or (node_id and tunnel_mgr.get_reverse_session(node_id))
+    if is_reverse:
+        session = tunnel_mgr.get_reverse_session(node_id) if node_id else None
+        if not session or session.is_closed:
+            logger.error(f"反向长连接已断开 (Node {node_id})")
+            return 0
+        try:
+            res = await session.send_command("inject_cookies", {"cookies": valid_params}, timeout=10.0)
+            return res.get("injected_count", len(valid_params))
+        except Exception as e:
+            logger.error(f"反向隧道注入 Cookie 失败 (Node {node_id}): {e}")
+            return 0
+
+    try:
+        host, ws_url = await resolve_cdp_endpoint(local_port, target_host, prefer_page=True)
+    except Exception as e:
+        logger.error(f"无法获取 Page 注入端点: {e}")
+        return 0
+
+    async with websockets.connect(ws_url, timeout=10.0, max_size=100 * 1024 * 1024) as ws:
+        await ws.send(json.dumps({"id": 1, "method": "Network.enable"}))
+        await asyncio.wait_for(ws.recv(), timeout=3.0)
+
+        try:
+            await ws.send(json.dumps({
+                "id": 2,
+                "method": "Network.setCookies",
+                "params": {"cookies": valid_params}
+            }))
+            resp_batch = json.loads(await asyncio.wait_for(ws.recv(), timeout=6.0))
+            if "error" not in resp_batch:
+                await asyncio.sleep(0.3)
+                return len(valid_params)
+        except Exception:
+            pass
+
+        # 流水线模式逐条写入
+        for i, p in enumerate(valid_params):
+            await ws.send(json.dumps({
+                "id": 1000 + i,
+                "method": "Network.setCookie",
+                "params": p
+            }))
+
+        success_count = 0
+        for _ in range(len(valid_params)):
+            try:
+                resp_text = await asyncio.wait_for(ws.recv(), timeout=2.0)
+                resp = json.loads(resp_text)
+                if resp.get("result", {}).get("success") is True:
+                    success_count += 1
+            except Exception:
+                pass
+
+        await asyncio.sleep(0.3)
+        return success_count
 
 async def purge_stale_cookies_on_node(local_port: int, target_host: str = "127.0.0.1", exclude_domains: List[str] = None, node_id: Optional[int] = None) -> int:
-    """清理目标过期垃圾与黑名单"""
-    from services.tunnel_manager import REVERSE_TUNNEL_POOL
-    if node_id and node_id in REVERSE_TUNNEL_POOL:
-        try:
-            res = await send_reverse_tunnel_command(node_id, "purge_cookies", {"exclude_domains": exclude_domains or []})
-            return res.get("purged_count", 0)
-        except Exception:
-            return 0
+    """清理过期与黑名单 Cookies"""
+    from services.tunnel_manager import tunnel_mgr
+    is_reverse = (target_host in ["reverse-nat4", "reverse"]) or (node_id and tunnel_mgr.get_reverse_session(node_id))
+    if is_reverse:
+        session = tunnel_mgr.get_reverse_session(node_id) if node_id else None
+        if session and not session.is_closed:
+            try:
+                res = await session.send_command("purge_cookies", {"exclude_domains": exclude_domains or []})
+                return res.get("purged_count", 0)
+            except Exception:
+                return 0
+        return 0
 
     try:
         raw_cookies = await fetch_cookies_native(local_port, target_host)
@@ -258,75 +325,6 @@ async def purge_stale_cookies_on_node(local_port: int, target_host: str = "127.0
     except Exception:
         return 0
 
-async def inject_cookies_native(local_port: int, cookies: List[dict], target_host: str = "127.0.0.1", node_id: Optional[int] = None) -> int:
-    """写入 Cookies (支持借道反向隧道或直连 Page 端点)"""
-    if not cookies:
-        return 0
-
-    valid_params = []
-    for c in cookies:
-        norm = normalize_cookie_for_cdp(c)
-        if norm:
-            valid_params.append(norm)
-
-    if not valid_params:
-        return 0
-
-    # 优先分支：若是 NAT4 反向隧道节点，下发给反向 WebSocket 执行
-    from services.tunnel_manager import REVERSE_TUNNEL_POOL
-    if node_id and node_id in REVERSE_TUNNEL_POOL:
-        try:
-            res = await send_reverse_tunnel_command(node_id, "inject_cookies", {"cookies": valid_params})
-            return res.get("injected_count", len(valid_params))
-        except Exception as e:
-            logger.error(f"反向隧道注入 Cookie 失败 (Node {node_id}): {e}")
-            return 0
-
-    try:
-        host, ws_url = await resolve_cdp_endpoint(local_port, target_host, prefer_page=True)
-    except Exception as e:
-        logger.error(f"无法获取 Page 注入端点: {e}")
-        return 0
-
-    start_t = time.time()
-    async with websockets.connect(ws_url, timeout=10.0, max_size=100 * 1024 * 1024) as ws:
-        await ws.send(json.dumps({"id": 1, "method": "Network.enable"}))
-        await asyncio.wait_for(ws.recv(), timeout=3.0)
-
-        try:
-            await ws.send(json.dumps({
-                "id": 2,
-                "method": "Network.setCookies",
-                "params": {"cookies": valid_params}
-            }))
-            resp_batch = json.loads(await asyncio.wait_for(ws.recv(), timeout=6.0))
-            if "error" not in resp_batch:
-                await asyncio.sleep(0.3)
-                return len(valid_params)
-        except Exception:
-            pass
-
-        # 流水线模式
-        for i, p in enumerate(valid_params):
-            await ws.send(json.dumps({
-                "id": 1000 + i,
-                "method": "Network.setCookie",
-                "params": p
-            }))
-
-        success_count = 0
-        for _ in range(len(valid_params)):
-            try:
-                resp_text = await asyncio.wait_for(ws.recv(), timeout=2.0)
-                resp = json.loads(resp_text)
-                if resp.get("result", {}).get("success") is True:
-                    success_count += 1
-            except Exception:
-                pass
-
-        await asyncio.sleep(0.3)
-        return success_count
-
 async def probe_node_cookies(local_port: int, target_host: str = "127.0.0.1", node_id: Optional[int] = None) -> tuple[int, str]:
     try:
         cookies = await fetch_cookies_native(local_port, target_host, node_id=node_id)
@@ -334,4 +332,4 @@ async def probe_node_cookies(local_port: int, target_host: str = "127.0.0.1", no
     except ConnectionRefusedError as ce:
         return 0, str(ce)
     except Exception as e:
-        return 0, f"探测异常: {str(e)[:35]}"
+        return 0, f"探测异常: {str(e)[:45]}"
