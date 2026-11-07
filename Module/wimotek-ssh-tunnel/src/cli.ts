@@ -83,7 +83,7 @@ async function main(): Promise<void> {
     console.log(`[*] Starting SSH Tunnel: ${user}@${host}:${port} (127.0.0.1:${localPort} -> 127.0.0.1:${remotePort})...`);
 
     try {
-      const session = await openTunnel(host, remotePort, localPort, user, port, key, password, '127.0.0.1', timeout);
+      const session = await openTunnel(host!, remotePort, localPort, user, port, key, password, '127.0.0.1', timeout);
       console.log(`[+] Tunnel established! Bound to 127.0.0.1:${session.localPort}`);
       console.log('[*] Press Ctrl+C to stop tunnel...');
 
