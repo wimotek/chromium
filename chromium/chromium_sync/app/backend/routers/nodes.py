@@ -36,6 +36,22 @@ def _append_audit_log(event: str, **kwargs):
     except Exception:
         pass
 
+def _get_available_bind_port(cur, preferred_port: int, exclude_node_id: Optional[int] = None) -> int:
+    """确保 local_bind_port 在集群内全局唯一，杜绝触发 SQLite UNIQUE 约束异常"""
+    if exclude_node_id:
+        cur.execute("SELECT id FROM nodes WHERE local_bind_port=? AND id!=?", (preferred_port, exclude_node_id))
+    else:
+        cur.execute("SELECT id FROM nodes WHERE local_bind_port=?", (preferred_port,))
+    if not cur.fetchone():
+        return preferred_port
+
+    cur.execute("SELECT local_bind_port FROM nodes")
+    used_ports = {r[0] for r in cur.fetchall()}
+    candidate = max(max(used_ports, default=10000) + 1, 10000)
+    while candidate in used_ports:
+        candidate += 1
+    return candidate
+
 class NodeAutoRegisterDTO(BaseModel):
     node_uuid: str
     name: Optional[str] = ""
@@ -298,10 +314,8 @@ async def http_auto_register_node(
         decision = "allow_token"
         reason = "edge_agent_token_verified"
     elif not tofu_enabled:
-        # TOFU 开关已关闭，无 Token 直接拒绝
         raise HTTPException(status_code=403, detail="TOFU 未授权接入功能已关闭，请配置合法 JOIN_TOKEN")
     elif tofu_auto_approve:
-        # TOFU 开启了自动审批
         approval_status = 1
         status = "connected"
         decision = "allow_token"
@@ -326,18 +340,20 @@ async def http_auto_register_node(
     if existing:
         node_id = existing["id"]
         appr = existing["approval_status"] if approval_status == 0 else 1
+        allocated_port = _get_available_bind_port(cur, data.cdp_port, exclude_node_id=node_id)
         cur.execute("""
-            UPDATE nodes SET direct_host=?, local_bind_port=?, name=?, group_name=?, approval_status=?
+            UPDATE nodes SET direct_host=?, remote_cdp_port=?, local_bind_port=?, name=?, group_name=?, approval_status=?
             WHERE id=?
-        """, (direct_ip, data.cdp_port, node_name, grp_name, appr, node_id))
+        """, (direct_ip, data.cdp_port, allocated_port, node_name, grp_name, appr, node_id))
     else:
+        allocated_port = _get_available_bind_port(cur, data.cdp_port)
         cur.execute("""
             INSERT INTO nodes (
                 name, group_name, enabled, approval_status, conn_type, node_uuid, fingerprint,
                 is_source, is_local, direct_host, ssh_host, ssh_port, ssh_user,
                 ssh_key_filename, ssh_password, remote_cdp_port, local_bind_port, status
-            ) VALUES (?, ?, 1, ?, 'direct', ?, '', 0, 1, ?, '', 22, '', '', '', 9222, ?, ?)
-        """, (node_name, grp_name, approval_status, data.node_uuid, direct_ip, data.cdp_port, status))
+            ) VALUES (?, ?, 1, ?, 'direct', ?, '', 0, 1, ?, '', 22, '', '', '', ?, ?, ?)
+        """, (node_name, grp_name, approval_status, data.node_uuid, direct_ip, data.cdp_port, allocated_port, status))
         node_id = cur.lastrowid
 
     conn.commit()
@@ -479,7 +495,6 @@ async def reverse_tunnel_endpoint(
             decision = "allow_session"
             reason = "trusted_session_ticket_verified"
         elif not tofu_enabled:
-            # TOFU 被禁用：无 Token 的未知设备直接断开拦截
             decision = "deny"
             reason = "tofu_access_disabled"
             client_host = websocket.client.host if websocket.client else "unknown"
@@ -497,7 +512,6 @@ async def reverse_tunnel_endpoint(
             logger.warning(f"🚫 [TOFU 拦截] 未知节点 [{node_name}] 无 Token 且 TOFU 已关闭，直接拒绝！")
             return
         elif tofu_auto_approve:
-            # TOFU 开启全自动免审放行
             approved = 1
             status = "connected"
             decision = "allow_token"
@@ -509,25 +523,29 @@ async def reverse_tunnel_endpoint(
             reason = "tofu_pending_admin_approval"
 
     try:
-        cur.execute("SELECT id FROM nodes WHERE node_uuid=?", (node_uuid,))
+        cur.execute("SELECT id, local_bind_port FROM nodes WHERE node_uuid=?", (node_uuid,))
         existing_row = cur.fetchone()
 
         if existing_row:
             node_id = existing_row["id"]
+            # 老节点重连：安全保留其原本的 local_bind_port，仅更新远端实际端口与在线状态
+            allocated_port = existing_row["local_bind_port"]
             cur.execute("""
                 UPDATE nodes SET 
-                    conn_type='reverse', direct_host='reverse-nat4', local_bind_port=?, status=?, approval_status=?,
-                    name=?, group_name=?, fingerprint=?
+                    conn_type='reverse', direct_host='reverse-nat4', remote_cdp_port=?, local_bind_port=?,
+                    status=?, approval_status=?, name=?, group_name=?, fingerprint=?
                 WHERE id=?
-            """, (cdp_port, status, approved, node_name, node_group, node_fp, node_id))
+            """, (cdp_port, allocated_port, status, approved, node_name, node_group, node_fp, node_id))
         else:
+            # 新节点首次接入：自动计算不与集群内任何既有节点冲突的全局唯一 local_bind_port
+            allocated_port = _get_available_bind_port(cur, cdp_port)
             cur.execute("""
                 INSERT INTO nodes (
                     name, group_name, enabled, approval_status, conn_type, node_uuid, fingerprint,
                     is_source, is_local, direct_host, ssh_host, ssh_port, ssh_user,
                     ssh_key_filename, ssh_password, remote_cdp_port, local_bind_port, status
-                ) VALUES (?, ?, 1, ?, 'reverse', ?, ?, 0, 1, 'reverse-nat4', '', 22, '', '', '', 9222, ?, ?)
-            """, (node_name, node_group, approved, node_uuid, node_fp, cdp_port, status))
+                ) VALUES (?, ?, 1, ?, 'reverse', ?, ?, 0, 1, 'reverse-nat4', '', 22, '', '', '', ?, ?, ?)
+            """, (node_name, node_group, approved, node_uuid, node_fp, cdp_port, allocated_port, status))
             node_id = cur.lastrowid
 
         conn.commit()
@@ -572,7 +590,7 @@ async def reverse_tunnel_endpoint(
                 logger.info(f"🍪 [开机探活刷新] 节点 ID:{nid} 真实 Cookie 存量更新完毕: {c_cnt} 条")
             except Exception as e:
                 logger.debug(f"开机探活跳过: {e}")
-        asyncio.create_task(_auto_probe_on_connect(node_id, cdp_port))
+        asyncio.create_task(_auto_probe_on_connect(node_id, allocated_port))
 
     else:
         await session.send_raw_json({
@@ -585,7 +603,6 @@ async def reverse_tunnel_endpoint(
     try:
         while True:
             text = await websocket.receive_text()
-            # 强化兼容心跳判断（支持纯文本 ping 以及各类带空格的 JSON ping）
             is_ping = False
             if text in ["ping", "pong"]:
                 is_ping = True

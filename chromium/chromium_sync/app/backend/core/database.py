@@ -109,6 +109,15 @@ def init_db_and_jwt():
             except Exception:
                 pass
 
+    # 兼容性自愈补丁：清理历史数据库遗留的 local_bind_port 显式唯一索引（若存在）
+    try:
+        cur.execute("SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='nodes' AND sql LIKE '%local_bind_port%'")
+        for (idx_name,) in cur.fetchall():
+            if "autoindex" not in idx_name:
+                cur.execute(f"DROP INDEX IF EXISTS {idx_name}")
+    except Exception:
+        pass
+
     cur.execute("PRAGMA table_info(sync_logs)")
     existing_log_cols = {col[1] for col in cur.fetchall()}
     for col_name, col_def in [
