@@ -27,6 +27,7 @@ def init_db_and_jwt():
         conn_type TEXT DEFAULT 'direct',       -- 'direct' 直连, 'ssh' 远程, 'reverse' NAT4反向隧道
         node_uuid TEXT DEFAULT '',             -- 节点容器持久化唯一标识
         fingerprint TEXT DEFAULT '',           -- wimotek-edge-agent 证书指纹
+        created_at TEXT DEFAULT '',            -- 节点首见接入时间戳
         is_source INTEGER DEFAULT 0,
         is_local INTEGER DEFAULT 0,
         direct_host TEXT DEFAULT '127.0.0.1',
@@ -86,6 +87,7 @@ def init_db_and_jwt():
         ("conn_type", "TEXT DEFAULT 'direct'"),
         ("node_uuid", "TEXT DEFAULT ''"),
         ("fingerprint", "TEXT DEFAULT ''"),
+        ("created_at", "TEXT DEFAULT ''"),
         ("enabled", "INTEGER DEFAULT 1"),
         ("group_name", "TEXT DEFAULT '默认分组'"),
         ("direct_host", "TEXT DEFAULT '127.0.0.1'"),
@@ -117,14 +119,13 @@ def init_db_and_jwt():
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
             ("默认全网智能双向合并", 1, 15, "smart_merge", "all", 0, "", "all", "[]", "", now_str))
 
-    # 生成唯一的集群入网通行证 Token (Join Token)
     initial_join_token = "hub_join_" + secrets.token_urlsafe(24)
 
     defaults = {
         'admin_username': INIT_USERNAME,
         'admin_password': hash_password(INIT_PASSWORD),
         'jwt_secret': secrets.token_hex(32),
-        'edge_agent_secret': secrets.token_urlsafe(32),  # 用于 wimotek-edge-agent HMAC 验签
+        'edge_agent_secret': secrets.token_urlsafe(32),
         'api_key': 'cdp_' + secrets.token_urlsafe(24),
         'cluster_join_token': initial_join_token,
         'direct_port_access_enabled': '1',
@@ -139,6 +140,7 @@ def init_db_and_jwt():
         'email_notify_to': '',
         'serverchan_enabled': '0',
         'serverchan_key': '',
+        'tofu_timeout_notify_minutes': '10',  # 默认待审超过 10 分钟自动预警，设为 0 关闭
         'sync_diff_enabled': '1',
         'sync_include_domains': '',
         'sync_exclude_domains': 'doubleclick.net,google-analytics.com'

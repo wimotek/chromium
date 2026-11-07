@@ -23,14 +23,15 @@ def get_notification_settings(user: dict = Depends(verify_token)):
         "email_notify_enabled": get_setting("email_notify_enabled", "0") == "1",
         "email_notify_to": get_setting("email_notify_to", ""),
         "serverchan_enabled": get_setting("serverchan_enabled", "0") == "1",
-        "serverchan_key": get_setting("serverchan_key")
+        "serverchan_key": get_setting("serverchan_key"),
+        "tofu_timeout_notify_minutes": get_setting("tofu_timeout_notify_minutes", "10")
     }
 
 @router.post("/api/notifications/settings")
 def save_notification_settings(data: dict, user: dict = Depends(verify_token)):
-    for k in ["smtp_host", "smtp_port", "smtp_sender_name", "smtp_user", "email_notify_to", "serverchan_key"]:
+    for k in ["smtp_host", "smtp_port", "smtp_sender_name", "smtp_user", "email_notify_to", "serverchan_key", "tofu_timeout_notify_minutes"]:
         if k in data:
-            set_setting(k, data[k])
+            set_setting(k, str(data[k]).strip())
     if data.get("smtp_pass"):
         set_setting("smtp_pass", data["smtp_pass"].strip())
     if "smtp_ssl" in data:
@@ -39,7 +40,7 @@ def save_notification_settings(data: dict, user: dict = Depends(verify_token)):
         set_setting("email_notify_enabled", "1" if data["email_notify_enabled"] else "0")
     if "serverchan_enabled" in data:
         set_setting("serverchan_enabled", "1" if data["serverchan_enabled"] else "0")
-    return {"message": "通知设置已保存"}
+    return {"message": "通知设置与待审预警策略已保存"}
 
 @router.post("/api/notifications/test-email")
 def test_email(data: TestEmailDTO, user: dict = Depends(verify_token)):

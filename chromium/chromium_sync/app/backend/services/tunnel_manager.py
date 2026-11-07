@@ -1,13 +1,18 @@
 import os
 import json
+import time
 import sqlite3
 import asyncio
 import secrets
-from typing import Dict, Optional
+from typing import Dict, Optional, Set
 from sshtunnel import SSHTunnelForwarder
 
 from config import KEYS_DIR, logger
-from core.database import get_db_connection
+from core.database import get_db_connection, get_setting
+
+# 缓存待审节点的首次发现时间戳与已告警记录，避免短时间内重复轰炸
+_PENDING_FIRST_SEEN: Dict[str, float] = {}
+_NOTIFIED_PENDING_NODES: Set[str] = set()
 
 class ReverseTunnelSession:
     """
@@ -175,13 +180,68 @@ tunnel_mgr = TunnelManager()
 REVERSE_TUNNEL_POOL = tunnel_mgr.reverse_sessions
 
 async def tunnel_watchdog_loop():
+    """
+    全量后台守护看门狗：
+    1. TOFU 待审批挂起超时自动预警 (支持邮件与微信 Server酱推送)
+    2. 直连、SSH 隧道与反向长连接健康探活
+    """
     from services.cdp_engine import probe_node_cookies
-    logger.info("启动守护看门狗：巡检直连、SSH 隧道与 NAT4 反向隧道 (周期: 30秒)...")
+    from services.notification import dispatch_notification
+
+    logger.info("启动守护看门狗：巡检节点链路状态与待审批超时预警 (周期: 30秒)...")
     while True:
         try:
             conn = get_db_connection()
             conn.row_factory = sqlite3.Row
             cur = conn.cursor()
+
+            # ==================== 1. TOFU 待审批挂起超时预警闭环 ====================
+            timeout_setting = get_setting('tofu_timeout_notify_minutes', '10')
+            try:
+                alert_timeout_mins = int(timeout_setting)
+            except ValueError:
+                alert_timeout_mins = 10
+
+            now_ts = time.time()
+            cur.execute("SELECT * FROM nodes WHERE approval_status=0")
+            pending_nodes = [dict(r) for r in cur.fetchall()]
+
+            current_pending_uuids = set()
+            for p_node in pending_nodes:
+                uuid_key = p_node.get("node_uuid") or str(p_node["id"])
+                current_pending_uuids.add(uuid_key)
+
+                # 记录首次发现挂起时间
+                if uuid_key not in _PENDING_FIRST_SEEN:
+                    _PENDING_FIRST_SEEN[uuid_key] = now_ts
+
+                elapsed_seconds = now_ts - _PENDING_FIRST_SEEN[uuid_key]
+                threshold_seconds = alert_timeout_mins * 60
+
+                # 达到超时设定且尚未通知过，触发分发
+                if alert_timeout_mins > 0 and elapsed_seconds >= threshold_seconds:
+                    if uuid_key not in _NOTIFIED_PENDING_NODES:
+                        _NOTIFIED_PENDING_NODES.add(uuid_key)
+                        alert_title = f"待审批预警: 边缘节点 [{p_node['name']}] 等待认领超时"
+                        alert_body = (
+                            f"【CDP 集群安全提醒】\n"
+                            f"检测到边缘新节点接入已处于 TOFU 隔离等待状态超过 {alert_timeout_mins} 分钟无人处理！\n\n"
+                            f"• 节点名称: {p_node['name']}\n"
+                            f"• 节点标识: {p_node.get('node_uuid', '---')}\n"
+                            f"• 网络模式: {p_node.get('conn_type', 'reverse')}\n"
+                            f"• 当前状态: 仅维持心跳隔离，业务未放行\n\n"
+                            f"请尽快登录 CDP 集群管理后台进行「批准入网」或「拒绝清理」。"
+                        )
+                        asyncio.create_task(dispatch_notification(alert_title, alert_body))
+                        logger.warning(f"⚠️ [待审批超时告警] 节点 [{p_node['name']}] 已挂起超过 {alert_timeout_mins} 分钟，已触发推送。")
+
+            # 清除已脱离待审状态 (已审批/已删除) 的节点缓存
+            for old_uuid in list(_PENDING_FIRST_SEEN.keys()):
+                if old_uuid not in current_pending_uuids:
+                    _PENDING_FIRST_SEEN.pop(old_uuid, None)
+                    _NOTIFIED_PENDING_NODES.discard(old_uuid)
+
+            # ==================== 2. 已认证节点链路在线巡检 ====================
             cur.execute("SELECT * FROM nodes WHERE enabled=1 AND approval_status=1")
             nodes = [dict(r) for r in cur.fetchall()]
             conn.close()
