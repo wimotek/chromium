@@ -2,12 +2,12 @@
 set -e
 
 # ==============================================================================
-# 阶段 1：Root 权限自愈与降权
+# 阶段 1：Root 权限自愈与宝塔证书安全合成 (绝对不触碰宿主机 /certs 权限)
 # ==============================================================================
 if [ "$(id -u)" = "0" ]; then
-    echo "[Init] (Root阶段) 正在执行 Kasm 权限自愈与锁清理..."
+    echo "[Init] (Root阶段) 正在执行 Kasm 权限自愈与宝塔证书扫描..."
 
-    mkdir -p /tmp/.X11-unix /home/kasm-user/.vnc /home/kasm-user/.config /home/kasm-user/.cache /tmp/crashpad /etc/ssl/app
+    mkdir -p /tmp/.X11-unix /home/kasm-user/.vnc /home/kasm-user/.config /home/kasm-user/.cache /tmp/crashpad /etc/ssl/app /etc/kasmvnc
     chmod 1777 /tmp /tmp/.X11-unix /tmp/crashpad
 
     rm -rf /tmp/.X0-lock /tmp/.X11-unix/X0 /data/SingletonLock /data/SingletonCookie /data/SingletonSocket
@@ -17,6 +17,7 @@ if [ "$(id -u)" = "0" ]; then
     CERT_FILE=""
     KEY_FILE=""
 
+    # 扫描外部公钥证书 (支持宝塔、Certbot 等格式)
     for f in "$SSL_CERT_FILE" "$CERTS_DIR"/fullchain*.pem "$CERTS_DIR"/fullchain*.crt "$CERTS_DIR"/fullchain "$CERTS_DIR"/cert*.pem "$CERTS_DIR"/tls.crt "$CERTS_DIR"/*.crt "$CERTS_DIR"/*.pem; do
         if [ -f "$f" ] && [ "$f" != "$CERTS_DIR/privkey.pem" ] && [ "$f" != "$CERTS_DIR/key.pem" ]; then
             CERT_FILE="$f"
@@ -24,6 +25,7 @@ if [ "$(id -u)" = "0" ]; then
         fi
     done
 
+    # 扫描外部私钥 (由 Root 读取 600 权限，绝不修改宿主机权限)
     for k in "$SSL_KEY_FILE" "$CERTS_DIR"/privkey*.pem "$CERTS_DIR"/privkey*.key "$CERTS_DIR"/privkey "$CERTS_DIR"/key*.pem "$CERTS_DIR"/tls.key "$CERTS_DIR"/*.key; do
         if [ -f "$k" ]; then
             KEY_FILE="$k"
@@ -32,10 +34,19 @@ if [ "$(id -u)" = "0" ]; then
     done
 
     if [ -n "$CERT_FILE" ] && [ -n "$KEY_FILE" ]; then
+        echo "[SSL] (Root阶段) 成功检测到外部宝塔/域名证书与私钥:"
+        echo "       -> 公钥 (Cert): $CERT_FILE"
+        echo "       -> 私钥 (Key) : $KEY_FILE"
         cp "$CERT_FILE" "$SSL_OUT_DIR/kasm.crt"
         cp "$KEY_FILE" "$SSL_OUT_DIR/kasm.key"
     else
+        echo "[SSL] (Root阶段) 未检测到有效证书，自动生成 10 年 SAN 自签证书..."
         if [ ! -f "$SSL_OUT_DIR/kasm.crt" ] || [ ! -f "$SSL_OUT_DIR/kasm.key" ]; then
+            openssl req -x509 -nodes -days 3650 -newkey rsa:2048 \
+                -keyout "$SSL_OUT_DIR/kasm.key" \
+                -out "$SSL_OUT_DIR/kasm.crt" \
+                -subj "/CN=kasm-user" \
+                -addext "subjectAltName=DNS:localhost,IP:127.0.0.1,IP:0.0.0.0" 2>/dev/null || \
             openssl req -x509 -nodes -days 3650 -newkey rsa:2048 \
                 -keyout "$SSL_OUT_DIR/kasm.key" \
                 -out "$SSL_OUT_DIR/kasm.crt" \
@@ -43,7 +54,8 @@ if [ "$(id -u)" = "0" ]; then
         fi
     fi
 
-    chown -R kasm-user:kasm-user /data /home/kasm-user "$SSL_OUT_DIR" /opt/venv 2>/dev/null || true
+    # 核心隔离原则：只对容器自有的数据目录过户，绝对不碰宿主机 /certs
+    chown -R kasm-user:kasm-user /data /home/kasm-user "$SSL_OUT_DIR" /etc/kasmvnc /opt/venv 2>/dev/null || true
     chmod 600 "$SSL_OUT_DIR/kasm.key" 2>/dev/null || true
 
     export HOME=/home/kasm-user
@@ -61,6 +73,7 @@ export LOGNAME=kasm-user
 export XDG_CONFIG_HOME=/home/kasm-user/.config
 export XDG_CACHE_HOME=/home/kasm-user/.cache
 export NO_AT_BRIDGE=1
+export PYTHONUNBUFFERED=1
 
 RESOLUTION=${RESOLUTION:-1920x1080}
 WIDTH=$(echo "$RESOLUTION" | cut -d'x' -f1)
@@ -72,6 +85,7 @@ CHROME_ARGS="${CHROME_ARGS:-}"
 FINAL_CERT="/etc/ssl/app/kasm.crt"
 FINAL_KEY="/etc/ssl/app/kasm.key"
 
+# 1. 动态生成 KasmVNC 运行时 YAML 配置
 mkdir -p "$HOME/.vnc"
 cat <<EOF > "$HOME/.vnc/kasmvnc.yaml"
 network:
@@ -86,14 +100,18 @@ client:
     allow_client_to_server: true
 EOF
 
+# 2. 密码配置 (支持免密启动)
 AUTH_FLAG="-SecurityTypes None"
 if [ -n "$VNC_PASSWORD" ]; then
     if command -v kasmvncpasswd >/dev/null 2>&1; then
         echo -e "${VNC_PASSWORD}\n${VNC_PASSWORD}" | kasmvncpasswd -u kasm-user
         AUTH_FLAG="-SecurityTypes VncAuth"
+        echo "[KasmVNC] 密码认证已成功启用"
     fi
 fi
 
+# 3. 启动 KasmVNC Server (:0)
+echo "[KasmVNC] 正在拉起 Xvnc 服务 (:0)..."
 Xvnc :0 \
     -geometry "$RESOLUTION" \
     -depth 24 \
@@ -115,27 +133,28 @@ for i in {1..30}; do
     sleep 0.1
 done
 
+# 4. 强制开启 Num Lock (小键盘 ON)
 if command -v numlockx >/dev/null 2>&1; then
     DISPLAY=:0 numlockx on || true
 fi
 
+# 5. 启动轻量窗口管理器 Openbox
 openbox &
 
-# 【核心对换】：socat 作为外部备用通道，监听 9223 转发至原生 9222
+# 6. 【本地调试备用通道】：socat 监听 9223 转发至原生 9222
 socat TCP-LISTEN:9223,fork,reuseaddr TCP:127.0.0.1:9222 &
 
-echo "[Ready] KasmVNC Web 端运行于 :6901 (HTTPS), 外部备用 CDP 映射于 :9223, 原生 CDP 位于 :9222"
+echo "[Ready] KasmVNC Web 端运行于 :6901 (HTTPS), CDP 调试端点 :9222"
 
 # ==============================================================================
-#  【核心增强】：启动 Wimotek Agent 守护进程 (带故障自动拉起与自愈)
+# 7. 启动 Wimotek Agent 守护进程 (带故障自动重生看门狗)
 # ==============================================================================
 if [ -n "$HUB_URL" ]; then
     echo "[Edge] 检测到 HUB_URL 配置 ($HUB_URL)，拉起 Agent 后台守护看门狗..."
     (
-        # 守护子进程独立后台运行，主进程继续向下启动 Chromium
         while true; do
             echo "[Edge Watchdog] 正在拉起 edge_node_client 进程..."
-            python3 /opt/edge_node_client.py || true
+            python3 -u /opt/edge_node_client.py || true
             echo "[Edge Watchdog] ⚠️ 警告: edge_node_client 异常退出，3 秒后自动重生拉起..."
             sleep 3
         done
@@ -143,7 +162,7 @@ if [ -n "$HUB_URL" ]; then
 fi
 
 # ==============================================================================
-# 循环守护启动 Chromium (原生使用 9222 调试端口)
+# 8. 循环守护启动 Chromium (原生使用 9222 调试端口)
 # ==============================================================================
 if [ $# -eq 0 ]; then
     set -- "$HOMEPAGE"
