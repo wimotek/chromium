@@ -1,0 +1,37 @@
+{
+  "name": "wimotek-ssh-tunnel",
+  "version": "1.0",
+  "description": "Universal SSH Tunnel & Port Forwarding Engine for CDP Hub and TCP services (default 9222 -> 19222)",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "type": "module",
+  "bin": {
+    "wimotek-ssh-tunnel": "./dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "test": "node --test tests/*.test.js",
+    "prepublishOnly": "npm run build"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "keywords": [
+    "ssh",
+    "ssh-tunnel",
+    "port-forwarding",
+    "cdp",
+    "cdp-hub",
+    "tunnel",
+    "tcp-forwarding",
+    "wimotek"
+  ],
+  "author": "Wimotek Engineering <wimotek@gmail.com>",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/wimotek/wimotek-ssh-tunnel"
+  }
+}

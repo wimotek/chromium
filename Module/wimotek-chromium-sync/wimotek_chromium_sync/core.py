@@ -125,15 +125,17 @@ def compute_cookie_delta(
 @dataclass
 class NodeConfig:
     """
-    统一节点配置
-    - 本地节点：只需提供 cdp_port (无需提供 ssh_host，自动识别为本地免密直连)
-    - 远程节点：提供 ssh_host, cdp_port
-    - 认证方式：
-      * ssh_key: 原生支持私钥文件绝对路径 或 私钥 PEM 文本内容字符串
-      * ssh_password: SSH 密码认证
+    统一节点配置 (支持 CDP Hub 全部 4 种连接方式与离线弹性跳过)
+    1. 直连 (direct): 本地或内网直接访问 cdp_port，如 http://192.168.1.100:9222
+    2. wss直连 (wss_direct): TLS 网关加密直连，如 wss://hub.internal:8443/devtools/...
+    3. wss反穿 (wss_reverse): 边缘端向 Hub 反向长连接的会话映射
+    4. ssh穿透 (ssh_tunnel): 通过 wimotek-ssh-tunnel 模块建立加密端口转发 (如 19222 -> 9222)
     """
     id: str
     name: str = ""
+    mode: str = "direct"                 # "direct" | "wss_direct" | "wss_reverse" | "ssh_tunnel"
+    endpoint_url: Optional[str] = None  # 显式指定完整 CDP 调试 URL (如 wss://... 或 ws://...)
+    headers: Optional[Dict[str, str]] = None # 可选 WebSocket/HTTP 鉴权请求头 (如 Bearer token)
     is_local: bool = False
     cdp_host: str = "127.0.0.1"
     cdp_port: int = 9222
@@ -150,32 +152,52 @@ class NodeConfig:
         if not self.name:
             self.name = self.id
 
-        # 智能判定本地节点：未提供 ssh_host 或指定本地回环
-        if not self.ssh_host or self.ssh_host.strip() in ("127.0.0.1", "localhost", "::1", ""):
+        # 智能判定连接模式
+        if self.endpoint_url:
+            raw_url = self.endpoint_url.strip()
+            if raw_url.startswith("wss://"):
+                self.mode = "wss_direct"
+            elif raw_url.startswith("ws://") and ("reverse" in raw_url or "agent" in raw_url):
+                self.mode = "wss_reverse"
+            elif raw_url.startswith("http://") or raw_url.startswith("ws://"):
+                self.mode = "direct"
+            self.is_local = False
+        elif self.ssh_host and self.ssh_host.strip() not in ("127.0.0.1", "localhost", "::1", ""):
+            self.mode = "ssh_tunnel"
+            self.is_local = False
+        else:
+            self.mode = "direct"
             self.is_local = True
 
-        # 本地节点无需额外隧道映射，直接连接 cdp_port
-        if self.is_local:
+        # 本地免密直连无需隧道映射
+        if self.is_local and not self.tunnel_port:
             self.tunnel_port = self.cdp_port
 
-        # 智能解析 ssh_key：支持文件路径或 PEM 字符串内容
+        # 智能解析 ssh_key
         key_input = self.ssh_key or self.ssh_key_path or self.ssh_key_data
         if key_input:
             key_str = key_input.strip()
             if "-----BEGIN" in key_str or "\n" in key_str:
                 self.ssh_key_data = key_str
             else:
-                expanded = os.path.expanduser(key_str)
-                if os.path.exists(expanded):
-                    self.ssh_key_path = expanded
-                else:
-                    self.ssh_key_path = expanded
+                self.ssh_key_path = os.path.expanduser(key_str)
 
     @property
     def cdp_url(self) -> str:
-        if self.is_local:
-            return f"http://{self.cdp_host}:{self.cdp_port}"
-        return f"http://127.0.0.1:{self.tunnel_port}"
+        # 1. 显式指定端点 URL (支持 wss://, ws://, http://)
+        if self.endpoint_url:
+            return self.endpoint_url.strip()
+
+        # 2. SSH 穿透模式 (通过本地映射端口访问)
+        if self.mode == "ssh_tunnel":
+            return f"http://127.0.0.1:{self.tunnel_port or 19222}"
+
+        # 3. WSS 直连模式
+        if self.mode == "wss_direct":
+            return f"wss://{self.cdp_host}:{self.cdp_port}"
+
+        # 4. 直连模式 (默认)
+        return f"http://{self.cdp_host}:{self.cdp_port}"
 
 
 def merge_cookies(
@@ -225,140 +247,26 @@ def merge_cookies(
     return list(merged_map.values())
 
 
-class SshTunnelSession:
-    """
-    SSH 隧道生命周期管理
-    - 支持密钥文本 (PEM String) 自动写入安全受限临时文件
-    - 支持密钥路径与密码认证
-    - 支持端口复用检测与防僵尸连接自愈
-    """
-    def __init__(self, node: NodeConfig):
-        self.node = node
-        self.proc: Optional[subprocess.Popen] = None
-        self.is_reused: bool = False
-        self.temp_key_file: Optional[str] = None
-        self.askpass_script: Optional[str] = None
+# =============================================================================
+# SSH 隧道管理 (已解耦剥离至独立通用模块 wimotek-ssh-tunnel)
+# =============================================================================
 
-    def _is_port_in_use(self, port: int) -> bool:
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.settimeout(0.3)
-            return s.connect_ex(("127.0.0.1", port)) == 0
-
-    def _is_cdp_ready(self, url: str) -> bool:
-        try:
-            proxy_handler = urllib.request.ProxyHandler({})
-            opener = urllib.request.build_opener(proxy_handler)
-            resp = opener.open(f"{url}/json/version", timeout=1.5)
-            return resp.getcode() == 200
-        except Exception:
-            return False
-
-    def start(self, auto_close: bool = False):
-        if self.node.is_local:
-            return
-
-        target_local_port = self.node.tunnel_port
-        target_url = f"http://127.0.0.1:{target_local_port}"
-
-        if self._is_port_in_use(target_local_port):
-            if self._is_cdp_ready(target_url):
-                logging.info(f"[*] 节点 [{self.node.name}] 本地端口 {target_local_port} 已通畅，复用现有连接。")
-                self.is_reused = True
-                return
-
-        logging.info(
-            f"[*] 正在拉起 SSH 隧道: {self.node.name} -> {self.node.ssh_user}@{self.node.ssh_host}:{self.node.ssh_port} "
-            f"(本地 127.0.0.1:{target_local_port} -> 远程 127.0.0.1:{self.node.cdp_port}) ..."
-        )
-
-        ssh_cmd = [
-            "ssh", "-N",
-            "-p", str(self.node.ssh_port),
-            "-o", "ServerAliveInterval=15",
-            "-o", "ServerAliveCountMax=3",
-            "-o", "TCPKeepAlive=yes",
-            "-o", "StrictHostKeyChecking=accept-new",
-            "-o", "ExitOnForwardFailure=yes",
-            "-L", f"{target_local_port}:127.0.0.1:{self.node.cdp_port}"
-        ]
-
-        env = os.environ.copy()
-
-        if self.node.ssh_key_data:
-            fd, tmp_path = tempfile.mkstemp(prefix="ssh_key_")
-            with open(tmp_path, "w") as f:
-                f.write(self.node.ssh_key_data.strip() + "\n")
-            os.close(fd)
-            os.chmod(tmp_path, 0o600)
-            self.temp_key_file = tmp_path
-            ssh_cmd.extend(["-i", tmp_path])
-        elif self.node.ssh_key_path:
-            expanded_key = os.path.expanduser(self.node.ssh_key_path)
-            if os.path.exists(expanded_key):
-                ssh_cmd.extend(["-i", expanded_key])
-
-        if self.node.ssh_password:
-            if shutil.which("sshpass"):
-                ssh_cmd = ["sshpass", "-p", self.node.ssh_password] + ssh_cmd
-            else:
-                fd, askpass_path = tempfile.mkstemp(prefix="askpass_", suffix=".sh")
-                escaped_pw = self.node.ssh_password.replace("'", "'\\''")
-                with open(askpass_path, "w") as f:
-                    f.write(f"#!/bin/sh\necho '{escaped_pw}'\n")
-                os.close(fd)
-                os.chmod(askpass_path, 0o700)
-                self.askpass_script = askpass_path
-                env["SSH_ASKPASS"] = askpass_path
-                env["SSH_ASKPASS_REQUIRE"] = "force"
-                env["DISPLAY"] = ":0"
-                ssh_cmd.extend(["-o", "BatchMode=no"])
-
-        ssh_cmd.append(f"{self.node.ssh_user}@{self.node.ssh_host}")
-
-        try:
-            self.proc = subprocess.Popen(
-                ssh_cmd,
-                env=env,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                start_new_session=(not auto_close)
-            )
-        except FileNotFoundError:
-            raise RuntimeError(f"[-] 系统未找到 ssh 可执行文件，无法为远程节点 [{self.node.name}] 建立隧道！")
-
-        for _ in range(25):
-            time.sleep(0.4)
-            if self._is_port_in_use(target_local_port) and self._is_cdp_ready(target_url):
-                logging.info(f"[+] 节点 [{self.node.name}] SSH 隧道建立成功 (端口: {target_local_port})。")
-                return
-            if self.proc.poll() is not None:
-                break
-
-        self.stop(force=True)
-        raise RuntimeError(f"[-] 建立 SSH 隧道失败 [{self.node.name}]，请检查网络或认证凭据！")
-
-    def stop(self, force: bool = False):
-        if self.is_reused and not force:
-            return
-
-        if self.proc and self.proc.poll() is None:
-            try:
-                self.proc.terminate()
-                self.proc.wait(timeout=2)
-            except Exception:
-                self.proc.kill()
-            logging.info(f"[*] 节点 [{self.node.name}] 隧道已释放。")
-
-        if self.temp_key_file and os.path.exists(self.temp_key_file):
-            try:
-                os.remove(self.temp_key_file)
-            except Exception:
-                pass
-        if self.askpass_script and os.path.exists(self.askpass_script):
-            try:
-                os.remove(self.askpass_script)
-            except Exception:
-                pass
+try:
+    from wimotek_ssh_tunnel import SSHTunnel, SSHTunnelManager, SshTunnelSession, TunnelConfig, TunnelException
+    HAS_SSH_TUNNEL = True
+except ImportError:
+    try:
+        import sys
+        sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "wimotek-ssh-tunnel")))
+        from wimotek_ssh_tunnel import SSHTunnel, SSHTunnelManager, SshTunnelSession, TunnelConfig, TunnelException
+        HAS_SSH_TUNNEL = True
+    except Exception:
+        HAS_SSH_TUNNEL = False
+        SSHTunnel = None
+        SSHTunnelManager = None
+        SshTunnelSession = None
+        TunnelConfig = None
+        TunnelException = Exception
 
 
 class ChromiumSync:
@@ -652,11 +560,35 @@ class ChromiumSync:
     # =========================================================================
 
     def _start_all_tunnels(self):
+        """
+        拉起所有需要 SSH 穿透的节点 (模式 4)
+        直接委托给通用解耦模块 wimotek-ssh-tunnel
+        """
         for node in self.nodes:
-            if not node.is_local:
-                tunnel = SshTunnelSession(node)
-                tunnel.start(auto_close=self.auto_close_tunnel)
-                self.tunnels[node.id] = tunnel
+            if getattr(node, "mode", "direct") == "ssh_tunnel" and not node.is_local:
+                if not HAS_SSH_TUNNEL or not SshTunnelSession:
+                    raise RuntimeError(
+                        f"[-] 节点 [{node.name}] 处于 ssh_tunnel 模式，但未安装独立模块 wimotek-ssh-tunnel！\n"
+                        f"请先运行: pip install wimotek-ssh-tunnel"
+                    )
+                cfg = TunnelConfig(
+                    id=node.id,
+                    name=node.name,
+                    ssh_host=node.ssh_host,
+                    ssh_port=node.ssh_port,
+                    ssh_user=node.ssh_user,
+                    remote_host=node.cdp_host,
+                    remote_port=node.cdp_port,
+                    local_port=node.tunnel_port or 19222,
+                    ssh_key=node.ssh_key_data or node.ssh_key_path or node.ssh_key,
+                    ssh_password=node.ssh_password,
+                )
+                try:
+                    tunnel = SshTunnelSession(cfg)
+                    tunnel.start(auto_close=self.auto_close_tunnel)
+                    self.tunnels[node.id] = tunnel
+                except Exception as e:
+                    logging.warning(f"⚠️ [SKIP] 节点 [{node.name}] SSH 穿透拉起失败，标记异常跳过: {e}")
 
     def _stop_all_tunnels(self, force: bool = False):
         for tunnel in self.tunnels.values():
@@ -914,6 +846,8 @@ class ChromiumSync:
                 "source_total": 0,
                 "target_total": 0,
                 "nodes_synced": [],
+                "nodes_skipped": [],
+                "skips": [],
                 "duration": elapsed,
                 "details": "未安装 playwright 模块，请先运行: pip install playwright && playwright install chromium",
                 "error": "playwright not installed"
@@ -928,23 +862,44 @@ class ChromiumSync:
             contexts: Dict[str, BrowserContext] = {}
             nodes_data: Dict[str, dict] = {}
 
+            skipped_nodes: List[Dict[str, Any]] = []
+
             if is_pooled:
                 contexts = self._pooled_contexts
                 for node in self.nodes:
                     if node.id in contexts:
                         nodes_data[node.id] = await self._fetch_node_data(contexts[node.id], node)
+                    else:
+                        logging.warning(f"⚠️ [SKIP] 连接池中节点 [{node.name}] 不可用，自动跳过。")
+                        skipped_nodes.append({
+                            "id": node.id,
+                            "name": node.name,
+                            "mode": getattr(node, "mode", "direct"),
+                            "cdp_url": node.cdp_url,
+                            "reason": "Not connected in pool"
+                        })
             else:
                 async with async_playwright() as p:
                     for node in self.nodes:
                         cdp_url = node.cdp_url
                         try:
-                            b = await p.chromium.connect_over_cdp(cdp_url)
+                            connect_kwargs = {}
+                            if getattr(node, "headers", None):
+                                connect_kwargs["headers"] = node.headers
+                            b = await p.chromium.connect_over_cdp(cdp_url, **connect_kwargs)
                             ctx = b.contexts[0] if b.contexts else await b.new_context()
                             browsers[node.id] = b
                             contexts[node.id] = ctx
                             nodes_data[node.id] = await self._fetch_node_data(ctx, node)
                         except Exception as e:
-                            logging.error(f"[-] 连接节点 [{node.name}] 失败 ({cdp_url}): {e}")
+                            logging.warning(f"⚠️ [SKIP] 节点 [{node.name}] 离线或连接异常 ({cdp_url})，自动跳过: {e}")
+                            skipped_nodes.append({
+                                "id": node.id,
+                                "name": node.name,
+                                "mode": getattr(node, "mode", "direct"),
+                                "cdp_url": cdp_url,
+                                "reason": str(e)
+                            })
 
                     if not contexts:
                         elapsed = round(time.time() - start_time, 2)
@@ -956,13 +911,15 @@ class ChromiumSync:
                             "source_total": 0,
                             "target_total": 0,
                             "nodes_synced": [],
+                            "nodes_skipped": [n["id"] for n in skipped_nodes],
+                            "skips": skipped_nodes,
                             "duration": elapsed,
-                            "details": "无可用在线节点，同步终止",
+                            "details": "全部节点离线或异常，无可用在线节点，同步终止",
                             "error": "No available online nodes"
                         }
 
                     res = await self._execute_sync_flow(
-                        active_mode, active_source, active_targets, contexts, nodes_data, start_time
+                        active_mode, active_source, active_targets, contexts, nodes_data, start_time, skipped_nodes
                     )
                     for b in browsers.values():
                         await b.close()
@@ -979,13 +936,15 @@ class ChromiumSync:
                     "source_total": 0,
                     "target_total": 0,
                     "nodes_synced": [],
+                    "nodes_skipped": [n["id"] for n in skipped_nodes],
+                    "skips": skipped_nodes,
                     "duration": elapsed,
                     "details": "连接池中无可用在线节点",
                     "error": "No available online nodes in pool"
                 }
 
             return await self._execute_sync_flow(
-                active_mode, active_source, active_targets, contexts, nodes_data, start_time
+                active_mode, active_source, active_targets, contexts, nodes_data, start_time, skipped_nodes
             )
 
         except Exception as e:
@@ -999,6 +958,8 @@ class ChromiumSync:
                 "source_total": 0,
                 "target_total": 0,
                 "nodes_synced": [],
+                "nodes_skipped": [n["id"] for n in skipped_nodes] if 'skipped_nodes' in locals() else [],
+                "skips": skipped_nodes if 'skipped_nodes' in locals() else [],
                 "duration": elapsed,
                 "details": f"同步发生异常: {e}",
                 "error": str(e)
@@ -1014,12 +975,14 @@ class ChromiumSync:
         active_targets: Optional[List[str]],
         contexts: Dict[str, BrowserContext],
         nodes_data: Dict[str, dict],
-        start_time: float
+        start_time: float,
+        skipped_nodes: Optional[List[Dict[str, Any]]] = None
     ) -> Dict[str, Any]:
         """内部执行流"""
         print(self.get_summary_table(nodes_data))
         total_transferred = 0
         total_skipped = 0
+        skips_list = skipped_nodes or []
 
         if active_mode == "merge":
             logging.info("[*] 正在执行全节点 Cookie 智能 Merge (合并最新有效凭据)...")
@@ -1063,16 +1026,38 @@ class ChromiumSync:
                 "source_total": source_total,
                 "target_total": len(merged),
                 "nodes_synced": [n.id for n in dest_nodes],
+                "nodes_skipped": [n["id"] for n in skips_list],
+                "skips": skips_list,
                 "duration": elapsed,
-                "details": f"全节点 Merge 成功: 融合并向 {[n.name for n in dest_nodes]} 写入 {total_transferred} 条凭证 (跳过一致指纹 {total_skipped} 条)",
+                "details": f"全节点 Merge 成功: 向 {[n.name for n in dest_nodes]} 写入 {total_transferred} 条凭证 (跳过异常节点: {[n['name'] for n in skips_list] if skips_list else '无'})",
                 "error": None
             }
 
         elif active_mode == "sync":
             if not active_source:
                 active_source = self.nodes[0].id
+
+            # 源节点离线检查：如果指定源节点离线，打印明确通知日志并立即终止同步流程
             if active_source not in contexts:
-                raise RuntimeError(f"[-] 指定的源节点 [{active_source}] 未在线！")
+                source_node_obj = next((n for n in self.nodes if n.id == active_source), None)
+                source_name = source_node_obj.name if source_node_obj else active_source
+                elapsed = round(time.time() - start_time, 2)
+                msg = f"⚠️ [SOURCE_OFFLINE] 单向同步指定的源节点 [{source_name}] ({active_source}) 离线或连接异常，无法提取基准凭据，同步流程终止。"
+                logging.error(msg)
+                return {
+                    "status": "failed",
+                    "mode": "sync",
+                    "transferred_count": 0,
+                    "diff_skipped_count": 0,
+                    "source_total": 0,
+                    "target_total": 0,
+                    "nodes_synced": [],
+                    "nodes_skipped": [n["id"] for n in skips_list],
+                    "skips": skips_list,
+                    "duration": elapsed,
+                    "details": msg,
+                    "error": f"Source node '{active_source}' is offline"
+                }
 
             src_data = nodes_data[active_source]
             src_cookies = src_data["cookies"]
@@ -1105,8 +1090,10 @@ class ChromiumSync:
                 "source_total": len(src_cookies),
                 "target_total": len(src_cookies),
                 "nodes_synced": [n.id for n in dest_nodes],
+                "nodes_skipped": [n["id"] for n in skips_list],
+                "skips": skips_list,
                 "duration": elapsed,
-                "details": f"单源同步成功: [{src_data['name']}] 写入 {total_transferred} 条凭据至 {[n.name for n in dest_nodes]} (跳过一致指纹 {total_skipped} 条)",
+                "details": f"单源同步成功: [{src_data['name']}] 写入 {total_transferred} 条凭据至 {[n.name for n in dest_nodes]} (跳过异常节点: {[n['name'] for n in skips_list] if skips_list else '无'})",
                 "error": None
             }
 

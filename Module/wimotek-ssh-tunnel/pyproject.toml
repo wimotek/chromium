@@ -1,0 +1,52 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "wimotek-ssh-tunnel"
+version = "1.0"
+description = "Universal SSH Tunnel & CDP Target Sync engine for Chrome DevTools Protocol Hubs with resilient error skipping and structured logging"
+readme = "README.md"
+requires-python = ">=3.8"
+license = { text = "Apache-2.0" }
+authors = [
+  { name = "Wimotek Engineering", email = "wimotek@gmail.com" }
+]
+keywords = [
+  "cdp",
+  "chrome-devtools-protocol",
+  "ssh-tunnel",
+  "cdp-hub",
+  "sync",
+  "automation",
+  "playwright",
+  "puppeteer"
+]
+classifiers = [
+  "Development Status :: 5 - Production/Stable",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: Apache Software License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.8",
+  "Programming Language :: Python :: 3.9",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Internet :: Proxy Servers",
+  "Topic :: Software Development :: Testing"
+]
+dependencies = [
+  "urllib3>=1.26.0"
+]
+
+[project.optional-dependencies]
+paramiko = ["paramiko>=2.11.0"]
+sshtunnel = ["sshtunnel>=0.4.0"]
+all = ["paramiko>=2.11.0", "sshtunnel>=0.4.0"]
+
+[project.scripts]
+wimotek-ssh-tunnel = "wimotek_ssh_tunnel.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["wimotek_ssh_tunnel*"]
