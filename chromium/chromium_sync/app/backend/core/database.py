@@ -12,12 +12,16 @@ def get_db_connection() -> sqlite3.Connection:
     return conn
 
 def init_db_and_jwt():
+    """
+    服务启动初始化与一次性平滑升级补丁引擎：
+    由 app.py 启动时统一调用一次，集中管理表结构热升级，业务代码严禁堆砌迁移补丁。
+    """
     from core.security import hash_password
 
     conn = get_db_connection()
     cur = conn.cursor()
     
-    # 1. 节点表 (包含 approval_status 与 conn_type)
+    # 1. 基础节点表 (标准完整架构)
     cur.execute('''CREATE TABLE IF NOT EXISTS nodes (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         name TEXT NOT NULL,
@@ -81,34 +85,45 @@ def init_db_and_jwt():
         details TEXT
     )''')
 
-    # 增量字段平滑自动迁移
-    for col, col_type in [
+    # =========================================================================
+    # 【集中式一次性补丁迁移区】：统一扫描老旧数据库并自动补全缺失字段
+    # =========================================================================
+    cur.execute("PRAGMA table_info(nodes)")
+    existing_node_cols = {col[1] for col in cur.fetchall()}
+    
+    node_patches = [
         ("approval_status", "INTEGER DEFAULT 1"),
         ("conn_type", "TEXT DEFAULT 'direct'"),
         ("node_uuid", "TEXT DEFAULT ''"),
-        ("fingerprint", "TEXT DEFAULT ''"),
-        ("created_at", "TEXT DEFAULT ''"),
+        ("fingerprint", "TEXT DEFAULT ''"),    # 补齐 edge-agent 指纹字段
+        ("created_at", "TEXT DEFAULT ''"),     # 补齐待审超时计算时间戳
         ("enabled", "INTEGER DEFAULT 1"),
         ("group_name", "TEXT DEFAULT '默认分组'"),
         ("direct_host", "TEXT DEFAULT '127.0.0.1'"),
         ("auto_tunnel", "INTEGER DEFAULT 1"),
         ("cookie_count", "INTEGER DEFAULT 0")
-    ]:
-        try:
-            cur.execute(f"ALTER TABLE nodes ADD COLUMN {col} {col_type}")
-        except Exception:
-            pass
+    ]
 
-    for col, col_type in [
+    for col_name, col_def in node_patches:
+        if col_name not in existing_node_cols:
+            try:
+                cur.execute(f"ALTER TABLE nodes ADD COLUMN {col_name} {col_def}")
+            except Exception:
+                pass
+
+    cur.execute("PRAGMA table_info(sync_logs)")
+    existing_log_cols = {col[1] for col in cur.fetchall()}
+    for col_name, col_def in [
         ("source_node", "TEXT DEFAULT ''"),
         ("target_nodes", "TEXT DEFAULT ''"),
         ("cookie_count", "INTEGER DEFAULT 0"),
         ("duration", "TEXT DEFAULT ''")
     ]:
-        try:
-            cur.execute(f"ALTER TABLE sync_logs ADD COLUMN {col} {col_type}")
-        except Exception:
-            pass
+        if col_name not in existing_log_cols:
+            try:
+                cur.execute(f"ALTER TABLE sync_logs ADD COLUMN {col_name} {col_def}")
+            except Exception:
+                pass
 
     # 首次自动补齐默认策略
     cur.execute("SELECT count(*) FROM sync_policies")
@@ -140,7 +155,7 @@ def init_db_and_jwt():
         'email_notify_to': '',
         'serverchan_enabled': '0',
         'serverchan_key': '',
-        'tofu_timeout_notify_minutes': '10',  # 默认待审超过 10 分钟自动预警，设为 0 关闭
+        'tofu_timeout_notify_minutes': '10',
         'sync_diff_enabled': '1',
         'sync_include_domains': '',
         'sync_exclude_domains': 'doubleclick.net,google-analytics.com'
