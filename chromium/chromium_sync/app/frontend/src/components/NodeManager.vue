@@ -15,8 +15,8 @@ const selectedFilterGroup = ref('')
 const clusterJoinToken = ref('')
 
 // 视图与抽屉状态
-const activeTab = ref('nodes') // 'nodes' | 'audit'
-const deployTab = ref('docker') // 'docker' | 'compose'
+const activeTab = ref('nodes')
+const deployTab = ref('docker')
 const showDeployGuide = ref(false)
 
 // 准入审计日志
@@ -30,11 +30,15 @@ const editingNodeId = ref(null)
 const showCookieModal = ref(false)
 const cookieDetails = ref({ node_name: '', total: 0, valid_count: 0, session_count: 0, expired_count: 0, cookies: [] })
 
-// 节点表单模型
+// 节点表单模型 (分类严格隔离)
 const nodeForm = reactive({
   name: '',
   group_name: '默认分组',
+  conn_type: 'direct',
+  topo_profile: 'direct',
   is_local: true,
+  node_uuid: '',
+  fingerprint: '',
   direct_host: '127.0.0.1',
   ssh_host: '',
   ssh_port: 22,
@@ -45,12 +49,10 @@ const nodeForm = reactive({
   local_bind_port: 9222
 })
 
-// 当前访问的 Hub 地址 (用于自动填入一键部署命令)
 const currentHubUrl = computed(() => {
   return `${window.location.protocol}//${window.location.host}`
 })
 
-// 加载基础数据
 const loadBaseData = async () => {
   const [nRes, kRes, gRes, rRes] = await Promise.all([
     props.api('/api/nodes'),
@@ -66,7 +68,6 @@ const loadBaseData = async () => {
   emit('update-nodes')
 }
 
-// 加载零信任准入审计日志
 const loadAuditLogs = async () => {
   const res = await props.api('/api/nodes/audit-logs')
   if (res.ok) {
@@ -74,16 +75,13 @@ const loadAuditLogs = async () => {
   }
 }
 
-// 待认领 TOFU 队列
 const pendingNodes = computed(() => nodes.value.filter(n => n.approval_status === 0))
 
-// 分组过滤
 const filteredNodes = computed(() => {
   if (!selectedFilterGroup.value) return nodes.value
   return nodes.value.filter(n => n.group_name === selectedFilterGroup.value)
 })
 
-// 复制通用方法
 const copyText = async (text, desc) => {
   if (!text) return
   try {
@@ -100,7 +98,6 @@ const copyText = async (text, desc) => {
   }
 }
 
-// 重置入网通行码
 const resetJoinToken = async () => {
   if (confirm('确认重置集群入网通行码？旧通行码将立即失效，但已通过审批的节点不受影响。')) {
     const res = await props.api('/api/nodes/reset-join-token', { method: 'POST' })
@@ -110,7 +107,6 @@ const resetJoinToken = async () => {
   }
 }
 
-// 审批认领通过
 const approveNode = async (node) => {
   const res = await props.api(`/api/nodes/${node.id}/approve`, { method: 'POST' })
   const data = await res.json()
@@ -118,7 +114,6 @@ const approveNode = async (node) => {
   loadBaseData()
 }
 
-// 拒绝待审节点
 const rejectNode = async (node) => {
   if (confirm(`确认拒绝并清除待审节点 [${node.name}]？`)) {
     const res = await props.api(`/api/nodes/${node.id}/reject`, { method: 'POST' })
@@ -128,23 +123,25 @@ const rejectNode = async (node) => {
   }
 }
 
-// 一键信任全部
 const approveAllPending = async () => {
   for (const n of pendingNodes.value) {
     await props.api(`/api/nodes/${n.id}/approve`, { method: 'POST' })
   }
-  props.showToast(`已成功信任 ${pendingNodes.value.length} 个节点`, 'success')
+  props.showToast(`已信任 ${pendingNodes.value.length} 个节点`, 'success')
   loadBaseData()
 }
 
-// 弹窗表单操作
 const openCreateModal = () => {
   isEditMode.value = false
   editingNodeId.value = null
   Object.assign(nodeForm, {
     name: '',
     group_name: selectedFilterGroup.value || '默认分组',
+    conn_type: 'direct',
+    topo_profile: 'direct',
     is_local: true,
+    node_uuid: '',
+    fingerprint: '',
     direct_host: '127.0.0.1',
     ssh_host: '',
     ssh_port: 22,
@@ -163,15 +160,19 @@ const openEditModal = (node) => {
   Object.assign(nodeForm, {
     name: node.name,
     group_name: node.group_name || '默认分组',
+    conn_type: node.conn_type || 'direct',
+    topo_profile: node.topo_profile || 'direct',
     is_local: Boolean(node.is_local),
+    node_uuid: node.node_uuid || '',
+    fingerprint: node.fingerprint || '',
     direct_host: node.direct_host || '127.0.0.1',
-    ssh_host: node.ssh_host,
-    ssh_port: node.ssh_port,
-    ssh_user: node.ssh_user,
-    ssh_key_filename: node.ssh_key_filename,
-    ssh_password: node.ssh_password,
-    remote_cdp_port: node.remote_cdp_port,
-    local_bind_port: node.local_bind_port
+    ssh_host: node.ssh_host || '',
+    ssh_port: node.ssh_port || 22,
+    ssh_user: node.ssh_user || 'root',
+    ssh_key_filename: node.ssh_key_filename || '',
+    ssh_password: node.ssh_password || '',
+    remote_cdp_port: node.remote_cdp_port || 9222,
+    local_bind_port: node.local_bind_port || 9222
   })
   showNodeModal.value = true
 }
@@ -209,6 +210,7 @@ const viewCookieDetails = async (node) => {
 }
 
 const probeNode = async (node) => {
+  props.showToast('正在探测目标 CDP 存量...', 'info')
   const res = await props.api(`/api/nodes/${node.id}/probe`, { method: 'POST' })
   const data = await res.json()
   if (res.ok) {
@@ -255,7 +257,6 @@ onMounted(() => {
     <!-- ==================== 1. 入网凭证与一键部署横幅 (单行紧凑自适应 HUD) ==================== -->
     <div class="token-deploy-banner">
       <div class="token-bar-flex">
-        <!-- 左侧：图标 + 标题 + 紧凑 Token 复制胶囊 (杜绝横向拉伸黑洞) -->
         <div class="token-left-wrap">
           <div class="token-title-group">
             <span class="token-key-icon">🔑</span>
@@ -268,7 +269,6 @@ onMounted(() => {
           </div>
         </div>
 
-        <!-- 右侧：重置按钮与部署命令抽屉开关 -->
         <div class="token-right-wrap">
           <button @click="resetJoinToken" class="btn-micro btn-ghost-red" title="重置入网通行码">
             🔄 重置
@@ -279,7 +279,7 @@ onMounted(() => {
         </div>
       </div>
 
-      <!-- 折叠抽屉：点击展开显示部署命令 -->
+      <!-- 部署代码抽屉 -->
       <div v-if="showDeployGuide" class="deploy-guide-panel">
         <div style="display:flex; gap:10px; margin-bottom:8px; border-bottom:1px solid #1e3a8a; padding-bottom:6px;">
           <button @click="deployTab = 'docker'" :class="['tab-guide-btn', deployTab === 'docker' ? 'tab-guide-active' : '']">Docker CLI (标准命令)</button>
@@ -296,7 +296,7 @@ onMounted(() => {
   -v ./data:/data \
   wimotek/chromium:novnc</code></pre>
           <div style="display:flex; justify-content:space-between; align-items:center; margin-top:6px;">
-            <span style="font-size:11px; color:#64748b;">* 若宿主机映射了其他自定义端口（例如 -p 1922:9222），追加参数：<code>-e DIRECT_PORT=1922</code> 即可自动直连。</span>
+            <span style="font-size:11px; color:#64748b;">* 若宿主机映射了其他自定义端口（例如 -p 3030:9222），追加参数：<code>-e DIRECT_PORT=3030</code> 即可自动直连。</span>
             <button @click="copyText(`docker run -d --name chromium-novnc -p 6080:6080 -p 9222:9222 -e HUB_URL=${currentHubUrl} -e JOIN_TOKEN=${clusterJoinToken} -v ./data:/data wimotek/chromium:novnc`, 'Docker 启动命令')" class="link-probe">一键复制 CLI</button>
           </div>
         </div>
@@ -313,14 +313,14 @@ services:
     environment:
       - HUB_URL={{ currentHubUrl }}
       - JOIN_TOKEN={{ clusterJoinToken }}
-      # - DIRECT_PORT=1922   # 映射宿主机自定义端口时按需填写
+      # - DIRECT_PORT=3030   # 映射宿主机自定义端口时按需填写
     volumes:
       - ./data:/data</code></pre>
         </div>
       </div>
     </div>
 
-    <!-- ==================== 2. TOFU 待审批边缘节点提示条 ==================== -->
+    <!-- ==================== 2. 原版 TOFU 待审批边缘节点提示条 ==================== -->
     <div v-if="pendingNodes.length > 0" class="tofu-alert-banner">
       <div class="tofu-banner-left">
         <span class="tofu-bell-icon">🔔</span>
@@ -336,7 +336,7 @@ services:
       </div>
     </div>
 
-    <!-- ==================== 3. 导航药丸切换 (节点列表 vs 准入审计流水) ==================== -->
+    <!-- ==================== 3. 导航药丸切换 ==================== -->
     <div class="table-header-bar">
       <div style="display:flex; gap:16px; align-items:center;">
         <button @click="activeTab = 'nodes'" :class="['nav-pill-btn', activeTab === 'nodes' ? 'nav-pill-active' : '']">
@@ -369,16 +369,18 @@ services:
             <th style="width: 12%;">所属分组</th>
             <th style="width: 20%;">节点标识 (Node UUID)</th>
             <th style="width: 10%;">准入状态</th>
-            <th style="width: 14%;">端点 / 映射端口</th>
+            <th style="width: 16%;">端点 / 映射端口</th>
             <th style="width: 10%;">Cookie 存量</th>
             <th style="width: 12%;">网络拓扑</th>
             <th style="width: 8%;">角色</th>
-            <th style="width: 14%; text-align: right;">操作</th>
+            <th style="width: 12%; text-align: right;">操作</th>
           </tr>
         </thead>
         <tbody>
+          <!-- 核心继承：原版 row-node-disabled (禁用行置灰55%) 与 row-node-pending -->
           <tr v-for="node in filteredNodes" :key="node.id" :class="[node.enabled === 0 ? 'row-node-disabled' : '', node.approval_status === 0 ? 'row-node-pending' : '']">
             <td>
+              <!-- 核心继承：原版 tag-group-pill 分组蓝色胶囊 -->
               <span class="tag-group-pill">📁 {{ node.group_name || '默认分组' }}</span>
             </td>
 
@@ -389,33 +391,36 @@ services:
                 <span v-else-if="node.enabled === 0" style="font-size:10px; color:#f87171; margin-left:4px;">[已禁用]</span>
               </div>
               <div class="cell-sub-desc">
-                <span v-if="node.conn_type === 'reverse'">指纹: {{ node.fingerprint ? node.fingerprint.slice(0, 16) + '...' : (node.node_uuid || 'NAT4-Client') }}</span>
+                <span v-if="node.conn_type === 'reverse'">指纹: {{ node.fingerprint ? node.fingerprint.slice(0, 16) + '...' : (node.node_uuid || 'Client') }}</span>
                 <span v-else-if="node.is_local">直连: {{ node.direct_host || '127.0.0.1' }}</span>
                 <span v-else>{{ node.ssh_user }}@{{ node.ssh_host }}:{{ node.ssh_port }}</span>
               </div>
             </td>
 
             <td>
-              <span v-if="node.approval_status === 0" class="badge-status-pending">⏳ 待审批 (PENDING)</span>
+              <span v-if="node.approval_status === 0" class="badge-status-pending">⏳ 待审批</span>
               <span v-else-if="node.enabled === 0" class="status-standby">○ 已禁用</span>
-              <span v-else-if="node.status === 'connected'" class="badge-status-trusted">● 已信任 (TRUSTED)</span>
+              <span v-else-if="node.status === 'connected'" class="badge-status-trusted">● 已信任</span>
               <span v-else class="status-standby">○ 离线</span>
             </td>
 
             <td class="font-cyan-mono">
-              <span v-if="node.conn_type === 'reverse'">Reverse-WSS</span>
+              <span v-if="node.topo_profile === 'public_wss'">WSS: {{ node.direct_host }}:{{ node.local_bind_port }}</span>
+              <span v-else-if="node.topo_profile === 'nat4_reverse'">WSS: 内部打通(:{{ node.local_bind_port }})</span>
               <span v-else>{{ node.is_local ? (node.direct_host || '127.0.0.1') : '127.0.0.1' }}:{{ node.local_bind_port }}</span>
             </td>
 
             <td>
-              <div class="cookie-badge" @click="viewCookieDetails(node)" style="cursor:pointer;" title="查看详情">
+              <div class="cookie-badge" @click="viewCookieDetails(node)" style="cursor:pointer;" title="查看 Cookie 明细">
                 <span>🍪 {{ node.cookie_count || 0 }} 条</span>
               </div>
             </td>
 
             <td>
-              <span v-if="node.conn_type === 'reverse'" class="tag-topo-reverse">nat4_reverse</span>
-              <span v-else class="tag-topo-direct">direct</span>
+              <span v-if="node.topo_profile === 'public_wss'" class="tag-topo-public-wss">公网 WSS</span>
+              <span v-else-if="node.topo_profile === 'nat4_reverse'" class="tag-topo-reverse">NAT4 反穿</span>
+              <span v-else-if="node.topo_profile === 'ssh'" class="tag-topo-ssh">SSH 穿透</span>
+              <span v-else class="tag-topo-direct">端口直连</span>
             </td>
 
             <td>
@@ -430,7 +435,12 @@ services:
                   <button @click="rejectNode(node)" class="btn-micro btn-trash">❌ 拒绝</button>
                 </template>
                 <template v-else>
-                  <button @click="toggleNodeEnabled(node)" class="btn-micro" style="background:#334155;" :title="node.enabled === 0 ? '启用' : '禁用'">
+                  <!-- 核心继承：原版动态类名 btn-resume-node (绿色) 与 btn-pause-node (灰色) 完美恢复！ -->
+                  <button 
+                    @click="toggleNodeEnabled(node)" 
+                    :class="['btn-micro', node.enabled === 0 ? 'btn-resume-node' : 'btn-pause-node']"
+                    :title="node.enabled === 0 ? '点击恢复启用此节点' : '点击禁用此节点'"
+                  >
                     {{ node.enabled === 0 ? '▶️' : '⏸️' }}
                   </button>
                   <button @click="toggleTunnel(node)" :disabled="node.enabled === 0 || node.conn_type === 'reverse'" class="btn-micro btn-orange">
@@ -447,7 +457,7 @@ services:
       </table>
     </div>
 
-    <!-- ==================== 视图 2：零信任准入审计流水表格 (7列标准规范) ==================== -->
+    <!-- ==================== 视图 2：零信任准入审计流水表格 ==================== -->
     <div v-else class="table-responsive">
       <table class="cdp-fluid-table audit-decision-table">
         <thead>
@@ -484,7 +494,7 @@ services:
             </td>
             <td class="font-mono text-reason" :title="log.reason">{{ log.reason || '-' }}</td>
             <td>
-              <span class="font-mono" :style="{ color: log.network_profile === 'nat4_reverse' ? '#a78bfa' : '#38bdf8' }">
+              <span class="font-mono" :style="{ color: log.network_profile === 'public_wss' ? '#06b6d4' : (log.network_profile === 'nat4_reverse' ? '#a78bfa' : '#38bdf8') }">
                 {{ log.network_profile || '-' }}
               </span>
             </td>
@@ -496,18 +506,45 @@ services:
       </table>
     </div>
 
-    <!-- 弹窗：新增 / 编辑节点 -->
+    <!-- ==================== 弹窗：按 4 大类别严谨隔离编辑 ==================== -->
     <div v-if="showNodeModal" class="modal-backdrop">
       <div class="modal-card">
         <div class="modal-title-bar">
-          <h3 style="font-size:14px; font-weight:bold; color:#fff;">
-            {{ isEditMode ? '修改 CDP 实例配置' : '接入新 CDP 实例节点' }}
-          </h3>
+          <div style="display:flex; align-items:center; gap:8px;">
+            <span style="font-size:16px;">⚙️</span>
+            <h3 style="font-size:14px; font-weight:bold; color:#fff;">
+              {{ isEditMode ? '修改 CDP 实例配置' : '接入新 CDP 实例节点' }}
+            </h3>
+          </div>
           <button @click="showNodeModal = false" class="modal-close-btn">✕</button>
         </div>
 
         <form @submit.prevent="submitNodeForm" class="form-v-stack" style="margin-top:14px;">
-          <div class="form-field-block">
+          
+          <!-- 类别 1: 公网 WSS 长连 -->
+          <div v-if="isEditMode && nodeForm.conn_type === 'reverse' && nodeForm.topo_profile === 'public_wss'" class="reverse-node-locked-box" style="border-color:#0891b2; background:#082f49;">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">
+              <span style="color:#38bdf8; font-size:12px; font-weight:bold;">🌐 接入类别：公网 WSS 长连接 (安全直连通道)</span>
+              <span class="locked-tag-lock">🔒 边缘 Agent 托管长连</span>
+            </div>
+            <p style="font-size:11px; color:#cbd5e1; margin:0; line-height:1.5;">
+              节点拥有独立公网 IP，通过出站 WSS 安全长连接入，免在公网开放高危入站端口，通信全量加密。
+            </p>
+          </div>
+
+          <!-- 类别 2: NAT4 反向穿透长连接 -->
+          <div v-else-if="isEditMode && nodeForm.conn_type === 'reverse'" class="reverse-node-locked-box">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">
+              <span class="locked-badge-purple">🟣 接入类别：NAT4 反向穿透 (内网长连接)</span>
+              <span class="locked-tag-lock">🔒 边缘 Agent 托管长连</span>
+            </div>
+            <p style="font-size:11px; color:#cbd5e1; margin:0; line-height:1.5;">
+              节点处于无公网/家宽/NAT4 环境，由边缘 Agent 自动出站穿透入网。
+            </p>
+          </div>
+
+          <!-- 类别 3 & 4: 手动直连 / SSH 节点的模式切换 -->
+          <div v-else class="form-field-block">
             <label class="form-label">接入类型</label>
             <div class="row-flex-gap">
               <label :class="['radio-pill-card', nodeForm.is_local ? 'radio-pill-active' : '']">
@@ -521,6 +558,7 @@ services:
             </div>
           </div>
 
+          <!-- 业务参数 (名称与分组自由编辑) -->
           <div class="row-flex-gap">
             <div class="form-field-block" style="flex:1;">
               <label class="form-label">节点名称</label>
@@ -535,19 +573,46 @@ services:
             </div>
           </div>
 
-          <div v-if="nodeForm.is_local" style="background:#09122a; padding:12px; border-radius:6px; border:1px solid #172554;">
+          <!-- 专属表单区 A：WSS 长连节点 (展示真实来源 IP，锁定敏感项) -->
+          <div v-if="isEditMode && nodeForm.conn_type === 'reverse'" class="form-v-stack">
             <div class="row-flex-gap">
               <div class="form-field-block" style="flex:1;">
-                <label class="form-label">直连 IP / 域名</label>
+                <label class="form-label">节点来源公网/出口 IP <span style="color:#64748b;">[自动识别]</span></label>
+                <input v-model="nodeForm.direct_host" disabled class="cdp-input cdp-disabled font-cyan-mono" style="width:100% !important;">
+              </div>
+              <div class="form-field-block" style="flex:1;">
+                <label class="form-label">申报/映射 CDP 端口 (如 3030)</label>
+                <input v-model="nodeForm.local_bind_port" type="number" required class="cdp-input font-cyan-mono" style="width:100% !important;">
+              </div>
+            </div>
+
+            <div class="row-flex-gap">
+              <div class="form-field-block" style="flex:1;">
+                <label class="form-label">节点唯一标识 (UUID) <span style="color:#64748b;">[只读]</span></label>
+                <input v-model="nodeForm.node_uuid" disabled class="cdp-input cdp-disabled font-cyan-mono" style="width:100% !important;">
+              </div>
+              <div class="form-field-block" style="flex:1;">
+                <label class="form-label">公钥证书指纹 (Fingerprint) <span style="color:#64748b;">[防篡改]</span></label>
+                <input v-model="nodeForm.fingerprint" disabled class="cdp-input cdp-disabled font-cyan-mono" style="width:100% !important; font-size:11px;">
+              </div>
+            </div>
+          </div>
+
+          <!-- 专属表单区 B：本地/局域网直连 -->
+          <div v-else-if="nodeForm.is_local" style="background:#09122a; padding:12px; border-radius:6px; border:1px solid #172554;">
+            <div class="row-flex-gap">
+              <div class="form-field-block" style="flex:1;">
+                <label class="form-label">直连 IP / 局域网域名</label>
                 <input v-model="nodeForm.direct_host" required placeholder="127.0.0.1 或 192.168.x.x" class="cdp-input font-cyan-mono" style="width:100% !important;">
               </div>
               <div class="form-field-block">
-                <label class="form-label">CDP 端口 (默认 9222)</label>
+                <label class="form-label">CDP 调试端口 (默认 9222)</label>
                 <input v-model="nodeForm.local_bind_port" type="number" required class="cdp-input cdp-w-port font-cyan-mono">
               </div>
             </div>
           </div>
 
+          <!-- 专属表单区 C：远程 SSH 隧道 -->
           <div v-else class="form-v-stack">
             <div class="row-flex-gap">
               <div class="form-field-block" style="flex:1;">
@@ -592,7 +657,7 @@ services:
 
           <div style="display:flex; justify-content:flex-end; gap:8px; margin-top:16px;">
             <button type="button" @click="showNodeModal = false" class="btn-gray-test">取消</button>
-            <button type="submit" class="btn-primary-gradient">保存配置</button>
+            <button type="submit" class="btn-primary-gradient">保存修改</button>
           </div>
         </form>
       </div>
@@ -656,6 +721,81 @@ services:
 </template>
 
 <style scoped>
+/* ==================== 原版核心专属样式 (全量 100% 恢复保留) ==================== */
+/* 待审核节点专属横幅 */
+.tofu-alert-banner {
+  background: rgba(217, 119, 6, 0.12);
+  border: 1px solid #d97706;
+  border-radius: 8px;
+  padding: 12px 16px;
+  margin-bottom: 16px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+}
+.tofu-banner-left {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.tofu-bell-icon { font-size: 20px; }
+.tofu-title-text {
+  font-size: 13px;
+  font-weight: bold;
+  color: #fbbf24;
+  margin: 0;
+}
+.tofu-sub-text {
+  font-size: 11px;
+  color: #cbd5e1;
+  margin: 2px 0 0 0;
+}
+
+/* 核心原版：分组蓝色药丸标签 */
+.tag-group-pill {
+  background: #0f1f42;
+  border: 1px solid #1d4ed8;
+  color: #60a5fa;
+  border-radius: 4px;
+  padding: 2px 8px;
+  font-size: 11px;
+  display: inline-flex;
+  align-items: center;
+  white-space: nowrap;
+}
+
+/* 核心原版：禁用行整行置灰 55% */
+.row-node-disabled {
+  opacity: 0.55;
+  filter: grayscale(0.8);
+}
+/* 核心原版：待审行浅色标注 */
+.row-node-pending {
+  background: rgba(217, 119, 6, 0.05);
+}
+
+/* 核心原版：启停状态动态变色按钮 (灰色暂停 / 绿色恢复启动) */
+.btn-pause-node {
+  background-color: #334155 !important;
+  color: #cbd5e1 !important;
+}
+.btn-pause-node:hover {
+  background-color: #475569 !important;
+  color: #fff !important;
+}
+
+.btn-resume-node {
+  background-color: #065f46 !important;
+  color: #34d399 !important;
+  border: 1px solid #059669 !important;
+}
+.btn-resume-node:hover {
+  background-color: #047857 !important;
+  color: #fff !important;
+}
+
+/* ==================== 新增功能专属样式 (与原版完美兼容融入) ==================== */
 /* 紧凑型通行码横幅 (单行高聚合 HUD) */
 .token-deploy-banner {
   background: #09122a;
@@ -689,17 +829,9 @@ services:
   white-space: nowrap;
 }
 
-.token-key-icon {
-  font-size: 15px;
-}
+.token-key-icon { font-size: 15px; }
+.token-title-text { font-size: 13px; font-weight: bold; color: #f8fafc; }
 
-.token-title-text {
-  font-size: 13px;
-  font-weight: bold;
-  color: #f8fafc;
-}
-
-/* 核心优化：紧凑型 Token 胶囊条 (杜绝全宽空洞) */
 .token-compact-chip {
   display: inline-flex;
   align-items: center;
@@ -712,7 +844,6 @@ services:
   transition: all 0.2s ease;
   max-width: 440px;
 }
-
 .token-compact-chip:hover {
   border-color: #00f0ff;
   background: #0b1739;
@@ -736,13 +867,11 @@ services:
   padding: 1px 6px;
   white-space: nowrap;
 }
-
 .token-compact-chip:hover .token-copy-tag {
   background: #0284c7;
   color: #ffffff;
 }
 
-/* 右侧按钮群 */
 .token-right-wrap {
   display: flex;
   align-items: center;
@@ -755,10 +884,7 @@ services:
   border: 1px solid #dc2626;
   color: #f87171;
 }
-.btn-ghost-red:hover {
-  background: #dc2626;
-  color: #ffffff;
-}
+.btn-ghost-red:hover { background: #dc2626; color: #ffffff; }
 
 .btn-guide-toggle {
   background: #1e293b;
@@ -766,19 +892,13 @@ services:
   color: #38bdf8;
   font-weight: 600;
 }
-.btn-guide-toggle:hover {
-  background: #0284c7;
-  border-color: #0284c7;
-  color: #ffffff;
-}
+.btn-guide-toggle:hover { background: #0284c7; border-color: #0284c7; color: #ffffff; }
 
-/* 部署代码抽屉 */
 .deploy-guide-panel {
   margin-top: 10px;
   padding-top: 10px;
   border-top: 1px dashed #1e3a8a;
 }
-
 .tab-guide-btn {
   background: none;
   border: none;
@@ -787,7 +907,6 @@ services:
   cursor: pointer;
   padding: 3px 8px;
 }
-
 .tab-guide-active {
   color: #38bdf8;
   font-weight: bold;
@@ -806,7 +925,6 @@ services:
   overflow-x: auto;
 }
 
-/* 导航药丸切换按钮 */
 .nav-pill-btn {
   background: transparent;
   border: 1px solid #334155;
@@ -817,7 +935,6 @@ services:
   cursor: pointer;
   transition: all 0.2s;
 }
-
 .nav-pill-active {
   background: #1e3a8a;
   border-color: #3b82f6;
@@ -825,46 +942,93 @@ services:
   font-weight: bold;
 }
 
-/* 状态徽章体系 */
+/* 准入状态徽章 (去英文化纯正规范) */
 .badge-status-trusted {
   background: rgba(16, 185, 129, 0.15);
   border: 1px solid #059669;
   color: #34d399;
   border-radius: 4px;
-  padding: 2px 6px;
+  padding: 2px 8px;
   font-size: 11px;
+  font-weight: 500;
 }
-
 .badge-status-pending {
   background: rgba(217, 119, 6, 0.15);
   border: 1px solid #d97706;
   color: #fbbf24;
   border-radius: 4px;
-  padding: 2px 6px;
+  padding: 2px 8px;
   font-size: 11px;
+  font-weight: 500;
 }
 
+/* 拓扑标签四大分类体系 */
+.tag-topo-public-wss {
+  background: rgba(8, 145, 178, 0.2);
+  border: 1px solid #06b6d4;
+  color: #22d3ee;
+  border-radius: 4px;
+  padding: 2px 8px;
+  font-family: monospace;
+  font-size: 11px;
+  font-weight: bold;
+}
 .tag-topo-reverse {
   background: rgba(139, 92, 246, 0.2);
   border: 1px solid #8b5cf6;
   color: #c4b5fd;
   border-radius: 4px;
-  padding: 2px 6px;
+  padding: 2px 8px;
   font-family: monospace;
   font-size: 11px;
 }
-
 .tag-topo-direct {
   background: rgba(2, 132, 199, 0.15);
   border: 1px solid #0284c7;
   color: #38bdf8;
   border-radius: 4px;
-  padding: 2px 6px;
+  padding: 2px 8px;
+  font-family: monospace;
+  font-size: 11px;
+}
+.tag-topo-ssh {
+  background: rgba(49, 46, 129, 0.4);
+  border: 1px solid #4f46e5;
+  color: #a5b4fc;
+  border-radius: 4px;
+  padding: 2px 8px;
   font-family: monospace;
   font-size: 11px;
 }
 
-/* 准入审计表格专属样式 */
+/* 锁定与只读展示容器 */
+.reverse-node-locked-box {
+  background: #0f172a;
+  border: 1px solid #3b82f6;
+  border-radius: 6px;
+  padding: 10px 14px;
+  margin-bottom: 8px;
+}
+.locked-badge-purple {
+  color: #a78bfa;
+  font-size: 12px;
+  font-weight: bold;
+}
+.locked-tag-lock {
+  font-size: 11px;
+  color: #94a3b8;
+  background: #1e293b;
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+.cdp-disabled {
+  background-color: #090f1d !important;
+  color: #64748b !important;
+  border-color: #1e293b !important;
+  cursor: not-allowed !important;
+}
+
+/* 准入审计表格 */
 .badge-decision-allow {
   background: rgba(16, 185, 129, 0.2);
   border: 1px solid #059669;
@@ -873,7 +1037,6 @@ services:
   padding: 2px 8px;
   font-size: 11px;
 }
-
 .badge-decision-pending {
   background: rgba(217, 119, 6, 0.2);
   border: 1px solid #d97706;
@@ -882,7 +1045,6 @@ services:
   padding: 2px 8px;
   font-size: 11px;
 }
-
 .badge-decision-deny {
   background: rgba(220, 38, 38, 0.2);
   border: 1px solid #dc2626;
@@ -891,7 +1053,6 @@ services:
   padding: 2px 8px;
   font-size: 11px;
 }
-
 .badge-loopback {
   background: #1e293b;
   border: 1px solid #475569;
@@ -901,55 +1062,11 @@ services:
   border-radius: 3px;
   margin-left: 4px;
 }
-
 .text-reason {
   color: #cbd5e1;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
   max-width: 260px;
-}
-
-/* 待审核横幅 */
-.tofu-alert-banner {
-  background: rgba(217, 119, 6, 0.12);
-  border: 1px solid #d97706;
-  border-radius: 8px;
-  padding: 10px 14px;
-  margin-bottom: 14px;
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-}
-
-.tofu-banner-left {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-}
-
-.tofu-bell-icon { font-size: 18px; }
-.tofu-title-text { font-size: 13px; font-weight: bold; color: #fbbf24; margin: 0; }
-.tofu-sub-text { font-size: 11px; color: #cbd5e1; margin: 2px 0 0 0; }
-
-.tag-group-pill {
-  background: #0f1f42;
-  border: 1px solid #1d4ed8;
-  color: #60a5fa;
-  border-radius: 4px;
-  padding: 2px 8px;
-  font-size: 11px;
-  display: inline-flex;
-  align-items: center;
-  white-space: nowrap;
-}
-
-.row-node-disabled {
-  opacity: 0.55;
-  filter: grayscale(0.8);
-}
-
-.row-node-pending {
-  background: rgba(217, 119, 6, 0.05);
 }
 </style>
