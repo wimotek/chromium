@@ -16,28 +16,12 @@ from core.security import verify_token
 from services.tunnel_manager import tunnel_mgr, REVERSE_TUNNEL_POOL
 from services.cdp_engine import fetch_cookies_native, probe_node_cookies
 
-# ==================== 安全套件导入与降级 ====================
-try:
-    from wimotek_edge_agent import (
-        AccessDecision,
-        ConnectionContext,
-        TrustStatus,
-    )
-    from wimotek_edge_agent.tokens import JoinTokenIssuer, JoinTokenVerifier
-    HAS_EDGE_AGENT = True
-    logger.info("✅ 成功载入商业版 wimotek-edge-agent 核心鉴权套件！")
-except ImportError:
-    HAS_EDGE_AGENT = False
-    logger.warning("⚠️ 容器内未检测到 wimotek-edge-agent 包，启用内置轻量安全通行码引擎。")
-
 router = APIRouter(tags=["节点管理与边缘接入"])
 
 def _issue_join_token() -> str:
-    """生成标准紧凑型高熵通行码 (约 40 字符)"""
     return "hub_join_" + secrets.token_urlsafe(24)
 
 def _append_audit_log(event: str, **kwargs):
-    """向 /data/audit.jsonl 追加记录零信任准入审计事件"""
     audit_path = "/data/audit.jsonl"
     record = {
         "ts": datetime.now(timezone.utc).isoformat(),
@@ -52,7 +36,6 @@ def _append_audit_log(event: str, **kwargs):
         pass
 
 def _ensure_db_schema_migrated(conn):
-    """自愈函数：确保 nodes 表拥有 fingerprint 等最新字段"""
     try:
         conn.execute("ALTER TABLE nodes ADD COLUMN fingerprint TEXT DEFAULT ''")
         conn.commit()
@@ -184,7 +167,6 @@ def delete_node(node_id: int, user: dict = Depends(verify_token)):
 # ==================== 3. TOFU 认领、拒绝与 Token 重置 ====================
 @router.post("/api/nodes/{node_id}/approve")
 async def approve_node(node_id: int, user: dict = Depends(verify_token)):
-    """管理员在后台点击 [认领并信任]"""
     conn = get_db_connection()
     conn.row_factory = sqlite3.Row
     cur = conn.cursor()
@@ -199,7 +181,6 @@ async def approve_node(node_id: int, user: dict = Depends(verify_token)):
     node = dict(node_row)
     conn.close()
 
-    # 向长连接通道推送 approved 指令
     session = tunnel_mgr.get_reverse_session(node_id)
     if session:
         await session.send_raw_json({
@@ -373,8 +354,9 @@ async def reverse_tunnel_endpoint(
     port: Optional[int] = Query(None)
 ):
     await websocket.accept()
+    logger.info(f"⚡ [Tunnel] 接收到边缘节点 WebSocket 握手请求...")
 
-    # 1. 核心修复：优先从 Header 取端口，防止 Query(9222) 覆盖 DIRECT_PORT=3030
+    # 核心：优先从 Header 提取端口，让 DIRECT_PORT=3030 生效
     header_port_str = websocket.headers.get("x-cdp-port")
     try:
         cdp_port = int(header_port_str) if header_port_str else (port or 9222)
@@ -408,6 +390,7 @@ async def reverse_tunnel_endpoint(
         or "默认分组"
     )
 
+    # 兜底接收首帧 JSON
     if not node_uuid:
         try:
             first_msg_raw = await asyncio.wait_for(websocket.receive_text(), timeout=8.0)
@@ -419,7 +402,7 @@ async def reverse_tunnel_endpoint(
             node_group = data.get("group") or node_group
             cdp_port = data.get("port") or cdp_port
         except Exception as e:
-            logger.error(f"反向隧道握手超时或首帧异常: {e}")
+            logger.error(f"❌ [Tunnel 握手失败] 未收到节点身份信息: {e}")
             await websocket.close(code=1008, reason="Handshake timeout or invalid JSON")
             return
 
@@ -433,7 +416,7 @@ async def reverse_tunnel_endpoint(
     cur.execute("SELECT * FROM nodes WHERE node_uuid=?", (node_uuid,))
     existing_node = cur.fetchone()
 
-    # 准入判定
+    # 准入决策
     if enroll_token and (enroll_token == valid_token or enroll_token.startswith("hub_join_")):
         approved = 1
         status = "connected"
@@ -487,6 +470,7 @@ async def reverse_tunnel_endpoint(
         network_profile="nat4_reverse"
     )
 
+    # 发送握手结果
     if approved == 1:
         await session.send_raw_json({
             "status": "ok",
@@ -500,8 +484,9 @@ async def reverse_tunnel_endpoint(
             "reason": "tofu_pending_admin_approval",
             "network_profile": "nat4_reverse"
         })
-        logger.info(f"🔔 [TOFU 发现新节点] {node_name} (UUID: {node_uuid}, 端口: {cdp_port}) 进入待审隔离队列...")
+        logger.info(f"🔔 [TOFU 发现新节点] 节点 [{node_name}] (UUID: {node_uuid}, 端口: {cdp_port}) 进入待审隔离队列...")
 
+    # 进入常驻业务转发
     try:
         while True:
             text = await websocket.receive_text()
