@@ -1,4 +1,5 @@
 import os
+import asyncio
 import json
 import time
 import sqlite3
@@ -584,7 +585,19 @@ async def reverse_tunnel_endpoint(
     try:
         while True:
             text = await websocket.receive_text()
-            if text in ["ping", "{\"action\":\"ping\"}", "{\"type\":\"ping\"}"]:
+            # 强化兼容心跳判断（支持纯文本 ping 以及各类带空格的 JSON ping）
+            is_ping = False
+            if text in ["ping", "pong"]:
+                is_ping = True
+            elif "ping" in text:
+                try:
+                    parsed = json.loads(text)
+                    if isinstance(parsed, dict) and (parsed.get("action") == "ping" or parsed.get("type") == "ping"):
+                        is_ping = True
+                except Exception:
+                    pass
+
+            if is_ping:
                 await websocket.send_text("pong")
             else:
                 session.handle_incoming_text(text)
