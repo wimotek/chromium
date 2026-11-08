@@ -102,7 +102,10 @@ def list_nodes(user: dict = Depends(verify_token)):
     conn.close()
 
     for r in rows:
-        if r.get("approval_status") == 0:
+        # 【关键修复】：如果已被禁用，状态强制锁定为 disabled，防止长连存活状态发生判断矛盾
+        if r.get("enabled") == 0:
+            r["status"] = "disabled"
+        elif r.get("approval_status") == 0:
             r["status"] = "pending_approval"
         elif r.get("conn_type") == "reverse":
             session = tunnel_mgr.get_reverse_session(r["id"])
@@ -523,21 +526,23 @@ async def reverse_tunnel_endpoint(
             reason = "tofu_pending_admin_approval"
 
     try:
-        cur.execute("SELECT id, local_bind_port FROM nodes WHERE node_uuid=?", (node_uuid,))
+        cur.execute("SELECT id, local_bind_port, enabled FROM nodes WHERE node_uuid=?", (node_uuid,))
         existing_row = cur.fetchone()
 
         if existing_row:
             node_id = existing_row["id"]
-            # 老节点重连：安全保留其原本的 local_bind_port，仅更新远端实际端口与在线状态
             allocated_port = existing_row["local_bind_port"]
+            is_currently_enabled = existing_row["enabled"] if "enabled" in existing_row.keys() else 1
+            # 若处于手动禁用态，保持 disabled 状态；否则更新为在线状态
+            final_status = "disabled" if is_currently_enabled == 0 else status
+
             cur.execute("""
                 UPDATE nodes SET 
                     conn_type='reverse', direct_host='reverse-nat4', remote_cdp_port=?, local_bind_port=?,
                     status=?, approval_status=?, name=?, group_name=?, fingerprint=?
                 WHERE id=?
-            """, (cdp_port, allocated_port, status, approved, node_name, node_group, node_fp, node_id))
+            """, (cdp_port, allocated_port, final_status, approved, node_name, node_group, node_fp, node_id))
         else:
-            # 新节点首次接入：自动计算不与集群内任何既有节点冲突的全局唯一 local_bind_port
             allocated_port = _get_available_bind_port(cur, cdp_port)
             cur.execute("""
                 INSERT INTO nodes (
@@ -584,7 +589,8 @@ async def reverse_tunnel_endpoint(
                 c_cnt, _ = await probe_node_cookies(lport, node_id=nid)
                 c_conn = get_db_connection()
                 c_cur = c_conn.cursor()
-                c_cur.execute("UPDATE nodes SET cookie_count=? WHERE id=?", (c_cnt, nid))
+                # 探活成功：同步写回最新存量与 connected 状态
+                c_cur.execute("UPDATE nodes SET cookie_count=?, status='connected' WHERE id=? AND enabled=1", (c_cnt, nid))
                 c_conn.commit()
                 c_conn.close()
                 logger.info(f"🍪 [开机探活刷新] 节点 ID:{nid} 真实 Cookie 存量更新完毕: {c_cnt} 条")
@@ -626,7 +632,7 @@ async def reverse_tunnel_endpoint(
             try:
                 conn = get_db_connection()
                 cur = conn.cursor()
-                cur.execute("UPDATE nodes SET status='stopped' WHERE id=?", (node_id,))
+                cur.execute("UPDATE nodes SET status='stopped' WHERE id=? AND enabled=1", (node_id,))
                 conn.commit()
                 conn.close()
             except Exception:
@@ -770,29 +776,45 @@ def toggle_source(node_id: int, user: dict = Depends(verify_token)):
 def set_source_compat(node_id: int, user: dict = Depends(verify_token)):
     return toggle_source(node_id, user)
 
+# ==================== 9. 节点启用 / 禁用流转控制 (核心修复) ====================
 @router.post("/api/nodes/{node_id}/toggle-enabled")
-def toggle_node_enabled(node_id: int, user: dict = Depends(verify_token)):
+async def toggle_node_enabled(node_id: int, user: dict = Depends(verify_token)):
     conn = get_db_connection()
     conn.row_factory = sqlite3.Row
     cur = conn.cursor()
-    cur.execute("SELECT enabled FROM nodes WHERE id=?", (node_id,))
+    cur.execute("SELECT * FROM nodes WHERE id=?", (node_id,))
     row = cur.fetchone()
     if not row:
         conn.close()
         raise HTTPException(status_code=404, detail="节点不存在")
     
-    curr = row["enabled"]
+    node = dict(row)
+    curr = node.get("enabled", 1)
     new_val = 0 if curr == 1 else 1
-    new_status = "standby" if new_val == 1 else "disabled"
+    new_status = "disabled" if new_val == 0 else "standby"
+
+    # 更新启用开关与状态
     cur.execute("UPDATE nodes SET enabled=?, status=? WHERE id=?", (new_val, new_status, node_id))
     conn.commit()
+
+    cur.execute("SELECT * FROM nodes WHERE id=?", (node_id,))
+    updated_node = dict(cur.fetchone())
     conn.close()
 
     if new_val == 0:
+        # 禁用：停止 SSH 转发，长连接保留就绪待命态，阻断任务分发
         tunnel_mgr.stop_tunnel(node_id)
-        tunnel_mgr.unregister_reverse_tunnel(node_id)
-        msg = "节点已禁用"
+        msg = f"节点 [{updated_node['name']}] 已禁用"
     else:
-        msg = "节点已恢复启用"
+        # 恢复启用：异步拉起链路探活 (支持 SSH/直连/Reverse-WSS 全拓扑秒级恢复 connected)
+        if updated_node.get("approval_status", 1) == 1:
+            ok, start_msg = await tunnel_mgr.start_tunnel(updated_node)
+            msg = f"节点 [{updated_node['name']}] 已恢复启用: {start_msg}"
+        else:
+            msg = f"节点 [{updated_node['name']}] 已恢复启用 (等待审批放行)"
 
-    return {"message": msg, "enabled": new_val}
+    return {
+        "message": msg,
+        "enabled": new_val,
+        "status": updated_node.get("status")
+    }
