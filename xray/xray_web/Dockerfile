@@ -5,8 +5,7 @@ FROM --platform=$BUILDPLATFORM node:20-alpine AS frontend-builder
 WORKDIR /build
 
 COPY app/frontend/package*.json ./
-# 采用 npm ci 保证 lockfile 精确一致，提升并行构建速度
-RUN npm ci --prefer-offline --no-audit
+RUN npm install
 
 COPY app/frontend/ ./
 RUN npm run build
