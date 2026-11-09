@@ -14,10 +14,13 @@ const profile = reactive({
   api_key: ''
 })
 
-// 2. 指南 Tab 状态 (精炼为 3 大纯实战场景)
+// 2. 指南 Tab 状态 (精炼 3 大实战场景)
 const activeGuideTab = ref('same_host') // 'same_host' | 'remote_host' | 'api'
 
-// 3. SSH 密钥资产状态 (已移至左列)
+// 3. 代码折叠状态 (默认对齐场景三高度折叠)
+const isCodeExpanded = ref(false)
+
+// 4. SSH 密钥资产状态 (左列)
 const keys = ref([])
 const uploadRemark = ref('')
 
@@ -132,7 +135,7 @@ onMounted(() => {
 <template>
   <div class="grid-2col-fluid">
     
-    <!-- ==================== 左列：管理员账号 + SSH 密钥存储库 (布局重构) ==================== -->
+    <!-- ==================== 左列：管理员账号 + SSH 密钥存储库 ==================== -->
     <div class="layout-column-item">
       
       <!-- 卡片 1: 管理员账号 -->
@@ -153,7 +156,7 @@ onMounted(() => {
         </form>
       </div>
 
-      <!-- 卡片 2: SSH 密钥存储库 (从右侧迁至左侧，形成完美对称) -->
+      <!-- 卡片 2: SSH 密钥存储库 (左列对称布局) -->
       <div class="content-full-card">
         <div class="table-header-bar">
           <h3 class="card-inner-h3">🔑 SSH 密钥存储库</h3>
@@ -197,7 +200,7 @@ onMounted(() => {
 
     </div>
 
-    <!-- ==================== 右列：外部 API 准入控制、安全网关指南 (聚焦自动化接入) ==================== -->
+    <!-- ==================== 右列：外部 API 准入控制、安全网关指南 ==================== -->
     <div class="layout-column-item">
 
       <!-- 卡片 3: 外部 Agent 开放 API 与安全控制中枢 -->
@@ -235,11 +238,11 @@ onMounted(() => {
             <span style="font-size:12px; font-weight:bold; color:#34d399;">零信任架构安全收敛生效中</span>
           </div>
           <p style="font-size:11px; color:#94a3b8; margin-top:4px; line-height:1.5;">
-            系统已下线公网未鉴权裸端口映射。所有 SSH 隧道与本地端点锁死在 <code>127.0.0.1</code>；外部远程脚本统一通过 8443 安全网关带 Key 访问，彻底杜绝外网扫描入侵。系统原生兼容 IPv4 与 IPv6。
+            已下线未鉴权公网裸端口映射。所有 SSH 隧道与本地端点锁死在 <code>127.0.0.1</code>；外部远程脚本统一通过 8443 安全网关带 Key 访问，彻底杜绝外网扫描。系统完全支持 IPv4 / IPv6 双栈。
           </p>
         </div>
 
-        <!-- 对外调用指南 Tab 切换 (场景一、场景二、场景三) -->
+        <!-- 对外调用指南 Tab 切换 (3 大核心场景) -->
         <div>
           <div style="display:flex; gap:8px; margin-bottom:10px; border-bottom:1px solid #172554; padding-bottom:8px; flex-wrap:wrap;">
             <button 
@@ -265,14 +268,25 @@ onMounted(() => {
             </button>
           </div>
 
-          <!-- 场景 1: 同机自动化接入 (动态节点池 + 随机轮询防风控) -->
+          <!-- 场景 1: 同机自动化接入 (严格对齐场景三高度，带渐变折叠) -->
           <div v-if="activeGuideTab === 'same_host'" class="guide-content-box">
-            <p style="color:#38bdf8; font-weight:bold; margin-bottom:4px;">💻 自动化脚本与 Hub 部署在同一台机器 / 宿主机：</p>
-            <div style="font-size:11px; color:#94a3b8; line-height:1.6; margin-bottom:8px;">
-              • <b>动态节点池调度</b>：调用本地 API 动态获取全部在线节点，<b>随机/轮询选取节点操控</b>，有效轮换出口特征，防止机器人验证风控；<br>
-              • <b>自适应端点</b>：程序自动识别 <code>same_host_automation.recommended_endpoint</code>，直连/SSH 节点走 127.0.0.1 回环裸口，WSS 节点走本地网关，免公网流量、零延迟！
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:4px;">
+              <span style="color:#38bdf8; font-weight:bold;">💻 自动化脚本与 Hub 部署在同一台机器 / 宿主机：</span>
+              <button 
+                type="button" 
+                @click="copyText(`import httpx, asyncio, random\nfrom playwright.async_api import async_playwright\n\nHUB_URL = 'https://127.0.0.1:8443'\nAPI_KEY = '${profile.api_key}'\n\nasync def run_same_host():\n    async with httpx.AsyncClient(verify=False) as client:\n        res = await client.get(f'{HUB_URL}/api/v1/nodes?online_only=true', headers={'X-API-Key': API_KEY})\n        online_nodes = res.json().get('nodes', [])\n    if not online_nodes:\n        print('当前集群暂无可用在线节点！')\n        return\n    target = random.choice(online_nodes)\n    endpoint = target['connection_views']['same_host_automation']['recommended_endpoint']\n    print(f'同机命中节点: [{target[\"name\"]}] (拓扑: {target[\"topology_desc\"]}) -> {endpoint}')\n    async with async_playwright() as p:\n        browser = await p.chromium.connect_over_cdp(endpoint)\n        context = browser.contexts[0] if browser.contexts else await browser.new_context()\n        page = await context.new_page()\n        await page.goto('https://ipinfo.io')\n        print('执行完成，页面标题:', await page.title())\n        await browser.close()\n\nasyncio.run(run_same_host())`, '同机自动化脚本')"
+                class="btn-copy-tag"
+                style="padding: 2px 6px; font-size: 10px;"
+              >
+                📋 复制代码
+              </button>
             </div>
-            <pre class="code-snippet-box"><code># Python Playwright 同机动态调度示例 (防封号、防机器人验证)
+            <p style="font-size:11px; color:#94a3b8; line-height:1.5; margin:0 0 8px 0;">
+              动态拉取全部在线节点，随机/轮询挑选控制，有效轮换出口特征，防止反爬人机验证。
+            </p>
+
+            <div class="code-viewport-container" :class="{ 'code-expanded': isCodeExpanded }">
+              <pre class="code-snippet-box"><code># Python Playwright 同机动态调度示例 (防封号、防机器人验证)
 import httpx, asyncio, random
 from playwright.async_api import async_playwright
 
@@ -307,16 +321,35 @@ async def run_same_host():
         await browser.close()
 
 asyncio.run(run_same_host())</code></pre>
+              <div v-if="!isCodeExpanded" class="code-fade-overlay"></div>
+            </div>
+
+            <div class="code-fold-action-bar">
+              <button type="button" @click="isCodeExpanded = !isCodeExpanded" class="btn-fold-toggle">
+                {{ isCodeExpanded ? '▲ 收起代码' : '▼ 展开查看完整调度脚本' }}
+              </button>
+            </div>
           </div>
 
-          <!-- 场景 2: 异机/远程自动化接入 (全拓扑归一化 + 随机轮询防风控) -->
+          <!-- 场景 2: 异机/远程自动化接入 (严格对齐场景三高度，带渐变折叠) -->
           <div v-if="activeGuideTab === 'remote_host'" class="guide-content-box">
-            <p style="color:#34d399; font-weight:bold; margin-bottom:4px;">🌐 自动化脚本部署在外部服务器 / 本地开发电脑 / CI 容器 (支持 IPv4 / IPv6)：</p>
-            <div style="font-size:11px; color:#94a3b8; line-height:1.6; margin-bottom:8px;">
-              • <b>全拓扑归一化</b>：异机统一通过 Hub 8443 TLS 鉴权网关穿透（内网穿透 / SSH / 直连 / 公网 WSS 代码完全一致）；<br>
-              • <b>多节点轮询防封</b>：随机分发任务到不同在线节点，避免同一 IP 高频触发目标站点人机验证。
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:4px;">
+              <span style="color:#34d399; font-weight:bold;">🌐 脚本部署在外部服务器 / 本地开发机 / CI 容器：</span>
+              <button 
+                type="button" 
+                @click="copyText(`import httpx, asyncio, random\nfrom playwright.async_api import async_playwright\n\nHUB_URL = '${currentHubUrl}'\nAPI_KEY = '${profile.api_key}'\n\nasync def run_remote():\n    async with httpx.AsyncClient(verify=False) as client:\n        res = await client.get(f'{HUB_URL}/api/v1/nodes?online_only=true', headers={'X-API-Key': API_KEY})\n        online_nodes = res.json().get('nodes', [])\n    if not online_nodes:\n        print('当前集群暂无可用在线节点！')\n        return\n    target = random.choice(online_nodes)\n    cdp_url = target['preferred_cdp_url']\n    print(f'异机分配节点: [{target[\"name\"]}] (拓扑: {target[\"topology_desc\"]})')\n    async with async_playwright() as p:\n        browser = await p.chromium.connect_over_cdp(cdp_url)\n        context = browser.contexts[0] if browser.contexts else await browser.new_context()\n        page = await context.new_page()\n        await page.goto('https://ipinfo.io')\n        print('异机执行完成:', await page.title())\n        await browser.close()\n\nasyncio.run(run_remote())`, '异机自动化脚本')"
+                class="btn-copy-tag"
+                style="padding: 2px 6px; font-size: 10px;"
+              >
+                📋 复制代码
+              </button>
             </div>
-            <pre class="code-snippet-box"><code># Python Playwright 异机远程调用示例
+            <p style="font-size:11px; color:#94a3b8; line-height:1.5; margin:0 0 8px 0;">
+              异机统一通过 Hub 8443 TLS 鉴权网关穿透（全拓扑通杀），随机调度防止单一 IP 被风控封锁。
+            </p>
+
+            <div class="code-viewport-container" :class="{ 'code-expanded': isCodeExpanded }">
+              <pre class="code-snippet-box"><code># Python Playwright 异机远程调用示例
 import httpx, asyncio, random
 from playwright.async_api import async_playwright
 
@@ -351,12 +384,34 @@ async def run_remote():
         await browser.close()
 
 asyncio.run(run_remote())</code></pre>
+              <div v-if="!isCodeExpanded" class="code-fade-overlay"></div>
+            </div>
+
+            <div class="code-fold-action-bar">
+              <button type="button" @click="isCodeExpanded = !isCodeExpanded" class="btn-fold-toggle">
+                {{ isCodeExpanded ? '▲ 收起代码' : '▼ 展开查看完整调度脚本' }}
+              </button>
+            </div>
           </div>
 
-          <!-- 场景 3: RESTful 凭据操作 -->
+          <!-- 场景 3: RESTful 凭据操作 (天然高度约 195px，基准高度) -->
           <div v-if="activeGuideTab === 'api'" class="guide-content-box">
-            <p style="color:#cbd5e1; font-weight:bold; margin-bottom:6px;">⚡ 轻量级 RESTful API（无需挂载浏览器内核，直接抓取/写入 Cookie）：</p>
-            <pre class="code-snippet-box"><code># 1. 查询全网在线节点与连接视图 (含同机/异机端点，支持 IPv4/IPv6)
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:4px;">
+              <span style="color:#cbd5e1; font-weight:bold;">⚡ 轻量级 RESTful API 操作：</span>
+              <button 
+                type="button" 
+                @click="copyText(`curl -k -H 'X-API-Key: ${profile.api_key}' '${currentHubUrl}/api/v1/nodes?online_only=true'`, 'CURL 命令')"
+                class="btn-copy-tag"
+                style="padding: 2px 6px; font-size: 10px;"
+              >
+                📋 复制 API
+              </button>
+            </div>
+            <p style="font-size:11px; color:#94a3b8; line-height:1.5; margin:0 0 8px 0;">
+              无需挂载或启动本地浏览器内核，直接通过 HTTP 请求提取、注入 Cookie 或触发全网调度。
+            </p>
+            <div class="code-viewport-container code-natural-height">
+              <pre class="code-snippet-box"><code># 1. 查询全网在线节点与连接视图 (含同机/异机端点，支持 IPv4/IPv6)
 curl -k -H "X-API-Key: {{ profile.api_key }}" "{{ currentHubUrl }}/api/v1/nodes?online_only=true"
 
 # 2. 导出指定节点的全部 CookieJar (JSON 格式)
@@ -369,6 +424,7 @@ curl -k -X POST -H "X-API-Key: {{ profile.api_key }}" -H "Content-Type: applicat
 
 # 4. Webhook 触发全网调度策略即时同步
 curl -k -X POST -H "X-API-Key: {{ profile.api_key }}" "{{ currentHubUrl }}/api/v1/sync"</code></pre>
+            </div>
           </div>
         </div>
       </div>
@@ -503,16 +559,74 @@ curl -k -X POST -H "X-API-Key: {{ profile.api_key }}" "{{ currentHubUrl }}/api/v
   font-size: 12px;
 }
 
+/* ==================== 代码折叠与高度对齐容器 ==================== */
+.code-viewport-container {
+  position: relative;
+  max-height: 195px; /* 与场景三基准高度严格对齐 */
+  overflow: hidden;
+  border-radius: 6px;
+  border: 1px solid #1e3a8a;
+  transition: max-height 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  box-sizing: border-box;
+}
+
+.code-viewport-container.code-expanded {
+  max-height: 600px; /* 展开态 */
+  overflow-y: auto;
+}
+
+.code-viewport-container.code-natural-height {
+  max-height: none;
+  overflow: visible;
+}
+
 .code-snippet-box {
   background: #09122a;
-  border: 1px solid #1e3a8a;
-  border-radius: 4px;
-  padding: 10px;
+  border: none;
+  border-radius: 0;
+  padding: 10px 12px;
   font-family: monospace;
   font-size: 11px;
   color: #e2e8f0;
-  overflow-x: auto;
   line-height: 1.5;
   margin: 0;
+  overflow-x: auto;
+}
+
+/* 渐变遮罩虚化 */
+.code-fade-overlay {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  height: 65px;
+  background: linear-gradient(to bottom, rgba(9, 18, 42, 0), #09122a 90%);
+  pointer-events: none;
+}
+
+/* 折叠/展开控制栏 */
+.code-fold-action-bar {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  padding-top: 6px;
+}
+
+.btn-fold-toggle {
+  background: #0f1c3f;
+  border: 1px solid #1e3a8a;
+  color: #38bdf8;
+  font-size: 11px;
+  font-weight: 500;
+  padding: 3px 12px;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.btn-fold-toggle:hover {
+  background: #172554;
+  border-color: #00f0ff;
+  color: #ffffff;
 }
 </style>

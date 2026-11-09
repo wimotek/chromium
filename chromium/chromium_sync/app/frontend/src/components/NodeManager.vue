@@ -26,7 +26,7 @@ const tofuSettings = reactive({
   tofu_timeout_notify_minutes: 10
 })
 
-// 准入审计日志与搜索过滤状态 (核心新增)
+// 准入审计日志与搜索过滤状态
 const auditLogs = ref([])
 const auditSearchText = ref('')
 const auditDecisionFilter = ref('')
@@ -81,7 +81,7 @@ const loadBaseData = async () => {
   emit('update-nodes')
 }
 
-// 生产级 3 秒实时状态探活轮询 (含审计日志静默刷新)
+// 生产级 3 秒实时状态探活轮询
 let pollTimer = null
 let isPolling = false
 
@@ -94,7 +94,6 @@ const pollNodeStatus = async () => {
       nodes.value = await res.json()
       emit('update-nodes')
     }
-    // 当停留在审计 Tab 时，全自动静默获取最新流水
     if (activeTab.value === 'audit') {
       const aRes = await props.api('/api/nodes/audit-logs')
       if (aRes.ok) {
@@ -142,7 +141,7 @@ const filteredNodes = computed(() => {
   return trustedNodes.value.filter(n => n.group_name === selectedFilterGroup.value)
 })
 
-// 准入审计智能过滤计算属性 (支持决策多选 + 关键字模糊匹配)
+// 准入审计智能过滤计算属性
 const filteredAuditLogs = computed(() => {
   let list = auditLogs.value
   if (auditDecisionFilter.value) {
@@ -341,7 +340,6 @@ const deleteNode = async (id) => {
 onMounted(() => {
   loadBaseData()
   loadAuditLogs()
-  // 启动 3 秒高敏探活轮询 (含在线状态与审计日志实时拉取)
   pollTimer = setInterval(pollNodeStatus, 3000)
 })
 
@@ -486,9 +484,9 @@ services:
         <button @click="loadBaseData" class="btn-primary-gradient">🔄 刷新</button>
       </div>
 
-      <!-- Tab 3 右侧操作：【优化改造点】移除冗余刷新/清理，置入智能搜索与过滤控件 -->
+      <!-- Tab 3 右侧操作：【彻底根除大白底，注入暗黑极客主题】 -->
       <div v-else style="display:flex; gap:8px; align-items:center;">
-        <select v-model="auditDecisionFilter" class="sync-input font-mono" style="width:auto; height:32px; font-size:12px; padding:2px 8px;">
+        <select v-model="auditDecisionFilter" class="audit-filter-select font-mono">
           <option value="">⚖️ 全部判定决策</option>
           <option value="allow_token">🟢 allow_token (凭证信任)</option>
           <option value="allow_local">🟢 allow_local (本地信任)</option>
@@ -499,8 +497,7 @@ services:
         <input 
           v-model="auditSearchText" 
           placeholder="🔍 搜索 UUID / IP / 裁决原因..." 
-          class="sync-input font-mono" 
-          style="width:230px; height:32px; font-size:12px; padding:2px 10px;"
+          class="audit-search-input font-mono"
         >
       </div>
     </div>
@@ -653,7 +650,7 @@ services:
       </table>
     </div>
 
-    <!-- ==================== 视图 3：零信任准入审计流水 (接入实时搜索与过滤) ==================== -->
+    <!-- ==================== 视图 3：零信任准入审计流水 ==================== -->
     <div v-else class="table-responsive">
       <table class="cdp-fluid-table audit-decision-table">
         <thead>
@@ -900,6 +897,45 @@ services:
 </template>
 
 <style scoped>
+/* ==================== 准入审计过滤专属深色控件 (彻底根除大白底) ==================== */
+.audit-filter-select,
+.audit-search-input {
+  box-sizing: border-box !important;
+  background-color: #060b17 !important;
+  border: 1px solid #172554 !important;
+  color: #e2e8f0 !important;
+  border-radius: 6px !important;
+  outline: none !important;
+  font-family: monospace !important;
+  font-size: 12px !important;
+  height: 32px !important;
+  transition: all 0.2s ease !important;
+}
+
+.audit-filter-select {
+  width: auto !important;
+  padding: 2px 10px !important;
+  cursor: pointer !important;
+}
+
+.audit-search-input {
+  width: 250px !important;
+  padding: 2px 10px !important;
+}
+
+.audit-filter-select:focus,
+.audit-search-input:focus {
+  border-color: #00f0ff !important;
+  box-shadow: 0 0 8px rgba(0, 240, 255, 0.35) !important;
+  background-color: #081126 !important;
+}
+
+.audit-filter-select option {
+  background-color: #0b132b !important;
+  color: #e2e8f0 !important;
+  padding: 4px 8px !important;
+}
+
 /* 紧凑型通行码与策略横幅 */
 .token-deploy-banner {
   background: #09122a;
