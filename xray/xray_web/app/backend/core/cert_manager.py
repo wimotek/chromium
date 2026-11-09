@@ -13,23 +13,149 @@ os.makedirs(CERT_DIR, exist_ok=True)
 os.makedirs(CHALLENGE_DIR, exist_ok=True)
 
 def generate_self_signed_cert():
-    """使用系统原生 openssl CLI 生成 10 年期自签名证书，免装 pyOpenSSL 依赖"""
-    cmd = [
-        "openssl", "req", "-x509", "-nodes",
-        "-days", "3650",
-        "-newkey", "rsa:2048",
-        "-keyout", KEY_PATH,
-        "-out", CERT_PATH,
-        "-subj", "/C=US/ST=California/L=San Francisco/O=Xray Internal/CN=xray.internal"
-    ]
+    """使用系统原生 openssl CLI 生成带 IP SAN (包含 127.0.0.1) 的 10 年期自签名证书"""
+    openssl_cnf = """
+[req]
+distinguished_name = req_distinguished_name
+x509_extensions = v3_req
+prompt = no
+
+[req_distinguished_name]
+C = US
+ST = California
+L = San Francisco
+O = Xray Internal
+CN = xray.internal
+
+[v3_req]
+keyUsage = keyEncipherment, dataEncipherment
+extendedKeyUsage = serverAuth
+subjectAltName = @alt_names
+
+[alt_names]
+DNS.1 = localhost
+DNS.2 = xray.internal
+IP.1 = 127.0.0.1
+IP.2 = 0.0.0.0
+"""
+    tmp_cnf = "/tmp/openssl_san.cnf"
     try:
+        with open(tmp_cnf, "w") as f:
+            f.write(openssl_cnf)
+        cmd = [
+            "openssl", "req", "-x509", "-nodes",
+            "-days", "3650",
+            "-newkey", "rsa:2048",
+            "-keyout", KEY_PATH,
+            "-out", CERT_PATH,
+            "-config", tmp_cnf
+        ]
         subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except Exception as e:
-        print(f"[Cert Error] 生成自签证书失败: {e}", flush=True)
+        print(f"[Cert Error] 生成带 IP SAN 自签证书失败: {e}", flush=True)
+    finally:
+        if os.path.exists(tmp_cnf):
+            try:
+                os.remove(tmp_cnf)
+            except Exception:
+                pass
+
+# 候选证书挂载目录列表 (支持 /certs 以及 /data/certs)
+SEARCH_DIRS = ["/certs", "/data/certs"]
+
+# 常见的宝塔、Nginx、Certbot 证书公钥文件名候选 (按优先级匹配)
+CERT_CANDIDATES = [
+    "fullchain.pem", "certificate.crt", "fullchain.crt", "server.crt", "cert.pem", "bundle.crt"
+]
+
+# 常见的私钥文件名候选
+KEY_CANDIDATES = [
+    "privkey.pem", "private.key", "server.key", "key.pem"
+]
+
+def find_custom_certificates() -> tuple[str, str]:
+    """
+    全自动扫描外部映射的自定义证书 (如宝塔面板、Nginx、Certbot):
+    支持挂载到 /certs 或 /data/certs 下的任意常见命名证书文件
+    """
+    for d in SEARCH_DIRS:
+        if not os.path.exists(d):
+            continue
+
+        matched_cert = None
+        matched_key = None
+
+        # 1. 优先匹配标准名称
+        for c_name in CERT_CANDIDATES:
+            c_p = os.path.join(d, c_name)
+            if os.path.isfile(c_p) and os.path.getsize(c_p) > 0:
+                matched_cert = c_p
+                break
+
+        for k_name in KEY_CANDIDATES:
+            k_p = os.path.join(d, k_name)
+            if os.path.isfile(k_p) and os.path.getsize(k_p) > 0:
+                matched_key = k_p
+                break
+
+        # 2. 如果未命中，扫描目录下任何以 .crt / .pem 和 .key 结尾的配对文件
+        if not matched_cert or not matched_key:
+            try:
+                files = os.listdir(d)
+                for f in files:
+                    fp = os.path.join(d, f)
+                    if not os.path.isfile(fp) or os.path.getsize(fp) == 0:
+                        continue
+                    low = f.lower()
+                    if not matched_cert and (low.endswith(".crt") or (low.endswith(".pem") and "key" not in low)):
+                        matched_cert = fp
+                    elif not matched_key and (low.endswith(".key") or "key" in low):
+                        matched_key = fp
+            except Exception:
+                pass
+
+        if matched_cert and matched_key:
+            # 解决外部挂载权限问题 (如 root 映射只读，确保容器内部具备读取权限)
+            try:
+                os.chmod(matched_cert, 0o644)
+                os.chmod(matched_key, 0o600)
+            except Exception:
+                pass
+
+            # 校验私钥与公钥的有效性
+            chk_cert = subprocess.run(["openssl", "x509", "-in", matched_cert, "-noout"], capture_output=True)
+            chk_key = subprocess.run(["openssl", "rsa", "-in", matched_key, "-check", "-noout"], capture_output=True)
+            if chk_cert.returncode == 0 and chk_key.returncode == 0:
+                return matched_cert, matched_key
+
+    return "", ""
 
 def ensure_certificates() -> tuple[str, str]:
+    """
+    证书决策核心：
+    1. 优先扫描 /certs 或 /data/certs 下外部挂载的自定义有效证书 (宝塔/Nginx/Certbot)
+    2. 若未检测到外部自定义证书，则自动生成带 IP SAN (127.0.0.1) 的自签名证书
+    """
+    custom_cert, custom_key = find_custom_certificates()
+    if custom_cert and custom_key:
+        print(f"==> [SSL Discovery] 🟢 成功识别到外部自定义证书！", flush=True)
+        print(f"    - 公钥证书: {custom_cert}", flush=True)
+        print(f"    - 私钥文件: {custom_key}", flush=True)
+        return custom_cert, custom_key
+
+    # 未检测到外部自定义证书，使用自签名证书
     if not os.path.exists(CERT_PATH) or not os.path.exists(KEY_PATH):
+        print("==> [SSL Notice] 未检测到外部自定义证书，自动生成 10 年期自签证书 (含 127.0.0.1 IP SAN)...", flush=True)
         generate_self_signed_cert()
+    else:
+        print(f"==> [SSL Notice] 使用系统默认自签名证书: {CERT_PATH}", flush=True)
+
+    try:
+        os.chmod(CERT_PATH, 0o644)
+        os.chmod(KEY_PATH, 0o600)
+    except Exception:
+        pass
+
     return CERT_PATH, KEY_PATH
 
 def get_cert_info() -> dict:

@@ -101,6 +101,8 @@ start_scheduler_thread()
 if __name__ == '__main__':
     cert_path, key_path = ensure_certificates()
     print(f"==> [HTTPS] 正在以 HTTPS 加密协议启动面板 (端口: {Config.WEB_PORT})...", flush=True)
+    print(f"==> [HTTPS] 证书文件: {cert_path}", flush=True)
+    print(f"==> [HTTPS] 私钥文件: {key_path}", flush=True)
     app.run(
         host='0.0.0.0',
         port=Config.WEB_PORT,

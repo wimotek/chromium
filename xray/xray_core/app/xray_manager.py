@@ -108,10 +108,15 @@ class XrayManager:
         try:
             with open(tmp_path, "w") as f:
                 json.dump(config_dict, f, indent=2)
-            res = subprocess.run(["/usr/bin/xray", "test", "-config", tmp_path], capture_output=True, text=True)
+            # Xray 官方 CLI 语法为: xray -test -config <file>
+            res = subprocess.run(["/usr/bin/xray", "-test", "-config", tmp_path], capture_output=True, text=True)
             if res.returncode == 0:
                 return True
-            print(f"[Xray] 语法校验失败: {res.stderr.strip()}", flush=True)
+            # 兼容个别版本可能支持的 xray run -test
+            res_alt = subprocess.run(["/usr/bin/xray", "run", "-test", "-config", tmp_path], capture_output=True, text=True)
+            if res_alt.returncode == 0:
+                return True
+            print(f"[Xray] 语法校验失败: {res.stderr.strip() or res.stdout.strip()}", flush=True)
             return False
         except Exception as e:
             print(f"[Xray] 预检异常: {e}", flush=True)
