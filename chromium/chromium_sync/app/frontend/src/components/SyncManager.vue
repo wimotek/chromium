@@ -11,7 +11,7 @@ const nodes = ref([])
 const groups = ref([])
 const logs = ref([])
 
-// 正在执行的策略 ID (用于按钮加载状态显示)
+// 正在执行的策略 ID
 const runningPolicyId = ref(null)
 let autoRefreshTimer = null
 
@@ -24,13 +24,17 @@ const editingPolicyId = ref(null)
 const showLogModal = ref(false)
 const selectedLogDetail = ref('')
 
-// ==================== 全局 Cookie 过滤与差量同步策略弹窗模型 (从第 4 张卡迁入) ====================
+// 全局 Cookie 过滤与差量同步策略弹窗模型 (从第 4 张卡迁入)
 const showCookiePolicyModal = ref(false)
 const cookiePolicy = reactive({
   sync_diff_enabled: true,
   sync_include_domains: '',
   sync_exclude_domains: 'doubleclick.net,google-analytics.com'
 })
+
+// 同步任务审计搜索与过滤状态 (核心新增)
+const logSearchText = ref('')
+const logStatusFilter = ref('')
 
 const saveCookiePolicy = async () => {
   const res = await props.api('/api/cookie-policy', {
@@ -51,11 +55,11 @@ const policyForm = reactive({
   name: '',
   enabled: true,
   interval_minutes: 15,
-  sync_type: 'smart_merge', // 'smart_merge' | 'group_to_group' | 'node_to_group' | 'node_to_nodes'
-  source_type: 'all',       // 'node' | 'group' | 'all'
+  sync_type: 'smart_merge',
+  source_type: 'all',
   source_id: 0,
   source_group: '',
-  target_type: 'all',       // 'all' | 'group' | 'nodes'
+  target_type: 'all',
   target_ids: [],
   target_group: ''
 })
@@ -76,6 +80,23 @@ const loadAllData = async () => {
   if (lRes.ok) logs.value = await lRes.json()
   if (cRes && cRes.ok) Object.assign(cookiePolicy, await cRes.json())
 }
+
+// 任务审计智能过滤计算属性 (状态筛选 + 关键字模糊匹配)
+const filteredLogs = computed(() => {
+  let list = logs.value
+  if (logStatusFilter.value) {
+    list = list.filter(l => l.status === logStatusFilter.value)
+  }
+  if (logSearchText.value.trim()) {
+    const q = logSearchText.value.trim().toLowerCase()
+    list = list.filter(l => {
+      return (l.source_node && l.source_node.toLowerCase().includes(q)) ||
+             (l.target_nodes && l.target_nodes.toLowerCase().includes(q)) ||
+             (l.details && l.details.toLowerCase().includes(q))
+    })
+  }
+  return list
+})
 
 const formatRouteText = (p) => {
   if (p.sync_type === 'smart_merge') return '全网最新值智能双向合并'
@@ -181,7 +202,6 @@ const deletePolicy = async (id) => {
   }
 }
 
-// 核心优化：点击立即响应，按钮变为加载中，Toast 实时反馈
 const runPolicy = async (id) => {
   if (runningPolicyId.value) return
   runningPolicyId.value = id
@@ -199,16 +219,6 @@ const runPolicy = async (id) => {
     props.showToast('网络请求异常', 'error')
   } finally {
     runningPolicyId.value = null
-  }
-}
-
-const clearAllLogs = async () => {
-  if (confirm('确认清空所有历史同步审计流水记录？清空后将无法恢复！')) {
-    const res = await props.api('/api/sync/logs', { method: 'DELETE' })
-    if (res.ok) {
-      props.showToast('审计流水已清空', 'success')
-      logs.value = []
-    }
   }
 }
 
@@ -244,14 +254,13 @@ onUnmounted(() => {
 <template>
   <div class="sync-manager-container">
     
-    <!-- 顶栏标题与操作区 (新增全局过滤与差量策略入口) -->
+    <!-- 顶栏标题与操作区 -->
     <div class="sync-top-header">
       <div class="sync-title-box">
         <span class="sync-icon-globe">🌐</span>
         <h2 class="sync-title-text">多策略自动同步调度中枢 (支持组对组 / 节点对组)</h2>
       </div>
       <div style="display:flex; gap:10px; align-items:center;">
-        <!-- 新增：唤起全局 Cookie 策略弹窗 -->
         <button 
           @click="showCookiePolicyModal = true" 
           class="btn-sub-action" 
@@ -269,7 +278,6 @@ onUnmounted(() => {
     <div class="policies-grid-3col">
       <div v-for="p in policies" :key="p.id" class="policy-card-item">
         
-        <!-- 卡片头部：图标 + 标题 + 运行中徽章 -->
         <div class="policy-card-header">
           <div class="header-left-flex">
             <span class="policy-badge-icon">
@@ -285,7 +293,6 @@ onUnmounted(() => {
           <span v-else class="status-indicator-off">○ 已停用</span>
         </div>
 
-        <!-- 卡片中段：轻量级 HUD 数据流 -->
         <div class="policy-card-body">
           <div class="info-row">
             <span class="row-label">拓扑模式</span>
@@ -300,7 +307,6 @@ onUnmounted(() => {
           </div>
         </div>
 
-        <!-- 卡片底部动作栏：左删除，右执行 (带执行中动画) -->
         <div class="policy-card-actions">
           <button 
             @click="deletePolicy(p.id)" 
@@ -325,7 +331,6 @@ onUnmounted(() => {
               ✏️ 编辑
             </button>
 
-            <!-- 核心执行按钮：点击立刻展现执行中状态 -->
             <button 
               @click="runPolicy(p.id)" 
               :disabled="runningPolicyId !== null" 
@@ -344,17 +349,28 @@ onUnmounted(() => {
       </div>
     </div>
 
-    <!-- ==================== 审计列表：高规格结构化数据表格 (20 条轮转) ==================== -->
+    <!-- ==================== 审计列表：高规格结构化数据表格 (已接入搜索过滤) ==================== -->
     <div class="audit-section-wrapper">
       <div class="audit-header-bar">
         <div class="audit-title-box">
           <span style="font-size:16px;">📜</span>
           <h3 class="audit-title-text">同步任务审计追踪流水</h3>
-          <span class="badge-retention-note">仅保留最近 20 条 (自动轮转淘汰)</span>
+          <span class="badge-retention-note">模块自动定容淘汰</span>
         </div>
-        <div style="display:flex; gap:12px; align-items:center;">
-          <button @click="loadAllData" class="link-btn-cyan">刷新审计</button>
-          <button @click="clearAllLogs" class="link-btn-red" style="font-weight:600;">🗑️ 清空审计流水</button>
+        <!-- 移除冗余的刷新/清空按钮，置入状态筛选与模糊搜索框 -->
+        <div style="display:flex; gap:8px; align-items:center;">
+          <select v-model="logStatusFilter" class="sync-input font-mono" style="width:auto; height:30px; font-size:11px; padding:2px 8px;">
+            <option value="">📊 全部状态</option>
+            <option value="SUCCESS">🟢 SUCCESS 成功</option>
+            <option value="NO_CHANGE">🔵 NO_CHANGE 一致跳过</option>
+            <option value="FAILED">🔴 FAILED 失败</option>
+          </select>
+          <input 
+            v-model="logSearchText" 
+            placeholder="🔍 搜索源节点 / 目标范围 / 详情..." 
+            class="sync-input font-mono" 
+            style="width:230px; height:30px; font-size:11px; padding:2px 10px;"
+          >
         </div>
       </div>
 
@@ -372,7 +388,7 @@ onUnmounted(() => {
             </tr>
           </thead>
           <tbody>
-            <tr v-for="l in logs" :key="l.id">
+            <tr v-for="l in filteredLogs" :key="l.id">
               <td class="font-mono text-muted">{{ l.timestamp }}</td>
               <td>
                 <span class="badge-smart-source">{{ l.source_node || '---' }}</span>
@@ -394,15 +410,15 @@ onUnmounted(() => {
                 <button @click="viewLogDetail(l.details)" class="btn-view-detail">查看详情</button>
               </td>
             </tr>
-            <tr v-if="logs.length === 0">
-              <td colspan="7" class="empty-table-cell">暂无调度流水记录</td>
+            <tr v-if="filteredLogs.length === 0">
+              <td colspan="7" class="empty-table-cell">暂无匹配的调度流水记录</td>
             </tr>
           </tbody>
         </table>
       </div>
     </div>
 
-    <!-- ==================== 弹窗 1：全局 Cookie 过滤与差量同步策略 (全新置入) ==================== -->
+    <!-- 弹窗 1：全局 Cookie 过滤与差量同步策略 -->
     <div v-if="showCookiePolicyModal" class="modal-backdrop">
       <div class="modal-card modal-policy-size">
         <div class="modal-title-bar">
@@ -466,7 +482,6 @@ onUnmounted(() => {
             </div>
           </div>
 
-          <!-- 同步模式核心单选 -->
           <div class="form-block">
             <label class="block-label">同步传输拓扑模式</label>
             <div class="grid-2col-fluid" style="gap:10px;">
@@ -496,9 +511,7 @@ onUnmounted(() => {
             </div>
           </div>
 
-          <!-- 根据模式呈现不同的源端与目标端选择器 -->
           <div class="topology-selector-box form-vertical-flow">
-            <!-- 场景 1: 组对组 -->
             <div v-if="policyForm.sync_type === 'group_to_group'" class="row-flex-gap">
               <div class="form-block" style="flex:1;">
                 <label class="block-label">源分组 (Source Group)</label>
@@ -514,7 +527,6 @@ onUnmounted(() => {
               </div>
             </div>
 
-            <!-- 场景 2: 节点对组 -->
             <div v-if="policyForm.sync_type === 'node_to_group'" class="row-flex-gap">
               <div class="form-block" style="flex:1;">
                 <label class="block-label">源节点 (Source Node)</label>
@@ -530,7 +542,6 @@ onUnmounted(() => {
               </div>
             </div>
 
-            <!-- 场景 3: 节点对多节点 -->
             <div v-if="policyForm.sync_type === 'node_to_nodes'" class="form-vertical-flow">
               <div class="form-block">
                 <label class="block-label">源节点 (Source Node)</label>
@@ -561,7 +572,6 @@ onUnmounted(() => {
               </div>
             </div>
 
-            <!-- 场景 4: 全网智能合并提示 -->
             <div v-if="policyForm.sync_type === 'smart_merge'" style="font-size:12px; color:#38bdf8;">
               ✓ 自动作用于全网所有分组内的在线节点，各节点最新产生的登录态将互相对齐同步。
             </div>
@@ -1067,26 +1077,6 @@ onUnmounted(() => {
 }
 .btn-gray-test:hover { background: #334155; color: #ffffff; }
 
-.link-btn-cyan {
-  background: none;
-  border: none;
-  color: #38bdf8;
-  font-size: 11px;
-  cursor: pointer;
-  text-decoration: underline;
-  padding: 0;
-}
-
-.link-btn-red {
-  background: none;
-  border: none;
-  color: #f87171;
-  font-size: 11px;
-  cursor: pointer;
-  text-decoration: underline;
-  padding: 0;
-}
-
 /* 审计列表表格 */
 .audit-section-wrapper {
   margin-top: 24px;
@@ -1097,6 +1087,8 @@ onUnmounted(() => {
   justify-content: space-between;
   align-items: center;
   margin-bottom: 8px;
+  gap: 12px;
+  flex-wrap: wrap;
 }
 
 .audit-title-box {

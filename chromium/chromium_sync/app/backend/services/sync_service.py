@@ -22,6 +22,22 @@ from services.cdp_engine import (
 )
 from services.notification import dispatch_notification
 
+# 引入 wimotek-chromium-sync 最新的 AuditLogger 结构化自动轮转引擎
+try:
+    from wimotek_chromium_sync import AuditLogger
+except ImportError:
+    try:
+        from wimotek_chromium_sync.audit import AuditLogger
+    except ImportError:
+        AuditLogger = None
+
+SYNC_AUDIT_FILE = "/data/sync_audit.jsonl"
+sync_audit_logger = AuditLogger(
+    file_path=SYNC_AUDIT_FILE,
+    max_bytes=10 * 1024 * 1024,  # 10MB 触发文件轮转
+    backup_count=5               # 保留 5 个归档，超出自动淘汰最旧备份
+) if AuditLogger else None
+
 scheduler = BackgroundScheduler(timezone="Asia/Shanghai")
 
 _is_sync_running = False
@@ -94,7 +110,6 @@ def reschedule_all_policies():
             except Exception:
                 first_run = now_dt + timedelta(minutes=interval)
 
-        # 核心防坑：严禁传入 next_run_time=None，锁定具体时间对象
         scheduler.add_job(
             _execute_policy_job_wrapper,
             'interval',
@@ -114,8 +129,8 @@ async def run_chromium_sync_instance(
     diff_enabled: bool
 ) -> dict:
     """
-    全面对接已升级的 wimotek-chromium-sync v1.3.0 现代调度引擎：
-    采用规范的 nodes: List[dict] 节点矩阵入参，由其内部原生协程 run_async() 执行
+    全面对接 wimotek-chromium-sync v1.3.0 现代调度引擎：
+    挂载自动轮转审计文件 /data/sync_audit.jsonl
     """
     if ChromiumSync is None:
         raise ImportError("未安装 wimotek-chromium-sync 模块")
@@ -124,7 +139,6 @@ async def run_chromium_sync_instance(
     src_port = int(source_node.get("local_bind_port", 9222))
     tgt_port = int(target_node.get("local_bind_port", 19222))
 
-    # SSH 目标节点的隧道已由 wimotek-ssh-tunnel 预热就绪在本地端口，作为本地端点传入
     nodes_payload = [
         {
             "id": str(source_node["id"]),
@@ -151,7 +165,11 @@ async def run_chromium_sync_instance(
             include_domains=include_domains or None,
             exclude_domains=exclude_domains or None,
             diff=diff_enabled,
-            verbose=False
+            verbose=False,
+            audit_file=SYNC_AUDIT_FILE,
+            audit_max_bytes=10 * 1024 * 1024,
+            audit_backup_count=5,
+            audit_enabled=True
         )
         if hasattr(syncer, "run_async"):
             res = await syncer.run_async()
@@ -159,17 +177,17 @@ async def run_chromium_sync_instance(
             res = await asyncio.to_thread(syncer.run)
         return res if isinstance(res, dict) else {"status": "success", "details": str(res)}
     except Exception as e:
-        logger.warning(f"ChromiumSync v1.3 调度执行异常: {e}")
+        logger.warning(f"ChromiumSync 调度执行异常: {e}")
         return {"status": "failed", "details": str(e), "error": str(e)}
 
 
 async def execute_policy_task(policy_id: int):
     """
     多策略执行引擎：
-    1. 严格过滤 approval_status=1 (排除未认领节点)，无缝穿透 NAT4 反向通道；
-    2. 全局互斥锁与定时器下次运行时间自动顺延；
-    3. 前置差异研判 (0 差异 0.02 秒跳过) 与垃圾清理 (单域名 50 条熔断)；
-    4. 严格定容滚动裁剪保留最近 20 条结构化审计日志。
+    1. 前置过滤未认证节点，穿透 NAT4 反向与 SSH 通道；
+    2. 全局互斥锁防撞车，0 差异毫秒级跳过；
+    3. 集成 AuditLogger 持久化结构化轮转文件；
+    4. 数据库 sync_logs 自动定容滚动保留 20 条高频视图。
     """
     global _is_sync_running
     if _is_sync_running:
@@ -197,6 +215,13 @@ async def execute_policy_task(policy_id: int):
         policy = dict(policy_row)
         sync_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         log_detail = [f"🚀 触发策略 [{policy['name']}] (类型: {policy['sync_type']})"]
+
+        if sync_audit_logger:
+            sync_audit_logger.log("policy_start", {
+                "policy_id": policy_id,
+                "policy_name": policy["name"],
+                "sync_type": policy["sync_type"]
+            })
 
         active_nodes = [n for n in all_enabled_nodes if n.get("status") == "connected"]
         inactive_nodes = [n for n in all_enabled_nodes if n.get("status") != "connected"]
@@ -265,7 +290,7 @@ async def execute_policy_task(policy_id: int):
                     golden_pool, cap_trimmed = smart_merge_cookies(valid_cookie_lists, max_per_domain=50)
                     cookie_count_metric = len(golden_pool)
 
-                    # 前置差异研判 (Pre-flight Diff)
+                    # 前置差异研判
                     nodes_to_inject = []
                     total_diff_count = 0
 
@@ -276,11 +301,17 @@ async def execute_policy_task(policy_id: int):
                             nodes_to_inject.append({"node": n, "diff_cookies": diff_c, "skipped": skipped})
                             total_diff_count += len(diff_c)
 
-                    # 0 增量秒级跳过机制 (0.02s 跳过)
+                    # 0 增量秒级跳过机制
                     if total_diff_count == 0 and total_dropped == 0 and cap_trimmed == 0:
                         elapsed_fast = f"{(time.time() - start_ts):.2f}s"
                         log_detail.append(f"⚡ [前置比对无差异] 各节点凭据已 100% 保持最新且完全对齐，跳过写入 (耗时: {elapsed_fast})")
                         status = "NO_CHANGE"
+                        if sync_audit_logger:
+                            sync_audit_logger.log("sync_no_change", {
+                                "policy_id": policy_id,
+                                "duration": elapsed_fast,
+                                "cookie_count": cookie_count_metric
+                            })
                     else:
                         log_detail.append(f"✨ 黄金凭据池聚拢完成: 共 {cookie_count_metric} 条最新 Cookies (发现 {total_diff_count} 项增量需对齐)")
 
@@ -388,7 +419,6 @@ async def execute_policy_task(policy_id: int):
                                 injected_any = True
                                 await purge_stale_cookies_on_node(target['local_bind_port'], tgt_host, exclude_domains, node_id=target['id'])
 
-                                # SSH 节点优先委托 wimotek-chromium-sync v1.3.0 执行同步
                                 if ChromiumSync is not None and target.get('conn_type') == 'ssh':
                                     sync_res = await run_chromium_sync_instance(source, target, include_domains, exclude_domains, diff_enabled)
                                     target_count, _ = await probe_node_cookies(target['local_bind_port'], tgt_host, node_id=target['id'])
@@ -405,10 +435,24 @@ async def execute_policy_task(policy_id: int):
         except Exception as e:
             status = "FAILED"
             log_detail.append(f"策略执行中断: {e}")
+            if sync_audit_logger:
+                sync_audit_logger.log("policy_exception", {"policy_id": policy_id, "error": str(e)}, level="ERROR")
 
         duration_str = f"{time.time() - start_ts:.2f}s"
 
-        # 写入结构化审计记录，严格定容滚动裁剪保留最近 20 条
+        # 1. 结构化日志持久化至 10MB 自动轮替文件 (audit.py 引擎接管淘汰)
+        if sync_audit_logger:
+            sync_audit_logger.log("policy_finish", {
+                "policy_id": policy_id,
+                "policy_name": policy["name"],
+                "status": status,
+                "cookie_count": cookie_count_metric,
+                "duration": duration_str,
+                "source": source_node_desc,
+                "targets": target_nodes_desc
+            })
+
+        # 2. 数据库写入高频摘要，严格定容滚动保留 20 条供 UI 展示
         conn = get_db_connection()
         cur = conn.cursor()
         cur.execute("""
@@ -429,7 +473,7 @@ async def execute_policy_task(policy_id: int):
         conn.commit()
         conn.close()
 
-        # 手动执行后自动顺延下一次定时触发时间 (防撞车保护)
+        # 手动执行后自动顺延下一次定时触发时间
         try:
             job_id = f"policy_job_{policy_id}"
             job = scheduler.get_job(job_id)

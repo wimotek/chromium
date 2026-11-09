@@ -26,8 +26,10 @@ const tofuSettings = reactive({
   tofu_timeout_notify_minutes: 10
 })
 
-// 准入审计日志
+// 准入审计日志与搜索过滤状态 (核心新增)
 const auditLogs = ref([])
+const auditSearchText = ref('')
+const auditDecisionFilter = ref('')
 
 // 弹窗状态
 const showNodeModal = ref(false)
@@ -79,12 +81,11 @@ const loadBaseData = async () => {
   emit('update-nodes')
 }
 
-// ==================== 生产级 3 秒实时状态探活轮询 ====================
+// 生产级 3 秒实时状态探活轮询 (含审计日志静默刷新)
 let pollTimer = null
 let isPolling = false
 
 const pollNodeStatus = async () => {
-  // 当标签页切入后台或上一个请求仍在飞时，自动跳过，杜绝堆积卡死
   if (document.hidden || isPolling) return
   isPolling = true
   try {
@@ -93,7 +94,7 @@ const pollNodeStatus = async () => {
       nodes.value = await res.json()
       emit('update-nodes')
     }
-    // 若当前正在查看审计 Tab，同步静默刷新审计日志
+    // 当停留在审计 Tab 时，全自动静默获取最新流水
     if (activeTab.value === 'audit') {
       const aRes = await props.api('/api/nodes/audit-logs')
       if (aRes.ok) {
@@ -101,7 +102,7 @@ const pollNodeStatus = async () => {
       }
     }
   } catch (e) {
-    // 轮询异常静默，避免打扰正常操作
+    // 轮询异常静默
   } finally {
     isPolling = false
   }
@@ -129,17 +130,6 @@ const loadAuditLogs = async () => {
   }
 }
 
-// 一键清空审计流水
-const clearAuditLogs = async () => {
-  if (confirm('确认清空所有历史准入审计流水？清空后不可恢复！')) {
-    const res = await props.api('/api/nodes/audit-logs', { method: 'DELETE' })
-    if (res.ok) {
-      props.showToast('准入审计流水已清空', 'success')
-      auditLogs.value = []
-    }
-  }
-}
-
 // 已信任正式节点队列
 const trustedNodes = computed(() => nodes.value.filter(n => n.approval_status === 1))
 
@@ -150,6 +140,24 @@ const pendingNodes = computed(() => nodes.value.filter(n => n.approval_status ==
 const filteredNodes = computed(() => {
   if (!selectedFilterGroup.value) return trustedNodes.value
   return trustedNodes.value.filter(n => n.group_name === selectedFilterGroup.value)
+})
+
+// 准入审计智能过滤计算属性 (支持决策多选 + 关键字模糊匹配)
+const filteredAuditLogs = computed(() => {
+  let list = auditLogs.value
+  if (auditDecisionFilter.value) {
+    list = list.filter(l => l.decision === auditDecisionFilter.value)
+  }
+  if (auditSearchText.value.trim()) {
+    const q = auditSearchText.value.trim().toLowerCase()
+    list = list.filter(l => {
+      return (l.node_uuid && l.node_uuid.toLowerCase().includes(q)) ||
+             (l.source_ip && l.source_ip.toLowerCase().includes(q)) ||
+             (l.reason && l.reason.toLowerCase().includes(q)) ||
+             (l.event && l.event.toLowerCase().includes(q))
+    })
+  }
+  return list
 })
 
 // 复制通用方法
@@ -333,12 +341,11 @@ const deleteNode = async (id) => {
 onMounted(() => {
   loadBaseData()
   loadAuditLogs()
-  // 启动 3 秒高敏定时探活轮询：新节点接入、心跳、在线状态与 Cookie 存量全自动秒级刷新
+  // 启动 3 秒高敏探活轮询 (含在线状态与审计日志实时拉取)
   pollTimer = setInterval(pollNodeStatus, 3000)
 })
 
 onUnmounted(() => {
-  // 页面离开时彻底销毁轮询器，严防内存泄露
   if (pollTimer) {
     clearInterval(pollTimer)
     pollTimer = null
@@ -349,7 +356,7 @@ onUnmounted(() => {
 <template>
   <div class="content-full-card">
 
-    <!-- ==================== 1. 入网凭证与 TOFU 准入控制横幅 (单行高聚合排版) ==================== -->
+    <!-- ==================== 1. 入网凭证与 TOFU 准入控制横幅 ==================== -->
     <div class="token-deploy-banner">
       <div class="token-bar-flex">
         
@@ -434,33 +441,31 @@ services:
     environment:
       - HUB_URL={{ currentHubUrl }}
       - JOIN_TOKEN={{ clusterJoinToken }}
-      # - DIRECT_PORT=3030   # 映射宿主机自定义端口时按需填写
+      # - DIRECT_PORT=3030
     volumes:
       - ./data:/data</code></pre>
         </div>
       </div>
     </div>
 
-    <!-- ==================== 2. 三大板块 Tab 导航 (正式节点 / 独立待审批隔离区 / 准入审计) ==================== -->
+    <!-- ==================== 2. 三大板块 Tab 导航 ==================== -->
     <div class="table-header-bar">
       <div style="display:flex; gap:12px; align-items:center; flex-wrap:wrap;">
         <button @click="activeTab = 'nodes'" :class="['nav-pill-btn', activeTab === 'nodes' ? 'nav-pill-active' : '']">
           👥 已受信任节点 ({{ trustedNodes.length }})
         </button>
 
-        <!-- 独立待审批隔离区 Tab (带高亮待办角标) -->
         <button @click="activeTab = 'pending'" :class="['nav-pill-btn', activeTab === 'pending' ? 'nav-pill-active' : '']" style="position:relative;">
           ⏳ 待审批隔离区
           <span v-if="pendingNodes.length > 0" class="badge-pending-counter">{{ pendingNodes.length }}</span>
         </button>
 
-        <!-- 准入审计日志 Tab -->
         <button @click="activeTab = 'audit'; loadAuditLogs()" :class="['nav-pill-btn', activeTab === 'audit' ? 'nav-pill-active' : '']">
           📜 零信任准入审计日志
         </button>
       </div>
 
-      <!-- Tab 1 右侧操作：正式节点过滤与新增 -->
+      <!-- Tab 1 右侧操作 -->
       <div v-if="activeTab === 'nodes'" style="display:flex; gap:10px; align-items:center;">
         <select v-model="selectedFilterGroup" class="sync-input font-mono" style="width:auto; height:32px; font-size:12px;">
           <option value="">📂 全部分组 ({{ trustedNodes.length }})</option>
@@ -470,7 +475,7 @@ services:
         <button @click="loadBaseData" class="btn-primary-gradient">🔄 刷新</button>
       </div>
 
-      <!-- Tab 2 右侧操作：待审批专属批量审批操作台 -->
+      <!-- Tab 2 右侧操作 -->
       <div v-else-if="activeTab === 'pending'" style="display:flex; gap:8px; align-items:center;">
         <button @click="approveAllPending" :disabled="pendingNodes.length === 0" class="btn-micro" style="background:#059669; padding:6px 12px; height:32px;">
           ⚡ 一键信任全部 ({{ pendingNodes.length }})
@@ -481,12 +486,22 @@ services:
         <button @click="loadBaseData" class="btn-primary-gradient">🔄 刷新</button>
       </div>
 
-      <!-- Tab 3 右侧操作：审计日志刷新与一键清空 -->
+      <!-- Tab 3 右侧操作：【优化改造点】移除冗余刷新/清理，置入智能搜索与过滤控件 -->
       <div v-else style="display:flex; gap:8px; align-items:center;">
-        <button @click="clearAuditLogs" :disabled="auditLogs.length === 0" class="btn-micro btn-trash" style="padding:6px 12px; height:32px;">
-          🗑️ 清空审计流水
-        </button>
-        <button @click="loadAuditLogs" class="btn-primary-gradient">🔄 刷新审计</button>
+        <select v-model="auditDecisionFilter" class="sync-input font-mono" style="width:auto; height:32px; font-size:12px; padding:2px 8px;">
+          <option value="">⚖️ 全部判定决策</option>
+          <option value="allow_token">🟢 allow_token (凭证信任)</option>
+          <option value="allow_local">🟢 allow_local (本地信任)</option>
+          <option value="allow_session">🟢 allow_session (会话信任)</option>
+          <option value="pending_tofu">🟡 pending_tofu (待审批)</option>
+          <option value="deny">🔴 deny (拦截拒绝)</option>
+        </select>
+        <input 
+          v-model="auditSearchText" 
+          placeholder="🔍 搜索 UUID / IP / 裁决原因..." 
+          class="sync-input font-mono" 
+          style="width:230px; height:32px; font-size:12px; padding:2px 10px;"
+        >
       </div>
     </div>
 
@@ -576,7 +591,7 @@ services:
       </table>
     </div>
 
-    <!-- ==================== 视图 2：独立待审批隔离区子卡 (支持大数据量与批量处理) ==================== -->
+    <!-- ==================== 视图 2：独立待审批隔离区子卡 ==================== -->
     <div v-else-if="activeTab === 'pending'" class="table-responsive">
       <div v-if="pendingNodes.length > 0" class="pending-workbench-header">
         <span style="font-size:12px; color:#fbbf24;">
@@ -638,7 +653,7 @@ services:
       </table>
     </div>
 
-    <!-- ==================== 视图 3：零信任准入审计流水表格 (7列标准规范) ==================== -->
+    <!-- ==================== 视图 3：零信任准入审计流水 (接入实时搜索与过滤) ==================== -->
     <div v-else class="table-responsive">
       <table class="cdp-fluid-table audit-decision-table">
         <thead>
@@ -653,7 +668,7 @@ services:
           </tr>
         </thead>
         <tbody>
-          <tr v-for="(log, idx) in auditLogs" :key="idx">
+          <tr v-for="(log, idx) in filteredAuditLogs" :key="idx">
             <td class="font-mono text-muted">{{ log.ts ? log.ts.replace('T', ' ').slice(0, 19) : '---' }}</td>
             <td class="font-mono" style="color:#cbd5e1;">{{ log.event || 'access_decision' }}</td>
             <td class="font-cyan-mono" :title="log.node_uuid">{{ log.node_uuid || '---' }}</td>
@@ -662,7 +677,7 @@ services:
               <span v-if="log.is_loopback" class="badge-loopback">回环</span>
             </td>
             <td style="text-align: center;">
-              <span v-if="log.decision === 'allow_token' || log.decision === 'allow_local'" class="badge-decision-allow">
+              <span v-if="log.decision === 'allow_token' || log.decision === 'allow_local' || log.decision === 'allow_session'" class="badge-decision-allow">
                 {{ log.decision }}
               </span>
               <span v-else-if="log.decision === 'pending_tofu'" class="badge-decision-pending">
@@ -680,14 +695,14 @@ services:
               </span>
             </td>
           </tr>
-          <tr v-if="auditLogs.length === 0">
-            <td colspan="7" style="text-align:center; color:#64748b; padding:32px;">暂无准入审计日志</td>
+          <tr v-if="filteredAuditLogs.length === 0">
+            <td colspan="7" style="text-align:center; color:#64748b; padding:32px;">暂无匹配的准入审计记录</td>
           </tr>
         </tbody>
       </table>
     </div>
 
-    <!-- ==================== 弹窗：按类别隔离编辑 (反向长连通道只读锁定) ==================== -->
+    <!-- 弹窗：按类别隔离编辑 -->
     <div v-if="showNodeModal" class="modal-backdrop">
       <div class="modal-card">
         <div class="modal-title-bar">
@@ -702,7 +717,6 @@ services:
 
         <form @submit.prevent="submitNodeForm" class="form-v-stack" style="margin-top:14px;">
           
-          <!-- 类别 1: WSS 反向长连接节点 (系统托管，禁止切换为直连或 SSH) -->
           <div v-if="isEditMode && nodeForm.conn_type === 'reverse'" class="reverse-node-locked-box">
             <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">
               <span class="locked-badge-purple">🌐 接入类别：WSS 反向长连接</span>
@@ -713,7 +727,6 @@ services:
             </p>
           </div>
 
-          <!-- 类别 2: 手动创建或直连/SSH 节点的模式切换 -->
           <div v-else class="form-field-block">
             <label class="form-label">接入类型</label>
             <div class="row-flex-gap">
@@ -728,7 +741,6 @@ services:
             </div>
           </div>
 
-          <!-- 业务参数 (名称与分组可自由修改) -->
           <div class="row-flex-gap">
             <div class="form-field-block" style="flex:1;">
               <label class="form-label">节点名称</label>
@@ -743,7 +755,6 @@ services:
             </div>
           </div>
 
-          <!-- 场景 A：WSS 反向长连专属表单 (隐藏伪 IP，通道与指纹锁定) -->
           <div v-if="isEditMode && nodeForm.conn_type === 'reverse'" class="form-v-stack">
             <div class="row-flex-gap">
               <div class="form-field-block" style="flex:1;">
@@ -768,7 +779,6 @@ services:
             </div>
           </div>
 
-          <!-- 场景 B：本地/局域网直连专属表单 -->
           <div v-else-if="nodeForm.is_local" style="background:#09122a; padding:12px; border-radius:6px; border:1px solid #172554;">
             <div class="row-flex-gap">
               <div class="form-field-block" style="flex:1;">
@@ -782,7 +792,6 @@ services:
             </div>
           </div>
 
-          <!-- 场景 C：远程 SSH 隧道专属表单 -->
           <div v-else class="form-v-stack">
             <div class="row-flex-gap">
               <div class="form-field-block" style="flex:1;">
