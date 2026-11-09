@@ -1,85 +1,146 @@
 import sqlite3
 import secrets
-from typing import Optional
+import ipaddress
+from typing import Optional, List, Tuple
 from fastapi import APIRouter, HTTPException, Depends, Request, Query
 
 from config import DB_PATH
 from core.database import get_setting, set_setting, get_db_connection
 from core.security import verify_token, verify_agent_access
-from services.cdp_engine import fetch_cookies_native
+from services.cdp_engine import fetch_cookies_native, inject_cookies_native
 from services.sync_service import execute_sync_task
+from services.tunnel_manager import tunnel_mgr
 
 router = APIRouter(tags=["外部 Agent 开放 API"])
+
+# ==================== IPv6 / IPv4 双栈标准化工具 (RFC 2732) ====================
+def safe_format_host_port(host: str, port: int, scheme: str = "http") -> str:
+    """智能识别 IPv4、IPv6 与域名，符合 RFC 2732 规范 (IPv6 自动加 [])"""
+    clean_host = host.strip("[]")
+    try:
+        ip = ipaddress.ip_address(clean_host)
+        if ip.version == 6:
+            return f"{scheme}://[{clean_host}]:{port}"
+    except ValueError:
+        pass
+    return f"{scheme}://{clean_host}:{port}"
+
+def extract_host_from_domain(domain_header: str) -> str:
+    """安全解析 Host 请求头，防止 IPv6 冒号被切碎"""
+    if domain_header.startswith("["):
+        # 形如 [2408:8207::1]:8443
+        return domain_header.split("]")[0] + "]"
+    elif ":" in domain_header:
+        # 形如 1.2.3.4:8443 或 example.com:8443
+        return domain_header.rsplit(":", 1)[0]
+    return domain_header
 
 # ==================== 1. 远程访问与入网通行码设置 ====================
 @router.get("/api/remote-access")
 def get_remote_access_settings(user: dict = Depends(verify_token)):
     token = get_setting("cluster_join_token")
-    
-    # 自愈兜底：若数据库里为空，自动签发一个并持久化
     if not token:
-        try:
-            from wimotek_edge_agent.tokens import JoinTokenIssuer
-            secret = (get_setting('edge_agent_secret') or 'wimotek-commercial-secret-key-32b').encode('utf-8')
-            if len(secret) < 32:
-                secret = secret.ljust(32, b'0')
-            issuer = JoinTokenIssuer(secret=secret, audience="edge-agent", issuer="central", max_ttl_seconds=86400 * 365)
-            token = issuer.issue(node_group="default", ttl_seconds=86400 * 365)
-        except Exception:
-            token = "hub_join_" + secrets.token_urlsafe(24)
+        token = "hub_join_" + secrets.token_urlsafe(24)
         set_setting("cluster_join_token", token)
 
     return {
-        "direct_port_access_enabled": get_setting("direct_port_access_enabled", "1") == "1",
         "api_key": get_setting("api_key"),
-        "cluster_join_token": token  # 👈 核心修复：补齐字段，彻底消除「正在获取...」
+        "cluster_join_token": token
     }
 
 @router.post("/api/remote-access")
 def save_remote_access_settings(data: dict, user: dict = Depends(verify_token)):
-    if "direct_port_access_enabled" in data:
-        set_setting("direct_port_access_enabled", "1" if data["direct_port_access_enabled"] else "0")
     if "cluster_join_token" in data and data["cluster_join_token"]:
         set_setting("cluster_join_token", data["cluster_join_token"].strip())
-    return {"message": "远程连接策略已更新"}
+    return {"message": "远程凭据策略已更新"}
 
-# ==================== 2. 对外 Agent 节点列表与双模式查询 ====================
-@router.get("/api/v1/nodes", summary="获取所有在线 CDP 节点列表 (支持双连接方式生成)")
-def external_list_nodes(request: Request, auth: dict = Depends(verify_agent_access)):
+# ==================== 2. 对外 Agent 节点列表 (支持 IPv4/IPv6 双栈) ====================
+@router.get("/api/v1/nodes", summary="获取在线 CDP 节点列表 (支持 IPv6 双栈与同机/异机双视图)")
+def external_list_nodes(
+    request: Request,
+    online_only: bool = Query(False, description="仅返回当前处于在线连接状态的可用节点"),
+    auth: dict = Depends(verify_agent_access)
+):
     conn = get_db_connection()
     conn.row_factory = sqlite3.Row
     cur = conn.cursor()
-    cur.execute("SELECT * FROM nodes")
+    cur.execute("SELECT * FROM nodes ORDER BY id ASC")
     rows = [dict(r) for r in cur.fetchall()]
     conn.close()
 
     domain = request.headers.get("host", "localhost:8443")
     api_key = get_setting('api_key')
-    direct_port_enabled = (get_setting("direct_port_access_enabled", "1") == "1")
-    host_only = domain.split(":")[0]
+    host_only = extract_host_from_domain(domain)
 
     nodes_result = []
     for r in rows:
-        direct_h = r.get("direct_host") or "127.0.0.1"
-        is_loc = bool(r["is_local"])
         node_id = r["id"]
-        bind_port = r["local_bind_port"]
+        is_enabled = bool(r.get("enabled", 1))
+        conn_type_raw = r.get("conn_type", "direct")
+        is_loc = bool(r.get("is_local", 0))
+        direct_h = r.get("direct_host") or "127.0.0.1"
+        bind_port = r.get("local_bind_port", 9222)
+        remote_port = r.get("remote_cdp_port", 9222)
 
-        connection_methods = {
-            "gateway": {
-                "type": "wss_secure_gateway",
-                "enabled": True,
-                "description": "基于 API-Key 的加密反向中继网关 (推荐，防扫描，仅走 8443)",
-                "ws_url": f"wss://{domain}/cdp/{node_id}/ws?api_key={api_key}",
-                "http_version_url": f"https://{domain}/cdp/{node_id}/json/version?api_key={api_key}"
+        # 实时在线状态计算
+        if not is_enabled:
+            real_status = "disabled"
+        elif r.get("approval_status", 1) == 0:
+            real_status = "pending_approval"
+        elif conn_type_raw in ["reverse", "public_wss", "wss_direct"]:
+            session = tunnel_mgr.get_reverse_session(node_id)
+            real_status = "connected" if (session and not session.is_closed) else "stopped"
+        else:
+            real_status = r.get("status", "stopped")
+
+        if online_only and real_status != "connected":
+            continue
+
+        # 4 种拓扑精准打标
+        if conn_type_raw in ["public_wss", "wss_direct"]:
+            topology_type = "public_wss"
+            topology_desc = "公网 WSS (有独立公网IP / 安全出站长连)"
+        elif conn_type_raw == "reverse":
+            if direct_h not in ["reverse-nat4", "127.0.0.1", "", None] and not is_loc:
+                topology_type = "public_wss"
+                topology_desc = "公网 WSS (有独立公网IP / 安全出站长连)"
+            else:
+                topology_type = "nat4_reverse"
+                topology_desc = "NAT4 反向长连 (内网出站穿透 / 无入站端口)"
+        elif conn_type_raw in ["ssh", "ssh_tunnel"]:
+            topology_type = "ssh_tunnel"
+            topology_desc = "SSH 端口映射穿透 (通过 SSH 隧道加密转发)"
+        else:
+            topology_type = "direct"
+            topology_desc = "本地 / 局域网端口直连"
+
+        # 异机标准连接端点 (支持 IPv4 / IPv6 域名)
+        remote_gateway_ws = f"wss://{domain}/cdp/{node_id}/ws?api_key={api_key}"
+        
+        # 同机标准连接端点 (走 127.0.0.1 极速回环)
+        same_host_gateway_ws = f"wss://127.0.0.1:8443/cdp/{node_id}/ws?api_key={api_key}"
+        
+        # 同机裸连端点 (仅 direct 与 ssh 节点具备本地监听端口；反向节点物理上无裸端口)
+        if topology_type == "direct":
+            same_host_loopback = f"http://127.0.0.1:{bind_port}"
+        elif topology_type == "ssh_tunnel":
+            same_host_loopback = f"http://127.0.0.1:{bind_port}"
+        else:
+            same_host_loopback = None  # WSS 反穿 / 公网 WSS 节点无本地 TCP 裸端口
+
+        connection_views = {
+            "same_host_automation": {
+                "desc": "与 Hub 部署在同一台机器的自动化脚本",
+                "recommended_endpoint": same_host_loopback if same_host_loopback else same_host_gateway_ws,
+                "loopback_direct_url": same_host_loopback,
+                "local_gateway_url": same_host_gateway_ws,
+                "note": "direct/ssh 优先使用 loopback_direct_url (零延迟裸连)；WSS 反穿/直连使用 local_gateway_url"
             },
-            "direct": {
-                "type": "direct_port_mapping",
-                "enabled": direct_port_enabled,
-                "description": "公网直接端口映射模式 (需防火墙放行该端口)",
-                "port": bind_port,
-                "http_endpoint": f"http://{host_only}:{bind_port}",
-                "ws_endpoint_hint": f"http://{host_only}:{bind_port}/json/version"
+            "remote_host_automation": {
+                "desc": "部署在外部服务器、本地开发机或独立容器的远程自动化脚本 (支持 IPv4/IPv6)",
+                "recommended_endpoint": remote_gateway_ws,
+                "gateway_url": remote_gateway_ws,
+                "note": "异机强制统一使用 8443 安全网关 (已下线公网裸端口，杜绝扫描入侵)"
             }
         }
 
@@ -87,22 +148,23 @@ def external_list_nodes(request: Request, auth: dict = Depends(verify_agent_acce
             "id": node_id,
             "name": r["name"],
             "group_name": r.get("group_name") or "默认分组",
-            "conn_type": r.get("conn_type", "direct"),
-            "is_source": bool(r["is_source"]),
+            "conn_type": conn_type_raw,
+            "topology_type": topology_type,
+            "topology_desc": topology_desc,
+            "is_source": bool(r.get("is_source", 0)),
             "is_local": is_loc,
-            "direct_host": direct_h if is_loc else None,
-            "status": r["status"],
-            "cookie_count": r["cookie_count"],
-            "last_sync": r["last_sync"],
-            "connection_methods": connection_methods,
+            "status": real_status,
+            "cookie_count": r.get("cookie_count", 0),
+            "last_sync": r.get("last_sync"),
+            "preferred_cdp_url": remote_gateway_ws,
+            "connection_views": connection_views,
             "cookies_export_url": f"/api/v1/nodes/{node_id}/cookies"
         })
 
     return {
         "code": 200,
-        "total": len(rows),
-        "online_count": len([n for n in rows if n["status"] == "connected"]),
-        "direct_port_access_enabled": direct_port_enabled,
+        "total": len(nodes_result),
+        "online_count": len([n for n in nodes_result if n["status"] == "connected"]),
         "nodes": nodes_result
     }
 
@@ -133,7 +195,41 @@ async def external_get_cookies(node_id: int, auth: dict = Depends(verify_agent_a
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"提取 Cookies 失败: {e}")
 
-# ==================== 4. 外部自动化触发同步 ====================
+# ==================== 4. 向目标节点注入 Cookies ====================
+@router.post("/api/v1/nodes/{node_id}/cookies", summary="向目标节点注入 Cookies")
+async def external_inject_cookies(
+    node_id: int,
+    payload: dict,
+    auth: dict = Depends(verify_agent_access)
+):
+    conn = get_db_connection()
+    conn.row_factory = sqlite3.Row
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM nodes WHERE id=?", (node_id,))
+    row = cur.fetchone()
+    conn.close()
+
+    if not row:
+        raise HTTPException(status_code=404, detail="目标节点不存在")
+    node = dict(row)
+
+    cookies = payload.get("cookies", [])
+    if not isinstance(cookies, list):
+        raise HTTPException(status_code=400, detail="cookies 字段必须为列表")
+
+    try:
+        target_h = node.get('direct_host', '127.0.0.1') if node['is_local'] else "127.0.0.1"
+        injected = await inject_cookies_native(node['local_bind_port'], cookies, target_h, node_id=node['id'])
+        return {
+            "code": 200,
+            "node_id": node_id,
+            "injected_count": injected,
+            "message": f"成功向节点 [{node['name']}] 注入 {injected} 条 Cookies"
+        }
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"注入 Cookies 失败: {e}")
+
+# ==================== 5. 外部自动化触发同步 ====================
 @router.post("/api/v1/sync", summary="外部自动化触发全网同步")
 async def external_trigger_sync(
     policy_id: Optional[int] = Query(None, description="指定策略ID，留空则执行全部已启用策略"),

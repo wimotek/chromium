@@ -191,7 +191,7 @@ class TunnelManager:
                 "ssh_address_or_host": (node['ssh_host'], int(node.get('ssh_port') or 22)),
                 "ssh_username": node.get('ssh_user') or 'root',
                 "remote_bind_address": ('127.0.0.1', int(node.get('remote_cdp_port') or 9222)),
-                "local_bind_address": ('0.0.0.0', int(node['local_bind_port'])),
+                "local_bind_address": ('127.0.0.1', int(node['local_bind_port'])),
                 "set_keepalive": 30.0
             }
             if ssh_key_param:

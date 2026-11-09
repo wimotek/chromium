@@ -13,12 +13,8 @@ const profile = reactive({
   api_key: ''
 })
 
-const remoteAccess = reactive({
-  direct_port_access_enabled: true
-})
-
-// 移除 edge tab，默认定位到 WSS 安全网关与外部 API
-const activeGuideTab = ref('gateway') // 'gateway' | 'api'
+// 指南 Tab：same_host | remote_host | architecture | api
+const activeGuideTab = ref('same_host')
 
 const cookiePolicy = reactive({
   sync_diff_enabled: true,
@@ -38,16 +34,14 @@ const currentHubUrl = computed(() => {
 })
 
 const loadData = async () => {
-  const [pRes, kRes, cRes, rRes] = await Promise.all([
+  const [pRes, kRes, cRes] = await Promise.all([
     props.api('/api/profile'),
     props.api('/api/ssh-keys'),
-    props.api('/api/cookie-policy'),
-    props.api('/api/remote-access')
+    props.api('/api/cookie-policy')
   ])
   Object.assign(profile, await pRes.json())
   keys.value = await kRes.json()
   Object.assign(cookiePolicy, await cRes.json())
-  Object.assign(remoteAccess, await rRes.json())
 }
 
 const copyText = async (text, desc) => {
@@ -78,17 +72,6 @@ const saveProfile = async () => {
   if (res.ok) {
     props.showToast('管理员账号配置已更新', 'success')
     if (profile.new_password) emit('logout')
-  }
-}
-
-const saveRemoteAccess = async () => {
-  const res = await props.api('/api/remote-access', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(remoteAccess)
-  })
-  if (res.ok) {
-    props.showToast('远程连接策略已更新', 'success')
   }
 }
 
@@ -123,7 +106,7 @@ const uploadKey = async (e) => {
   fd.append('remark', uploadRemark.value)
   const res = await props.api('/api/ssh-keys', { method: 'POST', body: fd })
   if (res.ok) {
-    props.showToast(`证书 ${file.filename} 上传完成`, 'success')
+    props.showToast(`证书 ${file.name} 上传完成`, 'success')
     uploadRemark.value = ''
     await loadData()
   }
@@ -231,8 +214,8 @@ onMounted(() => {
       <!-- 卡片 3: 外部 Agent 开放 API 与安全控制中枢 -->
       <div class="content-full-card">
         <div class="table-header-bar" style="margin-bottom:10px; padding-bottom:8px;">
-          <h3 class="card-inner-h3">🌐 外部 Agent 开放 API 与安全控制</h3>
-          <span class="badge-recommend">8443 统一鉴权</span>
+          <h3 class="card-inner-h3">🌐 外部自动化 / Agent 准入控制与指南</h3>
+          <span class="badge-recommend">8443 统一中枢 · IPv4/IPv6 双栈</span>
         </div>
 
         <!-- 凭据: 外部 Agent API Key -->
@@ -252,76 +235,163 @@ onMounted(() => {
             <span class="copy-hint-icon">📋</span>
           </div>
           <p style="font-size:11px; color:#64748b; margin-top:5px;">
-            外部程序（Playwright、Puppeteer、AI Agent 或第三方系统）通过 WSS 反向网关操作 CDP 时的强制校验凭据。
+            外部程序（Playwright、Puppeteer、AI Agent）接管 CDP 或调用 HTTP 接口的全局唯一鉴权凭据。
           </p>
         </div>
 
-        <!-- 远程连接公网裸端口开关 -->
-        <div style="background:#09122a; border:1px solid #1e3a8a; border-radius:6px; padding:12px; margin-bottom:16px;">
-          <div style="display:flex; justify-content:space-between; align-items:center;">
-            <div>
-              <span style="font-size:13px; font-weight:bold; color:#ffffff;">公网裸端口直接映射访问 (19200-19250)</span>
-              <p style="font-size:11px; color:#64748b; margin-top:3px;">
-                开启后允许第三方程序绕过鉴权直接访问宿主机裸端口；关闭时将强制收敛于 8443 安全网关。
-              </p>
-            </div>
-            <div style="display:flex; align-items:center; gap:8px;">
-              <input type="checkbox" v-model="remoteAccess.direct_port_access_enabled" id="direct_port_toggle" class="check-box-blue" @change="saveRemoteAccess">
-              <label for="direct_port_toggle" style="font-size:12px; color:#38bdf8; font-weight:bold; cursor:pointer;">
-                {{ remoteAccess.direct_port_access_enabled ? '已开启' : '已关闭' }}
-              </label>
-            </div>
+        <!-- 零信任网络安全收敛通知栏 (替代原有的危险裸端口开关) -->
+        <div style="background:#09122a; border:1px solid #10b981; border-radius:6px; padding:10px 14px; margin-bottom:16px;">
+          <div style="display:flex; align-items:center; gap:8px;">
+            <span style="font-size:14px;">🔒</span>
+            <span style="font-size:12px; font-weight:bold; color:#34d399;">零信任架构安全收敛生效中</span>
           </div>
+          <p style="font-size:11px; color:#94a3b8; margin-top:4px; line-height:1.5;">
+            已全网下线公网未鉴权裸端口映射。SSH 隧道与本地端点已强制锁死在 <code>127.0.0.1</code>；外部远程脚本统一通过 8443 安全网关带 Key 访问，彻底杜绝公网扫描入侵。系统完全支持 IPv4 / IPv6 双栈访问。
+          </p>
         </div>
 
-        <!-- 对外调用指南 Tab 切换 (仅保留 2 个核心外部对接方式) -->
+        <!-- 对外调用指南 Tab 切换 (4 大核心场景) -->
         <div>
-          <div style="display:flex; gap:8px; margin-bottom:10px; border-bottom:1px solid #172554; padding-bottom:8px;">
+          <div style="display:flex; gap:8px; margin-bottom:10px; border-bottom:1px solid #172554; padding-bottom:8px; flex-wrap:wrap;">
             <button 
               type="button" 
-              @click="activeGuideTab = 'gateway'" 
-              :class="activeGuideTab === 'gateway' ? 'guide-tab-active' : 'guide-tab-normal'"
+              @click="activeGuideTab = 'same_host'" 
+              :class="activeGuideTab === 'same_host' ? 'guide-tab-active' : 'guide-tab-normal'"
             >
-              🔒 方式一：安全 WSS 鉴权网关 (8443 推荐)
+              💻 场景一：同机自动化接入
+            </button>
+            <button 
+              type="button" 
+              @click="activeGuideTab = 'remote_host'" 
+              :class="activeGuideTab === 'remote_host' ? 'guide-tab-active' : 'guide-tab-normal'"
+            >
+              🌐 场景二：异机/远程自动化
+            </button>
+            <button 
+              type="button" 
+              @click="activeGuideTab = 'architecture'" 
+              :class="activeGuideTab === 'architecture' ? 'guide-tab-active' : 'guide-tab-normal'"
+            >
+              📐 架构解析：四拓扑与 IPv6
             </button>
             <button 
               type="button" 
               @click="activeGuideTab = 'api'" 
               :class="activeGuideTab === 'api' ? 'guide-tab-active' : 'guide-tab-normal'"
             >
-              ⚡ 方式二：第三方自动化 API
+              ⚡ 场景四：RESTful 凭据操作
             </button>
           </div>
 
-          <!-- 说明 1: WSS 安全网关 -->
-          <div v-if="activeGuideTab === 'gateway'" class="guide-content-box">
-            <p style="color:#38bdf8; font-weight:bold; margin-bottom:6px;">🌟 核心优势：仅暴露 8443 单端口，全量 TLS 加密，强制 API-Key 鉴权，支持穿透控制 NAT4 内网节点。</p>
-            <p style="color:#94a3b8; font-size:11px; margin-bottom:8px;">
-              统一连接端点：<code>wss://{{ currentHubHost }}/cdp/{节点ID}/ws?api_key={{ profile.api_key }}</code>
-            </p>
-            <pre class="code-snippet-box"><code># Python Playwright 示例 (无视目标节点是否在内网/NAT4，秒级操控)
+          <!-- 场景 1: 同机自动化接入 -->
+          <div v-if="activeGuideTab === 'same_host'" class="guide-content-box">
+            <p style="color:#38bdf8; font-weight:bold; margin-bottom:4px;">💻 自动化脚本与 Hub 部署在同一台机器 / 宿主机：</p>
+            <div style="font-size:11px; color:#94a3b8; line-height:1.6; margin-bottom:8px;">
+              • <b>本地直连 & SSH 穿透节点</b>：直接连接本地回环 <code>http://127.0.0.1:端口</code>（免公网带宽、零网络延迟）；<br>
+              • <b>WSS 反穿 & WSS 直连节点</b>：通过本地回环安全网关 <code>wss://127.0.0.1:8443/cdp/{ID}/ws?api_key={{ profile.api_key }}</code>，Hub 内存直接中继转发，毫秒级打通！
+            </div>
+            <pre class="code-snippet-box"><code># Python Playwright 同机调用示例
+import asyncio
 from playwright.async_api import async_playwright
 
-async with async_playwright() as p:
-    cdp_url = "wss://{{ currentHubHost }}/cdp/1/ws?api_key={{ profile.api_key }}"
-    browser = await p.chromium.connect_over_cdp(cdp_url)
-    page = await browser.new_page()
-    await page.goto("https://ipinfo.io")
-    print("页面标题:", await page.title())
-    await browser.close()</code></pre>
+API_KEY = "{{ profile.api_key }}"
+
+async def run_local():
+    async with async_playwright() as p:
+        # 分支 A: 若控制 SSH 或本地直连节点 (例如本地绑定的 19222 端口，走零延迟裸连)
+        # browser = await p.chromium.connect_over_cdp("http://127.0.0.1:19222")
+
+        # 分支 B: 若控制 NAT4 反向长连 / WSS 直连节点 (走本地回环 8443 网关)
+        cdp_url = f"wss://127.0.0.1:8443/cdp/1/ws?api_key={API_KEY}"
+        browser = await p.chromium.connect_over_cdp(cdp_url)
+
+        page = await browser.new_page()
+        await page.goto("https://www.baidu.com")
+        print("同机执行成功:", await page.title())
+        await browser.close()
+
+asyncio.run(run_local())</code></pre>
           </div>
 
-          <!-- 说明 2: 第三方对接 API -->
+          <!-- 场景 2: 异机/远程自动化接入 -->
+          <div v-if="activeGuideTab === 'remote_host'" class="guide-content-box">
+            <p style="color:#34d399; font-weight:bold; margin-bottom:4px;">🌐 自动化脚本部署在外部服务器 / 本地开发电脑 / CI 容器 (支持 IPv4 / IPv6)：</p>
+            <div style="font-size:11px; color:#94a3b8; line-height:1.6; margin-bottom:8px;">
+              • <b>全拓扑归一化标准</b>：异机统一连接 Hub 的 8443 统一网关，无论目标节点处于 NAT4 内网还是 SSH 穿透，<b>调用代码完全一致</b>！<br>
+              • <b>动态节点池调度</b>：调用 <code>/api/v1/nodes?online_only=true</code> 实时获取可用节点并按 <code>preferred_cdp_url</code> 直接接管。
+            </div>
+            <pre class="code-snippet-box"><code>import httpx, asyncio
+from playwright.async_api import async_playwright
+
+HUB_URL = "{{ currentHubUrl }}"
+API_KEY = "{{ profile.api_key }}"
+
+async def run_remote():
+    # 1. 动态获取全网当前处于 connected 的在线节点池 (支持 IPv4 与 IPv6 域名)
+    async with httpx.AsyncClient(verify=False) as client:
+        res = await client.get(f"{HUB_URL}/api/v1/nodes?online_only=true", headers={"X-API-Key": API_KEY})
+        online_nodes = res.json().get("nodes", [])
+
+    if not online_nodes:
+        print("当前集群没有在线的可用 Chromium 节点！")
+        return
+
+    # 2. 任意选取一个在线节点 (包含 NAT4 反穿 / SSH / 公网 WSS / 直连)
+    target = online_nodes[0]
+    print(f"分配到在线节点: [{target['name']}] 拓扑模式: {target['topology_desc']}")
+
+    # 3. 异机统一使用 preferred_cdp_url 接管 (8443 TLS 鉴权网关)
+    async with async_playwright() as p:
+        browser = await p.chromium.connect_over_cdp(target["preferred_cdp_url"])
+        page = await browser.new_page()
+        await page.goto("https://ipinfo.io")
+        print("异机执行完成:", await page.title())
+        await browser.close()
+
+asyncio.run(run_remote())</code></pre>
+          </div>
+
+          <!-- 场景 3: 架构解析：四拓扑与 IPv6 双栈 -->
+          <div v-if="activeGuideTab === 'architecture'" class="guide-content-box">
+            <p style="color:#a78bfa; font-weight:bold; margin-bottom:6px;">📐 架构解析：零信任安全收敛与 IPv6 规范</p>
+            <div style="font-size:11px; color:#cbd5e1; line-height:1.6; margin-bottom:10px;">
+              • <b>为什么移除公网裸端口？</b> 原有的 19200-19250 裸端口绕过了 API-Key 校验，易被扫描接管。现在所有异机通信强制走 8443 网关；同机通信走 <code>127.0.0.1</code> 本地回环，彻底杜绝外网扫描。<br>
+              • <b>IPv6 规范支持</b>：系统完全遵循 RFC 2732 规范。若 Hub 运行在 IPv6 节点，连接端点自动格式化为 <code>wss://[2408:xxxx::1]:8443/...</code>，避免冒号引起的解析割裂。
+            </div>
+
+            <p style="color:#38bdf8; font-weight:bold; margin-bottom:6px;">四种网络拓扑连接支持矩阵：</p>
+            <div style="display:flex; flex-direction:column; gap:6px; font-size:11px; color:#cbd5e1;">
+              <div style="background:#09122a; padding:6px 10px; border-radius:4px; border-left:3px solid #8b5cf6;">
+                <b style="color:#c4b5fd;">1. NAT4 反向长连</b>：同机走 <code>wss://127.0.0.1:8443/...</code>；异机走 <code>wss://hub:8443/...</code>。<b>绝对无裸端口</b>。
+              </div>
+              <div style="background:#09122a; padding:6px 10px; border-radius:4px; border-left:3px solid #38bdf8;">
+                <b style="color:#38bdf8;">2. 公网 WSS 直连</b>：同机走 <code>wss://127.0.0.1:8443/...</code>；异机首选 8443 网关以防扫描。
+              </div>
+              <div style="background:#09122a; padding:6px 10px; border-radius:4px; border-left:3px solid #4f46e5;">
+                <b style="color:#a5b4fc;">3. SSH 端口映射</b>：同机直连 <code>127.0.0.1:19222+</code>；异机统一走 8443 网关中继。
+              </div>
+              <div style="background:#09122a; padding:6px 10px; border-radius:4px; border-left:3px solid #10b981;">
+                <b style="color:#34d399;">4. 本地/局域网直连</b>：同机直连 <code>127.0.0.1:9222</code> 或免密 <code>9223</code>；异机统一走 8443 网关。
+              </div>
+            </div>
+          </div>
+
+          <!-- 场景 4: RESTful 凭据操作 -->
           <div v-if="activeGuideTab === 'api'" class="guide-content-box">
-            <p style="color:#34d399; font-weight:bold; margin-bottom:6px;">⚡ 第三方程序或 Agent 自动化调度与数据提取接口：</p>
-            <pre class="code-snippet-box"><code># 1. 查询全网所有在线节点与双连接地址
-curl -H "X-API-Key: {{ profile.api_key }}" {{ currentHubUrl }}/api/v1/nodes
+            <p style="color:#cbd5e1; font-weight:bold; margin-bottom:6px;">⚡ 轻量级 RESTful API（无需挂载浏览器内核，直接抓取/写入 Cookie）：</p>
+            <pre class="code-snippet-box"><code># 1. 查询全网所有在线节点与连接拓扑 (含同机/异机连接地址，支持 IPv4/IPv6)
+curl -k -H "X-API-Key: {{ profile.api_key }}" "{{ currentHubUrl }}/api/v1/nodes?online_only=true"
 
-# 2. 一键抓取目标节点全量 Cookies JSON
-curl -H "X-API-Key: {{ profile.api_key }}" {{ currentHubUrl }}/api/v1/nodes/1/cookies
+# 2. 导出指定节点的全部 CookieJar (JSON 格式)
+curl -k -H "X-API-Key: {{ profile.api_key }}" "{{ currentHubUrl }}/api/v1/nodes/1/cookies"
 
-# 3. 外部 Webhook 触发全网调度策略同步
-curl -X POST -H "X-API-Key: {{ profile.api_key }}" {{ currentHubUrl }}/api/v1/sync</code></pre>
+# 3. 向指定节点注入 CookieJar (跨平台凭据投喂)
+curl -k -X POST -H "X-API-Key: {{ profile.api_key }}" -H "Content-Type: application/json" \
+  -d '{"cookies": [{"name": "session_id", "value": "xyz123", "domain": ".example.com", "path": "/"}]}' \
+  "{{ currentHubUrl }}/api/v1/nodes/1/cookies"
+
+# 4. Webhook 触发全网调度策略即时同步
+curl -k -X POST -H "X-API-Key: {{ profile.api_key }}" "{{ currentHubUrl }}/api/v1/sync"</code></pre>
           </div>
         </div>
       </div>
