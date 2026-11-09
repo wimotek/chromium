@@ -33,9 +33,10 @@ const currentHubUrl = computed(() => {
 })
 
 const loadData = async () => {
-  const [pRes, kRes] = await Promise.all([
+  const [pRes, kRes, cRes] = await Promise.all([
     props.api('/api/profile'),
-    props.api('/api/ssh-keys')
+    props.api('/api/ssh-keys'),
+    props.api('/api/cookie-policy')
   ])
   Object.assign(profile, await pRes.json())
   keys.value = await kRes.json()
@@ -58,6 +59,100 @@ const copyText = async (text, desc) => {
   } catch (err) {
     props.showToast('复制失败，请手动选择复制', 'error')
   }
+}
+
+// ==================== 彻底杜绝模板属性引号冲突的脚本复制函数 ====================
+const copySameHostScript = () => {
+  const code = `import httpx, asyncio, random
+from playwright.async_api import async_playwright
+
+HUB_URL = "https://127.0.0.1:8443"
+API_KEY = "${profile.api_key}"
+
+async def run_same_host():
+    # 1. 动态拉取当前所有健康在线的节点池
+    async with httpx.AsyncClient(verify=False) as client:
+        res = await client.get(
+            f"{HUB_URL}/api/v1/nodes?online_only=true",
+            headers={"X-API-Key": API_KEY}
+        )
+        online_nodes = res.json().get("nodes", [])
+
+    if not online_nodes:
+        print("当前集群暂无可用在线节点！")
+        return
+
+    # 2. 随机/轮询挑选一个节点 (分散指纹与出口特征，规避反爬检测)
+    target = random.choice(online_nodes)
+    endpoint = target["connection_views"]["same_host_automation"]["recommended_endpoint"]
+    print(f"同机命中节点: [{target['name']}] (拓扑: {target['topology_desc']}) -> {endpoint}")
+
+    # 3. 极速接管 CDP 自动化操控
+    async with async_playwright() as p:
+        browser = await p.chromium.connect_over_cdp(endpoint)
+        context = browser.contexts[0] if browser.contexts else await browser.new_context()
+        page = await context.new_page()
+        await page.goto("https://ipinfo.io")
+        print("执行完成，页面标题:", await page.title())
+        await browser.close()
+
+asyncio.run(run_same_host())`
+  copyText(code, '同机自动化脚本')
+}
+
+const copyRemoteHostScript = () => {
+  const code = `import httpx, asyncio, random
+from playwright.async_api import async_playwright
+
+HUB_URL = "${currentHubUrl.value}"
+API_KEY = "${profile.api_key}"
+
+async def run_remote():
+    # 1. 动态拉取全网在线节点池 (支持域名或 IPv6 地址)
+    async with httpx.AsyncClient(verify=False) as client:
+        res = await client.get(
+            f"{HUB_URL}/api/v1/nodes?online_only=true",
+            headers={"X-API-Key": API_KEY}
+        )
+        online_nodes = res.json().get("nodes", [])
+
+    if not online_nodes:
+        print("当前集群暂无可用在线节点！")
+        return
+
+    # 2. 随机/轮询选取目标节点 (多节点负载均衡，杜绝单 IP 触发反爬)
+    target = random.choice(online_nodes)
+    cdp_url = target["preferred_cdp_url"]  # 8443 TLS 统一网关端点
+    print(f"异机分配节点: [{target['name']}] (拓扑: {target['topology_desc']})")
+
+    # 3. 穿透接管 (无论节点在 NAT4 家宽内网还是公网云机)
+    async with async_playwright() as p:
+        browser = await p.chromium.connect_over_cdp(cdp_url)
+        context = browser.contexts[0] if browser.contexts else await browser.new_context()
+        page = await context.new_page()
+        await page.goto("https://ipinfo.io")
+        print("异机执行完成:", await page.title())
+        await browser.close()
+
+asyncio.run(run_remote())`
+  copyText(code, '异机自动化脚本')
+}
+
+const copyApiCurlScript = () => {
+  const code = `# 1. 查询全网在线节点与连接视图 (含同机/异机端点，支持 IPv4/IPv6)
+curl -k -H "X-API-Key: ${profile.api_key}" "${currentHubUrl.value}/api/v1/nodes?online_only=true"
+
+# 2. 导出指定节点的全部 CookieJar (JSON 格式)
+curl -k -H "X-API-Key: ${profile.api_key}" "${currentHubUrl.value}/api/v1/nodes/1/cookies"
+
+# 3. 向指定节点注入 CookieJar (跨平台凭据投喂)
+curl -k -X POST -H "X-API-Key: ${profile.api_key}" -H "Content-Type: application/json" \\
+  -d '{"cookies": [{"name": "session_id", "value": "xyz123", "domain": ".example.com", "path": "/"}]}' \\
+  "${currentHubUrl.value}/api/v1/nodes/1/cookies"
+
+# 4. Webhook 触发全网调度策略即时同步
+curl -k -X POST -H "X-API-Key: ${profile.api_key}" "${currentHubUrl.value}/api/v1/sync"`
+  copyText(code, 'CURL 示例命令')
 }
 
 const saveProfile = async () => {
@@ -268,13 +363,14 @@ onMounted(() => {
             </button>
           </div>
 
-          <!-- 场景 1: 同机自动化接入 (严格对齐场景三高度，带渐变折叠) -->
+          <!-- 场景 1: 同机自动化接入 -->
           <div v-if="activeGuideTab === 'same_host'" class="guide-content-box">
             <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:4px;">
               <span style="color:#38bdf8; font-weight:bold;">💻 自动化脚本与 Hub 部署在同一台机器 / 宿主机：</span>
+              <!-- 修复：调用独立方法，杜绝 HTML 引号截断 -->
               <button 
                 type="button" 
-                @click="copyText(`import httpx, asyncio, random\nfrom playwright.async_api import async_playwright\n\nHUB_URL = 'https://127.0.0.1:8443'\nAPI_KEY = '${profile.api_key}'\n\nasync def run_same_host():\n    async with httpx.AsyncClient(verify=False) as client:\n        res = await client.get(f'{HUB_URL}/api/v1/nodes?online_only=true', headers={'X-API-Key': API_KEY})\n        online_nodes = res.json().get('nodes', [])\n    if not online_nodes:\n        print('当前集群暂无可用在线节点！')\n        return\n    target = random.choice(online_nodes)\n    endpoint = target['connection_views']['same_host_automation']['recommended_endpoint']\n    print(f'同机命中节点: [{target[\"name\"]}] (拓扑: {target[\"topology_desc\"]}) -> {endpoint}')\n    async with async_playwright() as p:\n        browser = await p.chromium.connect_over_cdp(endpoint)\n        context = browser.contexts[0] if browser.contexts else await browser.new_context()\n        page = await context.new_page()\n        await page.goto('https://ipinfo.io')\n        print('执行完成，页面标题:', await page.title())\n        await browser.close()\n\nasyncio.run(run_same_host())`, '同机自动化脚本')"
+                @click="copySameHostScript"
                 class="btn-copy-tag"
                 style="padding: 2px 6px; font-size: 10px;"
               >
@@ -331,13 +427,14 @@ asyncio.run(run_same_host())</code></pre>
             </div>
           </div>
 
-          <!-- 场景 2: 异机/远程自动化接入 (严格对齐场景三高度，带渐变折叠) -->
+          <!-- 场景 2: 异机/远程自动化接入 -->
           <div v-if="activeGuideTab === 'remote_host'" class="guide-content-box">
             <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:4px;">
               <span style="color:#34d399; font-weight:bold;">🌐 脚本部署在外部服务器 / 本地开发机 / CI 容器：</span>
+              <!-- 修复：调用独立方法，杜绝 HTML 引号截断 -->
               <button 
                 type="button" 
-                @click="copyText(`import httpx, asyncio, random\nfrom playwright.async_api import async_playwright\n\nHUB_URL = '${currentHubUrl}'\nAPI_KEY = '${profile.api_key}'\n\nasync def run_remote():\n    async with httpx.AsyncClient(verify=False) as client:\n        res = await client.get(f'{HUB_URL}/api/v1/nodes?online_only=true', headers={'X-API-Key': API_KEY})\n        online_nodes = res.json().get('nodes', [])\n    if not online_nodes:\n        print('当前集群暂无可用在线节点！')\n        return\n    target = random.choice(online_nodes)\n    cdp_url = target['preferred_cdp_url']\n    print(f'异机分配节点: [{target[\"name\"]}] (拓扑: {target[\"topology_desc\"]})')\n    async with async_playwright() as p:\n        browser = await p.chromium.connect_over_cdp(cdp_url)\n        context = browser.contexts[0] if browser.contexts else await browser.new_context()\n        page = await context.new_page()\n        await page.goto('https://ipinfo.io')\n        print('异机执行完成:', await page.title())\n        await browser.close()\n\nasyncio.run(run_remote())`, '异机自动化脚本')"
+                @click="copyRemoteHostScript"
                 class="btn-copy-tag"
                 style="padding: 2px 6px; font-size: 10px;"
               >
@@ -394,13 +491,14 @@ asyncio.run(run_remote())</code></pre>
             </div>
           </div>
 
-          <!-- 场景 3: RESTful 凭据操作 (天然高度约 195px，基准高度) -->
+          <!-- 场景 3: RESTful 凭据操作 -->
           <div v-if="activeGuideTab === 'api'" class="guide-content-box">
             <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:4px;">
               <span style="color:#cbd5e1; font-weight:bold;">⚡ 轻量级 RESTful API 操作：</span>
+              <!-- 修复：调用独立方法，杜绝 HTML 引号截断 -->
               <button 
                 type="button" 
-                @click="copyText(`curl -k -H 'X-API-Key: ${profile.api_key}' '${currentHubUrl}/api/v1/nodes?online_only=true'`, 'CURL 命令')"
+                @click="copyApiCurlScript"
                 class="btn-copy-tag"
                 style="padding: 2px 6px; font-size: 10px;"
               >
@@ -571,7 +669,7 @@ curl -k -X POST -H "X-API-Key: {{ profile.api_key }}" "{{ currentHubUrl }}/api/v
 }
 
 .code-viewport-container.code-expanded {
-  max-height: 600px; /* 展开态 */
+  max-height: 600px;
   overflow-y: auto;
 }
 
