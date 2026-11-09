@@ -23,6 +23,7 @@ import time
 import urllib.request
 from dataclasses import dataclass, field, asdict
 from typing import Dict, List, Optional, Union, Any, Tuple, TYPE_CHECKING
+from .audit import AuditLogger
 
 if TYPE_CHECKING:
     from playwright.async_api import BrowserContext, Playwright, Browser
@@ -285,7 +286,11 @@ class ChromiumSync:
         ssh_key: Optional[str] = None,          # 集群通用私钥 (路径 或 PEM String)
         ssh_password: Optional[str] = None,     # 集群通用 SSH 密码
         auto_close_tunnel: bool = False,
-        verbose: bool = True
+        verbose: bool = True,
+        audit_file: Optional[str] = "audit.jsonl",
+        audit_max_bytes: int = 10 * 1024 * 1024,
+        audit_backup_count: int = 5,
+        audit_enabled: bool = True
     ):
         if not nodes:
             raise ValueError("[-] 必须至少提供一个节点配置！")
@@ -300,6 +305,22 @@ class ChromiumSync:
         self.exclude_domains = exclude_domains
         self.diff = diff
         self.auto_close_tunnel = auto_close_tunnel
+
+        # 审计日志与自动轮转参数 (开箱即用)
+        self.audit_enabled: bool = audit_enabled
+        self.audit_file: str = audit_file or "audit.jsonl"
+        self.audit_max_bytes: int = audit_max_bytes
+        self.audit_backup_count: int = audit_backup_count
+        self.audit_logger: Optional[AuditLogger] = (
+            AuditLogger(
+                file_path=self.audit_file,
+                max_bytes=self.audit_max_bytes,
+                backup_count=self.audit_backup_count,
+                enabled=self.audit_enabled
+            )
+            if self.audit_enabled and self.audit_file
+            else None
+        )
 
         log_level = logging.INFO if verbose else logging.WARNING
         logging.basicConfig(level=log_level, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -335,6 +356,30 @@ class ChromiumSync:
         self._pool_playwright: Optional[Any] = None
         self._pooled_browsers: Dict[str, Any] = {}
         self._pooled_contexts: Dict[str, BrowserContext] = {}
+
+    def _audit(
+        self,
+        event_type: str,
+        details: Optional[Dict[str, Any]] = None,
+        level: str = "INFO",
+        **kwargs
+    ) -> Optional[Dict[str, Any]]:
+        """写入一条结构化审计日志 (自动大小轮转与淘汰)"""
+        if self.audit_logger:
+            return self.audit_logger.log(event_type, details=details, level=level, **kwargs)
+        return None
+
+    def get_audit_records(self, limit: int = 50) -> List[Dict[str, Any]]:
+        """读取最近生成的结构化审计日志记录"""
+        if self.audit_logger:
+            return self.audit_logger.read_recent_records(limit=limit)
+        return []
+
+    def get_audit_files(self) -> List[str]:
+        """获取当前存在的主日志及轮转归档文件列表"""
+        if self.audit_logger:
+            return self.audit_logger.get_audit_files()
+        return []
 
     # =========================================================================
     # 会话级连接池复用 (Connection Pooling 上下文管理器)
@@ -834,10 +879,18 @@ class ChromiumSync:
         active_source = source or self.source
         active_targets = targets or self.targets
 
+        self._audit("sync_start", {
+            "mode": active_mode,
+            "source": active_source,
+            "targets": active_targets,
+            "nodes": [n.id for n in self.nodes]
+        })
+
         try:
             from playwright.async_api import async_playwright
         except ImportError:
             elapsed = round(time.time() - start_time, 2)
+            self._audit("sync_failed", {"reason": "playwright not installed"}, level="ERROR")
             return {
                 "status": "failed",
                 "mode": active_mode,
@@ -869,6 +922,12 @@ class ChromiumSync:
                 for node in self.nodes:
                     if node.id in contexts:
                         nodes_data[node.id] = await self._fetch_node_data(contexts[node.id], node)
+                        self._audit("node_connected", {
+                            "node_id": node.id,
+                            "name": node.name,
+                            "mode": getattr(node, "mode", "direct"),
+                            "pooled": True
+                        })
                     else:
                         logging.warning(f"⚠️ [SKIP] 连接池中节点 [{node.name}] 不可用，自动跳过。")
                         skipped_nodes.append({
@@ -878,6 +937,12 @@ class ChromiumSync:
                             "cdp_url": node.cdp_url,
                             "reason": "Not connected in pool"
                         })
+                        self._audit("node_skipped", {
+                            "node_id": node.id,
+                            "name": node.name,
+                            "mode": getattr(node, "mode", "direct"),
+                            "reason": "Not connected in pool"
+                        }, level="WARNING")
             else:
                 async with async_playwright() as p:
                     for node in self.nodes:
@@ -891,6 +956,12 @@ class ChromiumSync:
                             browsers[node.id] = b
                             contexts[node.id] = ctx
                             nodes_data[node.id] = await self._fetch_node_data(ctx, node)
+                            self._audit("node_connected", {
+                                "node_id": node.id,
+                                "name": node.name,
+                                "mode": getattr(node, "mode", "direct"),
+                                "cdp_url": cdp_url
+                            })
                         except Exception as e:
                             logging.warning(f"⚠️ [SKIP] 节点 [{node.name}] 离线或连接异常 ({cdp_url})，自动跳过: {e}")
                             skipped_nodes.append({
@@ -900,9 +971,21 @@ class ChromiumSync:
                                 "cdp_url": cdp_url,
                                 "reason": str(e)
                             })
+                            self._audit("node_skipped", {
+                                "node_id": node.id,
+                                "name": node.name,
+                                "mode": getattr(node, "mode", "direct"),
+                                "cdp_url": cdp_url,
+                                "reason": str(e)
+                            }, level="WARNING")
 
                     if not contexts:
                         elapsed = round(time.time() - start_time, 2)
+                        self._audit("sync_failed", {
+                            "mode": active_mode,
+                            "reason": "No available online nodes",
+                            "skipped_nodes": [n["id"] for n in skipped_nodes]
+                        }, level="ERROR")
                         return {
                             "status": "failed",
                             "mode": active_mode,
@@ -928,6 +1011,11 @@ class ChromiumSync:
             # 连接池模式下执行核心逻辑
             if not contexts:
                 elapsed = round(time.time() - start_time, 2)
+                self._audit("sync_failed", {
+                    "mode": active_mode,
+                    "reason": "No available online nodes in pool",
+                    "skipped_nodes": [n["id"] for n in skipped_nodes]
+                }, level="ERROR")
                 return {
                     "status": "failed",
                     "mode": active_mode,
@@ -950,6 +1038,7 @@ class ChromiumSync:
         except Exception as e:
             elapsed = round(time.time() - start_time, 2)
             logging.error(f"[-] 同步发生异常: {e}")
+            self._audit("sync_exception", {"mode": active_mode, "error": str(e)}, level="ERROR")
             return {
                 "status": "failed",
                 "mode": active_mode,
@@ -1006,6 +1095,12 @@ class ChromiumSync:
             if active_targets:
                 dest_nodes = [n for n in dest_nodes if n.id in active_targets]
 
+            self._audit("cookies_merged", {
+                "raw_total": source_total,
+                "merged_total": len(merged),
+                "dest_nodes": [n.id for n in dest_nodes]
+            })
+
             for dest in dest_nodes:
                 logging.info(f"[*] 注入合并凭据至节点: [{dest.name}]")
                 w, s = await self._apply_cookies_and_storage(
@@ -1018,6 +1113,17 @@ class ChromiumSync:
                 total_skipped += s
 
             elapsed = round(time.time() - start_time, 2)
+            self._audit("sync_finish", {
+                "status": "success",
+                "mode": "merge",
+                "transferred_count": total_transferred,
+                "diff_skipped_count": total_skipped,
+                "source_total": source_total,
+                "target_total": len(merged),
+                "nodes_synced": [n.id for n in dest_nodes],
+                "nodes_skipped": [n["id"] for n in skips_list],
+                "duration": elapsed
+            })
             return {
                 "status": "success",
                 "mode": "merge",
@@ -1044,6 +1150,16 @@ class ChromiumSync:
                 elapsed = round(time.time() - start_time, 2)
                 msg = f"⚠️ [SOURCE_OFFLINE] 单向同步指定的源节点 [{source_name}] ({active_source}) 离线或连接异常，无法提取基准凭据，同步流程终止。"
                 logging.error(msg)
+                self._audit("source_offline", {
+                    "source": active_source,
+                    "source_name": source_name,
+                    "details": msg
+                }, level="ERROR")
+                self._audit("sync_failed", {
+                    "mode": "sync",
+                    "reason": f"Source node '{active_source}' is offline",
+                    "source": active_source
+                }, level="ERROR")
                 return {
                     "status": "failed",
                     "mode": "sync",
@@ -1082,6 +1198,18 @@ class ChromiumSync:
                 total_skipped += s
 
             elapsed = round(time.time() - start_time, 2)
+            self._audit("sync_finish", {
+                "status": "success",
+                "mode": "sync",
+                "source": active_source,
+                "transferred_count": total_transferred,
+                "diff_skipped_count": total_skipped,
+                "source_total": len(src_cookies),
+                "target_total": len(src_cookies),
+                "nodes_synced": [n.id for n in dest_nodes],
+                "nodes_skipped": [n["id"] for n in skips_list],
+                "duration": elapsed
+            })
             return {
                 "status": "success",
                 "mode": "sync",

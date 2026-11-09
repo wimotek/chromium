@@ -29,6 +29,10 @@
    * 仅对实质变更的 Cookie 执行落盘与热重载，避免无效 IO 读写，**大幅延长从属端 SSD 寿命**。
 6. **全量纯函数工具方法开箱即用**：
    * 模块顶级导出 `merge_cookies`、`filter_cookies`、`compute_cookie_delta` 等独立纯函数工具。
+7. **开箱即用的结构化审计日志与自动大小轮转 (Structured Audit Logging & Auto-Rotation)**：
+   * **触发机制**：每次写入时自动检测目标文件大小，当达到阈值（默认 10MB / 10485760 字节）时，自动重命名归档为 `audit.jsonl.1`、`audit.jsonl.2` ... 并创建新的日志文件。
+   * **自动淘汰**：超出保留上限（默认最多保留 5 个归档备份，即 `audit.jsonl.1` 至 `audit.jsonl.5`）的最旧日志会被自动剔除，从根源杜绝磁盘打满。
+   * **JSON Lines 格式**：标准 JSONL 格式 (`.jsonl`)，便于 ELK、Loki、Splunk 或云端日志系统直接采集与追踪。
 
 ---
 
@@ -125,6 +129,67 @@ CDP Hub 在管理大规模分布式浏览器节点时，节点所处的网络拓
 
 ---
 
+## 📋 审计日志与开箱即用的自动大小轮转 (Auto-Rotation)
+
+生产环境下长期运行多节点同步引擎，审计日志必须兼顾**追溯性**与**磁盘安全性**。`wimotek-chromium-sync` 内置了开箱即用的线程安全 JSON Lines (`.jsonl`) 审计日志记录器与自动大小轮转机制：
+
+### 1. 工作原理与触发机制
+* **触发机制 (Trigger Mechanism)**：每次写入审计事件前，自动检测主文件（默认 `audit.jsonl`）的体积大小。当写入后总大小达到阈值（默认 `10MB` / `10 * 1024 * 1024` 字节）时，自动将主日志重命名归档为 `audit.jsonl.1`、`audit.jsonl.2` ... 并初始化全新的 `audit.jsonl` 继续写入。
+* **自动淘汰 (Auto-Eviction)**：严格控制归档保留数量（默认最多保留 `5` 个归档备份，即 `audit.jsonl.1` ~ `audit.jsonl.5`）。发生轮转时，超出上限的最旧归档（`audit.jsonl.5`）会被自动剔除删除，**从根源上杜绝磁盘打满或存储溢出风险**。
+* **线程安全 (Thread Safety)**：内置全局排他锁，并发批量调度时写入不串行、保证每行均为标准合法的 JSON 对象。
+
+### 2. 标准 JSON Lines 数据格式
+每条日志独立成行，字段标准统一：
+```json
+{"timestamp": "2026-11-08T19:20:01.123Z", "level": "INFO", "event": "sync_start", "details": {"mode": "sync", "source": "node-master", "targets": ["node-worker-1", "node-worker-2"], "nodes": ["node-master", "node-worker-1", "node-worker-2"]}}
+{"timestamp": "2026-11-08T19:20:01.345Z", "level": "INFO", "event": "node_connected", "details": {"node_id": "node-master", "name": "主控机", "mode": "direct", "cdp_url": "http://127.0.0.1:9222"}}
+{"timestamp": "2026-11-08T19:20:01.450Z", "level": "WARNING", "event": "node_skipped", "details": {"node_id": "node-worker-2", "name": "从属机2", "mode": "ssh_tunnel", "cdp_url": "http://127.0.0.1:19223", "reason": "Connection refused"}}
+{"timestamp": "2026-11-08T19:20:01.789Z", "level": "INFO", "event": "sync_finish", "details": {"status": "success", "mode": "sync", "source": "node-master", "transferred_count": 8, "diff_skipped_count": 92, "source_total": 100, "target_total": 100, "nodes_synced": ["node-worker-1"], "nodes_skipped": ["node-worker-2"], "duration": 0.67}}
+```
+
+### 3. 支持的核心审计事件 (Events)
+| 事件名称 (`event`) | 级别 (`level`) | 触发时机与包含字段 |
+| :--- | :--- | :--- |
+| `sync_start` | `INFO` | 同步引擎启动，记录模式 `mode`、源节点 `source` 与参与节点列表 |
+| `node_connected` | `INFO` | 节点成功接入并建立 CDP 会话 |
+| `node_skipped` | `WARNING` | 节点离线、握手失败或异常跳过，记录详细错误原因 `reason` |
+| `source_offline` | `ERROR` | 单向同步指定的源节点离线，记录终止通知 |
+| `cookies_merged` | `INFO` | `merge` 模式下凭据汇总去重完成，记录原始数与融合数 |
+| `sync_finish` | `INFO` | 同步成功完成，记录真正写入条数、差量跳过条数与耗时 |
+| `sync_failed` | `ERROR` | 全部节点离线或源节点离线导致同步流程无法继续 |
+| `sync_exception` | `ERROR` | 同步过程中发生未预期异常捕获 |
+
+### 4. 审计日志配置示例
+```python
+from wimotek_chromium_sync import ChromiumSync, AuditLogger
+
+syncer = ChromiumSync(
+    nodes=[
+        {"id": "master", "cdp_port": 9222},
+        {"id": "slave", "cdp_port": 9223}
+    ],
+    # 审计日志与自动轮转设置 (全部内置合理默认值，开箱即用)
+    audit_file="logs/chromium_sync_audit.jsonl", # 日志写入路径 (默认: "audit.jsonl")
+    audit_max_bytes=10 * 1024 * 1024,           # 单文件最大容量，达到后轮转 (默认: 10MB)
+    audit_backup_count=5,                       # 最多保留归档文件数 (默认: 5 个)
+    audit_enabled=True                          # 是否开启审计日志 (默认: True)
+)
+
+# 执行同步 (自动记录审计日志并按需轮转)
+report = syncer.run()
+
+# 快速读取最近生成的结构化审计日志
+recent_logs = syncer.get_audit_records(limit=20)
+for entry in recent_logs:
+    print(f"[{entry['timestamp']}] {entry['event']} -> {entry['details']}")
+
+# 查看当前存在的所有归档日志文件
+print("当前审计归档链:", syncer.get_audit_files())
+# ['logs/chromium_sync_audit.jsonl', 'logs/chromium_sync_audit.jsonl.1', ...]
+```
+
+---
+
 ## 🚀 极简开发示例
 
 ### 1. Hub 多模式混合集群融合 (全节点最新凭证合并)
@@ -153,7 +218,8 @@ syncer = ChromiumSync(
     mode="merge",
     include_domains=["google.com", "github.com"], # 仅同步核心业务站点
     exclude_domains=["doubleclick.net"],          # 剔除垃圾广告追踪
-    diff=True                                     # 开启差量指纹比对保护磁盘
+    diff=True,                                    # 开启差量指纹比对保护磁盘
+    audit_file="audit.jsonl"                      # 开启结构化审计自动轮转
 )
 
 report = syncer.run()
@@ -201,7 +267,11 @@ with SSHTunnelManager(start_port=19222) as tm:
 | `diff` | bool | `True` | **指纹差量同步**：相同凭证跳过写入，避免频繁刷盘保护 SSD 寿命 |
 | `source` | str | 第一个节点 | `'sync'` 模式下的基准源节点 ID (离线时打印错误通知并直接终止同步) |
 | `targets` | list | 其余节点 | `'sync'` 模式下的目标节点 ID 列表 |
-| `verbose` | bool | `True` | 是否输出详细强化日志 (`⚠️ [SKIP]`, `⚠️ [SOURCE_OFFLINE]`) |
+| `audit_file` | str | `'audit.jsonl'` | **审计日志文件路径** (支持相对或绝对路径) |
+| `audit_max_bytes` | int | `10485760` (10MB) | **自动轮转阈值**：文件大小达到该字节数时触发归档 |
+| `audit_backup_count` | int | `5` | **归档保留上限**：最多保留 5 个 `.1` ~ `.5` 归档备份，超出自动淘汰 |
+| `audit_enabled` | bool | `True` | **开箱即用**：是否开启结构化审计日志记录 |
+| `verbose` | bool | `True` | 是否输出详细控制台日志 (`⚠️ [SKIP]`, `⚠️ [SOURCE_OFFLINE]`) |
 
 ---
 
@@ -213,7 +283,8 @@ from wimotek_chromium_sync import (
     NodeConfig,           # 统一节点配置数据模型 (支持 4 种 CDP 连接模式)
     merge_cookies,        # 多节点 Cookie 智能融合纯函数
     filter_cookies,       # 域名白名单/黑名单过滤纯函数
-    compute_cookie_delta  # Cookie 指纹变更差量计算纯函数
+    compute_cookie_delta, # Cookie 指纹变更差量计算纯函数
+    AuditLogger           # 开箱即用的 JSON Lines 审计日志与自动轮转器
 )
 ```
 

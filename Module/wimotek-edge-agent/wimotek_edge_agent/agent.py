@@ -40,7 +40,11 @@ class EdgeAgent:
         self.config.ensure_dirs()
         self.data_handler = data_handler
 
-        self.audit = AuditLogger(config.audit_log_path)
+        self.audit = AuditLogger(
+            config.audit_log_path,
+            max_bytes=config.audit_max_bytes,
+            backup_count=config.audit_backup_count,
+        )
         self.trust_store = TrustStore(config.trust_db_path)
         self.local_bypass = LocalBypassManager(
             config.local_bypass_token_path,
@@ -451,6 +455,15 @@ def build_parser() -> argparse.ArgumentParser:
     p_sim.add_argument("--reverse-tunnel", action="store_true")
     p_sim.add_argument("--nat-type", default="unknown")
 
+    # 13. clean-audit
+    p_clean = subparsers.add_parser("clean-audit", help="Truncate or clear audit log")
+    p_clean.add_argument(
+        "--keep",
+        type=int,
+        default=0,
+        help="Keep last N records (default 0, clears all records)",
+    )
+
     return parser
 
 
@@ -488,6 +501,16 @@ def main(argv: Optional[list[str]] = None) -> int:
             "token": token,
             "path": str(agent.config.local_bypass_token_path),
             "required": agent.config.require_local_bypass_token,
+        }, indent=2))
+        return 0
+
+    if args.command == "clean-audit":
+        retained = agent.audit.clear(keep_last_lines=args.keep)
+        agent.audit.emit("audit_log_cleaned", retained_lines=retained, keep_requested=args.keep)
+        print(json.dumps({
+            "status": "ok",
+            "message": f"Audit log cleaned (retained {retained} lines)",
+            "retained_lines": retained,
         }, indent=2))
         return 0
 

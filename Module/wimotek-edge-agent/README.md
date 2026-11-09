@@ -14,6 +14,9 @@ Commercial-grade edge access control, service bridge, and tunnel agent featuring
 - [Programmatic usage](#programmatic-usage)
 - [Reverse tunnel / NAT4](#reverse-tunnel--nat4)
 - [Audit log](#audit-log)
+  - [Storage Mechanics & Format](#1-storage-mechanics--format)
+  - [Risks of Unmanaged Log Growth](#2-risks-of-unmanaged-log-growth)
+  - [Log Rotation & Cleanup Solutions](#3-log-rotation--cleanup-solutions)
 - [Security model](#security-model)
 - [Commercial deployment checklist](#commercial-deployment-checklist)
 - [License](#license)
@@ -241,6 +244,8 @@ npx wimotek-edge-agent --help
 | `EDGE_AGENT_SESSION_TICKET_TTL_SECONDS` | no | `300` | Session ticket TTL (seconds) |
 | `EDGE_AGENT_TOFU_HEARTBEAT_SECONDS` | no | `10` | TOFU quarantine heartbeat interval |
 | `EDGE_AGENT_REQUIRE_LOCAL_BYPASS_TOKEN` | no | `true` | Require local bypass token for loopback |
+| `EDGE_AGENT_AUDIT_MAX_BYTES` | no | `10485760` (10MB) | Max audit log size before auto-rotation |
+| `EDGE_AGENT_AUDIT_BACKUP_COUNT` | no | `5` | Number of rotated audit log files to keep |
 | `EDGE_AGENT_REVERSE_TUNNEL` | no | auto | Force reverse tunnel (`true`/`false`) |
 | `EDGE_AGENT_NAT_TYPE` | no | `unknown` | Network NAT type (`nat4`, `symmetric`, etc.) |
 | `EDGE_AGENT_NODE_UUID` | reverse only | - | Agent node UUID |
@@ -310,6 +315,16 @@ Read or generate the local bypass token:
 wimotek-edge-agent bypass-token
 ```
 
+Clean or truncate the audit log (keep recent N lines or 0 for complete truncate):
+
+```bash
+# Keep latest 500 lines:
+wimotek-edge-agent clean-audit --keep 500
+
+# Completely wipe audit log:
+wimotek-edge-agent clean-audit --keep 0
+```
+
 ## Programmatic usage
 
 ```python
@@ -364,13 +379,76 @@ await agent.run_reverse_tunnel(
 
 ## Audit log
 
-Every `AccessDecision` is written to `EDGE_AGENT_DATA_DIR/audit.jsonl`:
+### 1. Storage Mechanics & Format
+
+Every `AccessDecision` and administrative action is written to `$EDGE_AGENT_DATA_DIR/audit.jsonl` (default: `./edge_agent_data/audit.jsonl`).
+Lines are formatted as standard **JSON Lines (JSONL)** and protected by a thread-safe mutex lock:
 
 ```json
 {"ts":"2026-11-06T12:00:00+00:00","event":"access_decision","node_uuid":"node-xxx","source_ip":"203.0.113.10","is_loopback":false,"decision":"allow_token","reason":"edge_agent_token_verified","network_profile":"direct","nat_type":"unknown","fingerprint":"sha256:...","node_status":"trusted"}
 ```
 
-Ship this structured log file to your central logging pipeline (Loki, ELK, CloudWatch, OpenTelemetry). Raw join tokens are never logged.
+Raw join tokens are never logged.
+
+---
+
+### 2. Risks of Unmanaged Log Growth
+
+In high-throughput edge environments (hundreds of handshakes/sec):
+1. **Disk Exhaustion (ENOSPC)**: Without rotation, `audit.jsonl` can grow to tens of gigabytes, exhausting device storage.
+2. **Database Failure**: When disk fills up, SQLite (`trust_store.sqlite3`) fails during WAL commits, causing trust state and replay tracking to crash.
+3. **Memory & I/O Spikes**: Reading massive un-rotated log files causes severe memory consumption and potential OOM kills.
+4. **Compliance & SIEM Delay**: Retaining only raw local logs without shipping violates enterprise zero-trust audit policies.
+
+---
+
+### 3. Log Rotation & Cleanup Solutions
+
+#### A. Built-in Automatic Size Rotation (Recommended)
+`AuditLogger` features built-in auto-rotation when file size reaches the threshold:
+- Automatically rolls into `audit.jsonl.1` through `audit.jsonl.5`, purging the oldest file.
+- Configurable via environment variables:
+  ```bash
+  # Maximum file size before rotation (default: 10485760 = 10MB)
+  export EDGE_AGENT_AUDIT_MAX_BYTES=10485760
+  # Number of rotated archives to retain (default: 5)
+  export EDGE_AGENT_AUDIT_BACKUP_COUNT=5
+  ```
+
+#### B. CLI Manual Truncate & Clear
+```bash
+# Keep latest 500 lines and safely truncate history:
+wimotek-edge-agent clean-audit --keep 500
+
+# Completely wipe audit log:
+wimotek-edge-agent clean-audit --keep 0
+```
+
+#### C. Web Console 1-Click Clean
+In the Edge Agent Web Console:
+- Navigate to **"安全审计 (Audit Log)"** tab.
+- Click the red **"清理日志 (Clear Logs)"** button to truncate safely with confirmation.
+
+#### D. Production Linux Logrotate Configuration
+For systemd/daemon deployments, configure `/etc/logrotate.d/wimotek-edge-agent`:
+
+```text
+/path/to/edge_agent_data/audit.jsonl {
+    daily
+    missingok
+    rotate 7
+    compress
+    delaycompress
+    notifempty
+    copytruncate
+}
+```
+*(The `copytruncate` directive allows safe truncation without interrupting running agent processes).*
+
+#### E. SIEM Central Log Shipping
+Stream JSONL lines via Vector, FluentBit, or Filebeat directly to Loki, Elasticsearch, or AWS CloudWatch.
+
+---
 
 ## Security model
 

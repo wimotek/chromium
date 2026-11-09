@@ -44,6 +44,10 @@ class Config:
     session_ticket_ttl_seconds: int = 300
     tofu_heartbeat_seconds: int = 10
 
+    # 审计日志自动轮转配置
+    audit_max_bytes: int = 10 * 1024 * 1024  # 默认 10MB
+    audit_backup_count: int = 5              # 默认保留 5 个归档
+
     # None 表示自动判断；True 表示强制反向隧道；False 表示强制直连。
     reverse_tunnel: Optional[bool] = None
     nat_type: Optional[str] = None
@@ -98,6 +102,12 @@ class Config:
             ),
             tofu_heartbeat_seconds=int(
                 os.getenv("EDGE_AGENT_TOFU_HEARTBEAT_SECONDS", "10")
+            ),
+            audit_max_bytes=int(
+                os.getenv("EDGE_AGENT_AUDIT_MAX_BYTES", str(10 * 1024 * 1024))
+            ),
+            audit_backup_count=int(
+                os.getenv("EDGE_AGENT_AUDIT_BACKUP_COUNT", "5")
             ),
             reverse_tunnel=_env_opt_bool("EDGE_AGENT_REVERSE_TUNNEL"),
             nat_type=os.getenv("EDGE_AGENT_NAT_TYPE") or None,
