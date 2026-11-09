@@ -24,6 +24,28 @@ const editingPolicyId = ref(null)
 const showLogModal = ref(false)
 const selectedLogDetail = ref('')
 
+// ==================== 全局 Cookie 过滤与差量同步策略弹窗模型 (从第 4 张卡迁入) ====================
+const showCookiePolicyModal = ref(false)
+const cookiePolicy = reactive({
+  sync_diff_enabled: true,
+  sync_include_domains: '',
+  sync_exclude_domains: 'doubleclick.net,google-analytics.com'
+})
+
+const saveCookiePolicy = async () => {
+  const res = await props.api('/api/cookie-policy', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(cookiePolicy)
+  })
+  if (res.ok) {
+    props.showToast('全局 Cookie 过滤与差量策略已保存生效', 'success')
+    showCookiePolicyModal.value = false
+  } else {
+    props.showToast('保存策略失败', 'error')
+  }
+}
+
 // 策略表单模型
 const policyForm = reactive({
   name: '',
@@ -41,16 +63,18 @@ const policyForm = reactive({
 const selectedTargetToAdd = ref('')
 
 const loadAllData = async () => {
-  const [pRes, nRes, gRes, lRes] = await Promise.all([
+  const [pRes, nRes, gRes, lRes, cRes] = await Promise.all([
     props.api('/api/sync/policies'),
     props.api('/api/nodes'),
     props.api('/api/node-groups'),
-    props.api('/api/sync/logs')
+    props.api('/api/sync/logs'),
+    props.api('/api/cookie-policy')
   ])
   if (pRes.ok) policies.value = await pRes.json()
   if (nRes.ok) nodes.value = await nRes.json()
   if (gRes.ok) groups.value = await gRes.json()
   if (lRes.ok) logs.value = await lRes.json()
+  if (cRes && cRes.ok) Object.assign(cookiePolicy, await cRes.json())
 }
 
 const formatRouteText = (p) => {
@@ -170,7 +194,6 @@ const runPolicy = async (id) => {
     } else {
       props.showToast(data.detail || '执行受阻', 'error')
     }
-    // 立即刷新所有数据和审计表
     await loadAllData()
   } catch (e) {
     props.showToast('网络请求异常', 'error')
@@ -221,15 +244,25 @@ onUnmounted(() => {
 <template>
   <div class="sync-manager-container">
     
-    <!-- 顶栏标题与新增操作 -->
+    <!-- 顶栏标题与操作区 (新增全局过滤与差量策略入口) -->
     <div class="sync-top-header">
       <div class="sync-title-box">
         <span class="sync-icon-globe">🌐</span>
         <h2 class="sync-title-text">多策略自动同步调度中枢 (支持组对组 / 节点对组)</h2>
       </div>
-      <button @click="openCreatePolicy" class="btn-primary-gradient">
-        + 新增调度策略
-      </button>
+      <div style="display:flex; gap:10px; align-items:center;">
+        <!-- 新增：唤起全局 Cookie 策略弹窗 -->
+        <button 
+          @click="showCookiePolicyModal = true" 
+          class="btn-sub-action" 
+          style="border-color:#0284c7; color:#38bdf8; height:34px; display:inline-flex; align-items:center; gap:5px;"
+        >
+          🛡️ 全局过滤与差量策略
+        </button>
+        <button @click="openCreatePolicy" class="btn-primary-gradient">
+          + 新增调度策略
+        </button>
+      </div>
     </div>
 
     <!-- 策略管理大列表 (自适应一行 3 个卡片) -->
@@ -350,10 +383,8 @@ onUnmounted(() => {
               <td>
                 <span class="cookie-stat-badge">🍪 {{ l.cookie_count || 0 }} 条</span>
               </td>
-              <!-- 核心修复：补齐缺失的耗时列，解决所有列向左错位问题 -->
               <td class="font-mono text-duration">{{ l.duration || '0.00s' }}</td>
 
-              <!-- 状态胶囊 (正确对应「状态」表头) -->
               <td style="text-align: center;">
                 <span v-if="l.status==='SUCCESS'" class="status-pill-ok">● 成功</span>
                 <span v-else-if="l.status==='NO_CHANGE'" class="status-pill-skip">● 一致跳过</span>
@@ -371,7 +402,51 @@ onUnmounted(() => {
       </div>
     </div>
 
-    <!-- 弹窗：新建 / 修改策略 -->
+    <!-- ==================== 弹窗 1：全局 Cookie 过滤与差量同步策略 (全新置入) ==================== -->
+    <div v-if="showCookiePolicyModal" class="modal-backdrop">
+      <div class="modal-card modal-policy-size">
+        <div class="modal-title-bar">
+          <div style="display:flex; align-items:center; gap:8px;">
+            <span style="font-size:16px;">🛡️</span>
+            <h3 class="modal-title-h3">全局 Cookie 过滤与差量同步策略配置</h3>
+          </div>
+          <button @click="showCookiePolicyModal = false" class="modal-close-btn">✕</button>
+        </div>
+
+        <form @submit.prevent="saveCookiePolicy" class="form-vertical-flow" style="margin-top:14px;">
+          <div style="background:#09122a; border:1px solid #1e3a8a; border-radius:6px; padding:12px; width:100%; box-sizing:border-box;">
+            <div style="display:flex; align-items:center; gap:8px;">
+              <input type="checkbox" v-model="cookiePolicy.sync_diff_enabled" id="diff_toggle_modal" class="check-box-blue">
+              <label for="diff_toggle_modal" style="font-size:12px; color:#38bdf8; font-weight:bold; cursor:pointer;">
+                启用 Cookie 指纹变更差量检测 (Diff / Delta Sync)
+              </label>
+            </div>
+            <p style="font-size:11px; color:#64748b; margin-top:5px; line-height:1.5;">
+              仅对值、有效期发生实质变更的凭证执行下发，跳过完全一致项，避免全量频繁刷盘。
+            </p>
+          </div>
+
+          <div class="form-block">
+            <label class="block-label">域名白名单 (Include Domains，选填)</label>
+            <input v-model="cookiePolicy.sync_include_domains" placeholder="例如: google.com, twitter.com (留空则同步全部)" class="sync-input font-cyan-mono" style="width:100% !important;">
+            <p style="font-size:11px; color:#64748b; margin:2px 0 0 0;">仅同步匹配这些域名的 Cookie，多个域名用英文逗号分隔；留空表示不过滤。</p>
+          </div>
+
+          <div class="form-block">
+            <label class="block-label">域名黑名单 (Exclude Domains，选填)</label>
+            <input v-model="cookiePolicy.sync_exclude_domains" placeholder="例如: doubleclick.net, google-analytics.com" class="sync-input font-cyan-mono" style="width:100% !important;">
+            <p style="font-size:11px; color:#64748b; margin:2px 0 0 0;">全局自动剔除广告、数据统计类垃圾凭据，防止污染目标浏览器。</p>
+          </div>
+
+          <div style="display:flex; justify-content:flex-end; gap:8px; margin-top:8px;">
+            <button type="button" @click="showCookiePolicyModal = false" class="btn-gray-test">取消</button>
+            <button type="submit" class="btn-primary-gradient">保存全局策略</button>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    <!-- 弹窗 2：新建 / 修改策略 -->
     <div v-if="showPolicyModal" class="modal-backdrop">
       <div class="modal-card modal-policy-size">
         <div class="modal-title-bar">
@@ -500,7 +575,7 @@ onUnmounted(() => {
       </div>
     </div>
 
-    <!-- 日志详情弹窗 -->
+    <!-- 弹窗 3：日志详情弹窗 -->
     <div v-if="showLogModal" class="modal-backdrop">
       <div class="modal-card modal-log-size">
         <div class="modal-title-bar">
@@ -539,6 +614,8 @@ onUnmounted(() => {
   padding-bottom: 16px;
   border-bottom: 1px solid #172554;
   margin-bottom: 18px;
+  gap: 12px;
+  flex-wrap: wrap;
 }
 
 .sync-title-box {
@@ -844,6 +921,13 @@ onUnmounted(() => {
 
 .font-mono { font-family: monospace; }
 .font-cyan-mono { color: #00f0ff; font-family: monospace; font-weight: bold; }
+
+.check-box-blue {
+  width: 14px;
+  height: 14px;
+  accent-color: #0284c7;
+  cursor: pointer;
+}
 
 /* 拓扑模式卡片 */
 .grid-2col-fluid {
