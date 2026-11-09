@@ -27,8 +27,6 @@ from typing import Optional, Tuple, List
 import httpx
 import websockets
 
-from wimotek_edge_agent import Config, EdgeAgent
-
 # 容器内部 Chromium 原生监听标准端口
 CDP_PORT = int(os.getenv("CDP_PORT", "9222"))
 

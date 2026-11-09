@@ -1,192 +1,118 @@
-# Xray-core 极简独立部署套件 (REALITY 自动最新版)
+# Xray-core 极简边缘代理套件 (纯 Python 守护 & 双模自适应)
 
-这是一个完全解耦、开箱即用的 Xray 服务端 Docker 部署套件。默认采用目前抗封锁与传输性能最佳的 **VLESS + XTLS + REALITY (Vision 流控)** 架构，无需自行申请或维护 SSL 证书。
+这是一个工业级、开箱即用的 Xray 边缘节点容器镜像。支持 **公网直连 (VLESS-REALITY-Vision)** 与 **NAT4 无公网 (WSS 反向打洞穿透)** 双模式自适应切换。
+
+底层彻底抛弃脆弱的 Shell 脚本编排，采用标准纯 Python（`python3 -m app`）面向对象异步架构进行三层守护。
 
 ---
 
 ## ✨ 核心特性
 
-- **官方最新核心**：构建镜像与容器运行时均支持自动直连 GitHub 获取官方最新 Release，杜绝频控限制与版本滞后。
-- **全自动化初始化**：初次启动自动生成高强度 UUID、x25519 密钥对和 ShortId，一机一密。
-- **即启即用**：启动后直接在终端日志与本地文件中输出标准客户端导入链接（`vless://`）。
-- **轻量与多架构**：基于 Alpine Linux 构建，原生适配 `amd64`、`arm64`、`armv7` 等硬件架构。
-- **高性能网络**：默认推荐 Host 网络栈，全面兼容系统原生 TCP BBR 拥塞控制算法。
+- 🐍 **纯 Python 异步三层看门狗**：
+  - **核心看门狗**：秒级监控 Xray 核心运行状态，意外退出 1 秒内原地自愈拉起；
+  - **语法沙箱防变砖**：配置变更前强制执行 `xray test -config` 预检，100% 校验通过后原子上架并平滑重载；
+  - **WSS 隧道守护**：长连接探活心跳（Ping-Pong 15s），网络波动按指数退避（1s~60s）自动重连。
+- 🌐 **IPv4 + IPv6 双栈原生支持**：
+  - 自动检测并输出公网 IPv4 与原生全球单播 IPv6；
+  - 纯 IPv6 独享主机（如 Scaleway / Hetzner）天然直连端到端。
+- ☁️ **Oracle Cloud / AWS 1:1 NAT 完美识别**：
+  - 内置云平台元数据探测（IMDSv1/v2，`169.254.169.254`）；
+  - 即使主机网卡仅显示 `10.0.0.x` 私网 IP，也能准确识别 1:1 NAT 公网直通映射，**绝不误判走反穿**。
+- 🔀 **智能网络双模自适应 (`net_mode`)**：
+  - **直连模式 (`direct`)**：监听 `0.0.0.0:443`，启用 VLESS + REALITY + Vision 流控；
+  - **NAT4 反穿模式 (`reverse_wss`)**：Xray 监听本地 `127.0.0.1:10086`，Python 建立 WSS 反向隧道连向 Hub 端接流，无需公网 IP 和端口映射。
+- 🛡️ **TOFU 首次信任与零信任通信**：
+  - 首次启动携带集群引导令牌协商凭证，成功后固化永久专属 `node_key`；
+  - 动态下发与轮换密钥，上报增量流量并重置统计。
 
 ---
 
-## 🚀 快速开始
+## 🚀 快速启动
 
-### 方式 A：使用 Docker Compose（推荐）
+### 方式 1：Docker Run 单条命令接入主控集群（推荐）
 
-### 1. 准备配置文件
+```bash
+docker run -d \
+  --name xray-node \
+  --restart always \
+  --network host \
+  -e PANEL_URL="http://<主控服务器IP>:3000" \
+  -e CLUSTER_TOKEN="xray_cluster_secret_key_2026" \
+  -e NET_MODE="auto" \
+  -e PORT=443 \
+  -e DEST="www.microsoft.com:443" \
+  -e SERVER_NAMES="www.microsoft.com,microsoft.com" \
+  -v $(pwd)/data:/data \
+  ghcr.io/wimotek/xray:latest
+```
 
-在目录中创建 `docker-compose.yml`：
+### 方式 2：使用 Docker Compose 启动
+
+创建 `docker-compose.yml`：
 
 ```yaml
 services:
   xray:
     image: ghcr.io/wimotek/xray:latest
-    # 若使用 Docker Hub 镜像可切换为: wimotek/xray:latest
-    container_name: xray-service
+    container_name: xray-node
     restart: unless-stopped
     network_mode: "host"
     environment:
       - TZ=Asia/Shanghai
-      - AUTO_UPDATE=true                        # 每次重启容器时自动检查并热更新到官方最新版
-      - PORT=443                                # 监听端口,确定此端口未被占用!!!
-      - DEST=www.apple.com:443                  # REALITY 伪装目标地址与端口
-      - SERVER_NAMES=www.apple.com,apple.com
+      - PANEL_URL=http://<主控服务器IP>:3000      # 留空则进入纯单机模式
+      - CLUSTER_TOKEN=xray_cluster_secret_key_2026 # 集群引导令牌
+      - NET_MODE=auto                              # auto / direct / reverse_wss
+      - PORT=443
+      - DEST=www.microsoft.com:443
+      - SERVER_NAMES=www.microsoft.com,microsoft.com
     volumes:
       - ./data:/data
 ```
 
-### 2. 启动服务
-
-在项目目录下执行：
-
+启动命令：
 ```bash
 docker compose up -d
 ```
 
-### 方式 B：使用 Docker Run 命令行
-无需创建配置文件，直接在终端执行以下命令启动：
-* 选项 1：Host 网络模式（Linux 首选，吞吐最佳）
-  
- 直接复用宿主机网络栈，能最大化 TCP/UDP 传输性能：
-```bash
-docker run -d \
-  --name xray-service \
-  --restart unless-stopped \
-  --network host \
-  -v $(pwd)/data:/data \
-  -e TZ=Asia/Shanghai \
-  -e AUTO_UPDATE=true \
-  -e PORT=443 \
-  -e DEST=www.apple.com:443 \
-  -e SERVER_NAMES=www.apple.com,apple.com \
-  ghcr.io/wimotek/xray:latest
-```
-* 选项 2：端口映射模式（跨平台 / 非 Host 环境）
-  
-  适用于 macOS、Windows Docker Desktop 或需要固定暴露端口的环境：
-```bash
-docker run -d \
-  --name xray-service \
-  --restart unless-stopped \
-  -p 443:443/tcp \
-  -p 443:443/udp \
-  -v $(pwd)/data:/data \
-  -e TZ=Asia/Shanghai \
-  -e AUTO_UPDATE=true \
-  -e PORT=443 \
-  -e DEST=www.apple.com:443 \
-  -e SERVER_NAMES=www.apple.com,apple.com \
-  ghcr.io/wimotek/xray:latest
-```
+### 方式 3：纯单机运行（不连 Hub 控制中心）
+若不配置 `PANEL_URL`，系统将自动进入单机独立模式，在终端日志及 `./data/client_info.txt` 输出开箱即用的客户端 `vless://` 直连链接。
 
-### 获取节点连接信息
+---
 
-容器启动后会自动生成配置并打印节点链接，执行以下命令查看：
+## ⚙️ 环境变量详解
 
-```bash
-docker logs xray-service
-```
+| 环境变量 | 默认值 | 作用说明 |
+| :--- | :--- | :--- |
+| `PANEL_URL` | *(空)* | Hub 控制中心访问地址（例：`http://hub.example.com:3000`）。若留空则为纯单机模式 |
+| `CLUSTER_TOKEN` | *(空)* | 集群引导令牌（首次连接用于 TOFU 认证）。也可用 `NODE_KEY` |
+| `NET_MODE` | `auto` | 网络模式：`auto`（智能探测）、`direct`（强制公网直连）、`reverse_wss`（强制 NAT4 反穿） |
+| `PORT` | `443` | 节点直连监听端口（反穿模式下对外端口由 Hub 代理接管） |
+| `DEST` | `www.microsoft.com:443` | REALITY 伪装回落目标 |
+| `SERVER_NAMES` | `www.microsoft.com,microsoft.com` | REALITY 伪装 SNI 列表（逗号分隔） |
+| `DATA_DIR` | `/data` | 持久化数据目录，存储 node_id、node_key、真实公钥及 config.json |
 
-终端将输出类似以下内容：
+---
+
+## 📂 项目包结构说明 (`xray_core/app/`)
 
 ```text
-======================================================
-              Xray Reality 节点配置信息
-======================================================
-IP / 地址:        198.51.100.???
-端口:             443
-UUID:             ????????-????-????-????-????????????
-流控 (flow):      xtls-rprx-vision
-传输协议:         tcp
-安全类型:         reality
-SNI / 伪装域名:   www.apple.com
-公钥 (PublicKey): ????????????????????????????????????????????
-ShortId:          ????????????????
-Fingerprint:      chrome
-
-客户端导入链接:
-vless://???@198.51.100.???:443?security=reality&encryption=none&pbk=???&headerType=none&fp=chrome&type=tcp&flow=xtls-rprx-vision&sni=www.apple.com&sid=???#Xray-Reality
-======================================================
-```
-
-也可以随时在宿主机查看持久化的节点信息：
-
-```bash
-cat ./data/client_info.txt
+app/
+├── __init__.py         # 包声明与版本号 (v1.0.15)
+├── __main__.py         # 容器唯一启动入口 (python3 -m app)
+├── config.py           # 环境变量与路径解析配置
+├── net_detector.py     # IPv4/IPv6 双栈探测与 Oracle/AWS 1:1 NAT 元数据判定
+├── config_builder.py   # 区分构建 Direct REALITY 与 Reverse WSS 的 config.json
+├── xray_manager.py     # 密钥推导、ShortId、语法沙箱预检与看门狗
+├── tunnel.py           # WSS 反向隧道全双工桥接与 Ping-Pong 心跳探活
+└── hub_client.py       # 主控端心跳握手、TOFU 准入、用户同步与流量结算
 ```
 
 ---
 
-## 🔄 核心更新机制
+## 📱 客户端兼容性
 
-### 方式一：容器重启时自动更新（推荐）
-在 `docker-compose.yml` 中已默认配置环境变量 `AUTO_UPDATE=true`。每次重启容器时，脚本会自动检测官方最新 Release，如有更新则自动拉取替换：
-
-```bash
-docker compose restart xray
-```
-
-### 方式二：容器内热更新（无需重新构建镜像）
-执行内置的热更新命令，直接拉取官方最新二进制：
-
-```bash
-docker exec -it xray-service update-xray
-docker compose restart xray
-```
-
-### 方式三：强制无缓存重新构建
-```bash
-docker compose build --no-cache
-docker compose up -d
-```
-
----
-
-## 📱 客户端支持
-
-复制控制台生成的 `vless://???` 链接，直接粘贴导入主流客户端：
-
-- **Windows**: v2rayN / Nekoray / Sing-box
-- **Android**: v2rayNG / NekoBox / Sing-box
-- **iOS / macOS**: Shadowrocket / Loon / Sing-box / FoXray
-- **Linux**: Clash-Meta (Mihomo) / Sing-box 核心
-
----
-
-## ⚡ 系统底层性能优化 (BBR)
-
-建议在 Linux 宿主机上开启 BBR 拥塞控制算法以获得更高吞吐量与抗丢包表现：
-
-```bash
-echo "net.core.default_qdisc=fq" >> /etc/sysctl.conf
-echo "net.ipv4.tcp_congestion_control=bbr" >> /etc/sysctl.conf
-sysctl -p
-```
-
-检查 BBR 是否成功生效：
-```bash
-sysctl net.ipv4.tcp_congestion_control
-# 输出应包含: bbr
-```
-
-## 💡 附带的 Warning 优化建议
-日志中还有两行黄色警告：
-```code
-REALITY: Choosing apple, icloud, etc. as the target may get your IP blocked by the GFW
-```
-这是新版 Xray-core 的温馨提示：近年来 Apple / iCloud 域名的 SNI 握手特征在部分地区容易被重点关注。
-
-建议将 docker-compose.yml 中的伪装目标换成更通用的域名（如微软、亚马逊等）：
-
----
-
-## 📂 文件持久化说明
-
-- `./data/config.json`: 当前运行的 Xray 服务端核心配置。
-- `./data/client_info.txt`: 当前节点的公私钥及 `vless://???` 导入链接备份。
-- 如需重新生成全新的 UUID 与密钥对，只需停止容器，删除 `./data/config.json` 后重新启动容器即可。
+无论节点是海外公网直连（REALITY），还是家宽 NAT4 反穿（WSS），**Hub 端下发的订阅地址均会自动生成标准原生链接**，完全兼容：
+- **v2rayN / xrayN (Windows)**
+- **Clash-Meta / Clash Verge (Rev)**
+- **Sing-box (Android / iOS)**
+- **Shadowrocket (小火箭 / iOS)**

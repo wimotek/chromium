@@ -6,9 +6,10 @@ ARG XRAY_VERSION=latest
 LABEL maintainer="Wimotek <i@Wimotek.com>"
 LABEL description="Xray REALITY Core (Headless & Slim)"
 
-# 安装基础系统依赖
+# 安装基础系统依赖与纯净 Python 运行环境 (纯 apk 二进制包，零 pip 编译开销)
 RUN apk add --no-cache \
-    ca-certificates tzdata jq curl openssl bind-tools
+    ca-certificates tzdata openssl \
+    python3 py3-websockets
 
 # 拉取官方核心
 RUN set -ex && \
@@ -39,16 +40,16 @@ ENV XRAY_LOCATION_ASSET=/usr/share/xray \
     TZ=Asia/Shanghai
 
 WORKDIR /root
-COPY entrypoint.sh /usr/local/bin/entrypoint.sh
+
+# 复制 Edge Core Python 守护包
+COPY app/ /root/app/
 
 # 模板保持在容器原生位置 /etc/xray/，外部挂载不影响它
 COPY config.template.json /etc/xray/config.template.json
-
-RUN chmod +x /usr/local/bin/entrypoint.sh
-RUN ln -s /usr/local/bin/entrypoint.sh /usr/local/bin/update-xray
 
 # 外部数据卷统一指定为 /data
 VOLUME ["/data"]
 EXPOSE 443/tcp 443/udp
 
-ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
+# 直接由 Python 统一守护接管
+ENTRYPOINT ["python3", "-m", "app"]

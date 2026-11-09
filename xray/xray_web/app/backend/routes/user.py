@@ -39,7 +39,8 @@ def user_refresh_info():
         if len(n.get("pbk", "")) == 43:
             snis = get_node_snis(n)
             random_sni = random.choice(snis)
-            link = build_node_link(user_dict['uuid'], n, f"{n['name']}", chosen_sni=random_sni)
+            hub_domain = request.host
+            link = build_node_link(user_dict['uuid'], n, f"{n['name']}", chosen_sni=random_sni, hub_domain=hub_domain)
             nodes_data.append({
                 "id": n["id"],
                 "name": n["name"],
@@ -101,7 +102,8 @@ def user_reset_uuid():
         if len(n.get("pbk", "")) == 43:
             snis = get_node_snis(n)
             random_sni = random.choice(snis)
-            link = build_node_link(new_uuid, n, f"{n['name']}", chosen_sni=random_sni)
+            hub_domain = request.host
+            link = build_node_link(new_uuid, n, f"{n['name']}", chosen_sni=random_sni, hub_domain=hub_domain)
             nodes_data.append({
                 "id": n["id"],
                 "name": n["name"],

@@ -86,7 +86,8 @@ def get_subscription():
             snis = get_node_snis(n)
             chosen_sni = forced_sni if (forced_sni and forced_sni in snis) else random.choice(snis)
             remark = f"{n['name']}"
-            links.append(build_node_link(user['uuid'], n, remark, chosen_sni=chosen_sni))
+            hub_domain = request.host
+            links.append(build_node_link(user['uuid'], n, remark, chosen_sni=chosen_sni, hub_domain=hub_domain))
 
     sub_text = "\n".join(links)
     b64_sub = base64.b64encode(sub_text.encode('utf-8')).decode('utf-8')

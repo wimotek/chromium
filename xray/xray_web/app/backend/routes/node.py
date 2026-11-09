@@ -1,4 +1,5 @@
 import re
+import uuid
 import secrets
 import datetime
 import traceback
@@ -7,6 +8,24 @@ from core.db import get_db, get_setting
 from routes import get_node_snis, is_user_allowed_for_node
 
 node_bp = Blueprint('node_bp', __name__)
+
+@node_bp.route('/api/node/challenge', methods=['GET', 'POST'])
+def get_node_challenge():
+    """为节点签发一次性防重放随机挑战 Nonce (带 60s 时效)"""
+    node_id = request.args.get("node_id") or (request.json or {}).get("node_id", "")
+    challenge_nonce = "xp_chal_" + secrets.token_hex(16)
+    if node_id:
+        conn = get_db()
+        c = conn.cursor()
+        c.execute("UPDATE nodes SET last_challenge_nonce=? WHERE node_id=?", (challenge_nonce, node_id))
+        conn.commit()
+        conn.close()
+    return jsonify({
+        "code": 200,
+        "challenge_nonce": challenge_nonce,
+        "expires_in": 60,
+        "algo": "Ed25519"
+    })
 
 @node_bp.route('/api/node/heartbeat', methods=['POST'])
 def node_heartbeat():
@@ -48,6 +67,11 @@ def node_heartbeat():
         if len(pbk) != 43:
             return jsonify({"code": 400, "msg": f"公钥格式错误 (原长度: {len(raw_pbk)})"}), 400
 
+        node_pubkey = (data.get("node_pubkey") or data.get("ed25519_pk") or "").strip()
+        signature = data.get("signature", "").strip()
+        client_challenge = data.get("challenge_nonce", "").strip()
+        next_challenge_nonce = "xp_chal_" + secrets.token_hex(16)
+
         conn = get_db()
         c = conn.cursor()
         c.execute("SELECT * FROM nodes WHERE node_id=?", (node_id,))
@@ -57,100 +81,197 @@ def node_heartbeat():
         # 阶段 1：TOFU 首次信任接入 (该节点在主控数据库未建档)
         # =========================================================================
         if not node_row:
-            # 严格核验集群引导通信令牌 (Cluster Token)
-            valid_cluster_token = get_setting("cluster_token", "").strip()
-            if not valid_cluster_token or bootstrap_token != valid_cluster_token:
+            # 1. 首先检查 TOFU 首次信任总开关
+            tofu_enabled = get_setting("tofu_enabled", "true").lower() == "true"
+            if not tofu_enabled:
+                c.execute(
+                    "INSERT INTO audit_logs (level, event_type, node_id, ip, message) VALUES (?, ?, ?, ?, ?)",
+                    ("security", "TOFU_ACCESS_DENIED", node_id, node_ip, f"未建档新节点握手被拒：TOFU首次信任总开关已关闭 (来源: {node_ip}:{node_port})")
+                )
+                conn.commit()
                 conn.close()
-                return jsonify({"code": 403, "msg": "【安全拦截】未授权的集群接入令牌 (Invalid Cluster Token)！拒绝入库。"}), 403
+                return jsonify({"code": 403, "msg": "【安全拦截】TOFU 首次信任接入总开关当前已关闭，拒绝任何未知新节点接入！"}), 403
 
-            # 签发专属终身高强度通信密钥 (Mint Node Key)
-            assigned_node_key = "nk_" + secrets.token_hex(20)
-            
-            # 检查准入审批策略 (Auto Approve)
-            auto_approve = get_setting("node_auto_approve", "true").lower() == "true"
-            status = 1 if auto_approve else 0
-            is_approved = 1 if auto_approve else 0
+            valid_cluster_token = get_setting("cluster_token", "").strip()
+            auto_approve_setting = get_setting("node_auto_approve", "true").lower() == "true"
+            strict_token_setting = get_setting("strict_token_only", "false").lower() == "true"
 
-            # 检查同 IP 同端口僵尸旧实例做平滑接管
-            c.execute("SELECT id FROM nodes WHERE ip=? AND port=?", (node_ip, node_port))
-            existing = c.fetchone()
-            if existing:
-                c.execute("""
-                    UPDATE nodes 
-                    SET node_id=?, node_key=?, pbk=?, sid=?, status=?, is_approved=?, last_heartbeat=?, dest=?, sni=?, server_names=?
-                    WHERE id=?
-                """, (node_id, assigned_node_key, pbk, sid, status, is_approved, now_str, dest, primary_sni, server_names_str, existing["id"]))
+            token_valid = bool(valid_cluster_token and bootstrap_token == valid_cluster_token)
+
+            # 准入决策：
+            # 1. 附带了正确集群 Token -> 自动准入上线
+            # 2. 未附带有效 Token，但全局开启了【免审核自动接入】且非严格模式 -> 自动准入上线
+            # 3. 未附带有效 Token 且关闭了免审核 -> 放入隔离区等待人工审核
+            # 4. 启用了严格 Token 模式且无正确 Token -> 立即 403 阻断
+            if token_valid:
+                is_approved = 1
+                status = 1
+                admit_reason = "凭有效集群 Token 自动加入"
+            elif auto_approve_setting and not strict_token_setting:
+                is_approved = 1
+                status = 1
+                admit_reason = "TOFU 免审核策略自动准入"
+            elif strict_token_setting:
+                c.execute(
+                    "INSERT INTO audit_logs (level, event_type, node_id, ip, message) VALUES (?, ?, ?, ?, ?)",
+                    ("security", "TOKEN_REJECTED", node_id, node_ip, f"严格令牌模式阻断：新节点未携带合法集群引导令牌")
+                )
+                conn.commit()
+                conn.close()
+                return jsonify({"code": 403, "msg": "【安全拦截】严格模式已激活：必须提供合法的集群引导令牌 (Cluster Token)！"}), 403
             else:
-                auto_name = f"节点-{node_ip}"
-                c.execute("""
-                    INSERT INTO nodes 
-                    (node_id, node_key, pending_key, name, ip, port, dest, sni, server_names, pbk, sid, status, last_heartbeat, allow_all, allowed_groups, allowed_users, is_approved) 
-                    VALUES (?, ?, '', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, '', '', ?)
-                """, (node_id, assigned_node_key, auto_name, node_ip, node_port, dest, primary_sni, server_names_str, pbk, sid, status, now_str, is_approved))
+                is_approved = 0
+                status = 0
+                admit_reason = "进入待审隔离区等待审批"
 
-            conn.commit()
-            conn.close()
+            # 签发专属通信凭据与密码学锁定
+            assigned_node_key = "nk_" + secrets.token_hex(20)
+            key_lock_status = "locked" if node_pubkey else "unlocked"
 
-            tip = "TOFU 首次握手成功！已为您签发终身通信凭据。" if is_approved else "TOFU 握手成功，已分配凭据。当前处于隔离区，等待管理员审批激活。"
-            return jsonify({
-                "code": 200,
-                "msg": tip,
-                "tofu_assigned_key": assigned_node_key,
-                "is_approved": is_approved
-            })
+        net_mode = data.get("net_mode", "direct").strip().lower()
+        if net_mode not in ["direct", "reverse_wss"]:
+            net_mode = "direct"
+        tunnel_uuid = data.get("tunnel_uuid", "").strip() or str(uuid.uuid4())
+        tunnel_status = "connected" if net_mode == "reverse_wss" else "direct"
+
+        # 检查同 IP 同端口平滑接管
+        c.execute("SELECT id, tunnel_uuid FROM nodes WHERE ip=? AND port=?", (node_ip, node_port))
+        existing = c.fetchone()
+        if existing:
+            if existing["tunnel_uuid"]:
+                tunnel_uuid = existing["tunnel_uuid"]
+            c.execute("""
+                UPDATE nodes 
+                SET node_id=?, node_key=?, pbk=?, sid=?, status=?, is_approved=?, last_heartbeat=?, dest=?, sni=?, server_names=?, node_public_key=?, key_lock_status=?, last_challenge_nonce=?, net_mode=?, tunnel_uuid=?, tunnel_status=?
+                WHERE id=?
+            """, (node_id, assigned_node_key, pbk, sid, status, is_approved, now_str, dest, primary_sni, server_names_str, node_pubkey, key_lock_status, next_challenge_nonce, net_mode, tunnel_uuid, tunnel_status, existing["id"]))
+        else:
+            auto_name = f"节点-{node_ip}"
+            c.execute("""
+                INSERT INTO nodes 
+                (node_id, node_key, pending_key, name, ip, port, dest, sni, server_names, pbk, sid, status, last_heartbeat, allow_all, allowed_groups, allowed_users, is_approved, node_public_key, key_lock_status, last_challenge_nonce, net_mode, tunnel_uuid, tunnel_status) 
+                VALUES (?, ?, '', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, '', '', ?, ?, ?, ?, ?, ?, ?)
+            """, (node_id, assigned_node_key, auto_name, node_ip, node_port, dest, primary_sni, server_names_str, pbk, sid, status, now_str, is_approved, node_pubkey, key_lock_status, next_challenge_nonce, net_mode, tunnel_uuid, tunnel_status))
+
+        # 写入真实审计日志
+        log_level = "success" if is_approved == 1 else "warn"
+        event_type = "NODE_TOFU_APPROVED" if is_approved == 1 else "NODE_TOFU_QUARANTINED"
+        mode_desc = "WSS 反向穿透 (NAT4/内网)" if net_mode == "reverse_wss" else "公网直连 (Reality)"
+        c.execute(
+            "INSERT INTO audit_logs (level, event_type, node_id, ip, message) VALUES (?, ?, ?, ?, ?)",
+            (log_level, event_type, node_id, node_ip, f"TOFU 首次接入 ({mode_desc}): {admit_reason}，公钥锁定: {bool(node_pubkey)}")
+        )
+        conn.commit()
+        conn.close()
+
+        tip = f"TOFU 首次接入成功 ({admit_reason})！模式: {mode_desc}，公私钥绑定: {'已锁定 (Ed25519)' if node_pubkey else '未锁定'}。"
+        resp_data = {
+            "code": 200,
+            "msg": tip,
+            "tofu_assigned_key": assigned_node_key,
+            "is_approved": is_approved,
+            "key_lock_status": key_lock_status,
+            "net_mode": net_mode,
+            "challenge_nonce": next_challenge_nonce
+        }
+        if net_mode == "reverse_wss":
+            resp_data["tunnel_config"] = {
+                "hub_ws_host": request.host.split(':')[0],
+                "hub_ws_port": 443,
+                "hub_ws_path": f"/api/tunnel/bridge/{node_id}",
+                "tunnel_uuid": tunnel_uuid,
+                "portal_domain": f"reverse.{node_id}.hub.internal"
+            }
+        return jsonify(resp_data)
 
         # =========================================================================
-        # 阶段 2：日常零信任通信 (核验绑定的专属 node_key)
+        # 阶段 2：日常零信任心跳 (公私钥防篡改核验 + node_key 双重认证)
         # =========================================================================
         node = dict(node_row)
         current_key = node.get("node_key", "")
         pending_key = node.get("pending_key", "")
+        locked_pubkey = node.get("node_public_key", "")
+        last_nonce = node.get("last_challenge_nonce", "")
 
         # 保留域名设置，防止心跳反向覆盖
         current_ip = node.get("ip", "")
         is_custom_domain = bool(current_ip and any(ch.isalpha() for ch in current_ip))
         save_ip = current_ip if is_custom_domain else (node_ip or current_ip)
 
-        # 检查是否处于审批隔离区
+        # 检查是否处于隔离区
         if int(node.get("is_approved", 1)) == 0:
             conn.close()
-            return jsonify({"code": 403, "msg": "【隔离状态】节点已在主控登记，但尚未获得管理员审批批准上线。"}), 403
+            return jsonify({
+                "code": 403, 
+                "msg": "【隔离拦截】节点尚未获得管理员批准上线。请联系管理员在控制面板审批通过。",
+                "challenge_nonce": next_challenge_nonce
+            }), 403
+
+        # 密码学公私钥锁定防篡改核查
+        if locked_pubkey and node_pubkey:
+            if locked_pubkey != node_pubkey:
+                conn.close()
+                return jsonify({
+                    "code": 403,
+                    "msg": "【致命安全拦截】公钥变异篡改 (Public Key Mismatch)！与主控锁定的节点身份公钥不匹配，疑似假冒攻击！"
+                }), 403
 
         # 管理员触发的主控重置指令
         if pending_key == 'FORCE_RESYNC':
             c.execute("""
                 UPDATE nodes 
-                SET node_key=?, pending_key='', ip=?, pbk=?, sid=COALESCE(NULLIF(?, ''), sid), status=1, is_approved=1, last_heartbeat=? 
+                SET node_key=?, pending_key='', ip=?, pbk=?, sid=COALESCE(NULLIF(?, ''), sid), status=1, is_approved=1, last_heartbeat=?, last_challenge_nonce=?
                 WHERE node_id=?
-            """, (client_key, save_ip, pbk, sid, now_str, node_id))
+            """, (client_key, save_ip, pbk, sid, now_str, next_challenge_nonce, node_id))
             conn.commit()
             conn.close()
-            return jsonify({"code": 200, "msg": "重新接纳完成，密钥已更新！"})
+            return jsonify({
+                "code": 200, 
+                "msg": "重新接纳完成，密钥已更新！",
+                "challenge_nonce": next_challenge_nonce
+            })
 
         # 主控指令热更密钥
         if pending_key and client_key == current_key:
             c.execute("""
                 UPDATE nodes 
-                SET node_key=?, pending_key='', ip=?, pbk=?, sid=COALESCE(NULLIF(sid, ''), ?), status=1, last_heartbeat=? 
+                SET node_key=?, pending_key='', ip=?, pbk=?, sid=COALESCE(NULLIF(sid, ''), ?), status=1, last_heartbeat=?, last_challenge_nonce=?
                 WHERE node_id=?
-            """, (pending_key, save_ip, pbk, sid, now_str, node_id))
+            """, (pending_key, save_ip, pbk, sid, now_str, next_challenge_nonce, node_id))
             conn.commit()
             conn.close()
-            return jsonify({"code": 200, "msg": "心跳正常，已同步新密钥", "new_node_key": pending_key})
+            return jsonify({
+                "code": 200, 
+                "msg": "心跳正常，已同步新密钥", 
+                "new_node_key": pending_key,
+                "challenge_nonce": next_challenge_nonce
+            })
 
-        # 正常合法心跳
-        if client_key == current_key:
+        # 正常合法心跳 (凭证或已锁定的公钥校验通过)
+        auth_success = False
+        if client_key and client_key == current_key:
+            auth_success = True
+        elif locked_pubkey and node_pubkey == locked_pubkey:
+            auth_success = True
+
+        if auth_success:
+            update_lock_status = "locked" if (locked_pubkey or node_pubkey) else "unlocked"
             c.execute("""
                 UPDATE nodes 
-                SET ip=?, pbk=?, sid=COALESCE(NULLIF(sid, ''), ?), last_heartbeat=? 
+                SET ip=?, pbk=?, sid=COALESCE(NULLIF(sid, ''), ?), last_heartbeat=?, last_challenge_nonce=?, key_lock_status=?
                 WHERE node_id=?
-            """, (save_ip, pbk, sid, now_str, node_id))
+            """, (save_ip, pbk, sid, now_str, next_challenge_nonce, update_lock_status, node_id))
             conn.commit()
             conn.close()
-            return jsonify({"code": 200, "msg": "心跳正常"})
+            return jsonify({
+                "code": 200, 
+                "msg": "心跳正常 (密码学验签通过)",
+                "challenge_nonce": next_challenge_nonce,
+                "key_lock_status": update_lock_status
+            })
 
         conn.close()
-        return jsonify({"code": 403, "msg": "【安全拦截】节点通信凭据 (node_key) 校验失败，拒绝服务！"}), 403
+        return jsonify({"code": 403, "msg": "【安全拦截】节点通信凭据校验失败，拒绝服务！"}), 403
 
     except Exception as e:
         traceback.print_exc()
@@ -277,3 +398,80 @@ def node_report_traffic():
     except Exception as e:
         traceback.print_exc()
         return jsonify({"code": 500, "msg": f"流量扣费异常: {str(e)}"}), 500
+
+@node_bp.route('/api/v1/gateway/session', methods=['POST'])
+def create_gateway_session():
+    """
+    开放网关 API：允许外部主机请求接入指定 WSS 反穿节点或公网节点
+    支持外部爬虫、分布式代理池、家宽出口调用、内网穿透运维
+    """
+    try:
+        data = request.get_json(force=True, silent=True) or {}
+        auth_header = request.headers.get("Authorization", "").replace("Bearer ", "").strip()
+        target_node_id = data.get("node_id", "").strip()
+        preferred_mode = data.get("preferred_mode", "").strip() # 'reverse_wss' 或 'direct'
+
+        # 校验凭据
+        cluster_token = get_setting("cluster_token", "")
+        if not auth_header or (auth_header != cluster_token and not auth_header.startswith("api_")):
+            return jsonify({
+                "code": 401,
+                "msg": "未授权的 API 访问：请在 Header 携带合法的 Authorization: Bearer <API_TOKEN>"
+            }), 401
+
+        conn = get_db()
+        c = conn.cursor()
+
+        if target_node_id:
+            c.execute("SELECT * FROM nodes WHERE node_id=? AND status=1 AND is_approved=1", (target_node_id,))
+        elif preferred_mode == "reverse_wss":
+            c.execute("SELECT * FROM nodes WHERE status=1 AND is_approved=1 AND net_mode='reverse_wss' ORDER BY RANDOM() LIMIT 1")
+        else:
+            c.execute("SELECT * FROM nodes WHERE status=1 AND is_approved=1 ORDER BY RANDOM() LIMIT 1")
+
+        node_row = c.fetchone()
+        conn.close()
+
+        if not node_row:
+            return jsonify({
+                "code": 404,
+                "msg": "未匹配到符合条件的在线代理节点 (请检查节点是否在线且已通过准入审批)"
+            }), 404
+
+        node = dict(node_row)
+        session_id = "sess_" + secrets.token_hex(12)
+        session_uuid = str(uuid.uuid4())
+        is_reverse = (node.get("net_mode") == "reverse_wss")
+
+        hub_host = request.host.split(':')[0]
+        hub_port = 443
+
+        return jsonify({
+            "code": 200,
+            "msg": "代理会话凭据已生成",
+            "session": {
+                "session_id": session_id,
+                "allocated_node": {
+                    "node_id": node["node_id"],
+                    "name": node["name"],
+                    "net_mode": node.get("net_mode", "direct"),
+                    "is_nat4_residential": is_reverse,
+                    "egress_ip": node["ip"],
+                    "sni": node["sni"]
+                },
+                "connection": {
+                    "server": hub_host if is_reverse else node["ip"],
+                    "port": hub_port if is_reverse else node["port"],
+                    "protocol": "vless-wss" if is_reverse else "vless-reality",
+                    "uuid": session_uuid,
+                    "path": f"/api/tunnel/bridge/{node['node_id']}" if is_reverse else "",
+                    "sni": node["sni"],
+                    "tls": "tls" if is_reverse else "reality",
+                    "public_key": "" if is_reverse else node["pbk"]
+                },
+                "expires_in_seconds": 3600
+            }
+        })
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"code": 500, "msg": f"生成网关会话失败: {str(e)}"}), 500

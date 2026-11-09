@@ -1,14 +1,4 @@
-# ---- 构建阶段：装编译工具 + venv ----
-FROM debian:bookworm-slim AS pydeps
-RUN apt-get update && apt-get install -y --no-install-recommends python3 python3-venv \
- && python3 -m venv /opt/venv \
- && /opt/venv/bin/pip install --no-cache-dir websockets httpx wimotek-edge-agent
-
-# ---- 最终阶段 ----
 FROM debian:bookworm-slim
-
-COPY --from=pydeps /opt/venv /opt/venv
-ENV PATH=/opt/venv/bin:$PATH
 
 ENV DEBIAN_FRONTEND=noninteractive \
     LANG=zh_CN.UTF-8 \

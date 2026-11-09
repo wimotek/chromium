@@ -91,12 +91,24 @@ def get_node_snis(node: dict) -> list[str]:
             snis.append(clean)
     return snis if snis else ["www.microsoft.com"]
 
-def build_node_link(uuid_str: str, node: dict, remark: str, chosen_sni: str = None) -> str:
+import urllib.parse
+
+def build_node_link(uuid_str: str, node: dict, remark: str, chosen_sni: str = None, hub_domain: str = None) -> str:
+    # 模式判断：如果是 NAT4 WSS 反向穿透节点，客户端连接 Hub 的域名与 WSS 路径
+    if node.get("net_mode") == "reverse_wss":
+        hub_host = (hub_domain or "hub.example.com").split(":")[0]
+        ws_path = urllib.parse.quote(f"/api/tunnel/bridge/{node['node_id']}")
+        return (
+            f"vless://{uuid_str}@{hub_host}:443"
+            f"?security=tls&encryption=none&headerType=none&type=ws&host={hub_host}&path={ws_path}&sni={hub_host}#{urllib.parse.quote(remark + ' [WSS反穿]')}"
+        )
+
+    # 默认模式：公网直连 (Reality)
     snis = get_node_snis(node)
     sni = chosen_sni if (chosen_sni and chosen_sni in snis) else random.choice(snis)
     clean_sni = sni.split(":")[0]
     return (
         f"vless://{uuid_str}@{node['ip']}:{node['port']}"
         f"?security=reality&encryption=none&pbk={node['pbk']}&headerType=none&fp=chrome"
-        f"&type=tcp&flow=xtls-rprx-vision&sni={clean_sni}&sid={node['sid']}#{remark}"
+        f"&type=tcp&flow=xtls-rprx-vision&sni={clean_sni}&sid={node['sid']}#{urllib.parse.quote(remark)}"
     )

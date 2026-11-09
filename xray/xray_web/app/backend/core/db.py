@@ -99,6 +99,18 @@ def init_db():
         sent_date TEXT NOT NULL
     )''')
 
+    # 5. 安全审计与通信流水表 (生产级无污染日志表)
+    c.execute('''CREATE TABLE IF NOT EXISTS audit_logs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        level TEXT NOT NULL,
+        event_type TEXT NOT NULL,
+        node_id TEXT DEFAULT '',
+        node_name TEXT DEFAULT '',
+        ip TEXT DEFAULT '',
+        message TEXT NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )''')
+
     def try_add_column(sql):
         try:
             c.execute(sql)
@@ -114,9 +126,20 @@ def init_db():
     try_add_column("ALTER TABLE nodes ADD COLUMN allowed_groups TEXT DEFAULT ''")
     try_add_column("ALTER TABLE nodes ADD COLUMN allowed_users TEXT DEFAULT ''")
     try_add_column("ALTER TABLE nodes ADD COLUMN is_approved INTEGER DEFAULT 1")
+    try_add_column("ALTER TABLE nodes ADD COLUMN node_public_key TEXT DEFAULT ''")
+    try_add_column("ALTER TABLE nodes ADD COLUMN key_lock_status TEXT DEFAULT 'unlocked'")
+    try_add_column("ALTER TABLE nodes ADD COLUMN last_challenge_nonce TEXT DEFAULT ''")
+    try_add_column("ALTER TABLE nodes ADD COLUMN last_nonce_created_at REAL DEFAULT 0")
+    try_add_column("ALTER TABLE nodes ADD COLUMN net_mode TEXT DEFAULT 'direct'")
+    try_add_column("ALTER TABLE nodes ADD COLUMN tunnel_uuid TEXT DEFAULT ''")
+    try_add_column("ALTER TABLE nodes ADD COLUMN tunnel_status TEXT DEFAULT 'disconnected'")
     try_add_column("ALTER TABLE users ADD COLUMN user_group TEXT DEFAULT 'default'")
 
-    # 初始化全局集群引导令牌 (Cluster Token) 与自动审批开关
+    # 初始化全局 TOFU 首次信任总开关、引导令牌 (Cluster Token) 与自动审批开关
+    c.execute("SELECT value FROM system_settings WHERE key='tofu_enabled'")
+    if not c.fetchone():
+        c.execute("INSERT INTO system_settings (key, value) VALUES ('tofu_enabled', 'true')")
+
     c.execute("SELECT value FROM system_settings WHERE key='cluster_token'")
     if not c.fetchone():
         init_cluster_token = "ctk_" + secrets.token_hex(16)
@@ -125,6 +148,10 @@ def init_db():
     c.execute("SELECT value FROM system_settings WHERE key='node_auto_approve'")
     if not c.fetchone():
         c.execute("INSERT INTO system_settings (key, value) VALUES ('node_auto_approve', 'true')")
+
+    c.execute("SELECT value FROM system_settings WHERE key='crypto_key_lock_enforced'")
+    if not c.fetchone():
+        c.execute("INSERT INTO system_settings (key, value) VALUES ('crypto_key_lock_enforced', 'true')")
 
     c.execute("SELECT id FROM users WHERE role='admin'")
     if not c.fetchone():

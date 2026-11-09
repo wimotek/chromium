@@ -66,3 +66,30 @@ def notify_user(user: dict, title: str, html_content: str, text_content: str) ->
         return send_smtp_email(user["email"], title, html_content)
 
     return False, "用户未绑定有效的接收方式"
+
+def notify_admin(title: str, html_content: str, text_content: str) -> tuple[bool, str]:
+    """向系统管理员推送通知 (支持 SMTP 邮件与 Server 酱微信双通道)"""
+    admin_channel = get_setting("admin_notify_channel", "email").lower()
+    admin_email = get_setting("admin_notify_email") or get_setting("smtp_user")
+    admin_serverchan = get_setting("admin_serverchan_key", "")
+
+    sent_any = False
+    messages = []
+
+    # 1. 微信 Server 酱渠道
+    if admin_channel in ["serverchan", "all"] and admin_serverchan:
+        ok_sc, msg_sc = send_serverchan_msg(admin_serverchan, title, text_content)
+        if ok_sc:
+            sent_any = True
+        messages.append(f"微信: {msg_sc}")
+
+    # 2. 邮件渠道
+    if admin_channel in ["email", "all"] and admin_email:
+        ok_mail, msg_mail = send_smtp_email(admin_email, title, html_content)
+        if ok_mail:
+            sent_any = True
+        messages.append(f"邮件: {msg_mail}")
+
+    if sent_any:
+        return True, "，".join(messages)
+    return False, "管理员未配置有效的接收通道或通知渠道关闭: " + "，".join(messages)
