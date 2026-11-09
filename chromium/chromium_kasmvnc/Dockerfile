@@ -51,7 +51,7 @@ RUN useradd -m -u 1000 -s /bin/bash kasm-user \
     && adduser kasm-user ssl-cert
 
 RUN mkdir -p /data /certs /etc/ssl/app /tmp/crashpad /home/kasm-user/.vnc /etc/kasmvnc \
-    && chown -R kasm-user:kasm-user /data /certs /etc/ssl/app /tmp/crashpad /home/kasm-user /etc/kasmvnc /opt/venv
+    && chown -R kasm-user:kasm-user /data /certs /etc/ssl/app /tmp/crashpad /home/kasm-user /etc/kasmvnc
 
 COPY --chmod=755 entrypoint.sh /entrypoint.sh
 COPY --chmod=755 edge_node_client.py /opt/edge_node_client.py
