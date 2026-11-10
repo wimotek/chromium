@@ -144,10 +144,17 @@ class XrayManager:
                 pass
 
         if new_data_str != old_data_str:
-            tmp_write = "/tmp/config.atomic.json"
+            # 修复：将临时文件直接创建在 /data 目录下（与目标文件在同一挂载盘/文件系统）
+            tmp_write = f"{AppConfig.CONFIG_FILE}.tmp"
             with open(tmp_write, "w") as f:
                 json.dump(config_dict, f, indent=2)
-            os.replace(tmp_write, AppConfig.CONFIG_FILE)
+            
+            try:
+                os.replace(tmp_write, AppConfig.CONFIG_FILE)
+            except OSError:
+                import shutil
+                shutil.move(tmp_write, AppConfig.CONFIG_FILE)
+
             print("[Xray] ✅ 配置文件更新存盘，平滑重启核心中...", flush=True)
             self.restart()
             return True

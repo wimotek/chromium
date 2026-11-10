@@ -128,61 +128,61 @@ def node_heartbeat():
             assigned_node_key = "nk_" + secrets.token_hex(20)
             key_lock_status = "locked" if node_pubkey else "unlocked"
 
-        net_mode = data.get("net_mode", "direct").strip().lower()
-        if net_mode not in ["direct", "reverse_wss"]:
-            net_mode = "direct"
-        tunnel_uuid = data.get("tunnel_uuid", "").strip() or str(uuid.uuid4())
-        tunnel_status = "connected" if net_mode == "reverse_wss" else "direct"
+            net_mode = data.get("net_mode", "direct").strip().lower()
+            if net_mode not in ["direct", "reverse_wss"]:
+                net_mode = "direct"
+            tunnel_uuid = data.get("tunnel_uuid", "").strip() or str(uuid.uuid4())
+            tunnel_status = "connected" if net_mode == "reverse_wss" else "direct"
 
-        # 检查同 IP 同端口平滑接管
-        c.execute("SELECT id, tunnel_uuid FROM nodes WHERE ip=? AND port=?", (node_ip, node_port))
-        existing = c.fetchone()
-        if existing:
-            if existing["tunnel_uuid"]:
-                tunnel_uuid = existing["tunnel_uuid"]
-            c.execute("""
-                UPDATE nodes 
-                SET node_id=?, node_key=?, pbk=?, sid=?, status=?, is_approved=?, last_heartbeat=?, dest=?, sni=?, server_names=?, node_public_key=?, key_lock_status=?, last_challenge_nonce=?, net_mode=?, tunnel_uuid=?, tunnel_status=?
-                WHERE id=?
-            """, (node_id, assigned_node_key, pbk, sid, status, is_approved, now_str, dest, primary_sni, server_names_str, node_pubkey, key_lock_status, next_challenge_nonce, net_mode, tunnel_uuid, tunnel_status, existing["id"]))
-        else:
-            auto_name = f"节点-{node_ip}"
-            c.execute("""
-                INSERT INTO nodes 
-                (node_id, node_key, pending_key, name, ip, port, dest, sni, server_names, pbk, sid, status, last_heartbeat, allow_all, allowed_groups, allowed_users, is_approved, node_public_key, key_lock_status, last_challenge_nonce, net_mode, tunnel_uuid, tunnel_status) 
-                VALUES (?, ?, '', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, '', '', ?, ?, ?, ?, ?, ?, ?)
-            """, (node_id, assigned_node_key, auto_name, node_ip, node_port, dest, primary_sni, server_names_str, pbk, sid, status, now_str, is_approved, node_pubkey, key_lock_status, next_challenge_nonce, net_mode, tunnel_uuid, tunnel_status))
+            # 检查同 IP 同端口平滑接管
+            c.execute("SELECT id, tunnel_uuid FROM nodes WHERE ip=? AND port=?", (node_ip, node_port))
+            existing = c.fetchone()
+            if existing:
+                if existing["tunnel_uuid"]:
+                    tunnel_uuid = existing["tunnel_uuid"]
+                c.execute("""
+                    UPDATE nodes 
+                    SET node_id=?, node_key=?, pbk=?, sid=?, status=?, is_approved=?, last_heartbeat=?, dest=?, sni=?, server_names=?, node_public_key=?, key_lock_status=?, last_challenge_nonce=?, net_mode=?, tunnel_uuid=?, tunnel_status=?
+                    WHERE id=?
+                """, (node_id, assigned_node_key, pbk, sid, status, is_approved, now_str, dest, primary_sni, server_names_str, node_pubkey, key_lock_status, next_challenge_nonce, net_mode, tunnel_uuid, tunnel_status, existing["id"]))
+            else:
+                auto_name = f"节点-{node_ip}"
+                c.execute("""
+                    INSERT INTO nodes 
+                    (node_id, node_key, pending_key, name, ip, port, dest, sni, server_names, pbk, sid, status, last_heartbeat, allow_all, allowed_groups, allowed_users, is_approved, node_public_key, key_lock_status, last_challenge_nonce, net_mode, tunnel_uuid, tunnel_status) 
+                    VALUES (?, ?, '', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, '', '', ?, ?, ?, ?, ?, ?, ?)
+                """, (node_id, assigned_node_key, auto_name, node_ip, node_port, dest, primary_sni, server_names_str, pbk, sid, status, now_str, is_approved, node_pubkey, key_lock_status, next_challenge_nonce, net_mode, tunnel_uuid, tunnel_status))
 
-        # 写入真实审计日志
-        log_level = "success" if is_approved == 1 else "warn"
-        event_type = "NODE_TOFU_APPROVED" if is_approved == 1 else "NODE_TOFU_QUARANTINED"
-        mode_desc = "WSS 反向穿透 (NAT4/内网)" if net_mode == "reverse_wss" else "公网直连 (Reality)"
-        c.execute(
-            "INSERT INTO audit_logs (level, event_type, node_id, ip, message) VALUES (?, ?, ?, ?, ?)",
-            (log_level, event_type, node_id, node_ip, f"TOFU 首次接入 ({mode_desc}): {admit_reason}，公钥锁定: {bool(node_pubkey)}")
-        )
-        conn.commit()
-        conn.close()
+            # 写入真实审计日志
+            log_level = "success" if is_approved == 1 else "warn"
+            event_type = "NODE_TOFU_APPROVED" if is_approved == 1 else "NODE_TOFU_QUARANTINED"
+            mode_desc = "WSS 反向穿透 (NAT4/内网)" if net_mode == "reverse_wss" else "公网直连 (Reality)"
+            c.execute(
+                "INSERT INTO audit_logs (level, event_type, node_id, ip, message) VALUES (?, ?, ?, ?, ?)",
+                (log_level, event_type, node_id, node_ip, f"TOFU 首次接入 ({mode_desc}): {admit_reason}，公钥锁定: {bool(node_pubkey)}")
+            )
+            conn.commit()
+            conn.close()
 
-        tip = f"TOFU 首次接入成功 ({admit_reason})！模式: {mode_desc}，公私钥绑定: {'已锁定 (Ed25519)' if node_pubkey else '未锁定'}。"
-        resp_data = {
-            "code": 200,
-            "msg": tip,
-            "tofu_assigned_key": assigned_node_key,
-            "is_approved": is_approved,
-            "key_lock_status": key_lock_status,
-            "net_mode": net_mode,
-            "challenge_nonce": next_challenge_nonce
-        }
-        if net_mode == "reverse_wss":
-            resp_data["tunnel_config"] = {
-                "hub_ws_host": request.host.split(':')[0],
-                "hub_ws_port": 443,
-                "hub_ws_path": f"/api/tunnel/bridge/{node_id}",
-                "tunnel_uuid": tunnel_uuid,
-                "portal_domain": f"reverse.{node_id}.hub.internal"
+            tip = f"TOFU 首次接入成功 ({admit_reason})！模式: {mode_desc}，公私钥绑定: {'已锁定 (Ed25519)' if node_pubkey else '未锁定'}。"
+            resp_data = {
+                "code": 200,
+                "msg": tip,
+                "tofu_assigned_key": assigned_node_key,
+                "is_approved": is_approved,
+                "key_lock_status": key_lock_status,
+                "net_mode": net_mode,
+                "challenge_nonce": next_challenge_nonce
             }
-        return jsonify(resp_data)
+            if net_mode == "reverse_wss":
+                resp_data["tunnel_config"] = {
+                    "hub_ws_host": request.host.split(':')[0],
+                    "hub_ws_port": 443,
+                    "hub_ws_path": f"/api/tunnel/bridge/{node_id}",
+                    "tunnel_uuid": tunnel_uuid,
+                    "portal_domain": f"reverse.{node_id}.hub.internal"
+                }
+            return jsonify(resp_data)
 
         # =========================================================================
         # 阶段 2：日常零信任心跳 (公私钥防篡改核验 + node_key 双重认证)
@@ -253,14 +253,19 @@ def node_heartbeat():
             auth_success = True
         elif locked_pubkey and node_pubkey == locked_pubkey:
             auth_success = True
+        else:
+            valid_cluster_token = get_setting("cluster_token", "").strip()
+            if valid_cluster_token and (bootstrap_token == valid_cluster_token or client_key == valid_cluster_token):
+                auth_success = True
 
         if auth_success:
             update_lock_status = "locked" if (locked_pubkey or node_pubkey) else "unlocked"
+            save_pubkey = locked_pubkey or node_pubkey
             c.execute("""
                 UPDATE nodes 
-                SET ip=?, pbk=?, sid=COALESCE(NULLIF(sid, ''), ?), last_heartbeat=?, last_challenge_nonce=?, key_lock_status=?
+                SET ip=?, port=?, pbk=?, sid=COALESCE(NULLIF(?, ''), sid), dest=?, sni=?, server_names=?, status=1, last_heartbeat=?, last_challenge_nonce=?, key_lock_status=?, node_public_key=?
                 WHERE node_id=?
-            """, (save_ip, pbk, sid, now_str, next_challenge_nonce, update_lock_status, node_id))
+            """, (save_ip, node_port, pbk, sid, dest, primary_sni, server_names_str, now_str, next_challenge_nonce, update_lock_status, save_pubkey, node_id))
             conn.commit()
             conn.close()
             return jsonify({
