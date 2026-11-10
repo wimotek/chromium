@@ -1,7 +1,10 @@
 <template>
   <div class="cyber-card tab-content-card">
     <div class="card-header">
-      <h3>👥 接入用户治理列表</h3>
+      <div style="display: flex; align-items: center; gap: 8px;">
+        <h3>👥 接入用户治理列表</h3>
+        <span class="badge badge-ready">{{ adminUsers.length }} 位用户</span>
+      </div>
       <button class="btn-cyber-refresh" @click="$emit('reload-all')">🔄 刷新数据</button>
     </div>
 
@@ -390,6 +393,22 @@ const handleDeleteUser = async (targetUser) => {
 </script>
 
 <style scoped>
+.table-progress {
+  height: 6px;
+  background: #1e293b;
+  border-radius: 3px;
+  width: 100px;
+  overflow: hidden;
+  margin-top: 4px;
+}
+
+.table-glow {
+  height: 100%;
+  background: #38bdf8;
+  border-radius: 3px;
+  transition: width 0.3s;
+}
+
 .badge-group {
   background: rgba(56, 189, 248, 0.15);
   color: #38bdf8;

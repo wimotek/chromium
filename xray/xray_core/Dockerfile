@@ -8,7 +8,7 @@ LABEL description="Xray REALITY Core (Headless & Slim)"
 
 # 安装基础系统依赖与纯净 Python 运行环境 (纯 apk 二进制包，零 pip 编译开销)
 RUN apk add --no-cache \
-    ca-certificates tzdata openssl curl unzip\
+    ca-certificates tzdata openssl curl unzip \
     python3 py3-websockets
 
 # 拉取官方核心

@@ -24,6 +24,9 @@ def admin_data():
     c.execute("SELECT * FROM nodes ORDER BY id ASC")
     active_nodes = [dict(n) for n in c.fetchall()]
 
+    c.execute("SELECT * FROM audit_logs ORDER BY id DESC LIMIT 150")
+    audit_logs = [dict(a) for a in c.fetchall()]
+
     c.execute("SELECT username, email, traffic_limit_mb, used_mb, expire_date, role, uuid, status, notify_type, is_monthly, reset_day, user_group FROM users")
     raw_users = c.fetchall()
     conn.close()
@@ -57,13 +60,16 @@ def admin_data():
     cluster_token = get_setting("cluster_token", "")
     auto_approve = get_setting("node_auto_approve", "true").lower() == "true"
 
+    tofu_enabled = get_setting("tofu_enabled", "true").lower() == "true"
     return jsonify({
         "code": 200, 
         "cards": cards, 
         "users": users, 
         "nodes": active_nodes,
+        "audit_logs": audit_logs,
         "cluster_info": {
             "cluster_token": cluster_token,
+            "tofu_enabled": tofu_enabled,
             "auto_approve": auto_approve,
             "panel_url": host_prefix
         }
@@ -79,6 +85,7 @@ def admin_cluster_token():
         return jsonify({
             "code": 200,
             "cluster_token": get_setting("cluster_token", ""),
+            "tofu_enabled": get_setting("tofu_enabled", "true").lower() == "true",
             "auto_approve": get_setting("node_auto_approve", "true").lower() == "true"
         })
     else:
@@ -90,11 +97,17 @@ def admin_cluster_token():
             new_token = "ctk_" + secrets.token_hex(16)
             set_setting("cluster_token", new_token)
             return jsonify({"code": 200, "msg": "集群引导令牌已轮换重置！旧令牌已立即失效。", "cluster_token": new_token})
+
+        if "tofu_enabled" in data:
+            val = "true" if data.get("tofu_enabled") else "false"
+            set_setting("tofu_enabled", val)
+            tip = "TOFU 首次信任总开关已开启" if val == "true" else "TOFU 首次信任总开关已关闭，任何未知新节点将被拒接入"
+            return jsonify({"code": 200, "msg": tip})
         
         if "auto_approve" in data:
             val = "true" if data.get("auto_approve") else "false"
             set_setting("node_auto_approve", val)
-            tip = "自动准入已开启，新节点可免审上线" if val == "true" else "零信任隔离模式已开启，新节点需审批通过后方可激活服务"
+            tip = "免审上线已开启，新节点可免审直连" if val == "true" else "零信任隔离模式已开启，新节点需审批通过后方可激活服务"
             return jsonify({"code": 200, "msg": tip})
 
         return jsonify({"code": 400, "msg": "未知操作"})

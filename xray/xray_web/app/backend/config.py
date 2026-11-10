@@ -7,6 +7,8 @@ class Config:
     # Web 端口与代理端口彻底解耦
     WEB_PORT = int(os.getenv("WEB_PORT", 3000))
     PORT = WEB_PORT
+    # 是否强制 HTTPS (生产环境建议前置 Nginx/反代，或设为 false 使用纯 HTTP 配合外部反代)
+    SSL_ENABLE = os.getenv("SSL_ENABLE", "false").strip().lower() in ("true", "1", "yes")
     
     APP_MODE = os.getenv("APP_MODE", "user")
 

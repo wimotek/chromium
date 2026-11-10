@@ -10,9 +10,16 @@ from routes import get_node_snis, build_node_link, normalize_expire_date, is_use
 
 auth_bp = Blueprint('auth_bp', __name__)
 
+def get_client_ip():
+    forwarded = request.headers.get('X-Forwarded-For', '')
+    if forwarded:
+        return forwarded.split(',')[0].strip()
+    return request.remote_addr or '127.0.0.1'
+
 @auth_bp.route('/api/auth/captcha', methods=['GET'])
 def get_captcha():
-    data = generate_math_captcha()
+    ip = get_client_ip()
+    data = generate_math_captcha(ip)
     return jsonify({"code": 200, "data": data})
 
 @auth_bp.route('/api/login', methods=['POST'])
@@ -22,8 +29,10 @@ def login():
     p = data.get('password', '').strip()
     captcha_id = data.get('captcha_id', '').strip()
     captcha_ans = data.get('captcha_ans', '').strip()
+    honeypot = data.get('bot_honey_token', '')
 
-    ok, c_msg = verify_captcha(captcha_id, captcha_ans)
+    ip = get_client_ip()
+    ok, c_msg = verify_captcha(captcha_id, captcha_ans, client_ip=ip, honeypot_val=honeypot)
     if not ok:
         return jsonify({"code": 400, "msg": c_msg})
 
@@ -104,8 +113,10 @@ def send_register_code():
     email = data.get('email', '').strip().lower()
     captcha_id = data.get('captcha_id', '').strip()
     captcha_ans = data.get('captcha_ans', '').strip()
+    honeypot = data.get('bot_honey_token', '')
 
-    ok, c_msg = verify_captcha(captcha_id, captcha_ans)
+    ip = get_client_ip()
+    ok, c_msg = verify_captcha(captcha_id, captcha_ans, client_ip=ip, honeypot_val=honeypot)
     if not ok: return jsonify({"code": 400, "msg": c_msg})
     if not email or '@' not in email: return jsonify({"code": 400, "msg": "请输入合法的电子邮箱"})
 
@@ -187,8 +198,10 @@ def send_reset_code():
     email = data.get('email', '').strip().lower()
     captcha_id = data.get('captcha_id', '').strip()
     captcha_ans = data.get('captcha_ans', '').strip()
+    honeypot = data.get('bot_honey_token', '')
 
-    ok, c_msg = verify_captcha(captcha_id, captcha_ans)
+    ip = get_client_ip()
+    ok, c_msg = verify_captcha(captcha_id, captcha_ans, client_ip=ip, honeypot_val=honeypot)
     if not ok: return jsonify({"code": 400, "msg": c_msg})
 
     conn = get_db()

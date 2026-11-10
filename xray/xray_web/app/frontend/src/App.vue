@@ -37,40 +37,40 @@
       <!-- 3. 管理员端：多选项卡调度 -->
       <div v-else-if="currentUser.role === 'admin'" class="admin-wrapper">
         <div class="card-tabs-nav">
-          <button class="tab-card-btn" :class="{ active: activeTab === 'users' }" @click="activeTab = 'users'">
+          <button class="tab-card-btn tab-card-users" :class="{ active: activeTab === 'users' }" @click="activeTab = 'users'">
             <span class="tab-icon">👥</span>
             <div class="tab-text">
               <div class="tab-title">全站用户生命周期管理</div>
               <div class="tab-sub">配额/时效治理、重置UUID与密码、凭证二维码</div>
             </div>
-            <span class="count-tag">{{ adminUsers.length }} 位用户</span>
+            <span class="count-tag tag-users">{{ adminUsers.length }} 位用户</span>
           </button>
 
-          <button class="tab-card-btn" :class="{ active: activeTab === 'nodes' }" @click="openNodesTab">
+          <button class="tab-card-btn tab-card-nodes" :class="{ active: activeTab === 'nodes' }" @click="openNodesTab">
             <span class="tab-icon">🌐</span>
             <div class="tab-text">
               <div class="tab-title">远程节点 (xray_core) 集群</div>
               <div class="tab-sub">多节点公钥监管、在线状态、配置修改与接入</div>
             </div>
-            <span class="count-tag">{{ adminNodes.length }} 个节点</span>
+            <span class="count-tag tag-nodes">{{ adminNodes.length }} 个节点</span>
           </button>
 
-          <button class="tab-card-btn" :class="{ active: activeTab === 'cards' }" @click="activeTab = 'cards'">
+          <button class="tab-card-btn tab-card-cards" :class="{ active: activeTab === 'cards' }" @click="activeTab = 'cards'">
             <span class="tab-icon">🎟️</span>
             <div class="tab-text">
               <div class="tab-title">卡密生成与发卡中心</div>
               <div class="tab-sub">批量制卡、库存导出、范围清理、对接 API</div>
             </div>
-            <span class="count-tag">{{ adminCards.length }} 张卡密</span>
+            <span class="count-tag tag-cards">{{ adminCards.length }} 张卡密</span>
           </button>
 
-          <button class="tab-card-btn" :class="{ active: activeTab === 'settings' }" @click="openSettingsTab">
+          <button class="tab-card-btn tab-card-settings" :class="{ active: activeTab === 'settings' }" @click="openSettingsTab">
             <span class="tab-icon">⚙️</span>
             <div class="tab-text">
               <div class="tab-title">系统发信与全局运维配置</div>
               <div class="tab-sub">公告设置、SMTP、HTTPS证书、📢用户群发通知</div>
             </div>
-            <span class="count-tag">配置中心</span>
+            <span class="count-tag tag-settings">配置中心</span>
           </button>
         </div>
 
@@ -457,6 +457,10 @@ const logout = () => {
   margin-left: auto; font-size: 11px; background: rgba(56, 189, 248, 0.1); color: #38bdf8;
   padding: 3px 10px; border-radius: 20px; border: 1px solid rgba(56, 189, 248, 0.3); white-space: nowrap; flex-shrink: 0;
 }
+.count-tag.tag-users { background: rgba(168, 85, 247, 0.15); color: #c084fc; border-color: rgba(168, 85, 247, 0.3); }
+.count-tag.tag-nodes { background: rgba(56, 189, 248, 0.15); color: #38bdf8; border-color: rgba(56, 189, 248, 0.3); }
+.count-tag.tag-cards { background: rgba(236, 72, 153, 0.15); color: #f472b6; border-color: rgba(236, 72, 153, 0.3); }
+.count-tag.tag-settings { background: rgba(148, 163, 184, 0.15); color: #94a3b8; border-color: rgba(148, 163, 184, 0.3); }
 
 .sub-tab-nav { display: flex; gap: 12px; margin-bottom: 20px; border-bottom: 1px solid #1e293b; padding-bottom: 12px; flex-wrap: wrap; }
 .sub-tab-btn {

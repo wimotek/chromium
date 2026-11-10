@@ -27,12 +27,14 @@
           </div>
           <div class="form-item">
             <label>ACCESS KEY / 登录密码</label>
+            <!-- 蜜罐陷阱 (Honeypot Trap) - 爬虫自动填入即刻封锁 -->
+            <input type="text" v-model="botHoneyToken" class="honey-trap-input" tabindex="-1" autocomplete="off" />
             <input v-model="authForm.password" type="password" class="cyber-input modal-input" placeholder="请输入密码" />
           </div>
           <div class="form-item">
-            <label>CAPTCHA / 算术验证 (点击图片刷新)</label>
+            <label>SECURITY CAPTCHA / 人机安全验证 (点击图片刷新)</label>
             <div class="captcha-group">
-              <input v-model="loginCaptchaAns" type="text" class="cyber-input captcha-input" placeholder="计算结果" @keyup.enter="handleAuth" />
+              <input v-model="loginCaptchaAns" type="text" class="cyber-input captcha-input" :placeholder="loginCaptcha.hint || '答案/计算结果'" @keyup.enter="handleAuth" />
               <div class="captcha-svg-box" @click="refreshCaptcha('login')" v-html="loginCaptcha.svg" title="点击刷新验证码"></div>
             </div>
           </div>
@@ -56,9 +58,9 @@
             <input v-model="authForm.email" type="email" class="cyber-input modal-input" placeholder="name@example.com" />
           </div>
           <div class="form-item">
-            <label>CAPTCHA / 算术防刷验证</label>
+            <label>SECURITY CAPTCHA / 人机安全验证</label>
             <div class="captcha-group">
-              <input v-model="registerCaptchaAns" type="text" class="cyber-input captcha-input" placeholder="计算结果" />
+              <input v-model="registerCaptchaAns" type="text" class="cyber-input captcha-input" :placeholder="registerCaptcha.hint || '答案/计算结果'" />
               <div class="captcha-svg-box" @click="refreshCaptcha('register')" v-html="registerCaptcha.svg" title="点击刷新验证码"></div>
             </div>
           </div>
@@ -90,9 +92,9 @@
             <input v-model="forgotForm.email" type="email" class="cyber-input modal-input" placeholder="输入绑定的邮箱" />
           </div>
           <div class="form-item">
-            <label>CAPTCHA / 算术验证</label>
+            <label>SECURITY CAPTCHA / 人机安全验证</label>
             <div class="captcha-group">
-              <input v-model="forgotCaptchaAns" type="text" class="cyber-input captcha-input" placeholder="计算结果" />
+              <input v-model="forgotCaptchaAns" type="text" class="cyber-input captcha-input" :placeholder="forgotCaptcha.hint || '答案/计算结果'" />
               <div class="captcha-svg-box" @click="refreshCaptcha('forgot')" v-html="forgotCaptcha.svg" title="点击刷新验证码"></div>
             </div>
           </div>
@@ -137,12 +139,13 @@ const loading = ref(false)
 const authMode = ref('login')
 const countdown = ref(0)
 const sendingCode = ref(false)
+const botHoneyToken = ref('')
 
-const loginCaptcha = reactive({ id: '', svg: '' })
+const loginCaptcha = reactive({ id: '', svg: '', hint: '' })
 const loginCaptchaAns = ref('')
-const registerCaptcha = reactive({ id: '', svg: '' })
+const registerCaptcha = reactive({ id: '', svg: '', hint: '' })
 const registerCaptchaAns = ref('')
-const forgotCaptcha = reactive({ id: '', svg: '' })
+const forgotCaptcha = reactive({ id: '', svg: '', hint: '' })
 const forgotCaptchaAns = ref('')
 
 const authForm = reactive({ username: '', email: '', code: '', password: '' })
@@ -163,14 +166,17 @@ const refreshCaptcha = async (type) => {
       if (type === 'login') {
         loginCaptcha.id = res.data.data.captcha_id
         loginCaptcha.svg = res.data.data.svg
+        loginCaptcha.hint = res.data.data.hint || ''
         loginCaptchaAns.value = ''
       } else if (type === 'register') {
         registerCaptcha.id = res.data.data.captcha_id
         registerCaptcha.svg = res.data.data.svg
+        registerCaptcha.hint = res.data.data.hint || ''
         registerCaptchaAns.value = ''
       } else if (type === 'forgot') {
         forgotCaptcha.id = res.data.data.captcha_id
         forgotCaptcha.svg = res.data.data.svg
+        forgotCaptcha.hint = res.data.data.hint || ''
         forgotCaptchaAns.value = ''
       }
     }
@@ -204,14 +210,15 @@ const startCountdown = () => {
 
 const sendRegisterCode = async () => {
   if (!authForm.email || !authForm.email.includes('@')) return ElMessage.warning('请输入合法电子邮箱')
-  if (!registerCaptchaAns.value) return ElMessage.warning('请先输入算术验证码计算结果')
+  if (!registerCaptchaAns.value) return ElMessage.warning('请先输入人机安全验证码')
 
   sendingCode.value = true
   try {
     const res = await axios.post('/api/auth/send_register_code', {
       email: authForm.email,
       captcha_id: registerCaptcha.id,
-      captcha_ans: registerCaptchaAns.value
+      captcha_ans: registerCaptchaAns.value,
+      bot_honey_token: botHoneyToken.value
     })
     if (res.data.code === 200) {
       ElMessage.success(res.data.msg)
@@ -230,14 +237,15 @@ const sendRegisterCode = async () => {
 
 const sendForgotCode = async () => {
   if (!forgotForm.email || !forgotForm.email.includes('@')) return ElMessage.warning('请输入绑定的注册邮箱')
-  if (!forgotCaptchaAns.value) return ElMessage.warning('请先输入算术验证码计算结果')
+  if (!forgotCaptchaAns.value) return ElMessage.warning('请先输入人机安全验证码')
 
   sendingCode.value = true
   try {
     const res = await axios.post('/api/auth/send_reset_code', {
       email: forgotForm.email,
       captcha_id: forgotCaptcha.id,
-      captcha_ans: forgotCaptchaAns.value
+      captcha_ans: forgotCaptchaAns.value,
+      bot_honey_token: botHoneyToken.value
     })
     if (res.data.code === 200) {
       ElMessage.success(res.data.msg)
@@ -260,7 +268,10 @@ const submitForgotPassword = async () => {
 
   loading.value = true
   try {
-    const res = await axios.post('/api/auth/reset_password', forgotForm)
+    const res = await axios.post('/api/auth/reset_password', {
+      ...forgotForm,
+      bot_honey_token: botHoneyToken.value
+    })
     if (res.data.code === 200) {
       ElMessage.success(res.data.msg)
       switchAuthMode('login')
@@ -278,15 +289,20 @@ const submitForgotPassword = async () => {
 
 const handleAuth = async () => {
   if (!authForm.username || !authForm.password) return ElMessage.warning('请填写账号与密码')
-  if (authMode.value === 'login' && !loginCaptchaAns.value) return ElMessage.warning('请输入算术验证码计算结果')
+  if (authMode.value === 'login' && !loginCaptchaAns.value) return ElMessage.warning('请输入人机安全验证码答案')
+  if (authMode.value === 'register' && !registerCaptchaAns.value) return ElMessage.warning('请输入人机安全验证码答案')
 
   loading.value = true
   const api = authMode.value === 'register' ? '/api/register' : '/api/login'
+  const capId = authMode.value === 'register' ? registerCaptcha.id : loginCaptcha.id
+  const capAns = authMode.value === 'register' ? registerCaptchaAns.value : loginCaptchaAns.value
+
   try {
     const res = await axios.post(api, {
       ...authForm,
-      captcha_id: loginCaptcha.id,
-      captcha_ans: loginCaptchaAns.value
+      captcha_id: capId,
+      captcha_ans: capAns,
+      bot_honey_token: botHoneyToken.value
     })
     if (res.data.code === 200) {
       if (authMode.value === 'register') {
@@ -299,9 +315,11 @@ const handleAuth = async () => {
     } else {
       ElMessage.error(res.data.msg)
       if (authMode.value === 'login') refreshCaptcha('login')
+      else refreshCaptcha('register')
     }
   } catch (_) {
     if (authMode.value === 'login') refreshCaptcha('login')
+    else refreshCaptcha('register')
   } finally {
     loading.value = false
   }
@@ -443,5 +461,32 @@ const handleAuth = async () => {
   .form-side-panel {
     padding: 24px;
   }
+}
+
+.honey-trap-input {
+  display: none !important;
+  opacity: 0 !important;
+  position: absolute !important;
+  left: -9999px !important;
+  pointer-events: none !important;
+}
+
+.captcha-svg-box {
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #0b1120;
+  border: 1px solid #334155;
+  border-radius: 6px;
+  padding: 2px;
+  transition: all 0.2s;
+  user-select: none;
+}
+
+.captcha-svg-box:hover {
+  border-color: #38bdf8;
+  box-shadow: 0 0 10px rgba(56, 189, 248, 0.25);
+  transform: scale(1.02);
 }
 </style>

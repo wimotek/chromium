@@ -84,7 +84,19 @@ def init_db():
     c.execute('''CREATE TABLE IF NOT EXISTS captchas (
         id TEXT PRIMARY KEY,
         answer TEXT NOT NULL,
-        expire_at REAL NOT NULL
+        expire_at REAL NOT NULL,
+        created_at REAL DEFAULT 0
+    )''')
+    try:
+        c.execute("ALTER TABLE captchas ADD COLUMN created_at REAL DEFAULT 0")
+    except Exception:
+        pass
+
+    c.execute('''CREATE TABLE IF NOT EXISTS ip_security_limits (
+        ip TEXT PRIMARY KEY,
+        fail_count INTEGER DEFAULT 0,
+        lock_until REAL DEFAULT 0,
+        last_attempt REAL DEFAULT 0
     )''')
 
     c.execute('''CREATE TABLE IF NOT EXISTS system_settings (
