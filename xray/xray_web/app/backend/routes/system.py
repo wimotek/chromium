@@ -106,7 +106,13 @@ def handle_settings():
                 "acme_email": get_setting("acme_email", ""),
                 "system_notice": get_setting("system_notice", "").strip(),
                 "reg_traffic_mb": get_setting("reg_traffic_mb", "1024"),
-                "reg_expire_days": get_setting("reg_expire_days", "1")
+                "reg_expire_days": get_setting("reg_expire_days", "1"),
+                "referral_enabled": get_setting("referral_enabled", "true"),
+                "referral_inviter_traffic_gb": get_setting("referral_inviter_traffic_gb", "10"),
+                "referral_inviter_days": get_setting("referral_inviter_days", "30"),
+                "referral_invitee_traffic_gb": get_setting("referral_invitee_traffic_gb", "5"),
+                "referral_invitee_days": get_setting("referral_invitee_days", "30"),
+                "referral_max_per_user": get_setting("referral_max_per_user", "50")
             }
         })
     else:
@@ -120,7 +126,9 @@ def handle_settings():
         keys = ["smtp_host", "smtp_port", "smtp_user", "smtp_sender", "smtp_ssl",
                 "task_notify_enable", "task_interval_hours", "task_traffic_threshold", "task_expire_days",
                 "faka_api_enable", "faka_api_token", "acme_enable", "acme_domain", "acme_email",
-                "system_notice", "reg_traffic_mb", "reg_expire_days"]
+                "system_notice", "reg_traffic_mb", "reg_expire_days",
+                "referral_enabled", "referral_inviter_traffic_gb", "referral_inviter_days",
+                "referral_invitee_traffic_gb", "referral_invitee_days", "referral_max_per_user"]
         for k in keys:
             if k in data:
                 set_setting(k, str(data[k]).strip())

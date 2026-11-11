@@ -51,7 +51,58 @@
       </div>
     </div>
 
-    <!-- 3. 节点列表与聚合订阅 -->
+    <!-- 3. 专属好友推荐邀请返利中心 -->
+    <div class="cyber-card col-span-2">
+      <div class="card-header">
+        <div style="display: flex; align-items: center; gap: 8px;">
+          <h3>🎁 专属好友推荐邀请返利中心</h3>
+          <span class="tag-status" style="border-color: #38bdf8; color: #38bdf8; background: rgba(56, 189, 248, 0.1);">双向互利</span>
+        </div>
+      </div>
+      <p class="card-desc">
+        将您的专属邀请链接或邀请码分享给好友，好友注册激活立即获赠额外高速流量与天数，您亦可获得丰厚流量与有效期双向累加奖励！
+      </p>
+
+      <div class="settings-2col-layout" style="margin-top: 14px;">
+        <!-- 统计面板 -->
+        <div class="column-stack">
+          <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px;">
+            <div style="background: rgba(15, 23, 42, 0.6); border: 1px solid rgba(56, 189, 248, 0.2); border-radius: 8px; padding: 14px; text-align: center;">
+              <div style="font-size: 11px; color: #94a3b8; margin-bottom: 4px;">成功邀请人数</div>
+              <div style="font-size: 24px; font-weight: bold; color: #38bdf8;">{{ currentUser.referral_count || 0 }} <span style="font-size: 12px; color: #64748b;">人</span></div>
+            </div>
+            <div style="background: rgba(15, 23, 42, 0.6); border: 1px solid rgba(16, 185, 129, 0.2); border-radius: 8px; padding: 14px; text-align: center;">
+              <div style="font-size: 11px; color: #94a3b8; margin-bottom: 4px;">累计获赠流量</div>
+              <div style="font-size: 24px; font-weight: bold; color: #10b981;">+{{ currentUser.referral_bonus_gb || 0 }} <span style="font-size: 12px; color: #64748b;">GB</span></div>
+            </div>
+            <div style="background: rgba(15, 23, 42, 0.6); border: 1px solid rgba(245, 158, 11, 0.2); border-radius: 8px; padding: 14px; text-align: center;">
+              <div style="font-size: 11px; color: #94a3b8; margin-bottom: 4px;">累计延长有效期</div>
+              <div style="font-size: 24px; font-weight: bold; color: #f59e0b;">+{{ currentUser.referral_bonus_days || 0 }} <span style="font-size: 12px; color: #64748b;">天</span></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- 邀请码与链接 -->
+        <div class="column-stack">
+          <div class="form-item" style="margin-bottom: 10px;">
+            <label>您的专属推荐邀请码：</label>
+            <div style="display: flex; gap: 8px;">
+              <input :value="referralCode" readonly type="text" class="cyber-input font-mono" style="font-weight: bold; letter-spacing: 1px; color: #38bdf8; background: rgba(15, 23, 42, 0.7);" />
+              <button class="btn-cyber-primary" style="white-space: nowrap; padding: 0 16px;" @click="$emit('copy', referralCode)">📋 复制</button>
+            </div>
+          </div>
+          <div class="form-item" style="margin-bottom: 0;">
+            <label>您的专属好友直达推广链接：</label>
+            <div style="display: flex; gap: 8px;">
+              <input :value="referralLink" readonly type="text" class="cyber-input font-mono" style="font-size: 12px; color: #94a3b8; background: rgba(15, 23, 42, 0.7);" />
+              <button class="btn-cyber-success" style="white-space: nowrap; padding: 0 16px;" @click="$emit('copy', referralLink)">🔗 复制链接</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 4. 节点列表与聚合订阅 -->
     <div class="cyber-card col-span-2">
       <div class="card-header header-nowrap-row">
         <h3 class="header-title-text">🌐 全球加速节点列表与通用订阅 (共 {{ currentUser.nodes ? currentUser.nodes.length : 0 }} 个节点)</h3>
@@ -279,6 +330,15 @@ const loadingChangeEmail = ref(false)
 const trafficPercent = computed(() => {
   if (!props.currentUser.limit_mb) return 100
   return Math.min(100, Math.round((props.currentUser.used_mb / props.currentUser.limit_mb) * 100))
+})
+
+const referralCode = computed(() => {
+  return props.currentUser.referral_code || (props.currentUser.uuid ? props.currentUser.uuid.slice(0, 8).toUpperCase() : '')
+})
+
+const referralLink = computed(() => {
+  const origin = window.location.origin
+  return `${origin}/?ref=${referralCode.value}`
 })
 
 // ==================== 核心增强：前台无感自动轮询机制 ====================

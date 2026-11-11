@@ -103,7 +103,12 @@ def login():
             "sub_url": sub_url,
             "nodes": nodes_data,
             "notify_type": user_dict['notify_type'] or 'email',
-            "serverchan_key": user_dict['serverchan_key'] or ''
+            "serverchan_key": user_dict['serverchan_key'] or '',
+            "referral_code": user_dict.get('referral_code') or user_dict['uuid'][:8].upper(),
+            "invited_by": user_dict.get('invited_by') or '',
+            "referral_count": user_dict.get('referral_count') or 0,
+            "referral_bonus_gb": user_dict.get('referral_bonus_gb') or 0,
+            "referral_bonus_days": user_dict.get('referral_bonus_days') or 0
         }
     })
 
@@ -153,6 +158,7 @@ def register():
     p = data.get('password', '').strip()
     email = data.get('email', '').strip().lower()
     code = data.get('code', '').strip()
+    ref_code = data.get('ref_code', '').strip().upper()
 
     if not u or not p or not email or not code:
         return jsonify({"code": 400, "msg": "所有项均为必填项"})
@@ -173,21 +179,71 @@ def register():
     reg_traffic_mb = int(get_setting("reg_traffic_mb", "1024") or 1024)
     reg_expire_days = int(get_setting("reg_expire_days", "1") or 1)
 
-    if reg_expire_days >= 3650:
+    referral_enabled = get_setting("referral_enabled", "true") == "true"
+    inviter_gb = int(get_setting("referral_inviter_traffic_gb", "10") or 10)
+    inviter_days = int(get_setting("referral_inviter_days", "30") or 30)
+    invitee_gb = int(get_setting("referral_invitee_traffic_gb", "5") or 5)
+    invitee_days = int(get_setting("referral_invitee_days", "30") or 30)
+    max_per_user = int(get_setting("referral_max_per_user", "50") or 50)
+
+    bonus_invitee_mb = 0
+    bonus_invitee_days = 0
+    invited_by_user = ""
+
+    if ref_code and referral_enabled:
+        c.execute("SELECT * FROM users WHERE referral_code=? OR UPPER(username)=?", (ref_code, ref_code))
+        inviter = c.fetchone()
+        if inviter and inviter['username'] != u:
+            cur_ref_count = inviter.get('referral_count') or 0
+            if cur_ref_count < max_per_user:
+                invited_by_user = inviter['username']
+                bonus_invitee_mb = invitee_gb * 1024
+                bonus_invitee_days = invitee_days
+
+                # 给邀请人发放奖励
+                inviter_new_limit = (inviter['traffic_limit_mb'] or 0) + (inviter_gb * 1024)
+                # 计算邀请人新的到期时间
+                inviter_exp = inviter['expire_date']
+                try:
+                    cur_exp_dt = datetime.datetime.strptime(inviter_exp, "%Y-%m-%d %H:%M:%S")
+                except Exception:
+                    cur_exp_dt = datetime.datetime.now()
+                if cur_exp_dt < datetime.datetime.now():
+                    cur_exp_dt = datetime.datetime.now()
+                new_inviter_exp = (cur_exp_dt + datetime.timedelta(days=inviter_days)).strftime("%Y-%m-%d %H:%M:%S")
+
+                c.execute("""
+                    UPDATE users SET 
+                        traffic_limit_mb=?, 
+                        expire_date=?, 
+                        referral_count=COALESCE(referral_count, 0) + 1,
+                        referral_bonus_gb=COALESCE(referral_bonus_gb, 0) + ?,
+                        referral_bonus_days=COALESCE(referral_bonus_days, 0) + ?
+                    WHERE id=?
+                """, (inviter_new_limit, new_inviter_exp, inviter_gb, inviter_days, inviter['id']))
+
+    total_traffic_mb = reg_traffic_mb + bonus_invitee_mb
+    total_expire_days = reg_expire_days + bonus_invitee_days
+
+    if total_expire_days >= 3650:
         exp = "2099-12-31 23:59:59"
     else:
-        exp_date = (datetime.datetime.now() + datetime.timedelta(days=reg_expire_days)).strftime("%Y-%m-%d")
+        exp_date = (datetime.datetime.now() + datetime.timedelta(days=total_expire_days)).strftime("%Y-%m-%d")
         exp = normalize_expire_date(exp_date)
+
+    my_ref_code = uuid.uuid4().hex[:8].upper()
 
     try:
         c.execute("""
-            INSERT INTO users (username, password_hash, uuid, email, traffic_limit_mb, used_mb, expire_date, role, status, is_verified, is_monthly, reset_day, user_group) 
-            VALUES (?, ?, ?, ?, ?, 0, ?, 'user', 1, 1, 0, 1, 'default')
-        """, (u, hash_pwd(p), str(uuid.uuid4()), email, reg_traffic_mb, exp))
+            INSERT INTO users (username, password_hash, uuid, email, traffic_limit_mb, used_mb, expire_date, role, status, is_verified, is_monthly, reset_day, user_group, referral_code, invited_by, referral_count, referral_bonus_gb, referral_bonus_days) 
+            VALUES (?, ?, ?, ?, ?, 0, ?, 'user', 1, 1, 0, 1, 'default', ?, ?, 0, 0, 0)
+        """, (u, hash_pwd(p), str(uuid.uuid4()), email, total_traffic_mb, exp, my_ref_code, invited_by_user))
         c.execute("DELETE FROM verify_codes WHERE email=?", (email,))
         conn.commit()
         conn.close()
-        return jsonify({"code": 200, "msg": f"账号激活成功，获赠 {reg_traffic_mb}MB 套餐"})
+        
+        bonus_msg = f"（含推荐礼包 +{invitee_gb}GB 流量与 +{invitee_days} 天有效期）" if invited_by_user else ""
+        return jsonify({"code": 200, "msg": f"账号激活成功！获赠 {round(total_traffic_mb/1024, 2)}GB 套餐{bonus_msg}"})
     except Exception as e:
         conn.close()
         return jsonify({"code": 500, "msg": f"注册失败: {str(e)}"})

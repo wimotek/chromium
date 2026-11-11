@@ -22,6 +22,13 @@
       >
         🔐 HTTPS 证书与基础运维
       </button>
+      <button
+        class="sub-tab-btn"
+        :class="{ active: settingsSubTab === 'referral' }"
+        @click="settingsSubTab = 'referral'"
+      >
+        🎁 新用户注册推荐奖励
+      </button>
     </div>
 
     <!-- ==================== 子卡 1：发信服务与通知推送中枢 (双列布局) ==================== -->
@@ -320,6 +327,94 @@
       </div>
     </div>
 
+    <!-- ==================== 子卡 3：新用户注册推荐奖励体系 ==================== -->
+    <div v-else-if="settingsSubTab === 'referral'" class="sub-tab-pane">
+      <div class="settings-2col-layout">
+        <!-- 左列：返利规则参数设置 -->
+        <div class="column-stack">
+          <div class="panel-card">
+            <div class="panel-card-header">
+              <div class="panel-title-wrap">
+                <span class="panel-icon">🎁</span>
+                <div>
+                  <strong class="panel-title">双向推荐返利参数配置</strong>
+                  <div class="panel-sub">新老用户双向赠送高速流量与延长账号有效期</div>
+                </div>
+              </div>
+              <label class="radio-label" style="margin: 0;">
+                <input type="checkbox" v-model="settingsForm.referral_enabled" />
+                <span :style="{ color: settingsForm.referral_enabled ? '#10b981' : '#ef4444' }">{{ settingsForm.referral_enabled ? '🟢 奖励已启用' : '🔴 奖励已停用' }}</span>
+              </label>
+            </div>
+
+            <div class="inner-divider">
+              <div class="inner-divider-title">👤 老用户 (邀请人) 获赠奖励</div>
+              <div class="form-row-2">
+                <div class="form-item">
+                  <label>每邀 1 人赠送流量 (GB)</label>
+                  <input v-model.number="settingsForm.referral_inviter_traffic_gb" type="number" class="cyber-input" placeholder="10" />
+                </div>
+                <div class="form-item">
+                  <label>账户有效期延长 (天)</label>
+                  <input v-model.number="settingsForm.referral_inviter_days" type="number" class="cyber-input" placeholder="30" />
+                </div>
+              </div>
+            </div>
+
+            <div class="inner-divider">
+              <div class="inner-divider-title">🎉 新用户 (被邀请人) 获赠奖励</div>
+              <div class="form-row-2">
+                <div class="form-item">
+                  <label>额外加赠新人礼包流量 (GB)</label>
+                  <input v-model.number="settingsForm.referral_invitee_traffic_gb" type="number" class="cyber-input" placeholder="5" />
+                </div>
+                <div class="form-item">
+                  <label>额外加赠有效天数 (天)</label>
+                  <input v-model.number="settingsForm.referral_invitee_days" type="number" class="cyber-input" placeholder="30" />
+                </div>
+              </div>
+            </div>
+
+            <div class="inner-divider">
+              <div class="inner-divider-title">🛡️ 防刷风控与上限</div>
+              <div class="form-item">
+                <label>单用户最大邀请奖励次数上限</label>
+                <input v-model.number="settingsForm.referral_max_per_user" type="number" class="cyber-input" placeholder="50" />
+                <span class="input-hint">达到上限后，邀请新用户不再继续累积奖励，杜绝恶意注册滥用。</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- 右列：一键生成并发布到系统公告 -->
+        <div class="column-stack">
+          <div class="panel-card">
+            <div class="panel-card-header">
+              <div class="panel-title-wrap">
+                <span class="panel-icon">📢</span>
+                <div>
+                  <strong class="panel-title">一键发布推荐奖励到公告</strong>
+                  <div class="panel-sub">根据当前设置格式化并即时发布至登录页及用户端公告</div>
+                </div>
+              </div>
+            </div>
+
+            <div class="form-item">
+              <label>公告文案预览 (自动同步当前奖励数值)：</label>
+              <textarea :value="generatedReferralNotice" rows="8" readonly class="cyber-input cyber-textarea font-mono" style="background: rgba(15, 23, 42, 0.6); color: #38bdf8;"></textarea>
+            </div>
+
+            <div class="btn-group" style="margin-top: 10px;">
+              <button class="btn-cyber-primary" style="width: 100%; padding: 10px 18px;" @click="publishReferralNotice">
+                📢 一键发布推荐奖励到系统公告
+              </button>
+            </div>
+            <span class="input-hint" style="margin-top: 8px;">点击后系统将自动把上述活动公告写入「系统公告」，并即时在前台登录页与用户看板顶端展示！</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
     <!-- 弹窗：手动粘贴证书 PEM -->
     <div v-if="showCustomCertModal" class="modal-backdrop" @click="showCustomCertModal = false">
       <div class="cyber-modal" style="max-width: 520px; text-align: left;" @click.stop>
@@ -343,7 +438,7 @@
 </template>
 
 <script setup>
-import { ref, reactive, onMounted } from 'vue'
+import { ref, reactive, computed, onMounted } from 'vue'
 import axios from 'axios'
 import { ElMessage } from 'element-plus'
 
@@ -375,7 +470,13 @@ const settingsForm = reactive({
   acme_email: '',
   system_notice: '',
   reg_traffic_mb: 1024,
-  reg_expire_days: 1
+  reg_expire_days: 1,
+  referral_enabled: true,
+  referral_inviter_traffic_gb: 10,
+  referral_inviter_days: 30,
+  referral_invitee_traffic_gb: 5,
+  referral_invitee_days: 30,
+  referral_max_per_user: 50
 })
 
 const notifyForm = reactive({ notify_type: 'email', serverchan_key: '' })
@@ -437,6 +538,12 @@ onMounted(async () => {
       settingsForm.system_notice = d.system_notice || ''
       settingsForm.reg_traffic_mb = Number(d.reg_traffic_mb) || 1024
       settingsForm.reg_expire_days = Number(d.reg_expire_days) || 1
+      settingsForm.referral_enabled = d.referral_enabled !== 'false'
+      settingsForm.referral_inviter_traffic_gb = Number(d.referral_inviter_traffic_gb) || 10
+      settingsForm.referral_inviter_days = Number(d.referral_inviter_days) || 30
+      settingsForm.referral_invitee_traffic_gb = Number(d.referral_invitee_traffic_gb) || 5
+      settingsForm.referral_invitee_days = Number(d.referral_invitee_days) || 30
+      settingsForm.referral_max_per_user = Number(d.referral_max_per_user) || 50
     }
     loadCertInfo()
   } catch (_) {}
@@ -555,6 +662,20 @@ const sendUserPushNotification = async () => {
   }
 }
 
+const generatedReferralNotice = computed(() => {
+  return `🎁【推荐好友注册双向奖励计划已开启】
+邀请好友注册各享豪礼！好友通过您的专属邀请链接或邀请码注册激活成功：
+• 邀请人奖励：立即获得 +${settingsForm.referral_inviter_traffic_gb} GB 高速流量，账户有效期延长 +${settingsForm.referral_inviter_days} 天！
+• 新用户奖励：额外赠送 +${settingsForm.referral_invitee_traffic_gb} GB 新人礼包流量，账户有效期延长 +${settingsForm.referral_invitee_days} 天！
+登录个人控制台即可获取您的专属推荐链接与邀请码，多邀多得！`
+})
+
+const publishReferralNotice = async () => {
+  settingsForm.system_notice = generatedReferralNotice.value
+  await saveAllSettings()
+  ElMessage.success('推荐奖励方案已成功格式化并发布至全站系统公告！')
+}
+
 const saveAllSettings = async () => {
   try {
     const res = await axios.post('/api/admin/settings', {
@@ -563,7 +684,8 @@ const saveAllSettings = async () => {
       ...settingsForm,
       smtp_ssl: settingsForm.smtp_ssl ? 'true' : 'false',
       task_notify_enable: settingsForm.task_notify_enable ? 'true' : 'false',
-      acme_enable: settingsForm.acme_enable ? 'true' : 'false'
+      acme_enable: settingsForm.acme_enable ? 'true' : 'false',
+      referral_enabled: settingsForm.referral_enabled ? 'true' : 'false'
     })
     if (res.data.code === 200) {
       ElMessage.success(res.data.msg)

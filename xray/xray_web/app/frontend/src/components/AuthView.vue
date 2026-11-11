@@ -77,6 +77,11 @@
             <label>ACCESS KEY / 设置新登录密码</label>
             <input v-model="authForm.password" type="password" class="cyber-input modal-input" placeholder="至少 6 位密码" />
           </div>
+          <div class="form-item">
+            <label>🎁 REFERRAL CODE / 推荐邀请码 (选填，双方立赠专属流量与时长)</label>
+            <input v-model="authForm.ref_code" type="text" class="cyber-input modal-input font-mono" placeholder="填入好友邀请码，激活双方额外赠送套餐" />
+            <span class="input-hint" style="color: #38bdf8;">🎁 填写邀请人代码，注册激活立送额外赠送高速流量与套餐有效期！</span>
+          </div>
           <button class="btn-cyber-primary" :disabled="loading" style="width: 100%; margin-top: 6px;" @click="handleAuth">
             {{ loading ? 'AUTHENTICATING...' : '验证并激活账号' }}
           </button>
@@ -148,7 +153,7 @@ const registerCaptchaAns = ref('')
 const forgotCaptcha = reactive({ id: '', svg: '', hint: '' })
 const forgotCaptchaAns = ref('')
 
-const authForm = reactive({ username: '', email: '', code: '', password: '' })
+const authForm = reactive({ username: '', email: '', code: '', password: '', ref_code: '' })
 const forgotForm = reactive({ email: '', code: '', new_password: '' })
 
 // 核心判断：只有存在非空白有效字符时，才视作有公告，绝不空置渲染
@@ -156,7 +161,15 @@ const cleanSystemNotice = computed(() => (props.systemNotice || '').trim())
 const hasNoticeContent = computed(() => Boolean(cleanSystemNotice.value))
 
 onMounted(() => {
-  refreshCaptcha('login')
+  try {
+    const urlParams = new URLSearchParams(window.location.search)
+    const refParam = urlParams.get('ref') || urlParams.get('r')
+    if (refParam) {
+      authForm.ref_code = refParam.trim().toUpperCase()
+      authMode.value = 'register'
+    }
+  } catch (_) {}
+  refreshCaptcha(authMode.value)
 })
 
 const refreshCaptcha = async (type) => {

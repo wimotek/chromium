@@ -154,11 +154,21 @@ def admin_save_node_config():
 
     conn = get_db()
     c = conn.cursor()
+    c.execute("SELECT node_key, sid FROM nodes WHERE node_id=?", (node_id,))
+    cur_node = c.fetchone()
+    if not cur_node:
+        conn.close()
+        return jsonify({"code": 404, "msg": "未找到对应节点"})
+
+    # 严密保护 TOFU 固化密钥与 ShortId：禁止空值覆写破坏已有加密握手凭证
+    final_node_key = cur_node["node_key"] if cur_node["node_key"] else node_key
+    final_sid = cur_node["sid"] if cur_node["sid"] else sid
+
     c.execute("""
         UPDATE nodes 
         SET name=?, ip=?, port=?, dest=?, sni=?, server_names=?, sid=?, node_key=?
         WHERE node_id=?
-    """, (name, ip, port, dest, primary_sni, server_names_str, sid, node_key, node_id))
+    """, (name, ip, port, dest, primary_sni, server_names_str, final_sid, final_node_key, node_id))
     conn.commit()
     conn.close()
 

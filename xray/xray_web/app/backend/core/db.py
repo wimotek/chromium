@@ -146,6 +146,11 @@ def init_db():
     try_add_column("ALTER TABLE nodes ADD COLUMN tunnel_uuid TEXT DEFAULT ''")
     try_add_column("ALTER TABLE nodes ADD COLUMN tunnel_status TEXT DEFAULT 'disconnected'")
     try_add_column("ALTER TABLE users ADD COLUMN user_group TEXT DEFAULT 'default'")
+    try_add_column("ALTER TABLE users ADD COLUMN referral_code TEXT DEFAULT ''")
+    try_add_column("ALTER TABLE users ADD COLUMN invited_by TEXT DEFAULT ''")
+    try_add_column("ALTER TABLE users ADD COLUMN referral_count INTEGER DEFAULT 0")
+    try_add_column("ALTER TABLE users ADD COLUMN referral_bonus_gb REAL DEFAULT 0")
+    try_add_column("ALTER TABLE users ADD COLUMN referral_bonus_days INTEGER DEFAULT 0")
 
     # 初始化全局 TOFU 首次信任总开关、引导令牌 (Cluster Token) 与自动审批开关
     c.execute("SELECT value FROM system_settings WHERE key='tofu_enabled'")
@@ -164,6 +169,19 @@ def init_db():
     c.execute("SELECT value FROM system_settings WHERE key='crypto_key_lock_enforced'")
     if not c.fetchone():
         c.execute("INSERT INTO system_settings (key, value) VALUES ('crypto_key_lock_enforced', 'true')")
+
+    # 初始化新用户注册推荐奖励设置
+    def init_setting_if_missing(k, v):
+        c.execute("SELECT value FROM system_settings WHERE key=?", (k,))
+        if not c.fetchone():
+            c.execute("INSERT INTO system_settings (key, value) VALUES (?, ?)", (k, v))
+
+    init_setting_if_missing('referral_enabled', 'true')
+    init_setting_if_missing('referral_inviter_traffic_gb', '10')
+    init_setting_if_missing('referral_inviter_days', '30')
+    init_setting_if_missing('referral_invitee_traffic_gb', '5')
+    init_setting_if_missing('referral_invitee_days', '30')
+    init_setting_if_missing('referral_max_per_user', '50')
 
     c.execute("SELECT id FROM users WHERE role='admin'")
     if not c.fetchone():

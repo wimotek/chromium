@@ -10,10 +10,10 @@
           <span class="shield-icon">🛡️</span>
           <b style="color: #f8fafc; font-size: 13px;">集群引导令牌 (Cluster Token):</b>
           <span class="cluster-token-code">{{ maskedClusterToken }}</span>
-          <button class="btn-xs btn-action" title="一键复制集群通信令牌" @click="copyText(clusterInfo.cluster_token, '集群通信令牌')">
+          <button class="btn-banner-action" title="一键复制集群通信令牌" @click="copyText(clusterInfo.cluster_token, '集群通信令牌')">
             📋 复制令牌
           </button>
-          <button class="btn-xs btn-reset" title="轮换重置令牌 (已在线节点不受影响)" @click="handleRegenerateClusterToken">
+          <button class="btn-banner-reset" title="轮换重置令牌 (已在线节点不受影响)" @click="handleRegenerateClusterToken">
             🔄 轮换重置
           </button>
         </div>
@@ -22,7 +22,7 @@
         </div>
       </div>
 
-      <!-- 右侧：TOFU 首次信任总开关 + 免审核准入子开关 + 部署指引 -->
+      <!-- 右侧：TOFU 首次信任总开关 + 免审核准入子开关 + 部署脚本入口 -->
       <div class="banner-right">
         <div class="tofu-switches-card">
           <!-- 主开关：TOFU 首次信任接入 -->
@@ -70,8 +70,8 @@
           </div>
         </div>
 
-        <button class="btn-cyber-primary btn-deploy-snippet" @click="showDeployModal = true">
-          🚀 部署指引
+        <button class="btn-banner-deploy" @click="currentSubTab = 'deploy'" title="跳转到 Docker 部署脚本与参数">
+          💻 Docker 部署脚本与参数 →
         </button>
       </div>
     </div>
@@ -381,26 +381,75 @@
     <!-- 子卡 4：Docker 部署脚本与参数 -->
     <!-- ========================================================================= -->
     <div v-else-if="currentSubTab === 'deploy'">
-      <div class="deploy-tab-box">
-        <h4 style="color: #38bdf8; margin-top: 0;">💻 边缘节点 Docker Compose 一键接入脚本</h4>
-        <p class="modal-tip">
-          在需要接入的海外 VPS 或内网主机上新建 <code>docker-compose.yml</code> 并粘贴如下配置，执行 <code>docker compose up -d</code>：
-        </p>
-        <div class="code-editor-box">
-          <pre class="yaml-code-view">{{ generatedDockerComposeYaml }}</pre>
+      <div class="deploy-tab-container">
+        <!-- 1. Docker 极简单行命令秒级部署 -->
+        <div class="docker-minimal-section">
+          <div class="docker-minimal-header">
+            <div>
+              <h4 style="color: #f8fafc; margin: 0; display: flex; align-items: center; gap: 8px;">
+                <span style="color: #fbbf24;">⚡</span> Docker 极简最小命令秒级部署 (免写文件，一键直启)
+              </h4>
+              <p class="modal-tip" style="margin: 4px 0 0 0;">
+                无需创建 docker-compose.yml 文件，在海外 VPS 终端粘贴下方单行指令回车即可完成节点自动握手与上线：
+              </p>
+            </div>
+            <div style="display: flex; gap: 8px;">
+              <button class="btn-cyber-primary" @click="copyText(generatedDockerOneLiner, 'Docker 最小部署命令')">
+                📋 复制 Docker 最小部署命令
+              </button>
+              <button class="btn-cyber-action" @click="copyText('docker logs -f xray-node', '容器日志命令')">
+                📋 复制日志监控命令
+              </button>
+            </div>
+          </div>
+          <div class="docker-oneliner-code">
+            {{ generatedDockerOneLiner }}
+          </div>
+          <div class="docker-args-grid">
+            <div class="docker-arg-card">
+              <div class="docker-arg-name">--network=host</div>
+              <div class="docker-arg-desc">直通网卡绑定物理 443 端口，性能无损耗</div>
+            </div>
+            <div class="docker-arg-card">
+              <div class="docker-arg-name">CLUSTER_TOKEN</div>
+              <div class="docker-arg-desc">集群引导凭据，已自动填充当前活跃令牌</div>
+            </div>
+            <div class="docker-arg-card">
+              <div class="docker-arg-name">-v ./data:/data</div>
+              <div class="docker-arg-desc">挂载持久化目录，保护私钥与节点ID永不丢失</div>
+            </div>
+            <div class="docker-arg-card">
+              <div class="docker-arg-name">AUTO_UPDATE=true</div>
+              <div class="docker-arg-desc">支持守护进程热重载与看门狗崩溃秒级自愈</div>
+            </div>
+          </div>
         </div>
-        <div style="margin-top: 14px;">
-          <button class="btn-cyber-primary" @click="copyText(generatedDockerComposeYaml, 'Docker Compose 配置')">
-            📋 复制完整 YAML 配置
-          </button>
+
+        <!-- 2. Docker Compose 编排标准文件 -->
+        <div class="deploy-tab-box">
+          <h4 style="color: #38bdf8; margin-top: 0;">💻 边缘节点 Docker Compose 生产编排部署文件</h4>
+          <p class="modal-tip">
+            在需要接入的海外 VPS 或内网主机上新建 <code>docker-compose.yml</code> 并粘贴如下配置，执行 <code>docker compose up -d</code>：
+          </p>
+          <div class="code-editor-box">
+            <pre class="yaml-code-view">{{ generatedDockerComposeYaml }}</pre>
+          </div>
+          <div style="margin-top: 14px;">
+            <button class="btn-cyber-primary" @click="copyText(generatedDockerComposeYaml, 'Docker Compose 配置')">
+              📋 复制完整 YAML 配置
+            </button>
+          </div>
         </div>
       </div>
     </div>
 
-    <!-- 弹窗 1：部署指引弹窗 -->
+    <!-- 弹窗 1：部署指引弹窗 (保留备用) -->
     <div v-if="showDeployModal" class="modal-backdrop" @click="showDeployModal = false">
       <div class="cyber-modal" style="max-width: 620px; text-align: left;" @click.stop>
-        <h3>🚀 海外节点一键 Docker Compose 部署配置</h3>
+        <div style="display: flex; justify-content: space-between; align-items: center;">
+          <h3 style="margin: 0;">🚀 海外节点 Docker 部署配置</h3>
+          <button class="modal-close-btn" @click="showDeployModal = false">✕</button>
+        </div>
         <p class="modal-tip">
           在海外 VPS 上创建 <code>docker-compose.yml</code> 并粘贴如下内容，执行 <code>docker compose up -d</code> 即可自动建立 TOFU 信任上线：
         </p>
@@ -416,18 +465,24 @@
       </div>
     </div>
 
-    <!-- 弹窗 2：⚙️ 节点网络配置 -->
+    <!-- 弹窗 2：⚙️ 节点网络配置 [精确对应图二样式] -->
     <div v-if="showConfigModal" class="modal-backdrop" @click="showConfigModal = false">
       <div class="cyber-modal" style="max-width: 520px; text-align: left;" @click.stop>
-        <h3>⚙️ 节点网络配置 [{{ configForm.name }}]</h3>
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
+          <h3 style="margin: 0;">⚙️ 节点网络配置 [{{ configForm.name }}]</h3>
+          <button class="modal-close-btn" @click="showConfigModal = false" title="关闭窗口">✕</button>
+        </div>
         <div class="form-item" style="margin-top: 14px;">
           <label>节点对外展示名称</label>
-          <input v-model="configForm.name" type="text" class="cyber-input modal-input" />
+          <input v-model="configForm.name" type="text" class="cyber-input modal-input" placeholder="例如: 节点-韩国1" />
         </div>
         <div style="display: flex; gap: 10px;">
           <div class="form-item" style="flex: 1;">
-            <label>节点连接地址 (支持 IP 或 域名)</label>
-            <input v-model="configForm.ip" type="text" class="cyber-input modal-input" />
+            <div style="display: flex; justify-content: space-between; align-items: center;">
+              <label>节点连接地址 (支持 IP 或 域名)</label>
+              <button type="button" class="btn-copy-tag" @click="copyText(configForm.ip, '连接地址')">📋 复制</button>
+            </div>
+            <input v-model="configForm.ip" type="text" class="cyber-input modal-input" placeholder="例如: 140.238.19.231" />
           </div>
           <div class="form-item" style="width: 110px;">
             <label>监听端口</label>
@@ -436,21 +491,30 @@
         </div>
         <div class="form-item">
           <label>伪装目标域名 (dest)</label>
-          <input v-model="configForm.dest" type="text" class="cyber-input modal-input" />
+          <input v-model="configForm.dest" type="text" class="cyber-input modal-input" placeholder="例如: www.amazon.com:443" />
         </div>
         <div class="form-item">
           <label>多 SNI 域名轮换池 (逗号隔开)</label>
-          <input v-model="configForm.server_names" type="text" class="cyber-input modal-input" />
+          <input v-model="configForm.server_names" type="text" class="cyber-input modal-input" placeholder="例如: www.amazon.com,aws.amazon.com" />
         </div>
         <div class="form-item">
-          <label>ShortId 认证标识</label>
-          <input v-model="configForm.sid" type="text" class="cyber-input modal-input" />
+          <div style="display: flex; justify-content: space-between; align-items: center;">
+            <label>ShortId 认证标识 <span class="badge-locked">🔒 节点固化</span></label>
+            <button type="button" class="btn-copy-tag" @click="copyText(configForm.sid, 'ShortId')">📋 复制</button>
+          </div>
+          <input v-model="configForm.sid" type="text" class="cyber-input modal-input font-mono input-readonly" readonly disabled />
         </div>
         <div class="form-item">
-          <label>专属通信密钥 (Node Key - TOFU 已固化)</label>
-          <input v-model="configForm.node_key" type="text" class="cyber-input modal-input font-mono" />
+          <div style="display: flex; justify-content: space-between; align-items: center;">
+            <label>专属通信密钥 (Node Key - TOFU 已固化) <span class="badge-locked">🔒 不可篡改</span></label>
+            <button type="button" class="btn-copy-tag" @click="copyText(configForm.node_key, '专属通信密钥')">📋 复制</button>
+          </div>
+          <input v-model="configForm.node_key" type="text" class="cyber-input modal-input font-mono input-readonly" readonly disabled />
+          <div class="modal-readonly-hint">
+            此密钥为 TOFU 首次握手后节点与控制中心唯一信任凭据，已固化禁止随意修改，保障节点永不失联。
+          </div>
         </div>
-        <div class="btn-group" style="justify-content: flex-end; margin-top: 20px;">
+        <div class="btn-group" style="justify-content: flex-end; margin-top: 20px; gap: 10px;">
           <button class="btn-cyber-action" @click="showConfigModal = false">取消</button>
           <button class="btn-cyber-primary" @click="submitNodeConfig">保存网络配置</button>
         </div>
@@ -576,7 +640,22 @@ const generatedDockerComposeYaml = computed(() => {
       - SERVER_NAMES=www.microsoft.com,microsoft.com
     volumes:
       - ./data:/data
-`
+})
+
+const generatedDockerOneLiner = computed(() => {
+  const panelUrl = clusterInfo.panel_url || (typeof window !== 'undefined' ? window.location.origin : '')
+  const token = clusterInfo.cluster_token || 'your_cluster_token'
+  return `docker run -d \\
+  --name xray-node \\
+  --restart=always \\
+  --network=host \\
+  -e PANEL_URL="${panelUrl}" \\
+  -e CLUSTER_TOKEN="${token}" \\
+  -e PORT=443 \\
+  -e DEST=www.microsoft.com:443 \\
+  -e SERVER_NAMES=www.microsoft.com,microsoft.com \\
+  -v ./data:/data \\
+  ghcr.io/wimotek/xray:latest`
 })
 
 const formatPbk = (pbk) => {
@@ -969,6 +1048,221 @@ const handleRevokeDelete = async (nodeId) => {
 
 .check-icon {
   font-weight: bold;
+}
+
+.btn-banner-action {
+  appearance: none;
+  -webkit-appearance: none;
+  padding: 4px 12px;
+  font-size: 12px;
+  font-weight: 600;
+  border-radius: 6px;
+  border: 1px solid rgba(56, 189, 248, 0.4);
+  background: linear-gradient(135deg, #0284c7 0%, #0369a1 100%);
+  color: #ffffff;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  box-shadow: 0 2px 6px rgba(2, 132, 199, 0.3);
+  transition: all 0.2s ease;
+}
+.btn-banner-action:hover {
+  background: linear-gradient(135deg, #38bdf8 0%, #0284c7 100%);
+  border-color: #38bdf8;
+  transform: translateY(-1px);
+  box-shadow: 0 4px 14px rgba(56, 189, 248, 0.4);
+}
+
+.btn-banner-reset {
+  appearance: none;
+  -webkit-appearance: none;
+  padding: 4px 12px;
+  font-size: 12px;
+  font-weight: 600;
+  border-radius: 6px;
+  border: 1px solid rgba(245, 158, 11, 0.4);
+  background: linear-gradient(135deg, #d97706 0%, #b45309 100%);
+  color: #ffffff;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  box-shadow: 0 2px 6px rgba(217, 119, 6, 0.3);
+  transition: all 0.2s ease;
+}
+.btn-banner-reset:hover {
+  background: linear-gradient(135deg, #f59e0b 0%, #d97706 100%);
+  border-color: #f59e0b;
+  transform: translateY(-1px);
+  box-shadow: 0 4px 14px rgba(245, 158, 11, 0.4);
+}
+
+.btn-banner-deploy {
+  appearance: none;
+  -webkit-appearance: none;
+  padding: 8px 16px;
+  font-size: 12px;
+  font-weight: 600;
+  border-radius: 6px;
+  border: 1px solid rgba(56, 189, 248, 0.4);
+  background: linear-gradient(135deg, #0284c7 0%, #1e40af 100%);
+  color: #ffffff;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  transition: all 0.2s ease;
+  box-shadow: 0 2px 8px rgba(2, 132, 199, 0.3);
+}
+.btn-banner-deploy:hover {
+  background: linear-gradient(135deg, #38bdf8 0%, #2563eb 100%);
+  border-color: #38bdf8;
+  transform: translateY(-1px);
+  box-shadow: 0 4px 16px rgba(56, 189, 248, 0.45);
+}
+
+.btn-xs {
+  appearance: none;
+  -webkit-appearance: none;
+  padding: 3px 8px;
+  font-size: 11px;
+  border-radius: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  cursor: pointer;
+  white-space: nowrap;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-weight: 600;
+  transition: all 0.2s ease;
+  user-select: none;
+}
+.btn-action {
+  background: linear-gradient(135deg, #0284c7 0%, #0369a1 100%);
+  border-color: rgba(56, 189, 248, 0.4);
+  color: #ffffff;
+}
+.btn-reset {
+  background: linear-gradient(135deg, #d97706 0%, #b45309 100%);
+  border-color: rgba(245, 158, 11, 0.4);
+  color: #ffffff;
+}
+
+.modal-close-btn {
+  appearance: none;
+  -webkit-appearance: none;
+  background: transparent;
+  border: none;
+  color: #94a3b8;
+  font-size: 18px;
+  cursor: pointer;
+  padding: 4px 8px;
+  border-radius: 6px;
+  transition: all 0.2s ease;
+  line-height: 1;
+}
+.modal-close-btn:hover {
+  color: #f87171;
+  background: rgba(239, 68, 68, 0.15);
+}
+
+.btn-copy-tag {
+  appearance: none;
+  -webkit-appearance: none;
+  background: rgba(30, 41, 59, 0.8);
+  border: 1px solid rgba(56, 189, 248, 0.3);
+  color: #38bdf8;
+  font-size: 11px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+.btn-copy-tag:hover {
+  background: rgba(56, 189, 248, 0.2);
+  border-color: #38bdf8;
+  color: #ffffff;
+}
+
+.badge-locked {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: rgba(245, 158, 11, 0.15);
+  color: #fbbf24;
+  border: 1px solid rgba(245, 158, 11, 0.3);
+  font-weight: 600;
+  margin-left: 6px;
+}
+
+.input-readonly {
+  background: rgba(15, 23, 42, 0.7) !important;
+  border-color: rgba(71, 85, 105, 0.4) !important;
+  color: #94a3b8 !important;
+  cursor: not-allowed !important;
+  user-select: text !important;
+}
+
+.modal-readonly-hint {
+  font-size: 11px;
+  color: #94a3b8;
+  margin-top: 4px;
+}
+
+.docker-minimal-section {
+  background: linear-gradient(135deg, rgba(15, 23, 42, 0.9) 0%, rgba(11, 17, 32, 0.95) 100%);
+  border: 1px solid rgba(56, 189, 248, 0.35);
+  border-radius: 12px;
+  padding: 20px;
+  margin-bottom: 20px;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4);
+}
+.docker-minimal-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 12px;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+.docker-oneliner-code {
+  background: #020617;
+  border: 1px solid rgba(56, 189, 248, 0.25);
+  border-radius: 8px;
+  padding: 14px 16px;
+  font-family: monospace;
+  font-size: 12px;
+  line-height: 1.6;
+  color: #38bdf8;
+  white-space: pre-wrap;
+  word-break: break-all;
+  user-select: text;
+}
+.docker-args-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 10px;
+  margin-top: 14px;
+}
+.docker-arg-card {
+  background: rgba(30, 41, 59, 0.5);
+  border: 1px solid rgba(51, 65, 85, 0.5);
+  border-radius: 6px;
+  padding: 8px 12px;
+  font-size: 11px;
+}
+.docker-arg-name {
+  color: #f1f5f9;
+  font-weight: 600;
+  font-family: monospace;
+}
+.docker-arg-desc {
+  color: #94a3b8;
+  margin-top: 2px;
 }
 
 .btn-deploy-snippet {
