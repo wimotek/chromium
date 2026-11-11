@@ -4,7 +4,7 @@ Xray-Web 容器启动预热证书初始化工具 (cert_init)
 1. 检测并从只读外部映射目录 /certs:ro 复制证书至 /app/certs
 2. 修复 Linux 权限为 0644 (公钥) 与 0600 (私钥)
 3. 若无任何外部证书，自动生成 10 年期带 IP SAN 的自签名证书
-4. 确保 Granian --ssl-certfile /app/certs/fullchain.pem --ssl-keyfile /app/certs/privkey.pem 启动时 100% 存在且有效！
+4. 确保 Granian --ssl-certificate /app/certs/fullchain.pem --ssl-keyfile /app/certs/privkey.pem 启动时 100% 存在且有效！
 """
 import sys
 import os
