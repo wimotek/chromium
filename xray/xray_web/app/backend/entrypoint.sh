@@ -21,8 +21,8 @@ if [ $# -eq 0 ] || [ "$1" = "granian-default" ]; then
     exec granian --interface wsgi \
          --host 0.0.0.0 --port "${WEB_PORT}" \
          --workers 2 \
-         --threads 1 \
-         --blocking-threads 32 \
+         --runtime-threads 1 \
+         --blocking-threads 8 \
          --ssl-certificate /app/certs/fullchain.pem \
          --ssl-keyfile /app/certs/privkey.pem \
          app:app
