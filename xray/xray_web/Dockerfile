@@ -61,10 +61,8 @@ USER appuser
 EXPOSE 3000
 VOLUME ["/data"]
 
-HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
-    CMD python3 -c "import urllib.request,urllib.error,sys; \
-        try: urllib.request.urlopen('http://127.0.0.1:3000/healthz', timeout=3) \
-        except urllib.error.HTTPError as e: sys.exit(0 if e.code < 500 else 1)" || exit 1
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+    CMD wget -q --spider http://127.0.0.1:3000/healthz || exit 1
 
 CMD ["gunicorn", "--bind", "0.0.0.0:3000", \
      "--workers", "5", \
