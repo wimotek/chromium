@@ -36,13 +36,14 @@ app.register_blueprint(system_bp)
 
 init_db()
 
+@app.route('/healthz', methods=['GET'])
+def health_check():
+    """轻量健康探测接口，供 Docker HEALTHCHECK 及 K8s liveness 探针秒级检测"""
+    return "OK", 200
+
 @app.route('/')
 def index():
     return send_from_directory(app.static_folder, 'index.html')
-
-@app.route("/healthz")
-def healthz():
-    return "ok", 200
 
 @app.route('/.well-known/acme-challenge/<path:filename>')
 def acme_challenge_token(filename):

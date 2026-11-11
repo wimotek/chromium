@@ -110,15 +110,21 @@ ShortId: {self.xray_mgr.short_id}
 
                 # 2. 如果 Hub 下发了新的节点配置或用户同步指令
                 sync_data = self.hub_client.fetch_users_and_policy()
-                if sync_data and "users" in sync_data:
-                    remote_users = sync_data["users"]
-                    node_cfg = sync_data.get("node_config", {})
-                    
+                node_cfg = (sync_data.get("node_config") if sync_data else None) or (hb_data.get("node_config") if hb_data else None)
+
+                if node_cfg:
                     remote_port = int(node_cfg.get("port", AppConfig.PORT))
                     remote_dest = node_cfg.get("dest", AppConfig.DEST)
                     remote_snis = node_cfg.get("server_names", AppConfig.get_server_name_list())
                     remote_sid = node_cfg.get("sid", self.xray_mgr.short_id)
 
+                    # 动态更新节点内存全局配置，确保后续心跳上报匹配主控设定的权威参数
+                    AppConfig.PORT = remote_port
+                    AppConfig.DEST = remote_dest
+                    if isinstance(remote_snis, list) and remote_snis:
+                        AppConfig.SERVER_NAMES = ",".join(remote_snis)
+
+                    remote_users = sync_data.get("users", []) if sync_data else []
                     new_cfg = build_xray_config(
                         net_mode=self.net_mode,
                         clients=remote_users,
@@ -132,7 +138,7 @@ ShortId: {self.xray_mgr.short_id}
 
                     applied = self.xray_mgr.apply_config(new_cfg)
                     if applied:
-                        print(f"[HubSync] ✅ 成功同步并生效 {len(remote_users)} 位授权用户规则", flush=True)
+                        print(f"[HubSync] ✅ 成功同步并生效最新网络策略 (端口:{remote_port}, dest:{remote_dest}, 用户数:{len(remote_users)})", flush=True)
 
                 # 3. 统计增量流量回传结算
                 self.hub_client.query_and_report_traffic()

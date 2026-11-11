@@ -171,8 +171,25 @@ def check_pending_nodes_timeout(force: bool = False):
                     conn.commit()
     conn.close()
 
+import os
+import fcntl
+
 def start_scheduler_thread():
+    """多进程守护线程：使用 fcntl 文件锁进行 Leader 选举，确保多 Worker 场景下仅有单进程执行巡检"""
+    lock_file = "/data/.scheduler.lock"
+
     def loop():
+        try:
+            os.makedirs("/data", exist_ok=True)
+            # 保持文件句柄常开持有锁
+            lock_fd = open(lock_file, "a+")
+            # 尝试非阻塞获取排他锁
+            fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            print(f"[Scheduler Leader] 进程 (PID: {os.getpid()}) 成功获取全局调度锁，启动后台任务与证书自动续期。", flush=True)
+        except (IOError, BlockingIOError, PermissionError):
+            print(f"[Scheduler Worker] 进程 (PID: {os.getpid()}) 未获取到全局调度锁，跳过定时器（由 Leader 进程托管）。", flush=True)
+            return
+
         time.sleep(10)
         while True:
             try:

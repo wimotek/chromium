@@ -36,7 +36,7 @@ docker run -d \
   --name xray-node \
   --restart always \
   --network host \
-  -e PANEL_URL="http://<主控服务器IP>:3000" \
+  -e PANEL_URL="https://<主控服务器IP>:8443" \
   -e CLUSTER_TOKEN="xray_cluster_secret_key_2026" \
   -e NET_MODE="auto" \
   -e PORT=443 \
@@ -59,7 +59,7 @@ services:
     network_mode: "host"
     environment:
       - TZ=Asia/Shanghai
-      - PANEL_URL=http://<主控服务器IP>:3000      # 留空则进入纯单机模式
+      - PANEL_URL=https://<主控服务器IP>:8443      # 留空则进入纯单机模式
       - CLUSTER_TOKEN=xray_cluster_secret_key_2026 # 集群引导令牌
       - NET_MODE=auto                              # auto / direct / reverse_wss
       - PORT=443
@@ -83,7 +83,7 @@ docker compose up -d
 
 | 环境变量 | 默认值 | 作用说明 |
 | :--- | :--- | :--- |
-| `PANEL_URL` | *(空)* | Hub 控制中心访问地址（例：`http://hub.example.com:3000`）。若留空则为纯单机模式 |
+| `PANEL_URL` | *(空)* | Hub 控制中心访问地址（例：`https://hub.example.com:8443`）。若留空则为纯单机模式 |
 | `CLUSTER_TOKEN` | *(空)* | 集群引导令牌（首次连接用于 TOFU 认证）。也可用 `NODE_KEY` |
 | `NET_MODE` | `auto` | 网络模式：`auto`（智能探测）、`direct`（强制公网直连）、`reverse_wss`（强制 NAT4 反穿） |
 | `PORT` | `443` | 节点直连监听端口（反穿模式下对外端口由 Hub 代理接管） |

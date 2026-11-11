@@ -261,18 +261,42 @@ def node_heartbeat():
         if auth_success:
             update_lock_status = "locked" if (locked_pubkey or node_pubkey) else "unlocked"
             save_pubkey = locked_pubkey or node_pubkey
+
+            # 主控持久化保存的网络配置为权威配置，不能被节点心跳上报的旧环境参数覆写！
+            effective_port = node_row["port"] if (node_row and node_row["port"]) else node_port
+            effective_dest = node_row["dest"] if (node_row and node_row["dest"]) else dest
+            effective_sni = node_row["sni"] if (node_row and node_row["sni"]) else primary_sni
+            effective_server_names = node_row["server_names"] if (node_row and node_row["server_names"]) else server_names_str
+            effective_sid = node_row["sid"] if (node_row and node_row["sid"]) else sid
+            effective_ip = node_row["ip"] if (node_row and node_row["ip"]) else save_ip
+
             c.execute("""
                 UPDATE nodes 
-                SET ip=?, port=?, pbk=?, sid=COALESCE(NULLIF(?, ''), sid), dest=?, sni=?, server_names=?, status=1, last_heartbeat=?, last_challenge_nonce=?, key_lock_status=?, node_public_key=?
+                SET ip=?, port=?, pbk=?, sid=?, dest=?, sni=?, server_names=?, status=1, last_heartbeat=?, last_challenge_nonce=?, key_lock_status=?, node_public_key=?
                 WHERE node_id=?
-            """, (save_ip, node_port, pbk, sid, dest, primary_sni, server_names_str, now_str, next_challenge_nonce, update_lock_status, save_pubkey, node_id))
+            """, (effective_ip, effective_port, pbk, effective_sid, effective_dest, effective_sni, effective_server_names, now_str, next_challenge_nonce, update_lock_status, save_pubkey, node_id))
             conn.commit()
+
+            # 重新拉取节点最新权威配置并下发给节点，确保管理员在面板修改后节点秒级同步生效
+            c.execute("SELECT * FROM nodes WHERE node_id=?", (node_id,))
+            latest_node = dict(c.fetchone())
             conn.close()
+
+            snis = get_node_snis(latest_node)
+            clean_dest = latest_node["dest"] if (latest_node.get("dest") and ":" in latest_node["dest"]) else f"{latest_node.get('dest', 'www.microsoft.com')}:443"
+
             return jsonify({
                 "code": 200, 
                 "msg": "心跳正常 (密码学验签通过)",
                 "challenge_nonce": next_challenge_nonce,
-                "key_lock_status": update_lock_status
+                "key_lock_status": update_lock_status,
+                "node_config": {
+                    "port": latest_node["port"],
+                    "dest": clean_dest,
+                    "sni": snis[0] if snis else "www.microsoft.com",
+                    "server_names": snis,
+                    "sid": latest_node["sid"]
+                }
             })
 
         conn.close()

@@ -4,11 +4,11 @@ class Config:
     SECRET_KEY = os.getenv("SECRET_KEY", "xray_secure_key_default")
     DB_PATH = os.getenv("DB_PATH", "/data/xray_web.db")
     
-    # Web 端口与代理端口彻底解耦
-    WEB_PORT = int(os.getenv("WEB_PORT", 3000))
+    # Web 端口与代理端口彻底解耦 (主控统一使用 HTTPS 8443 端口)
+    WEB_PORT = int(os.getenv("WEB_PORT", 8443))
     PORT = WEB_PORT
-    # 是否强制 HTTPS (生产环境建议前置 Nginx/反代，或设为 false 使用纯 HTTP 配合外部反代)
-    SSL_ENABLE = os.getenv("SSL_ENABLE", "false").strip().lower() in ("true", "1", "yes")
+    # 强制启用原生 HTTPS TLS 加密
+    SSL_ENABLE = os.getenv("SSL_ENABLE", "true").strip().lower() in ("true", "1", "yes")
     
     APP_MODE = os.getenv("APP_MODE", "user")
 

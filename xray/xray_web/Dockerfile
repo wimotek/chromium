@@ -39,35 +39,34 @@ LABEL description="Xray-Web Master Control Hub (Optimized & Precompiled)"
 # 仅安装生产必须的运行时动态链接库 (无 gcc/cargo/pip 缓存污染)
 RUN apk add --no-cache ca-certificates tzdata openssl
 
-# adduser 与 mkdir/chown 逻辑相关，合并成一层是合理的
+# adduser 与 mkdir/chown 逻辑相关，合并成一层是合理的 (包含持久化 /data 与运行期证书目录 /app/certs)
 RUN addgroup -g 10001 -S appgroup && \
     adduser -u 10001 -S -G appgroup -s /sbin/nologin appuser && \
-    mkdir -p /data && chown appuser:appgroup /data
+    mkdir -p /data /app/certs && chown -R appuser:appgroup /data /app/certs
 
 # 关键：bind mount，wheels 不进入任何层
 RUN --mount=type=bind,from=python-builder,source=/wheels,target=/wheels \
     pip install --no-cache-dir --no-index --find-links=/wheels /wheels/*.whl
 
-COPY --chown=appuser:appgroup app/backend/ ./backend/
+COPY --chown=appuser:appgroup --chmod=755 app/backend/ ./backend/
 COPY --chown=appuser:appgroup --from=frontend-builder /build/dist ./frontend/dist
 
 WORKDIR /app/backend
 ENV TZ=Asia/Shanghai \
     PYTHONUNBUFFERED=1 \
-    PYTHONDONTWRITEBYTECODE=1
+    PYTHONDONTWRITEBYTECODE=1 \
+    WEB_PORT=8443
 
 USER appuser
 
-EXPOSE 3000
+# EXPOSE 为镜像默认元数据声明（默认 8443，运行时可通过 -e WEB_PORT=自定义端口 自由指定）
+EXPOSE 8443
 VOLUME ["/data"]
 
-HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
-    CMD wget -q --spider http://127.0.0.1:3000/healthz || exit 1
+# 容器健康检查：动态解析 ${WEB_PORT} 端口与 /healthz 端点
+HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
+    CMD wget --no-check-certificate -q --spider "https://127.0.0.1:${WEB_PORT:-8443}/healthz" || exit 1
 
-CMD ["gunicorn", "--bind", "0.0.0.0:3000", \
-     "--workers", "5", \
-     "--threads", "2", \
-     "--timeout", "60", \
-     "--access-logfile", "-", \
-     "--error-logfile", "-", \
-     "app:app"]
+# 关键：使用 entrypoint.sh 统一接管证书预热与动态 ${WEB_PORT} 端口启动
+ENTRYPOINT ["/app/backend/entrypoint.sh"]
+CMD ["granian-default"]

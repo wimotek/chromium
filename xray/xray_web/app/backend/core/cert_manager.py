@@ -2,18 +2,59 @@ import os
 import shutil
 import datetime
 import subprocess
+import signal
 from core.db import get_setting
 
-CERT_DIR = "/data/certs"
+# 运行期 Granian 专属唯一落地路径 (与 Dockerfile 中 granian 参数严格对齐)
+CERT_DIR = "/app/certs"
 CERT_PATH = os.path.join(CERT_DIR, "fullchain.pem")
 KEY_PATH = os.path.join(CERT_DIR, "privkey.pem")
+
 CHALLENGE_DIR = "/data/acme-challenge"
 
-os.makedirs(CERT_DIR, exist_ok=True)
-os.makedirs(CHALLENGE_DIR, exist_ok=True)
+# 外部只读挂载候选目录 (用户通过 -v /host/path:/certs:ro 挂载)
+EXTERNAL_CERT_DIRS = ["/certs"]
 
-def generate_self_signed_cert():
-    """使用系统原生 openssl CLI 生成带 IP SAN (包含 127.0.0.1) 的 10 年期自签名证书"""
+# 常见的公钥证书候选文件名
+CERT_CANDIDATES = [
+    "fullchain.pem", "certificate.crt", "fullchain.crt", "server.crt", "cert.pem", "bundle.crt"
+]
+
+# 常见的私钥候选文件名
+KEY_CANDIDATES = [
+    "privkey.pem", "private.key", "server.key", "key.pem"
+]
+
+def ensure_dirs():
+    """确保运行时证书与 ACME 挑战目录存在"""
+    for d in [CERT_DIR, CHALLENGE_DIR]:
+        try:
+            os.makedirs(d, exist_ok=True)
+        except Exception:
+            pass
+
+ensure_dirs()
+
+def set_safe_permissions(cert_file: str, key_file: str):
+    """
+    为目标证书与私钥设置严格安全的 Linux 权限:
+    - 公钥证书: 0644 (所有组可读)
+    - 私钥文件: 0600 (仅属主 appuser 可读写)
+    """
+    try:
+        if os.path.exists(cert_file):
+            os.chmod(cert_file, 0o644)
+    except Exception:
+        pass
+    try:
+        if os.path.exists(key_file):
+            os.chmod(key_file, 0o600)
+    except Exception:
+        pass
+
+def generate_self_signed_cert(target_cert: str = CERT_PATH, target_key: str = KEY_PATH):
+    """使用 openssl CLI 生成带 IP SAN (含 127.0.0.1, 0.0.0.0, localhost) 的 10 年期自签证书至 /app/certs"""
+    ensure_dirs()
     openssl_cnf = """
 [req]
 distinguished_name = req_distinguished_name
@@ -40,19 +81,20 @@ IP.2 = 0.0.0.0
 """
     tmp_cnf = "/tmp/openssl_san.cnf"
     try:
-        with open(tmp_cnf, "w") as f:
+        with open(tmp_cnf, "w", encoding="utf-8") as f:
             f.write(openssl_cnf)
         cmd = [
             "openssl", "req", "-x509", "-nodes",
             "-days", "3650",
             "-newkey", "rsa:2048",
-            "-keyout", KEY_PATH,
-            "-out", CERT_PATH,
+            "-keyout", target_key,
+            "-out", target_cert,
             "-config", tmp_cnf
         ]
         subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        set_safe_permissions(target_cert, target_key)
     except Exception as e:
-        print(f"[Cert Error] 生成带 IP SAN 自签证书失败: {e}", flush=True)
+        print(f"[Cert Error] 生成自签证书失败: {e}", flush=True)
     finally:
         if os.path.exists(tmp_cnf):
             try:
@@ -60,25 +102,13 @@ IP.2 = 0.0.0.0
             except Exception:
                 pass
 
-# 候选证书挂载目录列表 (支持 /certs 以及 /data/certs)
-SEARCH_DIRS = ["/certs", "/data/certs"]
-
-# 常见的宝塔、Nginx、Certbot 证书公钥文件名候选 (按优先级匹配)
-CERT_CANDIDATES = [
-    "fullchain.pem", "certificate.crt", "fullchain.crt", "server.crt", "cert.pem", "bundle.crt"
-]
-
-# 常见的私钥文件名候选
-KEY_CANDIDATES = [
-    "privkey.pem", "private.key", "server.key", "key.pem"
-]
-
-def find_custom_certificates() -> tuple[str, str]:
+def find_and_import_external_certs() -> bool:
     """
-    全自动扫描外部映射的自定义证书 (如宝塔面板、Nginx、Certbot):
-    支持挂载到 /certs 或 /data/certs 下的任意常见命名证书文件
+    全自动扫描外部挂载的只读证书目录 (/certs:ro):
+    若识别到有效的证书与私钥，安全复制到 /app/certs 并赋予正确的属主与 0644/0600 权限
     """
-    for d in SEARCH_DIRS:
+    ensure_dirs()
+    for d in EXTERNAL_CERT_DIRS:
         if not os.path.exists(d):
             continue
 
@@ -98,7 +128,7 @@ def find_custom_certificates() -> tuple[str, str]:
                 matched_key = k_p
                 break
 
-        # 2. 如果未命中，扫描目录下任何以 .crt / .pem 和 .key 结尾的配对文件
+        # 2. 如果未命名标准，按文件扩展名智能推断
         if not matched_cert or not matched_key:
             try:
                 files = os.listdir(d)
@@ -115,51 +145,99 @@ def find_custom_certificates() -> tuple[str, str]:
                 pass
 
         if matched_cert and matched_key:
-            # 解决外部挂载权限问题 (如 root 映射只读，确保容器内部具备读取权限)
-            try:
-                os.chmod(matched_cert, 0o644)
-                os.chmod(matched_key, 0o600)
-            except Exception:
-                pass
-
-            # 校验私钥与公钥的有效性
             chk_cert = subprocess.run(["openssl", "x509", "-in", matched_cert, "-noout"], capture_output=True)
             chk_key = subprocess.run(["openssl", "rsa", "-in", matched_key, "-check", "-noout"], capture_output=True)
             if chk_cert.returncode == 0 and chk_key.returncode == 0:
-                return matched_cert, matched_key
-
-    return "", ""
+                print(f"==> [SSL Import] 🟢 从外部只读目录 {d} 成功检测到有效证书！", flush=True)
+                shutil.copyfile(matched_cert, CERT_PATH)
+                shutil.copyfile(matched_key, KEY_PATH)
+                set_safe_permissions(CERT_PATH, KEY_PATH)
+                print(f"==> [SSL Import] 证书已成功导入至 {CERT_PATH}，权限已设为 0644/0600", flush=True)
+                return True
+    return False
 
 def ensure_certificates() -> tuple[str, str]:
     """
-    证书决策核心：
-    1. 优先扫描 /certs 或 /data/certs 下外部挂载的自定义有效证书 (宝塔/Nginx/Certbot)
-    2. 若未检测到外部自定义证书，则自动生成带 IP SAN (127.0.0.1) 的自签名证书
+    容器启动及运行期证书落地总入口：
+    1. 优先扫描并对齐 /certs:ro 外部挂载证书，拷贝至 /app/certs
+    2. 其次复用 /app/certs 已存在的有效证书
+    3. 兜底自动生成带 127.0.0.1 IP SAN 的自签名证书
+    确保 /app/certs/fullchain.pem 与 /app/certs/privkey.pem 百分之百就绪！
     """
-    custom_cert, custom_key = find_custom_certificates()
-    if custom_cert and custom_key:
-        print(f"==> [SSL Discovery] 🟢 成功识别到外部自定义证书！", flush=True)
-        print(f"    - 公钥证书: {custom_cert}", flush=True)
-        print(f"    - 私钥文件: {custom_key}", flush=True)
-        return custom_cert, custom_key
+    ensure_dirs()
 
-    # 未检测到外部自定义证书，使用自签名证书
-    if not os.path.exists(CERT_PATH) or not os.path.exists(KEY_PATH):
-        print("==> [SSL Notice] 未检测到外部自定义证书，自动生成 10 年期自签证书 (含 127.0.0.1 IP SAN)...", flush=True)
-        generate_self_signed_cert()
-    else:
-        print(f"==> [SSL Notice] 使用系统默认自签名证书: {CERT_PATH}", flush=True)
+    # 1. 尝试导入外部挂载证书
+    if find_and_import_external_certs():
+        return CERT_PATH, KEY_PATH
 
-    try:
-        os.chmod(CERT_PATH, 0o644)
-        os.chmod(KEY_PATH, 0o600)
-    except Exception:
-        pass
+    # 2. 如果 /app/certs 已存在且有效
+    if os.path.exists(CERT_PATH) and os.path.exists(KEY_PATH):
+        chk_cert = subprocess.run(["openssl", "x509", "-in", CERT_PATH, "-noout"], capture_output=True)
+        if chk_cert.returncode == 0:
+            set_safe_permissions(CERT_PATH, KEY_PATH)
+            return CERT_PATH, KEY_PATH
 
+    # 3. 兜底自动生成自签名证书
+    print("==> [SSL Notice] 未找到有效证书，自动生成 10 年期自签证书 (含 127.0.0.1 IP SAN) 至 /app/certs...", flush=True)
+    generate_self_signed_cert()
     return CERT_PATH, KEY_PATH
 
+def reload_granian_server() -> bool:
+    """通过向 Granian 主进程发送 SIGHUP 信号，实现内存中 TLS 证书的平滑零宕机重载"""
+    try:
+        ppid = os.getppid()
+        if ppid > 1:
+            os.kill(ppid, signal.SIGHUP)
+            print(f"[SSL Reload] 已向 Granian 主进程 (PID: {ppid}) 发送 SIGHUP 信号完成平滑重载！", flush=True)
+            return True
+    except Exception as e:
+        print(f"[SSL Reload Warn] 无法向父进程发送 SIGHUP: {e}", flush=True)
+    return False
+
+def save_custom_certificate(cert_pem: str, key_pem: str) -> tuple[bool, str]:
+    """后台手动粘贴证书 PEM 后的保存逻辑：写入 /app/certs 并触发重载"""
+    cert_str = cert_pem.strip()
+    key_str = key_pem.strip()
+    if not cert_str or not key_str:
+        return False, "证书或私钥内容不能为空"
+
+    ensure_dirs()
+    tmp_cert = "/tmp/test_cert.pem"
+    tmp_key = "/tmp/test_key.pem"
+    try:
+        with open(tmp_cert, "w", encoding="utf-8") as f:
+            f.write(cert_str + "\n")
+        with open(tmp_key, "w", encoding="utf-8") as f:
+            f.write(key_str + "\n")
+
+        chk_cert = subprocess.run(["openssl", "x509", "-in", tmp_cert, "-noout"], capture_output=True)
+        chk_key = subprocess.run(["openssl", "rsa", "-in", tmp_key, "-check", "-noout"], capture_output=True)
+
+        if chk_cert.returncode != 0:
+            return False, "证书内容格式无效，无法通过 openssl 验证"
+        if chk_key.returncode != 0:
+            return False, "私钥内容格式无效，无法通过 openssl 验证"
+
+        # 直接写入 /app/certs
+        shutil.copyfile(tmp_cert, CERT_PATH)
+        shutil.copyfile(tmp_key, KEY_PATH)
+        set_safe_permissions(CERT_PATH, KEY_PATH)
+
+        # 触发 Granian 平滑热重载
+        reload_granian_server()
+        return True, "第三方 SSL 证书已成功保存至 /app/certs，并已通知服务平滑重载！"
+    except Exception as e:
+        return False, f"证书处理异常: {str(e)}"
+    finally:
+        if os.path.exists(tmp_cert):
+            try: os.remove(tmp_cert)
+            except Exception: pass
+        if os.path.exists(tmp_key):
+            try: os.remove(tmp_key)
+            except Exception: pass
+
 def get_cert_info() -> dict:
-    """使用系统 openssl x509 CLI 原生解析证书信息与剩余天数"""
+    """原生 openssl 解析当前 /app/certs/fullchain.pem 证书信息"""
     if not os.path.exists(CERT_PATH):
         return {"status": "none", "is_self_signed": True, "issuer": "", "days_left": 0}
 
@@ -202,38 +280,8 @@ def get_cert_info() -> dict:
         print(f"[Cert Info Error] {e}", flush=True)
         return {"status": "error", "is_self_signed": True, "issuer": "Error", "days_left": 0}
 
-def save_custom_certificate(cert_pem: str, key_pem: str) -> tuple[bool, str]:
-    cert_str = cert_pem.strip()
-    key_str = key_pem.strip()
-    if not cert_str or not key_str:
-        return False, "证书或私钥内容不能为空"
-
-    tmp_cert = "/tmp/test_cert.pem"
-    tmp_key = "/tmp/test_key.pem"
-    try:
-        with open(tmp_cert, "w", encoding="utf-8") as f:
-            f.write(cert_str + "\n")
-        with open(tmp_key, "w", encoding="utf-8") as f:
-            f.write(key_str + "\n")
-
-        chk_cert = subprocess.run(["openssl", "x509", "-in", tmp_cert, "-noout"], capture_output=True)
-        chk_key = subprocess.run(["openssl", "rsa", "-in", tmp_key, "-check", "-noout"], capture_output=True)
-
-        if chk_cert.returncode != 0:
-            return False, "证书内容格式无效，无法通过 openssl 验证"
-        if chk_key.returncode != 0:
-            return False, "私钥内容格式无效，无法通过 openssl 验证"
-
-        shutil.move(tmp_cert, CERT_PATH)
-        shutil.move(tmp_key, KEY_PATH)
-        return True, "第三方 SSL 证书导入保存成功！"
-    except Exception as e:
-        return False, f"证书处理异常: {str(e)}"
-    finally:
-        if os.path.exists(tmp_cert): os.remove(tmp_cert)
-        if os.path.exists(tmp_key): os.remove(tmp_key)
-
 def issue_acme_certificate(domain: str, email: str) -> tuple[bool, str]:
+    """ACME 自动签发并直接落地至 /app/certs"""
     if not domain:
         return False, "申请域名不能为空"
     cmd = [
@@ -256,7 +304,10 @@ def issue_acme_certificate(domain: str, email: str) -> tuple[bool, str]:
             if os.path.exists(live_cert) and os.path.exists(live_key):
                 shutil.copyfile(live_cert, CERT_PATH)
                 shutil.copyfile(live_key, KEY_PATH)
-                return True, f"ACME 证书为 [{domain}] 自动签发成功！已生效。"
+                set_safe_permissions(CERT_PATH, KEY_PATH)
+
+                reload_granian_server()
+                return True, f"ACME 证书为 [{domain}] 自动签发成功！已落地至 /app/certs 并平滑生效。"
             return False, "证书签发成功但无法定位 fullchain.pem"
         else:
             return False, f"Certbot 验证失败: {res.stderr or res.stdout}"

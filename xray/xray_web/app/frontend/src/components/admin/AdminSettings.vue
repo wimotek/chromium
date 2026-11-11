@@ -320,7 +320,7 @@
                 <div class="inner-divider-title" style="margin: 0;">📋 手动粘贴第三方证书 (如宝塔证书)</div>
                 <button class="btn-link-action" @click="showCustomCertModal = true">打开粘贴窗口</button>
               </div>
-              <div class="input-hint">若已有证书，可直接映射或粘贴保存到 <code>/data/certs/fullchain.pem</code> 与 <code>privkey.pem</code>。</div>
+              <div class="input-hint">若已有证书，可直接映射或粘贴保存到 <code>/app/certs/fullchain.pem</code> 与 <code>privkey.pem</code>。</div>
             </div>
           </div>
         </div>
@@ -419,7 +419,7 @@
     <div v-if="showCustomCertModal" class="modal-backdrop" @click="showCustomCertModal = false">
       <div class="cyber-modal" style="max-width: 520px; text-align: left;" @click.stop>
         <h3>📋 手动安装第三方 HTTPS 证书</h3>
-        <p class="modal-tip">直接粘贴 PEM 编码的证书与私钥，将保存写入 <code>/data/certs/fullchain.pem</code> 与 <code>privkey.pem</code>：</p>
+        <p class="modal-tip">直接粘贴 PEM 编码的证书与私钥，将保存写入 <code>/app/certs/fullchain.pem</code> 与 <code>privkey.pem</code>：</p>
         <div class="form-item">
           <label>公钥证书链 (fullchain.pem)</label>
           <textarea v-model="customCertPem" rows="6" class="cyber-input cyber-textarea modal-input" placeholder="-----BEGIN CERTIFICATE-----..."></textarea>

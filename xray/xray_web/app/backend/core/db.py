@@ -4,19 +4,58 @@ import hashlib
 import datetime
 import uuid
 import secrets
+import time
+from contextlib import contextmanager
 from config import Config
 
 def get_db():
     os.makedirs(os.path.dirname(Config.DB_PATH), exist_ok=True)
-    conn = sqlite3.connect(Config.DB_PATH)
+    conn = sqlite3.connect(Config.DB_PATH, timeout=30.0, check_same_thread=False)
     conn.row_factory = sqlite3.Row
+    # 高并发多进程必备：30 秒忙等锁超时，内存临时表，NORMAL 模式
+    conn.execute("PRAGMA busy_timeout=30000;")
+    conn.execute("PRAGMA synchronous=NORMAL;")
+    conn.execute("PRAGMA temp_store=MEMORY;")
     return conn
+
+@contextmanager
+def db_session():
+    """事务上下文管理器：自动 commit，异常自动 rollback，确保连接即刻关闭释放锁"""
+    conn = get_db()
+    try:
+        yield conn
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+def execute_with_retry(func, max_retries=5, initial_delay=0.05):
+    """数据库写锁冲突自愈重试器 (指数退避)"""
+    delay = initial_delay
+    for attempt in range(max_retries):
+        try:
+            return func()
+        except sqlite3.OperationalError as e:
+            if "locked" in str(e).lower() and attempt < max_retries - 1:
+                time.sleep(delay)
+                delay *= 2
+            else:
+                raise
 
 def hash_pwd(pwd: str) -> str:
     return hashlib.sha256(pwd.encode('utf-8')).hexdigest()
 
 def init_db():
-    conn = get_db()
+    os.makedirs(os.path.dirname(Config.DB_PATH), exist_ok=True)
+    conn = sqlite3.connect(Config.DB_PATH, timeout=30.0)
+    # 核心：永久启用 WAL (Write-Ahead Logging) 模式，实现读写互不阻塞！
+    conn.execute("PRAGMA journal_mode=WAL;")
+    conn.execute("PRAGMA busy_timeout=30000;")
+    conn.execute("PRAGMA synchronous=NORMAL;")
+    conn.commit()
+
     c = conn.cursor()
 
     # 1. 用户表

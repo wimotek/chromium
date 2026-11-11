@@ -444,8 +444,8 @@
     </div>
 
     <!-- 弹窗 1：部署指引弹窗 (保留备用) -->
-    <div v-if="showDeployModal" class="modal-backdrop" @click="showDeployModal = false">
-      <div class="cyber-modal" style="max-width: 620px; text-align: left;" @click.stop>
+    <div v-if="showDeployModal" class="modal-backdrop">
+      <div class="cyber-modal" style="max-width: 620px; text-align: left;">
         <div style="display: flex; justify-content: space-between; align-items: center;">
           <h3 style="margin: 0;">🚀 海外节点 Docker 部署配置</h3>
           <button class="modal-close-btn" @click="showDeployModal = false">✕</button>
@@ -465,9 +465,9 @@
       </div>
     </div>
 
-    <!-- 弹窗 2：⚙️ 节点网络配置 [精确对应图二样式] -->
-    <div v-if="showConfigModal" class="modal-backdrop" @click="showConfigModal = false">
-      <div class="cyber-modal" style="max-width: 520px; text-align: left;" @click.stop>
+    <!-- 弹窗 2：⚙️ 节点网络配置 [精确对应图二样式，点外部空白不关闭] -->
+    <div v-if="showConfigModal" class="modal-backdrop">
+      <div class="cyber-modal" style="max-width: 520px; text-align: left;">
         <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
           <h3 style="margin: 0;">⚙️ 节点网络配置 [{{ configForm.name }}]</h3>
           <button class="modal-close-btn" @click="showConfigModal = false" title="关闭窗口">✕</button>
@@ -522,8 +522,8 @@
     </div>
 
     <!-- 弹窗 3：🔐 节点启停与权限策略 -->
-    <div v-if="showPermModal" class="modal-backdrop" @click="showPermModal = false">
-      <div class="cyber-modal" style="max-width: 520px; text-align: left;" @click.stop>
+    <div v-if="showPermModal" class="modal-backdrop">
+      <div class="cyber-modal" style="max-width: 520px; text-align: left;">
         <h3>🔐 节点启停与权限策略 [{{ permForm.name }}]</h3>
         <div class="form-item" style="margin-top: 14px;">
           <label>节点运行状态 (单选启停)</label>
@@ -622,14 +622,9 @@ const maskedClusterToken = computed(() => {
   return `${t.slice(0, 8)}...${t.slice(-6)}`
 })
 
-// 只在运行期产生一个真实反斜杠，源码里不写 "\ + 换行"
-const SH = '\\'
-const NL = '\n'
-
 const generatedDockerComposeYaml = computed(() => {
-  const panelUrl = clusterInfo.panel_url || window.location.origin
+  const panelUrl = clusterInfo.panel_url || (typeof window !== 'undefined' ? window.location.origin : '')
   const token = clusterInfo.cluster_token || 'your_cluster_token'
-
   return [
     'services:',
     '  xray-node:',
@@ -646,28 +641,26 @@ const generatedDockerComposeYaml = computed(() => {
     '      - SERVER_NAMES=www.microsoft.com,microsoft.com',
     '    volumes:',
     '      - ./data:/data'
-  ].join(NL)
+  ].join('\n')
 })
 
 const generatedDockerOneLiner = computed(() => {
   const panelUrl = clusterInfo.panel_url || (typeof window !== 'undefined' ? window.location.origin : '')
   const token = clusterInfo.cluster_token || 'your_cluster_token'
-
   return [
-    `docker run -d ${SH}`,
-    `  --name xray-node ${SH}`,
-    `  --restart=always ${SH}`,
-    `  --network=host ${SH}`,
-    `  -e PANEL_URL="${panelUrl}" ${SH}`,
-    `  -e CLUSTER_TOKEN="${token}" ${SH}`,
-    `  -e PORT=443 ${SH}`,
-    `  -e DEST=www.microsoft.com:443 ${SH}`,
-    `  -e SERVER_NAMES=www.microsoft.com,microsoft.com ${SH}`,
-    `  -v ./data:/data ${SH}`,
-    `  ghcr.io/wimotek/xray:latest`
-  ].join(NL)
+    'docker run -d \\',
+    '  --name xray-node \\',
+    '  --restart=always \\',
+    '  --network=host \\',
+    `  -e PANEL_URL="${panelUrl}" \\`,
+    `  -e CLUSTER_TOKEN="${token}" \\`,
+    '  -e PORT=443 \\',
+    '  -e DEST=www.microsoft.com:443 \\',
+    '  -e SERVER_NAMES=www.microsoft.com,microsoft.com \\',
+    '  -v ./data:/data \\',
+    '  ghcr.io/wimotek/xray:latest'
+  ].join('\n')
 })
-
 
 const formatPbk = (pbk) => {
   if (!pbk || pbk.length < 14) return pbk || ''
@@ -676,11 +669,32 @@ const formatPbk = (pbk) => {
 
 const copyText = (text, label) => {
   if (!text) return
-  navigator.clipboard.writeText(text).then(() => {
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text).then(() => {
+      ElMessage.success(`${label}已复制到剪贴板！`)
+    }).catch(() => {
+      fallbackCopy(text, label)
+    })
+  } else {
+    fallbackCopy(text, label)
+  }
+}
+
+const fallbackCopy = (text, label) => {
+  try {
+    const ta = document.createElement('textarea')
+    ta.value = text
+    ta.style.position = 'fixed'
+    ta.style.left = '-9999px'
+    document.body.appendChild(ta)
+    ta.focus()
+    ta.select()
+    document.execCommand('copy')
+    document.body.removeChild(ta)
     ElMessage.success(`${label}已复制到剪贴板！`)
-  }).catch(() => {
-    ElMessage.error('复制失败')
-  })
+  } catch (_) {
+    ElMessage.error('复制失败，请手动选中文本复制')
+  }
 }
 
 const getHeartbeatInfo = (lastHeartbeat) => {

@@ -37,7 +37,7 @@
 
 ### 第一步：部署 `xray_web` 主控端
 
-> 建议部署在连接性良好的 Linux VPS（主控仅需 3000 端口，若承接 WSS 反穿可配置 443 Nginx 反代）。
+> 建议部署在连接性良好的 Linux VPS（主控使用 HTTPS 8443 原生 TLS 端口，若承接 WSS 反穿可配置 443 Nginx 反代）。
 
 1. **克隆项目到服务器**：
    ```bash
@@ -58,10 +58,11 @@
        environment:
          - TZ=Asia/Shanghai
          - APP_MODE=all
-         - WEB_PORT=3000
+         - WEB_PORT=8443
          - NODE_KEY=xray_cluster_secret_key_2026   # 集群通信引导令牌 (可自定义)
        volumes:
          - ./data:/data
+         - ./certs:/certs:ro                      # 可选挂载外部权威证书 (自动同步至 /app/certs)
    ```
 
 3. **启动主控容器**：
@@ -70,7 +71,7 @@
    ```
 
 4. **登录主控面板**：
-   - 访问地址：`http://<主控服务器IP>:3000`
+   - 访问地址：`https://<主控服务器IP>:8443`
    - 查看初始管理员账密：
      ```bash
      docker logs xray-web-master | grep "初始管理员凭据" -A 3
@@ -88,7 +89,7 @@ docker run -d \
   --name xray-node \
   --restart always \
   --network host \
-  -e PANEL_URL="http://<主控服务器IP>:3000" \
+  -e PANEL_URL="https://<主控服务器IP>:8443" \
   -e CLUSTER_TOKEN="xray_cluster_secret_key_2026" \
   -e NET_MODE="auto" \
   -e PORT=443 \
@@ -101,7 +102,7 @@ docker run -d \
 #### 环境变量说明：
 | 变量名 | 说明 | 默认值 / 示例 |
 | :--- | :--- | :--- |
-| `PANEL_URL` | **[必填]** 主控 `xray_web` 的访问地址 | `http://1.2.3.4:3000` |
+| `PANEL_URL` | **[必填]** 主控 `xray_web` 的访问地址 | `https://1.2.3.4:8443` |
 | `CLUSTER_TOKEN` | **[必填]** 集群通信引导令牌（用于首次 TOFU 准入） | `xray_cluster_secret_key_2026` |
 | `NET_MODE` | 网络模式：`auto`（自动探测）、`direct`（直连）、`reverse_wss`（反穿） | `auto` |
 | `PORT` | 节点 Reality 监听端口 | `443` |
@@ -133,7 +134,7 @@ docker run -d \
 * **接口路径**：`/api/open/faka_generate`
 * **URL 示例**：
   ```text
-  http://<主控IP>:3000/api/open/faka_generate?gb=100&days=30&is_monthly=1&token=你的Token
+  https://<主控IP>:8443/api/open/faka_generate?gb=100&days=30&is_monthly=1&token=你的Token
   ```
 
 ### 2. 请求参数说明
