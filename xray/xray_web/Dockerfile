@@ -39,13 +39,14 @@ LABEL description="Xray-Web Master Control Hub (Optimized & Precompiled)"
 # 仅安装生产必须的运行时动态链接库 (无 gcc/cargo/pip 缓存污染)
 RUN apk add --no-cache ca-certificates tzdata openssl
 
-# 先创建固定 UID/GID 的非 root 用户（安全核心）
+# adduser 与 mkdir/chown 逻辑相关，合并成一层是合理的
 RUN addgroup -g 10001 -S appgroup && \
-    adduser -u 10001 -S -G appgroup -s /sbin/nologin appuser
+    adduser -u 10001 -S -G appgroup -s /sbin/nologin appuser && \
+    mkdir -p /data && chown appuser:appgroup /data
 
-COPY --from=python-builder /wheels /tmp/wheels
-RUN pip install --no-cache-dir --no-index --find-links=/tmp/wheels /tmp/wheels/*.whl gunicorn && \
-    rm -rf /tmp/wheels
+# 关键：bind mount，wheels 不进入任何层
+RUN --mount=type=bind,from=python-builder,source=/wheels,target=/wheels \
+    pip install --no-cache-dir --no-index --find-links=/wheels /wheels/*.whl
 
 COPY --chown=appuser:appgroup app/backend/ ./backend/
 COPY --chown=appuser:appgroup --from=frontend-builder /build/dist ./frontend/dist
@@ -60,10 +61,11 @@ USER appuser
 EXPOSE 3000
 VOLUME ["/data"]
 
-HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD python3 -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:3000/')" || exit 1
+HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
+    CMD python3 -c "import urllib.request,urllib.error,sys; \
+        try: urllib.request.urlopen('http://127.0.0.1:3000/healthz', timeout=3) \
+        except urllib.error.HTTPError as e: sys.exit(0 if e.code < 500 else 1)" || exit 1
 
-# 稳定核心：Gunicorn 多 worker，2×CPU+1 起步
 CMD ["gunicorn", "--bind", "0.0.0.0:3000", \
      "--workers", "5", \
      "--threads", "2", \
