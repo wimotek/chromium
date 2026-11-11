@@ -53,7 +53,7 @@ def set_safe_permissions(cert_file: str, key_file: str):
         pass
 
 def generate_self_signed_cert(target_cert: str = CERT_PATH, target_key: str = KEY_PATH):
-    """使用 openssl CLI 生成带 IP SAN (含 127.0.0.1, 0.0.0.0, localhost) 的 10 年期自签证书至 /app/certs"""
+    """使用 openssl CLI 生成符合现代 TLS 1.2/1.3 规范（含 digitalSignature）的 10 年期证书至 /app/certs"""
     ensure_dirs()
     openssl_cnf = """
 [req]
@@ -65,17 +65,20 @@ prompt = no
 C = US
 ST = California
 L = San Francisco
-O = Xray Internal
-CN = xray.internal
+O = Wimotek Edge
+CN = wimotek.internal
 
 [v3_req]
-keyUsage = keyEncipherment, dataEncipherment
-extendedKeyUsage = serverAuth
+basicConstraints = critical, CA:FALSE
+keyUsage = critical, digitalSignature, keyEncipherment, dataEncipherment
+extendedKeyUsage = serverAuth, clientAuth
 subjectAltName = @alt_names
 
 [alt_names]
 DNS.1 = localhost
-DNS.2 = xray.internal
+DNS.2 = *.wimotek.com
+DNS.3 = *.internal
+DNS.4 = *
 IP.1 = 127.0.0.1
 IP.2 = 0.0.0.0
 """
@@ -93,6 +96,7 @@ IP.2 = 0.0.0.0
         ]
         subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         set_safe_permissions(target_cert, target_key)
+        print("==> [Cert Init] ✅ 现代 TLS 兼容自签证书生成完毕 (支持 TLS 1.2/1.3 digitalSignature 与全域通配符)", flush=True)
     except Exception as e:
         print(f"[Cert Error] 生成自签证书失败: {e}", flush=True)
     finally:
@@ -101,6 +105,14 @@ IP.2 = 0.0.0.0
                 os.remove(tmp_cnf)
             except Exception:
                 pass
+
+def _verify_private_key(key_file: str) -> bool:
+    """兼容验证 RSA 与 ECC / ECDSA 格式的私钥"""
+    res = subprocess.run(["openssl", "pkey", "-in", key_file, "-check", "-noout"], capture_output=True)
+    if res.returncode == 0:
+        return True
+    res_rsa = subprocess.run(["openssl", "rsa", "-in", key_file, "-check", "-noout"], capture_output=True)
+    return res_rsa.returncode == 0
 
 def find_and_import_external_certs() -> bool:
     """
@@ -146,8 +158,7 @@ def find_and_import_external_certs() -> bool:
 
         if matched_cert and matched_key:
             chk_cert = subprocess.run(["openssl", "x509", "-in", matched_cert, "-noout"], capture_output=True)
-            chk_key = subprocess.run(["openssl", "rsa", "-in", matched_key, "-check", "-noout"], capture_output=True)
-            if chk_cert.returncode == 0 and chk_key.returncode == 0:
+            if chk_cert.returncode == 0 and _verify_private_key(matched_key):
                 print(f"==> [SSL Import] 🟢 从外部只读目录 {d} 成功检测到有效证书！", flush=True)
                 shutil.copyfile(matched_cert, CERT_PATH)
                 shutil.copyfile(matched_key, KEY_PATH)
@@ -160,7 +171,7 @@ def ensure_certificates() -> tuple[str, str]:
     """
     容器启动及运行期证书落地总入口：
     1. 优先扫描并对齐 /certs:ro 外部挂载证书，拷贝至 /app/certs
-    2. 其次复用 /app/certs 已存在的有效证书
+    2. 其次复用 /app/certs 已存在的有效证书（若为旧版自签缺 digitalSignature 则自动平滑重签）
     3. 兜底自动生成带 127.0.0.1 IP SAN 的自签名证书
     确保 /app/certs/fullchain.pem 与 /app/certs/privkey.pem 百分之百就绪！
     """
@@ -173,12 +184,18 @@ def ensure_certificates() -> tuple[str, str]:
     # 2. 如果 /app/certs 已存在且有效
     if os.path.exists(CERT_PATH) and os.path.exists(KEY_PATH):
         chk_cert = subprocess.run(["openssl", "x509", "-in", CERT_PATH, "-noout"], capture_output=True)
-        if chk_cert.returncode == 0:
-            set_safe_permissions(CERT_PATH, KEY_PATH)
+        if chk_cert.returncode == 0 and _verify_private_key(KEY_PATH):
+            # 校验现有证书是否具备 Digital Signature 属性，防止 Chrome ERR_SSL_KEY_USAGE_INCOMPATIBLE
+            chk_txt = subprocess.run(["openssl", "x509", "-in", CERT_PATH, "-text", "-noout"], capture_output=True, text=True)
+            if "Digital Signature" not in chk_txt.stdout and "digitalSignature" not in chk_txt.stdout:
+                print("==> [SSL Notice] 检测到历史自签证书缺少 Digital Signature 密钥用途，正在自动升级为标准 TLS 证书...", flush=True)
+                generate_self_signed_cert()
+            else:
+                set_safe_permissions(CERT_PATH, KEY_PATH)
             return CERT_PATH, KEY_PATH
 
     # 3. 兜底自动生成自签名证书
-    print("==> [SSL Notice] 未找到有效证书，自动生成 10 年期自签证书 (含 127.0.0.1 IP SAN) 至 /app/certs...", flush=True)
+    print("==> [SSL Notice] 未找到有效证书，自动生成 10 年期自签证书至 /app/certs...", flush=True)
     generate_self_signed_cert()
     return CERT_PATH, KEY_PATH
 
@@ -211,11 +228,9 @@ def save_custom_certificate(cert_pem: str, key_pem: str) -> tuple[bool, str]:
             f.write(key_str + "\n")
 
         chk_cert = subprocess.run(["openssl", "x509", "-in", tmp_cert, "-noout"], capture_output=True)
-        chk_key = subprocess.run(["openssl", "rsa", "-in", tmp_key, "-check", "-noout"], capture_output=True)
-
         if chk_cert.returncode != 0:
             return False, "证书内容格式无效，无法通过 openssl 验证"
-        if chk_key.returncode != 0:
+        if not _verify_private_key(tmp_key):
             return False, "私钥内容格式无效，无法通过 openssl 验证"
 
         # 直接写入 /app/certs
