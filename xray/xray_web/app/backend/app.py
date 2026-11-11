@@ -40,6 +40,10 @@ init_db()
 def index():
     return send_from_directory(app.static_folder, 'index.html')
 
+@app.route("/healthz")
+def healthz():
+    return "ok", 200
+
 @app.route('/.well-known/acme-challenge/<path:filename>')
 def acme_challenge_token(filename):
     return send_from_directory(CHALLENGE_DIR, filename)
