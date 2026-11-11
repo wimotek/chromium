@@ -622,41 +622,52 @@ const maskedClusterToken = computed(() => {
   return `${t.slice(0, 8)}...${t.slice(-6)}`
 })
 
+// 只在运行期产生一个真实反斜杠，源码里不写 "\ + 换行"
+const SH = '\\'
+const NL = '\n'
+
 const generatedDockerComposeYaml = computed(() => {
   const panelUrl = clusterInfo.panel_url || window.location.origin
   const token = clusterInfo.cluster_token || 'your_cluster_token'
-  return `services:
-  xray-node:
-    image: ghcr.io/wimotek/xray:latest
-    container_name: xray-node
-    restart: always
-    network_mode: host
-    environment:
-      - PANEL_URL=${panelUrl}
-      - CLUSTER_TOKEN=${token}
-      - NET_MODE=auto # auto / direct / reverse_wss
-      - PORT=443
-      - DEST=www.microsoft.com:443
-      - SERVER_NAMES=www.microsoft.com,microsoft.com
-    volumes:
-      - ./data:/data
+
+  return [
+    'services:',
+    '  xray-node:',
+    '    image: ghcr.io/wimotek/xray:latest',
+    '    container_name: xray-node',
+    '    restart: always',
+    '    network_mode: host',
+    '    environment:',
+    `      - PANEL_URL=${panelUrl}`,
+    `      - CLUSTER_TOKEN=${token}`,
+    '      - NET_MODE=auto # auto / direct / reverse_wss',
+    '      - PORT=443',
+    '      - DEST=www.microsoft.com:443',
+    '      - SERVER_NAMES=www.microsoft.com,microsoft.com',
+    '    volumes:',
+    '      - ./data:/data'
+  ].join(NL)
 })
 
 const generatedDockerOneLiner = computed(() => {
   const panelUrl = clusterInfo.panel_url || (typeof window !== 'undefined' ? window.location.origin : '')
   const token = clusterInfo.cluster_token || 'your_cluster_token'
-  return `docker run -d \\
-  --name xray-node \\
-  --restart=always \\
-  --network=host \\
-  -e PANEL_URL="${panelUrl}" \\
-  -e CLUSTER_TOKEN="${token}" \\
-  -e PORT=443 \\
-  -e DEST=www.microsoft.com:443 \\
-  -e SERVER_NAMES=www.microsoft.com,microsoft.com \\
-  -v ./data:/data \\
-  ghcr.io/wimotek/xray:latest`
+
+  return [
+    `docker run -d ${SH}`,
+    `  --name xray-node ${SH}`,
+    `  --restart=always ${SH}`,
+    `  --network=host ${SH}`,
+    `  -e PANEL_URL="${panelUrl}" ${SH}`,
+    `  -e CLUSTER_TOKEN="${token}" ${SH}`,
+    `  -e PORT=443 ${SH}`,
+    `  -e DEST=www.microsoft.com:443 ${SH}`,
+    `  -e SERVER_NAMES=www.microsoft.com,microsoft.com ${SH}`,
+    `  -v ./data:/data ${SH}`,
+    `  ghcr.io/wimotek/xray:latest`
+  ].join(NL)
 })
+
 
 const formatPbk = (pbk) => {
   if (!pbk || pbk.length < 14) return pbk || ''
