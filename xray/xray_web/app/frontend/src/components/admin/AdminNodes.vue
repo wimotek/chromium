@@ -393,9 +393,12 @@
                 无需创建 docker-compose.yml 文件，在海外 VPS 终端粘贴下方单行指令回车即可完成节点自动握手与上线：
               </p>
             </div>
-            <div style="display: flex; gap: 8px;">
-              <button class="btn-cyber-primary" @click="copyText(generatedDockerOneLiner, 'Docker 最小部署命令')">
-                📋 复制 Docker 最小部署命令
+            <div style="display: flex; gap: 8px; flex-wrap: wrap;">
+              <button class="btn-cyber-primary" @click="copyText(generatedDockerPureMinimal, '极简单行命令')">
+                ⚡ 一键复制极简单行命令
+              </button>
+              <button class="btn-cyber-action" @click="copyText(generatedDockerOneLiner, '带注释部署命令模板')">
+                📋 复制带注释命令模板
               </button>
               <button class="btn-cyber-action" @click="copyText('docker logs -f xray-node', '容器日志命令')">
                 📋 复制日志监控命令
@@ -634,29 +637,33 @@ const generatedDockerComposeYaml = computed(() => {
     '    network_mode: host',
     '    environment:',
     `      - PANEL_URL=${panelUrl}`,
-    `      - CLUSTER_TOKEN=${token}`,
-    '      - NET_MODE=auto # auto / direct / reverse_wss',
-    '      - PORT=443',
-    '      - DEST=www.microsoft.com:443',
-    '      - SERVER_NAMES=www.microsoft.com,microsoft.com',
+    `      # - CLUSTER_TOKEN=${token} # 选填: 主控已开启免审核可省略`,
+    '      # - PORT=443 # 选填: 默认443',
+    '      # - DEST=www.microsoft.com:443 # 选填: 默认伪装目标',
+    '      # - SERVER_NAMES=www.microsoft.com,microsoft.com # 选填: 默认SNI域名',
     '    volumes:',
     '      - ./data:/data'
   ].join('\n')
 })
 
+const generatedDockerPureMinimal = computed(() => {
+  const panelUrl = clusterInfo.panel_url || (typeof window !== 'undefined' ? window.location.origin : '')
+  return `docker run -d --name xray-node --restart=always --network=host -e PANEL_URL="${panelUrl}" -v ./data:/data ghcr.io/wimotek/xray:latest`
+})
+
 const generatedDockerOneLiner = computed(() => {
   const panelUrl = clusterInfo.panel_url || (typeof window !== 'undefined' ? window.location.origin : '')
-  const token = clusterInfo.cluster_token || 'your_cluster_token'
+  const token = clusterInfo.cluster_token || 'ctk_aebaa4b470ee12c6b5d97e23da17d9f1'
   return [
     'docker run -d \\',
     '  --name xray-node \\',
     '  --restart=always \\',
     '  --network=host \\',
     `  -e PANEL_URL="${panelUrl}" \\`,
-    `  -e CLUSTER_TOKEN="${token}" \\`,
-    '  -e PORT=443 \\',
-    '  -e DEST=www.microsoft.com:443 \\',
-    '  -e SERVER_NAMES=www.microsoft.com,microsoft.com \\',
+    `  # -e CLUSTER_TOKEN="${token}" \\`,
+    '  # -e PORT=443 \\',
+    '  # -e DEST=www.microsoft.com:443 \\',
+    '  # -e SERVER_NAMES=www.microsoft.com,microsoft.com \\',
     '  -v ./data:/data \\',
     '  ghcr.io/wimotek/xray:latest'
   ].join('\n')

@@ -65,12 +65,12 @@
           </button>
 
           <button class="tab-card-btn tab-card-settings" :class="{ active: activeTab === 'settings' }" @click="openSettingsTab">
-            <span class="tab-icon">⚙️</span>
+            <span class="tab-icon">🗄️</span>
             <div class="tab-text">
-              <div class="tab-title">系统发信与全局运维配置</div>
-              <div class="tab-sub">公告设置、SMTP、HTTPS证书、📢用户群发通知</div>
+              <div class="tab-title">🗄️ 数据库自动备份与全局配置</div>
+              <div class="tab-sub">定期自动热备份与还原、系统公告、SMTP、HTTPS凭据</div>
             </div>
-            <span class="count-tag tag-settings">配置中心</span>
+            <span class="count-tag tag-settings" style="background: rgba(16, 185, 129, 0.15); color: #34d399; border-color: rgba(16, 185, 129, 0.3);">备份与配置</span>
           </button>
         </div>
 
