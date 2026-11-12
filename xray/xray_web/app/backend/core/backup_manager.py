@@ -4,7 +4,7 @@ import shutil
 import sqlite3
 import logging
 from datetime import datetime
-from ..config import Config
+from config import Config
 
 logger = logging.getLogger("xray_web.backup_manager")
 
