@@ -3,16 +3,13 @@ import shutil
 import datetime
 import subprocess
 import signal
-from core.db import get_setting
 
 # 运行期 Granian 专属唯一落地路径 (与 Dockerfile 中 granian 参数严格对齐)
 CERT_DIR = "/app/certs"
 CERT_PATH = os.path.join(CERT_DIR, "fullchain.pem")
 KEY_PATH = os.path.join(CERT_DIR, "privkey.pem")
 
-CHALLENGE_DIR = "/data/acme-challenge"
-
-# 外部只读挂载候选目录 (用户通过 -v /host/path:/certs:ro 挂载)
+# 外部只读挂载候选目录 (用户通过 -v /host/certs:/certs:ro 挂载自定义证书)
 EXTERNAL_CERT_DIRS = ["/certs"]
 
 # 常见的公钥证书候选文件名
@@ -26,12 +23,11 @@ KEY_CANDIDATES = [
 ]
 
 def ensure_dirs():
-    """确保运行时证书与 ACME 挑战目录存在"""
-    for d in [CERT_DIR, CHALLENGE_DIR]:
-        try:
-            os.makedirs(d, exist_ok=True)
-        except Exception:
-            pass
+    """确保运行时证书目录存在"""
+    try:
+        os.makedirs(CERT_DIR, exist_ok=True)
+    except Exception:
+        pass
 
 ensure_dirs()
 
@@ -159,7 +155,7 @@ def find_and_import_external_certs() -> bool:
         if matched_cert and matched_key:
             chk_cert = subprocess.run(["openssl", "x509", "-in", matched_cert, "-noout"], capture_output=True)
             if chk_cert.returncode == 0 and _verify_private_key(matched_key):
-                print(f"==> [SSL Import] 🟢 从外部只读目录 {d} 成功检测到有效证书！", flush=True)
+                print(f"==> [SSL Import] 🟢 从外部挂载目录 {d} 成功检测到有效证书！", flush=True)
                 shutil.copyfile(matched_cert, CERT_PATH)
                 shutil.copyfile(matched_key, KEY_PATH)
                 set_safe_permissions(CERT_PATH, KEY_PATH)
@@ -185,7 +181,6 @@ def ensure_certificates() -> tuple[str, str]:
     if os.path.exists(CERT_PATH) and os.path.exists(KEY_PATH):
         chk_cert = subprocess.run(["openssl", "x509", "-in", CERT_PATH, "-noout"], capture_output=True)
         if chk_cert.returncode == 0 and _verify_private_key(KEY_PATH):
-            # 校验现有证书是否具备 Digital Signature 属性，防止 Chrome ERR_SSL_KEY_USAGE_INCOMPATIBLE
             chk_txt = subprocess.run(["openssl", "x509", "-in", CERT_PATH, "-text", "-noout"], capture_output=True, text=True)
             if "Digital Signature" not in chk_txt.stdout and "digitalSignature" not in chk_txt.stdout:
                 print("==> [SSL Notice] 检测到历史自签证书缺少 Digital Signature 密钥用途，正在自动升级为标准 TLS 证书...", flush=True)
@@ -211,48 +206,8 @@ def reload_granian_server() -> bool:
         print(f"[SSL Reload Warn] 无法向父进程发送 SIGHUP: {e}", flush=True)
     return False
 
-def save_custom_certificate(cert_pem: str, key_pem: str) -> tuple[bool, str]:
-    """后台手动粘贴证书 PEM 后的保存逻辑：写入 /app/certs 并触发重载"""
-    cert_str = cert_pem.strip()
-    key_str = key_pem.strip()
-    if not cert_str or not key_str:
-        return False, "证书或私钥内容不能为空"
-
-    ensure_dirs()
-    tmp_cert = "/tmp/test_cert.pem"
-    tmp_key = "/tmp/test_key.pem"
-    try:
-        with open(tmp_cert, "w", encoding="utf-8") as f:
-            f.write(cert_str + "\n")
-        with open(tmp_key, "w", encoding="utf-8") as f:
-            f.write(key_str + "\n")
-
-        chk_cert = subprocess.run(["openssl", "x509", "-in", tmp_cert, "-noout"], capture_output=True)
-        if chk_cert.returncode != 0:
-            return False, "证书内容格式无效，无法通过 openssl 验证"
-        if not _verify_private_key(tmp_key):
-            return False, "私钥内容格式无效，无法通过 openssl 验证"
-
-        # 直接写入 /app/certs
-        shutil.copyfile(tmp_cert, CERT_PATH)
-        shutil.copyfile(tmp_key, KEY_PATH)
-        set_safe_permissions(CERT_PATH, KEY_PATH)
-
-        # 触发 Granian 平滑热重载
-        reload_granian_server()
-        return True, "第三方 SSL 证书已成功保存至 /app/certs，并已通知服务平滑重载！"
-    except Exception as e:
-        return False, f"证书处理异常: {str(e)}"
-    finally:
-        if os.path.exists(tmp_cert):
-            try: os.remove(tmp_cert)
-            except Exception: pass
-        if os.path.exists(tmp_key):
-            try: os.remove(tmp_key)
-            except Exception: pass
-
 def get_cert_info() -> dict:
-    """原生 openssl 解析当前 /app/certs/fullchain.pem 证书信息"""
+    """原生 openssl 解析当前 /app/certs/fullchain.pem 证书状态与过期时间"""
     if not os.path.exists(CERT_PATH):
         return {"status": "none", "is_self_signed": True, "issuer": "", "days_left": 0}
 
@@ -269,7 +224,7 @@ def get_cert_info() -> dict:
             capture_output=True, text=True, timeout=5
         )
         subject_line = res_subject.stdout.strip() if res_subject.returncode == 0 else ""
-        is_self_signed = (issuer_line == subject_line) or ("xray.internal" in issuer_line)
+        is_self_signed = (issuer_line == subject_line) or ("wimotek.internal" in issuer_line) or ("xray.internal" in issuer_line)
 
         res_date = subprocess.run(
             ["openssl", "x509", "-in", CERT_PATH, "-noout", "-enddate"],
@@ -289,53 +244,10 @@ def get_cert_info() -> dict:
             "status": "valid" if days_left > 0 else "expired",
             "is_self_signed": is_self_signed,
             "issuer": issuer,
-            "days_left": max(0, days_left)
+            "days_left": max(0, days_left),
+            "cert_path": CERT_PATH,
+            "key_path": KEY_PATH
         }
     except Exception as e:
         print(f"[Cert Info Error] {e}", flush=True)
         return {"status": "error", "is_self_signed": True, "issuer": "Error", "days_left": 0}
-
-def issue_acme_certificate(domain: str, email: str) -> tuple[bool, str]:
-    """ACME 自动签发并直接落地至 /app/certs"""
-    if not domain:
-        return False, "申请域名不能为空"
-    cmd = [
-        "certbot", "certonly", "--webroot",
-        "-w", CHALLENGE_DIR,
-        "-d", domain,
-        "--agree-tos", "--non-interactive"
-    ]
-    if email:
-        cmd.extend(["-m", email])
-    else:
-        cmd.append("--register-unsafely-without-email")
-
-    try:
-        res = subprocess.run(cmd, capture_output=True, text=True, timeout=90)
-        if res.returncode == 0:
-            live_dir = f"/etc/letsencrypt/live/{domain}"
-            live_cert = f"{live_dir}/fullchain.pem"
-            live_key = f"{live_dir}/privkey.pem"
-            if os.path.exists(live_cert) and os.path.exists(live_key):
-                shutil.copyfile(live_cert, CERT_PATH)
-                shutil.copyfile(live_key, KEY_PATH)
-                set_safe_permissions(CERT_PATH, KEY_PATH)
-
-                reload_granian_server()
-                return True, f"ACME 证书为 [{domain}] 自动签发成功！已落地至 /app/certs 并平滑生效。"
-            return False, "证书签发成功但无法定位 fullchain.pem"
-        else:
-            return False, f"Certbot 验证失败: {res.stderr or res.stdout}"
-    except Exception as e:
-        return False, f"执行 ACME 签发异常: {str(e)}"
-
-def auto_renew_acme_job():
-    acme_enable = get_setting("acme_enable", "false").lower() == "true"
-    acme_domain = get_setting("acme_domain", "")
-    if not acme_enable or not acme_domain:
-        return
-    info = get_cert_info()
-    if info.get("status") == "valid" and not info.get("is_self_signed") and info.get("days_left", 0) > 30:
-        return
-    email = get_setting("acme_email", "")
-    issue_acme_certificate(acme_domain, email)

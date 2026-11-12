@@ -2,7 +2,7 @@ import time
 import datetime
 import threading
 from core.db import get_db, get_setting, set_setting
-from core.cert_manager import auto_renew_acme_job
+from core.backup_manager import create_database_backup, prune_old_backups
 from services.notify_service import notify_user
 
 def run_scheduled_check(force: bool = False) -> tuple[int, int, str]:
@@ -174,6 +174,41 @@ def check_pending_nodes_timeout(force: bool = False):
 import os
 import fcntl
 
+def check_and_run_auto_backup():
+    """定期自动数据库备份巡检"""
+    try:
+        enabled = get_setting("auto_backup_enabled", "true").lower() == "true"
+        if not enabled:
+            return
+
+        interval_hours = int(get_setting("backup_interval_hours", "24") or 24)
+        max_count = int(get_setting("backup_max_count", "7") or 7)
+        last_str = get_setting("last_backup_time", "")
+
+        need_backup = False
+        now = datetime.datetime.now()
+        if not last_str:
+            need_backup = True
+        else:
+            try:
+                last_dt = datetime.datetime.strptime(last_str, "%Y-%m-%d %H:%M:%S")
+                diff_seconds = (now - last_dt).total_seconds()
+                if diff_seconds >= interval_hours * 3600:
+                    need_backup = True
+            except Exception:
+                need_backup = True
+
+        if need_backup:
+            ok, msg, info = create_database_backup(tag="auto")
+            if ok:
+                set_setting("last_backup_time", now.strftime("%Y-%m-%d %H:%M:%S"))
+                pruned = prune_old_backups(max_keep=max_count)
+                print(f"[Scheduler Backup] 自动化备份成功: {info.get('filename')} (大小: {info.get('size_human')}), 轮转清理 {pruned} 份旧备份 (限定保留: {max_count} 份)", flush=True)
+            else:
+                print(f"[Scheduler Backup Warn] 自动备份未成功: {msg}", flush=True)
+    except Exception as e:
+        print(f"[Scheduler Backup Error] {e}", flush=True)
+
 def start_scheduler_thread():
     """多进程守护线程：使用 fcntl 文件锁进行 Leader 选举，确保多 Worker 场景下仅有单进程执行巡检"""
     lock_file = "/data/.scheduler.lock"
@@ -185,7 +220,7 @@ def start_scheduler_thread():
             lock_fd = open(lock_file, "a+")
             # 尝试非阻塞获取排他锁
             fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            print(f"[Scheduler Leader] 进程 (PID: {os.getpid()}) 成功获取全局调度锁，启动后台任务与证书自动续期。", flush=True)
+            print(f"[Scheduler Leader] 进程 (PID: {os.getpid()}) 成功获取全局调度锁，启动后台任务与数据库定期自动备份。", flush=True)
         except (IOError, BlockingIOError, PermissionError):
             print(f"[Scheduler Worker] 进程 (PID: {os.getpid()}) 未获取到全局调度锁，跳过定时器（由 Leader 进程托管）。", flush=True)
             return
@@ -194,7 +229,7 @@ def start_scheduler_thread():
         while True:
             try:
                 run_scheduled_check(force=False)
-                auto_renew_acme_job()
+                check_and_run_auto_backup()
             except Exception as e:
                 print(f"[Scheduler Loop Error] {e}", flush=True)
             time.sleep(900)

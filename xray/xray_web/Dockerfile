@@ -39,10 +39,11 @@ LABEL description="Xray-Web Master Control Hub (Optimized & Precompiled)"
 # 仅安装生产必须的运行时动态链接库 (无 gcc/cargo/pip 缓存污染)
 RUN apk add --no-cache ca-certificates tzdata openssl
 
-# adduser 与 mkdir/chown 逻辑相关，合并成一层是合理的 (包含持久化 /data 与运行期证书目录 /app/certs)
+# adduser 与 mkdir/chown 逻辑相关，合并成一层是合理的 (包含持久化 /data /data/backups 与运行期证书目录 /app/certs)
 RUN addgroup -g 10001 -S appgroup && \
     adduser -u 10001 -S -G appgroup -s /sbin/nologin appuser && \
-    mkdir -p /data /app/certs && chown -R appuser:appgroup /data /app/certs
+    mkdir -p /data /data/backups /app/certs && \
+    chown -R appuser:appgroup /data /app/certs
 
 # 关键：bind mount，wheels 不进入任何层
 RUN --mount=type=bind,from=python-builder,source=/wheels,target=/wheels \
