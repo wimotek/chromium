@@ -4,8 +4,8 @@ set -e
 # 解析用户传入的 WEB_PORT 环境变量，未指定时默认使用 8443
 export WEB_PORT="${WEB_PORT:-8443}"
 
-# 确保运行时证书与临时挑战目录存在
-mkdir -p /app/certs /data/acme-challenge
+# 确保运行时证书与备份目录存在
+mkdir -p /app/certs /data/backups
 
 # 核心：在 Granian 监听绑定 SSL 套接字之前预热初始化证书
 # 1. 自动从只读 /certs:ro 读取外部证书并复制到 /app/certs

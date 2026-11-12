@@ -13,7 +13,7 @@ if CURRENT_DIR not in sys.path:
 
 from config import Config
 from core.db import init_db, get_db
-from core.cert_manager import ensure_certificates, CHALLENGE_DIR
+from core.cert_manager import ensure_certificates
 from services.scheduler_service import start_scheduler_thread
 
 # 导入通用路由工具与所有领域蓝图
@@ -44,10 +44,6 @@ def health_check():
 @app.route('/')
 def index():
     return send_from_directory(app.static_folder, 'index.html')
-
-@app.route('/.well-known/acme-challenge/<path:filename>')
-def acme_challenge_token(filename):
-    return send_from_directory(CHALLENGE_DIR, filename)
 
 @app.route('/api/qrcode', methods=['GET'])
 def get_qrcode_svg():
