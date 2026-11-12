@@ -120,13 +120,16 @@
     <!-- 子卡 1：已准入节点集群列表 -->
     <!-- ========================================================================= -->
     <div v-if="currentSubTab === 'approved'">
-      <div class="card-header" style="margin-top: 15px;">
+      <div class="card-header" style="margin-top: 15px; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px;">
         <div style="display: flex; align-items: center; gap: 8px;">
           <h3>🌐 已准入节点集群治理与多端调度</h3>
           <span class="badge badge-ready">{{ approvedNodes.length }} 个节点运行中</span>
         </div>
-        <div class="header-right-note">
-          已全量绑定 Ed25519 密码学公钥，下发给用户客户端与通用订阅。
+        <div style="display: flex; align-items: center; gap: 10px;">
+          <span style="font-size: 11px; color: #34d399; font-weight: 600;">🟢 自动轮询中 (每10秒更新)</span>
+          <button class="btn-sm btn-action" :disabled="pingingAll" @click="handlePingAllNodes">
+            {{ pingingAll ? '⏳ 正在测活...' : '⚡ 立即检测全部节点心跳' }}
+          </button>
         </div>
       </div>
 
@@ -136,12 +139,11 @@
             <tr>
               <th>节点名称 / 连接地址</th>
               <th>准入状态</th>
-              <th>服务状态</th>
-              <th>开放范围策略</th>
-              <th>SNI 伪装域名</th>
+              <th>网络连接与伪装配置</th>
+              <th>开放授权策略</th>
               <th>公钥 (PublicKey)</th>
-              <th>心跳检测状态</th>
-              <th style="width: 260px;">治理操作</th>
+              <th>健康与心跳 (实时测活)</th>
+              <th style="width: 250px; text-align: right;">治理操作</th>
             </tr>
           </thead>
           <tbody>
@@ -166,11 +168,17 @@
                 </span>
               </td>
 
-              <!-- 服务运行状态 -->
+              <!-- 网络连接与伪装配置 (利用合并冗余状态后腾出的空间) -->
               <td>
-                <span class="badge" :class="node.status === 1 ? 'badge-ready' : 'badge-disabled'">
-                  {{ node.status === 1 ? '🟢 运行中' : '🛑 已停止' }}
-                </span>
+                <div style="font-size: 11px; color: #e2e8f0; font-family: monospace; line-height: 1.5;">
+                  <div><span style="color: #94a3b8;">端口:</span> <b style="color: #38bdf8;">{{ node.port || 443 }}</b></div>
+                  <div style="white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 190px;" :title="`回落目标: ${node.dest || 'www.microsoft.com:443'}`">
+                    <span style="color: #94a3b8;">回落:</span> {{ node.dest || 'www.microsoft.com:443' }}
+                  </div>
+                  <div style="font-size: 10px; color: #64748b; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 190px;" :title="`SNI: ${node.sni || 'www.microsoft.com'}`">
+                    SNI: {{ node.sni || 'www.microsoft.com' }}
+                  </div>
+                </div>
               </td>
 
               <!-- 开放范围策略 -->
@@ -186,18 +194,11 @@
                 </span>
               </td>
 
-              <td>
-                <div style="font-size: 12px; color: #38bdf8;">{{ node.sni }}</div>
-                <div v-if="node.server_names && node.server_names.includes(',')" style="font-size: 10px; color: #94a3b8;">
-                  多SNI: {{ node.server_names.split(',').length }} 个
-                </div>
-              </td>
-
               <!-- 公钥纯文本 + 复制按钮 -->
               <td>
                 <div v-if="node.pbk && node.pbk.length === 43" class="pbk-box">
                   <span class="pbk-clean-text" :title="`完整公钥: ${node.pbk}`">{{ formatPbk(node.pbk) }}</span>
-                  <button class="btn-copy-icon" title="点击复制完整公钥" @click="copyText(node.pbk, '节点公钥')">
+                  <button type="button" class="btn-copy-icon" title="点击复制完整公钥" @click.stop="copyText(node.pbk, '节点公钥')">
                     📋
                   </button>
                 </div>
@@ -206,20 +207,40 @@
                 </div>
               </td>
 
-              <!-- 心跳状态 -->
+              <!-- 合并后的核心列：健康状态与实时测活 -->
               <td>
-                <span
-                  class="heartbeat-badge"
-                  :class="getHeartbeatInfo(node.last_heartbeat).cls"
-                  :title="`最后心跳: ${node.last_heartbeat || '无记录'} (${getHeartbeatInfo(node.last_heartbeat).diff})`"
-                >
-                  <span class="status-dot"></span>
-                  <span>{{ getHeartbeatInfo(node.last_heartbeat).label }}</span>
-                </span>
+                <div style="display: flex; align-items: center; gap: 8px;">
+                  <span
+                    class="heartbeat-badge"
+                    :class="node.status === 0 ? 'badge-disabled' : getHeartbeatInfo(node.last_heartbeat).cls"
+                    :title="node.status === 0 ? '管理已停用' : `最后心跳: ${node.last_heartbeat || '无记录'} (${getHeartbeatInfo(node.last_heartbeat).diff})`"
+                  >
+                    <span class="status-dot"></span>
+                    <span>{{ node.status === 0 ? '🛑 管理停用' : getHeartbeatInfo(node.last_heartbeat).label }}</span>
+                  </span>
+
+                  <!-- 立即检测心跳按钮 -->
+                  <button
+                    type="button"
+                    class="btn-xs btn-ping-icon"
+                    :disabled="pingingNodeId === node.node_id"
+                    title="立即探测该节点连通性与心跳"
+                    @click.stop="handlePingNode(node.node_id)"
+                  >
+                    {{ pingingNodeId === node.node_id ? '⏳' : '⚡ 测活' }}
+                  </button>
+                </div>
+
+                <div v-if="pingResults[node.node_id]" style="font-size: 10px; margin-top: 4px; font-family: monospace;" :style="{ color: pingResults[node.node_id].reachable ? '#34d399' : '#f87171' }">
+                  {{ pingResults[node.node_id].reachable ? `🟢 端口畅通 (${pingResults[node.node_id].rtt_ms}ms)` : '🔴 端口无法直连' }}
+                </div>
+                <div v-else class="text-muted font-mono" style="font-size: 10px; margin-top: 2px;">
+                  最后心跳: {{ getHeartbeatInfo(node.last_heartbeat).diff }}
+                </div>
               </td>
 
-              <td>
-                <div class="action-btn-row">
+              <td style="text-align: right;">
+                <div class="action-btn-row" style="justify-content: flex-end;">
                   <button class="btn-sm btn-edit" @click="openConfigModal(node)">⚙️ 配置</button>
                   <button class="btn-sm btn-perm" @click="openPermModal(node)">🔐 权限</button>
                   <button class="btn-sm btn-reset" @click="handleForceResync(node.node_id)" title="清空公钥让节点重新上报">🔄 接纳</button>
@@ -228,7 +249,7 @@
               </td>
             </tr>
             <tr v-if="approvedNodes.length === 0">
-              <td colspan="8" style="text-align: center; color: #64748b; padding: 24px;">
+              <td colspan="7" style="text-align: center; color: #64748b; padding: 24px;">
                 暂无已准入的在线节点，请在上方复制部署命令并在海外服务器或内网主机启动节点。
               </td>
             </tr>
@@ -291,7 +312,7 @@
               <td>
                 <div class="pbk-box">
                   <span class="pbk-clean-text">{{ formatPbk(node.pbk) }}</span>
-                  <button class="btn-copy-icon" @click="copyText(node.pbk, '节点公钥')">📋</button>
+                  <button type="button" class="btn-copy-icon" title="点击复制完整公钥" @click.stop.prevent="copyText(node.pbk, '节点公钥')">📋</button>
                 </div>
               </td>
               <td style="font-size: 12px; color: #94a3b8; font-family: monospace;">
@@ -570,7 +591,7 @@
 </template>
 
 <script setup>
-import { ref, reactive, computed, onMounted } from 'vue'
+import { ref, reactive, computed, onMounted, onUnmounted } from 'vue'
 import axios from 'axios'
 import { ElMessage } from 'element-plus'
 
@@ -579,11 +600,16 @@ const props = defineProps({
   adminPassword: { type: String, required: true }
 })
 
-const emit = defineEmits(['reload-all'])
+const emit = defineEmits(['reload-all', 'copy', 'open-qr'])
 
 const currentSubTab = ref('approved')
 const adminNodes = ref([])
 const auditLogsList = ref([])
+
+const pingResults = reactive({})
+const pingingNodeId = ref('')
+const pingingAll = ref(false)
+let pollTimer = null
 
 const clusterInfo = reactive({
   cluster_token: '',
@@ -674,9 +700,21 @@ const formatPbk = (pbk) => {
   return `${pbk.slice(0, 7)}...${pbk.slice(-6)}`
 }
 
-const copyText = (text, label) => {
-  if (!text) return
-  if (navigator.clipboard && navigator.clipboard.writeText) {
+const copyText = (val, label = '内容') => {
+  if (val === undefined || val === null) return
+  // 严格拦截任何原生事件对象
+  if (val instanceof Event || (typeof val === 'object' && (val.type || val.target || val.clipboardData || val.srcElement))) {
+    return
+  }
+  // 提取纯文本
+  let text = typeof val === 'object' && val.value !== undefined ? val.value : val
+  if (typeof text !== 'string' && typeof text !== 'number') return
+  text = String(text).trim()
+  if (!text || text === '[object ClipboardEvent]' || text === '[object Object]') {
+    ElMessage.warning(`${label}内容为空`)
+    return
+  }
+  if (navigator.clipboard && window.isSecureContext) {
     navigator.clipboard.writeText(text).then(() => {
       ElMessage.success(`${label}已复制到剪贴板！`)
     }).catch(() => {
@@ -687,18 +725,36 @@ const copyText = (text, label) => {
   }
 }
 
-const fallbackCopy = (text, label) => {
+const fallbackCopy = (text, label = '内容') => {
+  if (!text || typeof text !== 'string' || text === '[object ClipboardEvent]') return
   try {
     const ta = document.createElement('textarea')
     ta.value = text
     ta.style.position = 'fixed'
     ta.style.left = '-9999px'
+    ta.style.top = '-9999px'
+    ta.setAttribute('readonly', '')
     document.body.appendChild(ta)
     ta.focus()
     ta.select()
-    document.execCommand('copy')
+
+    // 捕获阶段拦截：防止任何上层 Vue 组件或根容器接收到原生 copy 事件冒泡
+    const stopCopyBubble = (e) => {
+      e.stopPropagation()
+      if (e.clipboardData) {
+        e.clipboardData.setData('text/plain', text)
+      }
+    }
+    document.addEventListener('copy', stopCopyBubble, true)
+    const successful = document.execCommand('copy')
+    document.removeEventListener('copy', stopCopyBubble, true)
+
     document.body.removeChild(ta)
-    ElMessage.success(`${label}已复制到剪贴板！`)
+    if (successful) {
+      ElMessage.success(`${label}已复制到剪贴板！`)
+    } else {
+      ElMessage.warning('未能自动复制，请手动复制')
+    }
   } catch (_) {
     ElMessage.error('复制失败，请手动选中文本复制')
   }
@@ -719,10 +775,10 @@ const getHeartbeatInfo = (lastHeartbeat) => {
     return { label: '在线 (活跃)', diff: diffText, cls: 'badge-ready' }
   } else if (diffSec <= 300) {
     const diffText = `${Math.floor(diffSec / 60)}分钟前`
-    return { label: '延迟', diff: diffText, cls: 'badge-restricted' }
+    return { label: '延迟预警', diff: diffText, cls: 'badge-restricted' }
   } else {
     const diffText = `${Math.floor(diffSec / 60)}分钟前`
-    return { label: '离线', diff: diffText, cls: 'badge-disabled' }
+    return { label: '离线失联', diff: diffText, cls: 'badge-disabled' }
   }
 }
 
@@ -733,7 +789,7 @@ const getScopeSummary = (node) => {
   return parts.length ? parts.join('+') : '未指派'
 }
 
-const fetchNodes = async () => {
+const fetchNodes = async (silent = false) => {
   try {
     const res = await axios.post('/api/admin/data', {
       admin_user: props.currentUser.username,
@@ -750,12 +806,76 @@ const fetchNodes = async () => {
       }
     }
   } catch (_) {
-    ElMessage.error('拉取集群数据失败')
+    if (!silent) {
+      ElMessage.error('拉取集群数据失败')
+    }
+  }
+}
+
+const handlePingNode = async (nodeId) => {
+  if (!nodeId) return
+  pingingNodeId.value = nodeId
+  try {
+    const res = await axios.post('/api/admin/nodes/ping', {
+      admin_user: props.currentUser.username,
+      admin_pwd: props.adminPassword,
+      node_id: nodeId
+    })
+    if (res.data.code === 200) {
+      if (res.data.data) {
+        Object.assign(pingResults, res.data.data)
+      }
+      if (res.data.nodes) {
+        const updated = res.data.nodes.find(n => n.node_id === nodeId)
+        if (updated) {
+          const idx = adminNodes.value.findIndex(n => n.node_id === nodeId)
+          if (idx !== -1) {
+            adminNodes.value[idx] = updated
+          }
+        }
+      }
+      ElMessage.success('节点连通性与心跳探测完成')
+    }
+  } catch (_) {
+    ElMessage.error('探测请求失败')
+  } finally {
+    pingingNodeId.value = ''
+  }
+}
+
+const handlePingAllNodes = async () => {
+  pingingAll.value = true
+  try {
+    const res = await axios.post('/api/admin/nodes/ping', {
+      admin_user: props.currentUser.username,
+      admin_pwd: props.adminPassword
+    })
+    if (res.data.code === 200) {
+      if (res.data.data) {
+        Object.assign(pingResults, res.data.data)
+      }
+      if (res.data.nodes) {
+        adminNodes.value = res.data.nodes
+      }
+      ElMessage.success('全量节点心跳与端口检测完成！')
+    }
+  } catch (_) {
+    ElMessage.error('批量测活失败')
+  } finally {
+    pingingAll.value = false
   }
 }
 
 onMounted(() => {
   fetchNodes()
+  // 10秒后台静默轮询心跳数据，无感刷新，杜绝手动 F5！
+  pollTimer = setInterval(() => {
+    fetchNodes(true)
+  }, 10000)
+})
+
+onUnmounted(() => {
+  if (pollTimer) clearInterval(pollTimer)
 })
 
 const handleToggleTofuEnabled = async () => {
@@ -1310,39 +1430,75 @@ const handleRevokeDelete = async (nodeId) => {
   gap: 6px;
 }
 
-/* 二级选项卡导航 (图二) */
+/* 二级选项卡导航 (统一风格) */
 .sub-nav-tabs {
   display: flex;
-  gap: 8px;
+  gap: 10px;
   margin-top: 16px;
-  border-bottom: 1px solid rgba(51, 65, 85, 0.6);
-  padding-bottom: 4px;
+  margin-bottom: 20px;
+  padding: 6px;
+  background: rgba(15, 23, 42, 0.6);
+  border: 1px solid rgba(51, 65, 85, 0.5);
+  border-radius: 10px;
+  flex-wrap: wrap;
+  align-items: center;
 }
 
 .sub-tab-btn {
-  background: transparent;
-  border: 1px solid #334155;
+  background: rgba(30, 41, 59, 0.5);
+  border: 1px solid rgba(51, 65, 85, 0.6);
   color: #94a3b8;
-  padding: 6px 14px;
-  border-radius: 6px;
-  font-size: 12px;
+  padding: 8px 18px;
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 600;
   cursor: pointer;
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  transition: all 0.2s;
+  gap: 8px;
+  transition: all 0.2s ease;
+  line-height: 1.2;
 }
 
 .sub-tab-btn:hover {
-  background: rgba(30, 41, 59, 0.6);
-  color: #e2e8f0;
+  background: rgba(51, 65, 85, 0.6);
+  border-color: rgba(148, 163, 184, 0.4);
+  color: #f1f5f9;
 }
 
 .sub-tab-btn.active {
-  background: #0284c7;
+  background: linear-gradient(135deg, rgba(2, 132, 199, 0.3) 0%, rgba(14, 165, 233, 0.2) 100%);
   border-color: #38bdf8;
-  color: #ffffff;
-  font-weight: 600;
+  color: #38bdf8;
+  font-weight: 700;
+  box-shadow: 0 0 12px rgba(56, 189, 248, 0.2);
+}
+
+.btn-ping-icon {
+  background: rgba(14, 165, 233, 0.15);
+  border: 1px solid rgba(56, 189, 248, 0.35);
+  color: #38bdf8;
+  border-radius: 4px;
+  padding: 2px 7px;
+  font-size: 11px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  white-space: nowrap;
+}
+
+.btn-ping-icon:hover:not(:disabled) {
+  background: rgba(14, 165, 233, 0.35);
+  border-color: #38bdf8;
+  box-shadow: 0 0 8px rgba(56, 189, 248, 0.3);
+  transform: translateY(-1px);
+}
+
+.btn-ping-icon:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
 }
 
 .sub-count-badge {

@@ -210,6 +210,51 @@ def admin_list_nodes():
     conn.close()
     return jsonify({"code": 200, "data": nodes})
 
+@admin_bp.route('/api/admin/nodes/ping', methods=['POST'])
+def admin_ping_node():
+    data = request.json or {}
+    if not check_admin(data.get('admin_user'), data.get('admin_pwd')): return jsonify({"code": 403, "msg": "无权限"})
+
+    node_id = data.get('node_id', '').strip()
+    conn = get_db()
+    c = conn.cursor()
+    if node_id:
+        c.execute("SELECT * FROM nodes WHERE node_id=?", (node_id,))
+        nodes = [dict(n) for n in c.fetchall()]
+    else:
+        c.execute("SELECT * FROM nodes ORDER BY id ASC")
+        nodes = [dict(n) for n in c.fetchall()]
+    conn.close()
+
+    import socket
+    import time
+    results = {}
+    for n in nodes:
+        nid = n['node_id']
+        ip = n.get('ip')
+        port = int(n.get('port', 443))
+        reachable = False
+        rtt_ms = None
+        if ip and ip != '0.0.0.0':
+            t0 = time.time()
+            try:
+                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                s.settimeout(1.5)
+                res = s.connect_ex((ip, port))
+                s.close()
+                if res == 0:
+                    reachable = True
+                    rtt_ms = round((time.time() - t0) * 1000, 1)
+            except Exception:
+                pass
+        results[nid] = {
+            "reachable": reachable,
+            "rtt_ms": rtt_ms,
+            "last_heartbeat": n.get('last_heartbeat', '')
+        }
+
+    return jsonify({"code": 200, "msg": "心跳与端口连通性检测完成", "data": results, "nodes": nodes})
+
 @admin_bp.route('/api/admin/nodes/force_resync', methods=['POST'])
 def admin_nodes_force_resync():
     data = request.json or {}

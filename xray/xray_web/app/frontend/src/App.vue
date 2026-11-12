@@ -108,10 +108,10 @@ import QrModal from './components/common/QrModal.vue'
 import AuthView from './components/AuthView.vue'
 import UserDashboard from './components/UserDashboard.vue'
 
-const AdminUsers = defineAsyncComponent(() => import('./components/admin/AdminUsers.vue'))
-const AdminNodes = defineAsyncComponent(() => import('./components/admin/AdminNodes.vue'))
-const AdminCards = defineAsyncComponent(() => import('./components/admin/AdminCards.vue'))
-const AdminSettings = defineAsyncComponent(() => import('./components/admin/AdminSettings.vue'))
+import AdminUsers from './components/admin/AdminUsers.vue'
+import AdminNodes from './components/admin/AdminNodes.vue'
+import AdminCards from './components/admin/AdminCards.vue'
+import AdminSettings from './components/admin/AdminSettings.vue'
 
 const isPureAdmin = ref(false)
 const systemNotice = ref('')
@@ -238,8 +238,15 @@ const openQrModalFromChild = ({ link, name }) => {
   showQrModal.value = true
 }
 
-const copyText = async (text) => {
-  if (!text) return ElMessage.warning('内容为空')
+const copyText = async (val) => {
+  if (val === undefined || val === null) return
+  if (val instanceof Event || (typeof val === 'object' && (val.type || val.target || val.clipboardData || val.srcElement))) {
+    return
+  }
+  let text = typeof val === 'object' && val.value !== undefined ? val.value : val
+  if (typeof text !== 'string' && typeof text !== 'number') return
+  text = String(text).trim()
+  if (!text || text === '[object ClipboardEvent]' || text === '[object Object]') return
   if (navigator.clipboard && window.isSecureContext) {
     try {
       await navigator.clipboard.writeText(text)
@@ -250,15 +257,24 @@ const copyText = async (text) => {
   const ta = document.createElement('textarea')
   ta.value = text
   ta.style.position = 'fixed'
+  ta.style.left = '-9999px'
   ta.style.opacity = '0'
   document.body.appendChild(ta)
   ta.select()
+  const stopBubble = (e) => {
+    e.stopPropagation()
+    if (e.clipboardData) {
+      e.clipboardData.setData('text/plain', text)
+    }
+  }
+  document.addEventListener('copy', stopBubble, true)
   try {
-    document.execCommand('copy')
-    ElMessage.success('已复制到剪贴板！')
+    const ok = document.execCommand('copy')
+    if (ok) ElMessage.success('已复制到剪贴板！')
   } catch (_) {
     ElMessage.error('复制失败，请手动选择复制')
   }
+  document.removeEventListener('copy', stopBubble, true)
   document.body.removeChild(ta)
 }
 
@@ -462,12 +478,44 @@ const logout = () => {
 .count-tag.tag-cards { background: rgba(236, 72, 153, 0.15); color: #f472b6; border-color: rgba(236, 72, 153, 0.3); }
 .count-tag.tag-settings { background: rgba(148, 163, 184, 0.15); color: #94a3b8; border-color: rgba(148, 163, 184, 0.3); }
 
-.sub-tab-nav { display: flex; gap: 12px; margin-bottom: 20px; border-bottom: 1px solid #1e293b; padding-bottom: 12px; flex-wrap: wrap; }
-.sub-tab-btn {
-  background: #0b1120; border: 1px solid #1e293b; color: #94a3b8; padding: 8px 18px;
-  border-radius: 8px; cursor: pointer; font-size: 13px; font-weight: 600;
+.sub-tab-nav, .sub-nav-tabs {
+  display: flex;
+  gap: 10px;
+  margin-bottom: 20px;
+  padding: 6px;
+  background: rgba(15, 23, 42, 0.6);
+  border: 1px solid rgba(51, 65, 85, 0.5);
+  border-radius: 10px;
+  flex-wrap: wrap;
+  align-items: center;
 }
-.sub-tab-btn.active { background: rgba(56, 189, 248, 0.15); color: #38bdf8; border-color: #38bdf8; }
+.sub-tab-btn {
+  background: rgba(30, 41, 59, 0.5);
+  border: 1px solid rgba(51, 65, 85, 0.6);
+  color: #94a3b8;
+  padding: 8px 18px;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 600;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  transition: all 0.2s ease;
+  line-height: 1.2;
+}
+.sub-tab-btn:hover {
+  background: rgba(51, 65, 85, 0.6);
+  border-color: rgba(148, 163, 184, 0.4);
+  color: #f1f5f9;
+}
+.sub-tab-btn.active {
+  background: linear-gradient(135deg, rgba(2, 132, 199, 0.3) 0%, rgba(14, 165, 233, 0.2) 100%);
+  border-color: #38bdf8;
+  color: #38bdf8;
+  font-weight: 700;
+  box-shadow: 0 0 12px rgba(56, 189, 248, 0.2);
+}
 
 .settings-2col-layout { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; align-items: start; }
 .column-stack { display: flex; flex-direction: column; gap: 20px; }
