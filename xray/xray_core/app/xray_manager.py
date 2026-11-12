@@ -104,7 +104,7 @@ class XrayManager:
 
     def test_config_syntax(self, config_dict: Dict[str, Any]) -> bool:
         """核心语法预检：xray test -config"""
-        tmp_path = "/tmp/xray.preflight.json"
+        tmp_path = os.path.join(AppConfig.DATA_DIR, "xray.preflight.json")
         try:
             with open(tmp_path, "w") as f:
                 json.dump(config_dict, f, indent=2)

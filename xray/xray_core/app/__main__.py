@@ -175,29 +175,39 @@ ShortId: {self.xray_mgr.short_id}
                 )
                 tasks.append(asyncio.create_task(self.tunnel_supervisor.run_tunnel_worker()))
 
-        # 监听优雅停机
+        # 监听优雅停机信号 (确保 dumb-init 转发的 SIGTERM / SIGINT 立即响应)
         loop = asyncio.get_running_loop()
         for sig in (signal.SIGTERM, signal.SIGINT):
             try:
                 loop.add_signal_handler(sig, self.shutdown)
             except NotImplementedError:
-                pass
+                signal.signal(sig, lambda s, f: self.shutdown())
 
         await asyncio.gather(*tasks, return_exceptions=True)
 
     def shutdown(self):
-        print("\n[EdgeCore] 接收到退出信号，正在安全停机...", flush=True)
+        if not self.is_running:
+            return
+        print("\n[EdgeCore] 接收到退出信号，正在执行全链路优雅停机...", flush=True)
         self.is_running = False
         if self.tunnel_supervisor:
             self.tunnel_supervisor.is_running = False
-        self.xray_mgr.stop()
+        if self.xray_mgr:
+            self.xray_mgr.stop()
+        print("[EdgeCore] ✅ Xray 核心已安全停止，进程退出完毕。", flush=True)
         sys.exit(0)
 
 def main():
     app = EdgeCoreApplication()
+    # 注册同步信号兜底，确保在事件循环就绪前后均能捕获 SIGTERM
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        try:
+            signal.signal(sig, lambda s, f: app.shutdown())
+        except Exception:
+            pass
     try:
         asyncio.run(app.run())
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, SystemExit):
         app.shutdown()
 
 if __name__ == "__main__":

@@ -139,10 +139,10 @@
             <tr>
               <th>节点名称 / 连接地址</th>
               <th>准入状态</th>
-              <th>网络连接与伪装配置</th>
+              <th>SNI 伪装域名</th>
               <th>开放授权策略</th>
               <th>公钥 (PublicKey)</th>
-              <th>健康与心跳 (实时测活)</th>
+              <th>健康与心跳 (点击测活)</th>
               <th style="width: 250px; text-align: right;">治理操作</th>
             </tr>
           </thead>
@@ -168,16 +168,13 @@
                 </span>
               </td>
 
-              <!-- 网络连接与伪装配置 (利用合并冗余状态后腾出的空间) -->
+              <!-- SNI 伪装域名 (恢复展示主 SNI 与多 SNI 数量，端口已在第一列地址中展示) -->
               <td>
-                <div style="font-size: 11px; color: #e2e8f0; font-family: monospace; line-height: 1.5;">
-                  <div><span style="color: #94a3b8;">端口:</span> <b style="color: #38bdf8;">{{ node.port || 443 }}</b></div>
-                  <div style="white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 190px;" :title="`回落目标: ${node.dest || 'www.microsoft.com:443'}`">
-                    <span style="color: #94a3b8;">回落:</span> {{ node.dest || 'www.microsoft.com:443' }}
-                  </div>
-                  <div style="font-size: 10px; color: #64748b; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 190px;" :title="`SNI: ${node.sni || 'www.microsoft.com'}`">
-                    SNI: {{ node.sni || 'www.microsoft.com' }}
-                  </div>
+                <div style="font-family: monospace; font-size: 12px; color: #38bdf8; font-weight: 600;">
+                  {{ node.sni || 'www.microsoft.com' }}
+                </div>
+                <div v-if="getServerNamesCount(node) > 1" style="font-size: 10px; color: #64748b; margin-top: 2px;">
+                  多SNI: {{ getServerNamesCount(node) }} 个
                 </div>
               </td>
 
@@ -198,7 +195,7 @@
               <td>
                 <div v-if="node.pbk && node.pbk.length === 43" class="pbk-box">
                   <span class="pbk-clean-text" :title="`完整公钥: ${node.pbk}`">{{ formatPbk(node.pbk) }}</span>
-                  <button type="button" class="btn-copy-icon" title="点击复制完整公钥" @click.stop="copyText(node.pbk, '节点公钥')">
+                  <button type="button" class="btn-copy-icon" title="点击复制完整公钥" @click.stop.prevent="copyText(node.pbk, '节点公钥')">
                     📋
                   </button>
                 </div>
@@ -207,35 +204,24 @@
                 </div>
               </td>
 
-              <!-- 合并后的核心列：健康状态与实时测活 -->
+              <!-- 健康与心跳 (单行徽章，鼠标移入展示心跳时间，点击直接发起测活) -->
               <td>
-                <div style="display: flex; align-items: center; gap: 8px;">
-                  <span
-                    class="heartbeat-badge"
-                    :class="node.status === 0 ? 'badge-disabled' : getHeartbeatInfo(node.last_heartbeat).cls"
-                    :title="node.status === 0 ? '管理已停用' : `最后心跳: ${node.last_heartbeat || '无记录'} (${getHeartbeatInfo(node.last_heartbeat).diff})`"
-                  >
-                    <span class="status-dot"></span>
-                    <span>{{ node.status === 0 ? '🛑 管理停用' : getHeartbeatInfo(node.last_heartbeat).label }}</span>
+                <div
+                  class="heartbeat-badge clickable-heartbeat"
+                  :class="[
+                    node.status === 0 ? 'badge-disabled' : getHeartbeatInfo(node.last_heartbeat).cls,
+                    { 'is-pinging': pingingNodeId === node.node_id }
+                  ]"
+                  :title="getHeartbeatTooltip(node)"
+                  @click.stop="node.status !== 0 && handlePingNode(node.node_id)"
+                >
+                  <span class="status-dot"></span>
+                  <span v-if="pingingNodeId === node.node_id">⏳ 测活中...</span>
+                  <span v-else-if="node.status === 0">🛑 管理停用</span>
+                  <span v-else-if="pingResults[node.node_id]">
+                    {{ pingResults[node.node_id].reachable ? `🟢 在线 (${pingResults[node.node_id].rtt_ms}ms)` : '🔴 离线 (端口不通)' }}
                   </span>
-
-                  <!-- 立即检测心跳按钮 -->
-                  <button
-                    type="button"
-                    class="btn-xs btn-ping-icon"
-                    :disabled="pingingNodeId === node.node_id"
-                    title="立即探测该节点连通性与心跳"
-                    @click.stop="handlePingNode(node.node_id)"
-                  >
-                    {{ pingingNodeId === node.node_id ? '⏳' : '⚡ 测活' }}
-                  </button>
-                </div>
-
-                <div v-if="pingResults[node.node_id]" style="font-size: 10px; margin-top: 4px; font-family: monospace;" :style="{ color: pingResults[node.node_id].reachable ? '#34d399' : '#f87171' }">
-                  {{ pingResults[node.node_id].reachable ? `🟢 端口畅通 (${pingResults[node.node_id].rtt_ms}ms)` : '🔴 端口无法直连' }}
-                </div>
-                <div v-else class="text-muted font-mono" style="font-size: 10px; margin-top: 2px;">
-                  最后心跳: {{ getHeartbeatInfo(node.last_heartbeat).diff }}
+                  <span v-else>{{ getHeartbeatInfo(node.last_heartbeat).label }}</span>
                 </div>
               </td>
 
@@ -780,6 +766,26 @@ const getHeartbeatInfo = (lastHeartbeat) => {
     const diffText = `${Math.floor(diffSec / 60)}分钟前`
     return { label: '离线失联', diff: diffText, cls: 'badge-disabled' }
   }
+}
+
+const getServerNamesCount = (node) => {
+  if (Array.isArray(node.server_names)) return node.server_names.length
+  if (typeof node.server_names === 'string' && node.server_names.trim()) {
+    return node.server_names.split(',').filter(Boolean).length
+  }
+  return 1
+}
+
+const getHeartbeatTooltip = (node) => {
+  if (node.status === 0) return '管理已停用'
+  const info = getHeartbeatInfo(node.last_heartbeat)
+  const ping = pingResults[node.node_id]
+  let tip = `最后心跳: ${node.last_heartbeat || '无记录'} (${info.diff})`
+  if (ping) {
+    tip += ` | ${ping.reachable ? `实时延迟: ${ping.rtt_ms}ms` : '端口不可达'}`
+  }
+  tip += ' (点击徽标立即执行测活)'
+  return tip
 }
 
 const getScopeSummary = (node) => {
@@ -1499,6 +1505,37 @@ const handleRevokeDelete = async (nodeId) => {
 .btn-ping-icon:disabled {
   opacity: 0.6;
   cursor: not-allowed;
+}
+
+/* 交互式心跳徽标 (点击立即测活，悬停发光) */
+.clickable-heartbeat {
+  cursor: pointer;
+  user-select: none;
+  transition: all 0.2s ease;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 11px;
+  border-radius: 9999px;
+  font-size: 12px;
+  font-weight: 600;
+  border: 1px solid transparent;
+}
+
+.clickable-heartbeat:hover:not(.badge-disabled) {
+  transform: translateY(-1px);
+  box-shadow: 0 0 10px rgba(56, 189, 248, 0.35);
+  border-color: #38bdf8;
+  filter: brightness(1.15);
+}
+
+.clickable-heartbeat:active:not(.badge-disabled) {
+  transform: translateY(0);
+}
+
+.clickable-heartbeat.is-pinging {
+  opacity: 0.8;
+  cursor: wait;
 }
 
 .sub-count-badge {

@@ -134,7 +134,7 @@
                   <th>类型</th>
                   <th>大小</th>
                   <th>生成时间</th>
-                  <th style="text-align: right;">操作</th>
+                  <th style="text-align: right; padding-right: 20px; width: 270px;">操作</th>
                 </tr>
               </thead>
               <tbody>
@@ -156,11 +156,11 @@
                   </td>
                   <td class="font-mono text-xs">{{ item.size_human }}</td>
                   <td class="font-mono text-xs text-muted">{{ item.created_at }}</td>
-                  <td style="text-align: right;">
-                    <div style="display: inline-flex; gap: 8px;">
-                      <button class="btn-xs btn-action" @click="handleDownloadBackup(item.filename)">📥 下载</button>
-                      <button class="btn-xs btn-cyber-primary" style="background: linear-gradient(135deg, #0284c7 0%, #2563eb 100%);" @click="openRestoreModal(item.filename)">🔄 一键恢复</button>
-                      <button class="btn-xs btn-reset" @click="handleDeleteBackup(item.filename)">🗑️ 删除</button>
+                  <td style="text-align: right; padding-right: 20px;">
+                    <div class="backup-btn-group">
+                      <button class="btn-backup-action btn-backup-download" title="下载备份快照到本地" @click="handleDownloadBackup(item.filename)">📥 下载</button>
+                      <button class="btn-backup-action btn-backup-restore" title="一键安全恢复整个数据库" @click="openRestoreModal(item.filename)">🔄 一键恢复</button>
+                      <button class="btn-backup-action btn-backup-delete" title="永久删除此备份快照" @click="handleDeleteBackup(item.filename)">🗑️ 删除</button>
                     </div>
                   </td>
                 </tr>
@@ -1158,5 +1158,72 @@ const triggerManualTask = async () => {
   font-size: 12px;
   color: #94a3b8;
   white-space: nowrap;
+}
+
+/* 历史备份表格操作按钮组 (彻底消除默认 3D 边框，统一直角圆角与质感) */
+.backup-btn-group {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.btn-backup-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  padding: 5px 12px;
+  font-size: 12px;
+  font-weight: 600;
+  border-radius: 6px;
+  cursor: pointer;
+  white-space: nowrap;
+  line-height: 1.2;
+  transition: all 0.2s ease;
+  outline: none;
+  border: 1px solid transparent;
+}
+
+/* 1. 下载按钮：科技青蓝风格 */
+.btn-backup-download {
+  background: rgba(14, 165, 233, 0.15);
+  border-color: rgba(56, 189, 248, 0.4);
+  color: #38bdf8;
+}
+.btn-backup-download:hover {
+  background: rgba(14, 165, 233, 0.32);
+  border-color: #38bdf8;
+  color: #ffffff;
+  box-shadow: 0 0 10px rgba(56, 189, 248, 0.25);
+  transform: translateY(-1px);
+}
+
+/* 2. 一键恢复按钮：高亮极客蓝渐变风格 */
+.btn-backup-restore {
+  background: linear-gradient(135deg, #0284c7 0%, #2563eb 100%);
+  border-color: #38bdf8;
+  color: #ffffff;
+  box-shadow: 0 0 8px rgba(56, 189, 248, 0.25);
+}
+.btn-backup-restore:hover {
+  background: linear-gradient(135deg, #0369a1 0%, #1d4ed8 100%);
+  border-color: #7dd3fc;
+  box-shadow: 0 0 12px rgba(56, 189, 248, 0.4);
+  transform: translateY(-1px);
+}
+
+/* 3. 删除按钮：警示暗红质感风格 (告别土黄与 3D 凸起) */
+.btn-backup-delete {
+  background: rgba(239, 68, 68, 0.15);
+  border-color: rgba(239, 68, 68, 0.35);
+  color: #f87171;
+}
+.btn-backup-delete:hover {
+  background: rgba(239, 68, 68, 0.32);
+  border-color: #ef4444;
+  color: #ffffff;
+  box-shadow: 0 0 10px rgba(239, 68, 68, 0.25);
+  transform: translateY(-1px);
 }
 </style>
