@@ -27,7 +27,7 @@ env:
   # 镜像上传变量：自动从 Secret 拼接 "用户名/nginx"
   DOCKER_IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/nginx
   # 定义工作目录
-  WORKDIR: ./nginx
+  WORKING_DIR: ./nginx
 
 jobs:
   build-and-push:
