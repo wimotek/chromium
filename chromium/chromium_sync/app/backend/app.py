@@ -169,6 +169,11 @@ def _create_listen_sockets(host: str, port: int):
 
 # 5. 服务入口
 if __name__ == "__main__":
+    import logging
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
+
+    enable_access_log = os.getenv("UVICORN_ACCESS_LOG", "false").strip().lower() in {"1", "true", "yes", "on"}
     cert_path, key_path = ensure_ssl_certificates()
     listen_sockets = _create_listen_sockets(HUB_HOST, HUB_PORT)
     uv_config = uvicorn.Config(
@@ -179,5 +184,6 @@ if __name__ == "__main__":
         ssl_keyfile=key_path,
         proxy_headers=True,
         forwarded_allow_ips="*",
+        access_log=enable_access_log,
     )
     uvicorn.Server(uv_config).run(sockets=listen_sockets)
