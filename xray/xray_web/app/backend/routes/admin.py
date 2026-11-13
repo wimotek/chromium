@@ -53,7 +53,7 @@ def admin_data():
                     "sni": chosen_sni,
                     "server_names": snis,
                     "selected_sni": chosen_sni,
-                    "link": build_node_link(d['uuid'], n, f"{n['name']}", chosen_sni=chosen_sni)
+                    "link": build_node_link(d['uuid'], n, f"{n['name']}", chosen_sni=chosen_sni, hub_domain=request.host)
                 })
         users.append(d)
 

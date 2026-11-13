@@ -14,7 +14,8 @@
   - **主控双栈监听**：Granian 启动时自动探测内核 IPv6 双栈能力（`::` 且 `IPV6_V6ONLY=0`），开箱同时监听 IPv4 与 IPv6（支持 `WEB_HOST` 手动覆写）；
   - **公网直连节点 (`direct`)**：默认启用原生 `TCP + VLESS-REALITY-Vision`，无任何废弃 WebSocket 警告，抗封锁性能优异；
   - **NAT4 / 封端口反穿节点 (`reverse_wss`)**：本地回环采用纯 TCP 桥接，节点 Python 守护进程主动向 Hub 建立 WSS 反向长连接，免公网 IP、免端口映射。
-- 🐍 **主控端原生集成官方 PyPI 模块 `wimotek-edge-agent`**：
+- 🐍 **主控端原生集成官方 PyPI 模块 `wimotek-edge-agent >= 1.0.16`**：
+  - **主动双栈 TCP 拨测裁决 (`detect_network_mode_sync`)**：节点上报公网 IPv4 / IPv6 与端口后，Hub 端主动并发 TCP 拨测连通性，精准裁决 `direct_dual` / `direct_ipv4` / `direct_ipv6` / `reverse_tunnel`，端口被墙或处于 NAT4 自动下发 `reverse_wss` 热切换；
   - **40 字符单次防重放令牌 (`JoinTokenIssuer / Verifier`)**：14 字节随机 ID + 16 字节 HMAC-SHA256 签名，核销后原子作废防重放劫持；
   - **零信任 `TrustStore` 与结构化审计 (`AuditLogger`)**：统一记录 JSONL 安全审计流水，支持 **10MB 自动切割轮转与归档**，提供 `/api/node/edge_agent/*` 原生管理端点。
 - 🛡️ **TOFU (Trust-On-First-Use) 首次准入与隔离区**：
@@ -144,7 +145,7 @@ docker run -d \
 | :--- | :--- | :--- |
 | `PANEL_URL` | **[必填]** 主控 `xray_web` 的访问地址 | `https://1.2.3.4:8443` |
 | `CLUSTER_TOKEN` | **[必填]** 集群引导令牌或主控签发的 40 字符单次 Join Token | `xray_cluster_secret_key_2026` |
-| `NET_MODE` | 网络模式：`auto`（自动识别 CGNAT/私网）、`direct`（直连）、`reverse_wss`（反穿） | `auto` |
+| `NET_MODE` | 网络模式：`auto`（上报双栈 IP 由 Hub 主动拨测裁决）、`direct`（强制直连）、`reverse_wss`（强制反穿） | `auto` |
 | `PORT` | 节点 Reality 监听端口 | `443` |
 | `DEST` | 伪装目标回落地址 | `www.microsoft.com:443` |
 | `SERVER_NAMES` | 伪装域名列表 (逗号分隔) | `www.microsoft.com,microsoft.com` |

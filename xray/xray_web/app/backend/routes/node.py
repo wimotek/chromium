@@ -7,7 +7,7 @@ from flask import Blueprint, request, jsonify
 from core.db import get_db, get_setting
 from core.edge_agent_service import EdgeAgentService
 from wimotek_edge_agent.models import AccessDecision
-from routes import get_node_snis, is_user_allowed_for_node
+from routes import get_node_snis, is_user_allowed_for_node, extract_host
 
 node_bp = Blueprint('node_bp', __name__)
 
@@ -98,10 +98,28 @@ def node_heartbeat():
             auto_approve_setting = get_setting("node_auto_approve", "true").lower() == "true"
             strict_token_setting = get_setting("strict_token_only", "false").lower() == "true"
 
-            # 优先使用 wimotek-edge-agent 单次 40 字符 HMAC 令牌验证 (抗重放)
-            edge_claims = EdgeAgentService.get_instance().verify_token(
+            # 1. 先由 Hub 调用 wimotek-edge-agent 主动并发拨测节点上报的双栈 IPv4/IPv6 端口连通性
+            reported_mode = data.get("net_mode", "auto").strip().lower()
+            v4_in = data.get("public_ipv4") or (node_ip if (node_ip and ":" not in str(node_ip)) else None)
+            v6_in = data.get("public_ipv6") or (node_ip if (node_ip and ":" in str(node_ip)) else None)
+            v4_port = int(data.get("public_ipv4_port") or node_port)
+            v6_port = int(data.get("public_ipv6_port") or node_port)
+
+            edge_svc = EdgeAgentService.get_instance()
+            net_mode, probed_ip, det_result = edge_svc.probe_node_network(
+                public_ipv4=v4_in,
+                public_ipv4_port=v4_port,
+                public_ipv6=v6_in,
+                public_ipv6_port=v6_port,
+                preferred_mode=reported_mode,
+                remote_addr=request.remote_addr,
+            )
+            node_ip = probed_ip or node_ip or request.remote_addr or "127.0.0.1"
+
+            # 2. 优先使用 wimotek-edge-agent 单次 40 字符 HMAC 令牌验证 (抗重放)
+            edge_claims = edge_svc.verify_token(
                 token=bootstrap_token,
-                source_ip=node_ip or "127.0.0.1",
+                source_ip=node_ip,
                 node_uuid=node_id
             )
             is_edge_token_valid = edge_claims is not None
@@ -117,42 +135,44 @@ def node_heartbeat():
                 is_approved = 1
                 status = 1
                 admit_reason = "凭 wimotek-edge-agent 单次防重放令牌准入" if is_edge_token_valid else "凭有效集群 Token 自动加入"
-                EdgeAgentService.get_instance().log_access(
-                    source_ip=node_ip or "127.0.0.1",
+                edge_svc.log_access(
+                    source_ip=node_ip,
                     node_uuid=node_id,
                     fingerprint=node_pubkey or "none",
                     decision=AccessDecision.ALLOW_TOKEN,
                     reason=admit_reason,
-                    network_profile=data.get("net_mode", "direct"),
+                    network_profile=det_result.network_profile,
+                    network_mode=det_result.network_mode,
                     node_status="trusted",
-                    join_token=bootstrap_token
                 )
             elif auto_approve_setting and not strict_token_setting:
                 is_approved = 1
                 status = 1
                 admit_reason = "TOFU 免审核策略自动准入"
-                EdgeAgentService.get_instance().log_access(
-                    source_ip=node_ip or "127.0.0.1",
+                edge_svc.log_access(
+                    source_ip=node_ip,
                     node_uuid=node_id,
                     fingerprint=node_pubkey or "none",
                     decision=AccessDecision.PENDING_TOFU,
                     reason=admit_reason,
-                    network_profile=data.get("net_mode", "direct"),
-                    node_status="trusted"
+                    network_profile=det_result.network_profile,
+                    network_mode=det_result.network_mode,
+                    node_status="trusted",
                 )
             elif strict_token_setting:
-                EdgeAgentService.get_instance().log_access(
-                    source_ip=node_ip or "127.0.0.1",
+                edge_svc.log_access(
+                    source_ip=node_ip,
                     node_uuid=node_id,
                     fingerprint=node_pubkey or "none",
                     decision=AccessDecision.DENY,
                     reason="严格模式拦截：缺少合法的单次防重放或集群引导令牌",
-                    network_profile=data.get("net_mode", "direct"),
-                    node_status="revoked"
+                    network_profile=det_result.network_profile,
+                    network_mode=det_result.network_mode,
+                    node_status="revoked",
                 )
                 c.execute(
                     "INSERT INTO audit_logs (level, event_type, node_id, ip, message) VALUES (?, ?, ?, ?, ?)",
-                    ("security", "TOKEN_REJECTED", node_id, node_ip, f"严格令牌模式阻断：新节点未携带合法集群引导令牌")
+                    ("security", "TOKEN_REJECTED", node_id, node_ip, "严格令牌模式阻断：新节点未携带合法集群引导令牌")
                 )
                 conn.commit()
                 conn.close()
@@ -161,25 +181,23 @@ def node_heartbeat():
                 is_approved = 0
                 status = 0
                 admit_reason = "进入待审隔离区等待审批"
-                EdgeAgentService.get_instance().log_access(
-                    source_ip=node_ip or "127.0.0.1",
+                edge_svc.log_access(
+                    source_ip=node_ip,
                     node_uuid=node_id,
                     fingerprint=node_pubkey or "none",
                     decision=AccessDecision.PENDING_TOFU,
                     reason=admit_reason,
-                    network_profile=data.get("net_mode", "direct"),
-                    node_status="pending"
+                    network_profile=det_result.network_profile,
+                    network_mode=det_result.network_mode,
+                    node_status="pending",
                 )
 
             # 签发专属通信凭据与密码学锁定
             assigned_node_key = "nk_" + secrets.token_hex(20)
             key_lock_status = "locked" if node_pubkey else "unlocked"
 
-            net_mode = data.get("net_mode", "direct").strip().lower()
-            if net_mode not in ["direct", "reverse_wss"]:
-                net_mode = "direct"
             tunnel_uuid = data.get("tunnel_uuid", "").strip() or str(uuid.uuid4())
-            tunnel_status = "connected" if net_mode == "reverse_wss" else "direct"
+            tunnel_status = "connected" if net_mode == "reverse_wss" else det_result.network_mode
 
             # 检查同 IP 同端口平滑接管
             c.execute("SELECT id, tunnel_uuid FROM nodes WHERE ip=? AND port=?", (node_ip, node_port))
@@ -211,7 +229,7 @@ def node_heartbeat():
             conn.commit()
             conn.close()
 
-            tip = f"TOFU 首次接入成功 ({admit_reason})！模式: {mode_desc}，公私钥绑定: {'已锁定 (Ed25519)' if node_pubkey else '未锁定'}。"
+            tip = f"TOFU 首次接入成功 ({admit_reason})！拨测结果: {det_result.network_mode} ({mode_desc})，公私钥绑定: {'已锁定 (Ed25519)' if node_pubkey else '未锁定'}。"
             resp_data = {
                 "code": 200,
                 "msg": tip,
@@ -219,11 +237,21 @@ def node_heartbeat():
                 "is_approved": is_approved,
                 "key_lock_status": key_lock_status,
                 "net_mode": net_mode,
-                "challenge_nonce": next_challenge_nonce
+                "network_mode": det_result.network_mode,
+                "network_detection": det_result.to_dict(),
+                "challenge_nonce": next_challenge_nonce,
+                "node_config": {
+                    "net_mode": net_mode,
+                    "port": node_port,
+                    "dest": dest,
+                    "sni": primary_sni,
+                    "server_names": snis,
+                    "sid": sid
+                }
             }
             if net_mode == "reverse_wss":
                 resp_data["tunnel_config"] = {
-                    "hub_ws_host": request.host.split(':')[0],
+                    "hub_ws_host": extract_host(request.host),
                     "hub_ws_port": 443,
                     "hub_ws_path": f"/api/tunnel/bridge/{node_id}",
                     "tunnel_uuid": tunnel_uuid,
@@ -332,19 +360,31 @@ def node_heartbeat():
             snis = get_node_snis(latest_node)
             clean_dest = latest_node["dest"] if (latest_node.get("dest") and ":" in latest_node["dest"]) else f"{latest_node.get('dest', 'www.microsoft.com')}:443"
 
-            return jsonify({
+            stage2_net_mode = latest_node.get("net_mode", "direct")
+            stage2_resp = {
                 "code": 200, 
                 "msg": "心跳正常 (密码学验签通过)",
                 "challenge_nonce": next_challenge_nonce,
                 "key_lock_status": update_lock_status,
+                "net_mode": stage2_net_mode,
                 "node_config": {
+                    "net_mode": stage2_net_mode,
                     "port": latest_node["port"],
                     "dest": clean_dest,
                     "sni": snis[0] if snis else "www.microsoft.com",
                     "server_names": snis,
                     "sid": latest_node["sid"]
                 }
-            })
+            }
+            if stage2_net_mode == "reverse_wss":
+                stage2_resp["tunnel_config"] = {
+                    "hub_ws_host": extract_host(request.host),
+                    "hub_ws_port": 443,
+                    "hub_ws_path": f"/api/tunnel/bridge/{node_id}",
+                    "tunnel_uuid": latest_node.get("tunnel_uuid") or "",
+                    "portal_domain": f"reverse.{node_id}.hub.internal"
+                }
+            return jsonify(stage2_resp)
 
         conn.close()
         return jsonify({"code": 403, "msg": "【安全拦截】节点通信凭据校验失败，拒绝服务！"}), 403
@@ -380,6 +420,7 @@ def node_sync_users():
             return jsonify({
                 "code": 200,
                 "node_config": {
+                    "net_mode": node.get("net_mode", "direct"),
                     "port": node["port"],
                     "dest": clean_dest,
                     "sni": snis[0],
@@ -405,6 +446,7 @@ def node_sync_users():
         return jsonify({
             "code": 200,
             "node_config": {
+                "net_mode": node.get("net_mode", "direct"),
                 "port": node["port"],
                 "dest": clean_dest,
                 "sni": snis[0],
@@ -519,8 +561,11 @@ def create_gateway_session():
         session_uuid = str(uuid.uuid4())
         is_reverse = (node.get("net_mode") == "reverse_wss")
 
-        hub_host = request.host.split(':')[0]
+        hub_host = extract_host(request.host)
         hub_port = 443
+
+        raw_node_ip = str(node["ip"]).strip()
+        formatted_node_ip = f"[{raw_node_ip}]" if (":" in raw_node_ip and not raw_node_ip.startswith("[")) else raw_node_ip
 
         return jsonify({
             "code": 200,
@@ -536,7 +581,7 @@ def create_gateway_session():
                     "sni": node["sni"]
                 },
                 "connection": {
-                    "server": hub_host if is_reverse else node["ip"],
+                    "server": hub_host if is_reverse else formatted_node_ip,
                     "port": hub_port if is_reverse else node["port"],
                     "protocol": "vless-wss" if is_reverse else "vless-reality",
                     "uuid": session_uuid,
@@ -618,4 +663,61 @@ def edge_agent_clean_audit():
         "code": 200,
         "cleared_lines": cleared,
         "msg": f"审计日志清理完成，保留最近 {keep_lines} 行"
+    })
+
+@node_bp.route('/api/node/edge_agent/probe_network', methods=['POST'])
+def edge_agent_probe_network():
+    """使用 wimotek-edge-agent 主动并发拨测指定 IPv4/IPv6 或已注册节点的端口连通性"""
+    data = request.get_json(silent=True) or {}
+    node_id = (data.get("node_id") or "").strip()
+    apply_result = bool(data.get("apply", False))
+
+    public_ipv4 = data.get("public_ipv4") or data.get("ipv4")
+    public_ipv4_port = data.get("public_ipv4_port") or data.get("port")
+    public_ipv6 = data.get("public_ipv6") or data.get("ipv6")
+    public_ipv6_port = data.get("public_ipv6_port") or data.get("port")
+    preferred_mode = data.get("net_mode", "auto")
+
+    if node_id and not (public_ipv4 or public_ipv6):
+        conn = get_db()
+        c = conn.cursor()
+        c.execute("SELECT ip, port FROM nodes WHERE node_id=?", (node_id,))
+        row = c.fetchone()
+        conn.close()
+        if not row:
+            return jsonify({"code": 404, "msg": "节点不存在"}), 404
+        stored_ip = (row["ip"] or "").strip().strip("[]")
+        stored_port = int(row["port"] or 443)
+        if ":" in stored_ip:
+            public_ipv6 = stored_ip
+            public_ipv6_port = public_ipv6_port or stored_port
+        elif stored_ip:
+            public_ipv4 = stored_ip
+            public_ipv4_port = public_ipv4_port or stored_port
+
+    xray_net_mode, best_ip, det = EdgeAgentService.get_instance().probe_node_network(
+        public_ipv4=public_ipv4,
+        public_ipv4_port=int(public_ipv4_port) if public_ipv4_port else None,
+        public_ipv6=public_ipv6,
+        public_ipv6_port=int(public_ipv6_port) if public_ipv6_port else None,
+        preferred_mode=preferred_mode,
+    )
+
+    if apply_result and node_id:
+        tunnel_status = "connected" if xray_net_mode == "reverse_wss" else det.network_mode
+        conn = get_db()
+        c = conn.cursor()
+        c.execute(
+            "UPDATE nodes SET net_mode=?, tunnel_status=? WHERE node_id=?",
+            (xray_net_mode, tunnel_status, node_id),
+        )
+        conn.commit()
+        conn.close()
+
+    return jsonify({
+        "code": 200,
+        "xray_net_mode": xray_net_mode,
+        "best_ip": best_ip,
+        "applied": bool(apply_result and node_id),
+        "detection": det.to_dict(),
     })

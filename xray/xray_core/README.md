@@ -20,10 +20,11 @@
   - **核心看门狗**：秒级监控 Xray 核心运行状态，意外退出立即自愈拉起；
   - **语法沙箱防变砖**：配置变更前强制执行 `xray -test -config` 预检，校验通过后在 `/data` 同分区原子替换并平滑重载；
   - **WSS 隧道守护**：反穿模式下长连接探活心跳（Ping-Pong 15s），网络波动按指数退避（1s~60s）自动重连。
-- 🔀 **智能网络双模判定 (`net_mode`)**：
-  - **直连模式 (`direct`)**：监听 `0.0.0.0:443`，启用原生 `TCP + REALITY + xtls-rprx-vision` 流控（无废弃 WebSocket 告警）；
-  - **反穿模式 (`reverse_wss`)**：Xray 本地仅监听回环 `127.0.0.1:10086`（纯原生 TCP，无 WS 废弃告警），由 Python 异步进程主动建立 `wss://` 反向隧道连向 Hub 中枢接流；
-  - **判定规范**：遵循 `wimotek-edge-agent` 规范——显式环境变量（`NET_MODE` / `EDGE_AGENT_REVERSE_TUNNEL`）与主控下发指令优先；默认 `auto` 模式下检测到 CGNAT (`100.64.0.0/10`) / 纯私网自动切入反穿，公网 IPv4（含云厂商 1:1 NAT）及全球 IPv6 默认走 `direct` REALITY 直连。
+- 🔀 **Hub 主动双栈 TCP 拨测裁决 (`net_mode`)**：
+  - **极简节点上报**：节点端零第三方依赖，仅采集自身公网 IPv4 / IPv6 上报至 Hub，默认先以 `direct` 拉起端口监听；
+  - **Hub 真实拨测**：Hub 端内置 `wimotek-edge-agent >= 1.0.16`，并发 TCP 拨测节点 IPv4 与 IPv6 端口（`direct_dual` / `direct_ipv4` / `direct_ipv6` / `reverse_tunnel`），端口不通或无公网入口时自动下发 `reverse_wss` 热切换指令；
+  - **直连模式 (`direct`)**：启用原生 `TCP + REALITY + xtls-rprx-vision` 流控（无废弃 WebSocket 告警）；
+  - **反穿模式 (`reverse_wss`)**：Xray 本地仅监听回环 `127.0.0.1:10086`（纯原生 TCP，无 WS 废弃告警），由 Python 异步进程主动建立 `wss://` 反向隧道连向 Hub 中枢接流。
 - 🛡️ **TOFU 首次信任与防重放准入**：
   - 支持主控 `wimotek-edge-agent` 签发的 40 字符单次防重放 `Join Token` 或集群引导令牌协商准入；
   - 握手成功后固化永久专属 `node_key`，并周期同步用户、策略与增量流量统计。
@@ -141,10 +142,9 @@ docker compose up -d
 | :--- | :--- | :--- |
 | `PANEL_URL` | *(空)* | Hub 控制中心访问地址（例：`https://hub.example.com:8443`）。若留空则为纯单机模式 |
 | `CLUSTER_TOKEN` | *(空)* | 集群引导令牌或 Hub 签发的 40 字符单次 Join Token（首次连接用于 TOFU 认证）。也可用 `NODE_KEY` |
-| `NET_MODE` | `auto` | 网络模式：`auto`（自动识别 CGNAT/私网）、`direct`（强制公网直连 REALITY）、`reverse_wss`（强制反向隧道穿透） |
-| `EDGE_AGENT_REVERSE_TUNNEL` | *(空)* | 可选布尔覆写：`true` 强制反穿，`false` 强制直连（与 `NET_MODE` 协同） |
-| `EDGE_AGENT_NAT_TYPE` | `unknown` | 可选 NAT 提示：`nat4` / `symmetric` 将在 `auto` 模式下触发反穿 |
-| `SERVER_IP` / `SERVER_IPV6` | *(自动探测)* | 手动指定节点对外汇报的 IPv4 / IPv6 地址（覆盖外部 IP 探测接口） |
+| `NET_MODE` | `auto` | 网络模式：`auto`（上报双栈 IP 由 Hub 主动拨测裁决）、`direct`（强制公网直连 REALITY）、`reverse_wss`（强制反向隧道穿透） |
+| `EDGE_AGENT_REVERSE_TUNNEL` | *(空)* | 可选布尔覆写：`true` 强制反穿 |
+| `SERVER_IP` / `SERVER_IPV6` | *(自动探测)* | 手动指定节点对外汇报的 IPv4 / IPv6 地址（覆盖外部 IP 探测与 `/proc/net/if_inet6` 采集） |
 | `PORT` | `443` | 节点直连监听端口（反穿模式下对外端口由 Hub 代理接管） |
 | `DEST` | `www.microsoft.com:443` | REALITY 伪装回落目标 |
 | `SERVER_NAMES` | `www.microsoft.com,microsoft.com` | REALITY 伪装 SNI 列表（逗号分隔） |
@@ -159,10 +159,10 @@ docker compose up -d
 
 ```text
 /app/
-├── __init__.py         # 包声明与版本号 (v1.0.15)
+├── __init__.py         # 包声明与版本号 (v1.0.16)
 ├── __main__.py         # 容器唯一启动入口 (python3 -m app) & 信号优雅退出
 ├── config.py           # 环境变量与路径解析配置
-├── net_detector.py     # 纯标准库网络拓扑解析 (CGNAT 识别 + 显式覆写)
+├── net_detector.py     # 纯标准库双栈公网 IPv4/IPv6 采集器 (交由 Hub 主动拨测)
 ├── config_builder.py   # 构建 Direct REALITY 与本地 TCP Loopback 反穿 config.json
 ├── xray_manager.py     # 密钥推导、ShortId、xray -test 语法预检与看门狗
 ├── tunnel.py           # WSS 反向隧道全双工桥接与 Ping-Pong 心跳探活

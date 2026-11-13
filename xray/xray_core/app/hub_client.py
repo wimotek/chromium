@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 Hub Client & Sync Worker
-负责向 Hub 端发送心跳、TOFU 准入协商、同步客户端用户列表、采集上报增量流量
+负责向 Hub 端上报双栈公网 IP 与端口、执行 TOFU 准入协商、同步最新网络模式/用户列表、采集上报增量流量
 """
 import os
 import json
@@ -9,14 +9,16 @@ import urllib.request
 import urllib.error
 import ssl
 import subprocess
-from typing import Dict, Any, Optional, List, Tuple
+from typing import Dict, Any, Optional, Tuple
 from .config import AppConfig
+
 
 def _ssl_unverified_context():
     ctx = ssl.create_default_context()
     ctx.check_hostname = False
     ctx.verify_mode = ssl.CERT_NONE
     return ctx
+
 
 class HubClient:
     def __init__(self, node_id: str):
@@ -38,7 +40,7 @@ class HubClient:
             f.write(key + "\n")
         self.is_bootstrapping = False
 
-    def post_json(self, url: str, payload: Dict[str, Any], timeout: int = 8) -> Optional[Dict[str, Any]]:
+    def post_json(self, url: str, payload: Dict[str, Any], timeout: int = 12) -> Optional[Dict[str, Any]]:
         try:
             req = urllib.request.Request(
                 url,
@@ -56,7 +58,7 @@ class HubClient:
                 return json.loads(body)
             except Exception:
                 return {"code": e.code, "msg": str(e)}
-        except Exception as e:
+        except Exception:
             return None
 
     def send_heartbeat(
@@ -65,28 +67,33 @@ class HubClient:
         ip: str,
         port: int,
         pbk: str,
-        sid: str
+        sid: str,
+        ipv4: str = "",
+        ipv6: str = "",
+        preferred_mode: str = "auto",
     ) -> Tuple[bool, Optional[Dict[str, Any]]]:
-        """向 Hub 提交心跳并协商 TOFU 准入"""
+        """向 Hub 上报自身公网 IPv4 / IPv6 与端口，交由 Hub 端 wimotek-edge-agent 拨测判定网络模式"""
         if not AppConfig.PANEL_URL:
             return False, None
 
         url = f"{AppConfig.PANEL_URL}/api/node/heartbeat"
-        payload = {
+        payload: Dict[str, Any] = {
             "node_id": self.node_id,
+            "node_uuid": self.node_id,
             "ip": ip,
             "port": port,
+            "public_ipv4": ipv4 or None,
+            "public_ipv4_port": port if ipv4 else None,
+            "public_ipv6": ipv6 or None,
+            "public_ipv6_port": port if ipv6 else None,
             "dest": AppConfig.DEST,
             "sni": AppConfig.get_first_server_name(),
             "server_names": AppConfig.SERVER_NAMES,
             "pbk": pbk,
             "sid": sid,
-            "net_mode": net_mode,
-            # wimotek-edge-agent 标准握手协议字段
-            "node_uuid": self.node_id,
             "public_key_fingerprint": pbk,
-            "nat_type": "nat4" if net_mode == "reverse_wss" else "unknown",
-            "reverse_tunnel": (net_mode == "reverse_wss")
+            "net_mode": preferred_mode if preferred_mode in ("direct", "reverse_wss") else "auto",
+            "active_net_mode": net_mode,
         }
 
         if self.is_bootstrapping:
@@ -98,7 +105,6 @@ class HubClient:
         if not resp:
             return False, None
 
-        # 检查 TOFU 分配的新专属永久凭证
         assigned_key = resp.get("tofu_assigned_key")
         if assigned_key:
             self.save_node_key(assigned_key)
@@ -107,12 +113,12 @@ class HubClient:
         new_key = resp.get("new_node_key")
         if new_key:
             self.save_node_key(new_key)
-            print(f"[HubSync] 🔄 主控下发轮换密钥，新密钥已固化存盘。", flush=True)
+            print("[HubSync] 🔄 主控下发轮换密钥，新密钥已固化存盘。", flush=True)
 
         return True, resp
 
     def fetch_users_and_policy(self) -> Optional[Dict[str, Any]]:
-        """从 Hub 拉取最新授权用户列表"""
+        """从 Hub 拉取最新授权用户列表与权威策略"""
         if not AppConfig.PANEL_URL or not self.node_key:
             return None
 
@@ -123,7 +129,7 @@ class HubClient:
                 data = json.loads(resp.read().decode("utf-8"))
                 if data.get("code") == 200:
                     return data
-        except Exception as e:
+        except Exception:
             pass
         return None
 

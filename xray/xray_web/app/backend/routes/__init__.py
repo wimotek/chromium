@@ -93,10 +93,25 @@ def get_node_snis(node: dict) -> list[str]:
 
 import urllib.parse
 
+def extract_host(raw_host: str, default: str = "hub.example.com") -> str:
+    """Safely extract hostname or bracketed IPv6 literal from a host[:port] header."""
+    s = (raw_host or "").strip()
+    if not s:
+        return default
+    if s.startswith("["):
+        end_idx = s.find("]")
+        if end_idx != -1:
+            return s[:end_idx + 1]
+    if s.count(":") == 1:
+        return s.split(":", 1)[0]
+    if ":" in s:
+        return f"[{s}]"
+    return s
+
 def build_node_link(uuid_str: str, node: dict, remark: str, chosen_sni: str = None, hub_domain: str = None) -> str:
     # 模式判断：如果是 NAT4 WSS 反向穿透节点，客户端连接 Hub 的域名与 WSS 路径
     if node.get("net_mode") == "reverse_wss":
-        hub_host = (hub_domain or "hub.example.com").split(":")[0]
+        hub_host = extract_host(hub_domain or "hub.example.com")
         ws_path = urllib.parse.quote(f"/api/tunnel/bridge/{node['node_id']}")
         return (
             f"vless://{uuid_str}@{hub_host}:443"
@@ -107,8 +122,10 @@ def build_node_link(uuid_str: str, node: dict, remark: str, chosen_sni: str = No
     snis = get_node_snis(node)
     sni = chosen_sni if (chosen_sni and chosen_sni in snis) else random.choice(snis)
     clean_sni = sni.split(":")[0]
+    raw_host = str(node['ip']).strip()
+    formatted_host = f"[{raw_host}]" if (":" in raw_host and not raw_host.startswith("[")) else raw_host
     return (
-        f"vless://{uuid_str}@{node['ip']}:{node['port']}"
+        f"vless://{uuid_str}@{formatted_host}:{node['port']}"
         f"?security=reality&encryption=none&pbk={node['pbk']}&headerType=none&fp=chrome"
         f"&type=tcp&flow=xtls-rprx-vision&sni={clean_sni}&sid={node['sid']}#{urllib.parse.quote(remark)}"
     )

@@ -74,7 +74,7 @@ def login():
         if len(n.get("pbk", "")) == 43:
             snis = get_node_snis(n)
             random_sni = random.choice(snis)
-            link = build_node_link(user_dict['uuid'], n, f"{n['name']}", chosen_sni=random_sni)
+            link = build_node_link(user_dict['uuid'], n, f"{n['name']}", chosen_sni=random_sni, hub_domain=request.host)
             nodes_data.append({
                 "id": n["id"],
                 "name": n["name"],
