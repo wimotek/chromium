@@ -24,6 +24,7 @@ class AppConfig:
     PORT = int(os.environ.get("PORT", "443"))
     LOCAL_BRIDGE_PORT = int(os.environ.get("LOCAL_BRIDGE_PORT", "10086"))
     STATS_PORT = int(os.environ.get("STATS_PORT", "10085"))
+    HEALTH_PORT = int(os.environ.get("HEALTH_PORT", "10087"))
     
     DEST = os.environ.get("DEST", "www.microsoft.com:443").strip()
     SERVER_NAMES = os.environ.get("SERVER_NAMES", "www.microsoft.com,microsoft.com").strip()

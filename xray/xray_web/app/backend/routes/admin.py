@@ -224,36 +224,62 @@ def admin_ping_node():
     else:
         c.execute("SELECT * FROM nodes ORDER BY id ASC")
         nodes = [dict(n) for n in c.fetchall()]
-    conn.close()
 
-    import socket
-    import time
+    from core.edge_agent_service import EdgeAgentService
+    edge_svc = EdgeAgentService.get_instance()
+    now_dt = datetime.datetime.now()
     results = {}
+
     for n in nodes:
         nid = n['node_id']
-        ip = n.get('ip')
-        port = int(n.get('port', 443))
-        reachable = False
-        rtt_ms = None
-        if ip and ip != '0.0.0.0':
-            t0 = time.time()
+        ip = (n.get('ip') or '').strip()
+        port = int(n.get('port', 443) or 443)
+        net_mode = n.get('net_mode', 'direct')
+        last_hb = n.get('last_heartbeat', '') or ''
+
+        hb_alive = False
+        if last_hb and "等待" not in last_hb and "下线" not in last_hb:
             try:
-                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                s.settimeout(1.5)
-                res = s.connect_ex((ip, port))
-                s.close()
-                if res == 0:
-                    reachable = True
-                    rtt_ms = round((time.time() - t0) * 1000, 1)
+                hb_dt = datetime.datetime.strptime(last_hb, "%Y-%m-%d %H:%M:%S")
+                hb_alive = (now_dt - hb_dt).total_seconds() <= 135
             except Exception:
                 pass
+
+        if net_mode == "reverse_wss":
+            results[nid] = {
+                "reachable": hb_alive,
+                "rtt_ms": 0.0 if hb_alive else None,
+                "net_mode": "reverse_wss",
+                "network_mode": "reverse_tunnel",
+                "ipv4_reachable": False,
+                "ipv6_reachable": False,
+                "recommended_endpoint": None,
+                "last_heartbeat": last_hb
+            }
+            continue
+
+        reachable, rtt_ms, det = edge_svc.probe_host_endpoint(ip, port)
+        c.execute("UPDATE nodes SET tunnel_status=? WHERE node_id=?", (det.network_mode, nid))
         results[nid] = {
             "reachable": reachable,
             "rtt_ms": rtt_ms,
-            "last_heartbeat": n.get('last_heartbeat', '')
+            "net_mode": net_mode,
+            "network_mode": det.network_mode,
+            "ipv4_reachable": det.ipv4_reachable,
+            "ipv6_reachable": det.ipv6_reachable,
+            "recommended_endpoint": det.recommended_endpoint,
+            "last_heartbeat": last_hb
         }
 
-    return jsonify({"code": 200, "msg": "心跳与端口连通性检测完成", "data": results, "nodes": nodes})
+    conn.commit()
+    if node_id:
+        c.execute("SELECT * FROM nodes WHERE node_id=?", (node_id,))
+    else:
+        c.execute("SELECT * FROM nodes ORDER BY id ASC")
+    nodes = [dict(n) for n in c.fetchall()]
+    conn.close()
+
+    return jsonify({"code": 200, "msg": "基于 wimotek-edge-agent TCP 三次握手的节点连通性检测完成", "data": results, "nodes": nodes})
 
 @admin_bp.route('/api/admin/nodes/force_resync', methods=['POST'])
 def admin_nodes_force_resync():

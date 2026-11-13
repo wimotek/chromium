@@ -105,6 +105,15 @@ class HubClient:
         if not resp:
             return False, None
 
+        # 若本地固化 node_key 与 Hub 不一致被 403 拒绝且配了引导令牌，自动携 bootstrap_token 重试协商恢复
+        if resp.get("code") == 403 and not self.is_bootstrapping and AppConfig.BOOTSTRAP_TOKEN:
+            retry_payload = dict(payload)
+            retry_payload.pop("node_key", None)
+            retry_payload["bootstrap_token"] = AppConfig.BOOTSTRAP_TOKEN
+            retry_resp = self.post_json(url, retry_payload)
+            if retry_resp:
+                resp = retry_resp
+
         assigned_key = resp.get("tofu_assigned_key")
         if assigned_key:
             self.save_node_key(assigned_key)

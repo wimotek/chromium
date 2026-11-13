@@ -11,6 +11,7 @@ Edge Agent Enterprise Service (Powered by wimotek-edge-agent >= 1.0.16)
 import ipaddress
 import os
 import secrets
+import socket
 from pathlib import Path
 from typing import Optional, Dict, Any, Tuple
 
@@ -176,6 +177,63 @@ class EdgeAgentService:
         )
 
         return xray_net_mode, best_ip, det
+
+    def probe_host_endpoint(
+        self,
+        host: str,
+        port: int = 443,
+        preferred_mode: str = "auto",
+    ) -> Tuple[bool, Optional[float], NetworkDetectionResult]:
+        """
+        对已有节点的地址（IPv4 / [IPv6] / 域名）使用 wimotek-edge-agent 执行并发 TCP 三次握手测活。
+        返回: (reachable, best_rtt_ms, NetworkDetectionResult)
+        """
+        clean_host = (host or "").strip().strip("[]")
+        v4: Optional[str] = None
+        v6: Optional[str] = None
+
+        if clean_host and clean_host != "0.0.0.0":
+            try:
+                addr = ipaddress.ip_address(clean_host)
+                if addr.version == 6:
+                    v6 = str(addr)
+                else:
+                    v4 = str(addr)
+            except ValueError:
+                # 域名：解析 A / AAAA 记录并交由 wimotek-edge-agent 并发 TCP 握手探测
+                try:
+                    for info in socket.getaddrinfo(clean_host, port, type=socket.SOCK_STREAM):
+                        fam, _, _, _, sockaddr = info
+                        cand_ip = sockaddr[0].split("%")[0]
+                        if fam == socket.AF_INET and not v4:
+                            v4 = cand_ip
+                        elif fam == socket.AF_INET6 and not v6:
+                            v6 = cand_ip
+                except Exception:
+                    pass
+
+        pref = (preferred_mode or "auto").strip().lower()
+        force_reverse: Optional[bool] = True if pref == "reverse_wss" else None
+
+        det = detect_network_mode_sync(
+            public_ipv4=v4,
+            public_ipv4_port=port if v4 else None,
+            public_ipv6=v6,
+            public_ipv6_port=port if v6 else None,
+            timeout=self.config.network_probe_timeout_seconds,
+            allow_non_public=self.config.allow_non_public_probe,
+            force_reverse=force_reverse,
+        )
+
+        latencies = []
+        if det.ipv4_reachable and det.ipv4 and det.ipv4.latency_ms is not None:
+            latencies.append(det.ipv4.latency_ms)
+        if det.ipv6_reachable and det.ipv6 and det.ipv6.latency_ms is not None:
+            latencies.append(det.ipv6.latency_ms)
+
+        reachable = det.ipv4_reachable or det.ipv6_reachable
+        best_rtt = round(min(latencies), 1) if latencies else None
+        return reachable, best_rtt, det
 
     def log_access(
         self,

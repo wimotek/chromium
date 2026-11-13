@@ -94,6 +94,10 @@ USER appuser
 VOLUME ["/data"]
 EXPOSE 443/tcp 443/udp
 
+# 容器健康检查：探测仅回环暴露的 127.0.0.1:${HEALTH_PORT:-10087}/healthz (零公网暴露、零额外体积)
+HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
+    CMD ["python3", "-m", "app.health"]
+
 # 完整信号链：dumb-init (PID 1) -> Python (SIGTERM 优雅捕获) -> Xray (Popen 安全终止)
 ENTRYPOINT ["/usr/bin/dumb-init", "--"]
 CMD ["python3", "-m", "app"]

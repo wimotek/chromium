@@ -19,6 +19,7 @@ from .config_builder import build_xray_config
 from .xray_manager import XrayManager
 from .tunnel import WssTunnelSupervisor
 from .hub_client import HubClient
+from .health import start_health_server
 
 
 class EdgeCoreApplication:
@@ -30,6 +31,7 @@ class EdgeCoreApplication:
         self.tunnel_supervisor: Optional[WssTunnelSupervisor] = None
         self.tunnel_task: Optional[asyncio.Task] = None
         self.current_clients = []
+        self.health_server = None
         self.is_running = True
 
         print("==================================================================", flush=True)
@@ -221,6 +223,7 @@ ShortId: {self.xray_mgr.short_id}
     async def run(self):
         self.bootstrap_initial_config()
         self.xray_mgr.start()
+        self.health_server = start_health_server(self)
 
         tasks = [asyncio.create_task(self.watchdog_loop())]
 
@@ -244,6 +247,13 @@ ShortId: {self.xray_mgr.short_id}
         print("\n[EdgeCore] 接收到退出信号，正在执行全链路优雅停机...", flush=True)
         self.is_running = False
         self._stop_tunnel_worker()
+        if self.health_server:
+            try:
+                self.health_server.shutdown()
+                self.health_server.server_close()
+            except Exception:
+                pass
+            self.health_server = None
         if self.xray_mgr:
             self.xray_mgr.stop()
         print("[EdgeCore] ✅ Xray 核心已安全停止，进程退出完毕。", flush=True)

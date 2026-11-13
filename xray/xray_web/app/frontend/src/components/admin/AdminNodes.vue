@@ -209,19 +209,14 @@
                 <div
                   class="heartbeat-badge clickable-heartbeat"
                   :class="[
-                    node.status === 0 ? 'badge-disabled' : getHeartbeatInfo(node.last_heartbeat).cls,
+                    getNodeHealthBadge(node).cls,
                     { 'is-pinging': pingingNodeId === node.node_id }
                   ]"
                   :title="getHeartbeatTooltip(node)"
                   @click.stop="node.status !== 0 && handlePingNode(node.node_id)"
                 >
                   <span class="status-dot"></span>
-                  <span v-if="pingingNodeId === node.node_id">⏳ 测活中...</span>
-                  <span v-else-if="node.status === 0">🛑 管理停用</span>
-                  <span v-else-if="pingResults[node.node_id]">
-                    {{ pingResults[node.node_id].reachable ? `🟢 在线 (${pingResults[node.node_id].rtt_ms}ms)` : '🔴 离线 (端口不通)' }}
-                  </span>
-                  <span v-else>{{ getHeartbeatInfo(node.last_heartbeat).label }}</span>
+                  <span>{{ getNodeHealthBadge(node).text }}</span>
                 </div>
               </td>
 
@@ -756,7 +751,7 @@ const getHeartbeatInfo = (lastHeartbeat) => {
   }
 
   const diffSec = Math.floor((Date.now() - t) / 1000)
-  if (diffSec < 0 || diffSec <= 90) {
+  if (diffSec < 0 || diffSec <= 135) {
     const diffText = diffSec <= 10 ? '刚刚' : `${diffSec}秒前`
     return { label: '在线 (活跃)', diff: diffText, cls: 'badge-ready' }
   } else if (diffSec <= 300) {
@@ -766,6 +761,32 @@ const getHeartbeatInfo = (lastHeartbeat) => {
     const diffText = `${Math.floor(diffSec / 60)}分钟前`
     return { label: '离线失联', diff: diffText, cls: 'badge-disabled' }
   }
+}
+
+const getNodeHealthBadge = (node) => {
+  if (node.status === 0) {
+    return { label: '管理停用', text: '管理停用', cls: 'badge-disabled' }
+  }
+  const hb = getHeartbeatInfo(node.last_heartbeat)
+  if (pingingNodeId.value === node.node_id) {
+    return { text: '测活中...', cls: hb.cls }
+  }
+  const ping = pingResults[node.node_id]
+  if (ping) {
+    if (ping.net_mode === 'reverse_wss') {
+      return ping.reachable
+        ? { text: '在线 (WSS反穿)', cls: 'badge-ready' }
+        : { text: '离线 (WSS断开)', cls: 'badge-disabled' }
+    }
+    if (ping.reachable) {
+      return { text: `在线 (${ping.rtt_ms}ms)`, cls: 'badge-ready' }
+    }
+    if (hb.cls === 'badge-ready') {
+      return { text: '心跳正常 · 端口不通', cls: 'badge-restricted' }
+    }
+    return { text: '离线 (端口不通)', cls: 'badge-disabled' }
+  }
+  return { text: hb.label, cls: hb.cls }
 }
 
 const getServerNamesCount = (node) => {
@@ -782,7 +803,12 @@ const getHeartbeatTooltip = (node) => {
   const ping = pingResults[node.node_id]
   let tip = `最后心跳: ${node.last_heartbeat || '无记录'} (${info.diff})`
   if (ping) {
-    tip += ` | ${ping.reachable ? `实时延迟: ${ping.rtt_ms}ms` : '端口不可达'}`
+    if (ping.net_mode === 'reverse_wss') {
+      tip += ping.reachable ? ' | WSS 反向隧道在线' : ' | WSS 反向隧道未上报心跳'
+    } else {
+      const stack = ping.network_mode ? ` [${ping.network_mode}]` : ''
+      tip += ` | ${ping.reachable ? `TCP 握手正常: ${ping.rtt_ms}ms${stack}` : `TCP 端口不可达${stack}`}`
+    }
   }
   tip += ' (点击徽标立即执行测活)'
   return tip

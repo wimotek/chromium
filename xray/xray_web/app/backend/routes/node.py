@@ -199,8 +199,12 @@ def node_heartbeat():
             tunnel_uuid = data.get("tunnel_uuid", "").strip() or str(uuid.uuid4())
             tunnel_status = "connected" if net_mode == "reverse_wss" else det_result.network_mode
 
-            # 检查同 IP 同端口平滑接管
-            c.execute("SELECT id, tunnel_uuid FROM nodes WHERE ip=? AND port=?", (node_ip, node_port))
+            # 检查同 IP 同端口平滑接管 (兼容裸 IPv6 与 [IPv6]，优先接管处于待重新接纳状态的记录)
+            bare_ip = str(node_ip).strip().strip("[]")
+            c.execute(
+                "SELECT id, tunnel_uuid FROM nodes WHERE (ip=? OR REPLACE(REPLACE(ip, '[', ''), ']', '')=?) AND port=? ORDER BY CASE WHEN pending_key='FORCE_RESYNC' THEN 0 ELSE 1 END, id ASC LIMIT 1",
+                (node_ip, bare_ip, node_port),
+            )
             existing = c.fetchone()
             if existing:
                 if existing["tunnel_uuid"]:
@@ -291,20 +295,69 @@ def node_heartbeat():
                     "msg": "【致命安全拦截】公钥变异篡改 (Public Key Mismatch)！与主控锁定的节点身份公钥不匹配，疑似假冒攻击！"
                 }), 403
 
-        # 管理员触发的主控重置指令
+        # 管理员触发的主控重置接纳指令 (FORCE_RESYNC)
         if pending_key == 'FORCE_RESYNC':
+            edge_svc = EdgeAgentService.get_instance()
+            reported_mode = data.get("net_mode", "auto").strip().lower()
+            v4_in = data.get("public_ipv4") or (node_ip if (node_ip and ":" not in str(node_ip)) else None)
+            v6_in = data.get("public_ipv6") or (node_ip if (node_ip and ":" in str(node_ip)) else None)
+            v4_port = int(data.get("public_ipv4_port") or node_port)
+            v6_port = int(data.get("public_ipv6_port") or node_port)
+
+            resync_net_mode, probed_ip, det_result = edge_svc.probe_node_network(
+                public_ipv4=v4_in,
+                public_ipv4_port=v4_port,
+                public_ipv6=v6_in,
+                public_ipv6_port=v6_port,
+                preferred_mode=reported_mode,
+                remote_addr=request.remote_addr,
+            )
+            final_save_ip = current_ip if is_custom_domain else (probed_ip or save_ip)
+            final_node_key = client_key or current_key or ("nk_" + secrets.token_hex(20))
+            final_sid = sid or node.get("sid") or ""
+            final_pubkey = node_pubkey or locked_pubkey
+            final_lock = "locked" if final_pubkey else "unlocked"
+            resync_tunnel_status = "connected" if resync_net_mode == "reverse_wss" else det_result.network_mode
+
             c.execute("""
                 UPDATE nodes 
-                SET node_key=?, pending_key='', ip=?, pbk=?, sid=COALESCE(NULLIF(?, ''), sid), status=1, is_approved=1, last_heartbeat=?, last_challenge_nonce=?
+                SET node_key=?, pending_key='', ip=?, port=?, pbk=?, sid=?, net_mode=?, tunnel_status=?, status=1, is_approved=1, last_heartbeat=?, last_challenge_nonce=?, node_public_key=?, key_lock_status=?
                 WHERE node_id=?
-            """, (client_key, save_ip, pbk, sid, now_str, next_challenge_nonce, node_id))
+            """, (final_node_key, final_save_ip, node_port, pbk, final_sid, resync_net_mode, resync_tunnel_status, now_str, next_challenge_nonce, final_pubkey, final_lock, node_id))
+            c.execute("SELECT * FROM nodes WHERE node_id=?", (node_id,))
+            resynced_node = dict(c.fetchone())
             conn.commit()
             conn.close()
-            return jsonify({
-                "code": 200, 
-                "msg": "重新接纳完成，密钥已更新！",
-                "challenge_nonce": next_challenge_nonce
-            })
+
+            resync_snis = get_node_snis(resynced_node)
+            resync_dest = resynced_node["dest"] if (resynced_node.get("dest") and ":" in resynced_node["dest"]) else f"{resynced_node.get('dest', 'www.microsoft.com')}:443"
+            resync_resp = {
+                "code": 200,
+                "msg": "重新接纳完成，公钥与网络策略已重新绑定！",
+                "challenge_nonce": next_challenge_nonce,
+                "net_mode": resync_net_mode,
+                "network_mode": det_result.network_mode,
+                "network_detection": det_result.to_dict(),
+                "node_config": {
+                    "net_mode": resync_net_mode,
+                    "port": resynced_node["port"],
+                    "dest": resync_dest,
+                    "sni": resync_snis[0] if resync_snis else "www.microsoft.com",
+                    "server_names": resync_snis,
+                    "sid": resynced_node["sid"]
+                }
+            }
+            if client_key != final_node_key:
+                resync_resp["tofu_assigned_key"] = final_node_key
+            if resync_net_mode == "reverse_wss":
+                resync_resp["tunnel_config"] = {
+                    "hub_ws_host": extract_host(request.host),
+                    "hub_ws_port": 443,
+                    "hub_ws_path": f"/api/tunnel/bridge/{node_id}",
+                    "tunnel_uuid": resynced_node.get("tunnel_uuid") or "",
+                    "portal_domain": f"reverse.{node_id}.hub.internal"
+                }
+            return jsonify(resync_resp)
 
         # 主控指令热更密钥
         if pending_key and client_key == current_key:
@@ -384,6 +437,8 @@ def node_heartbeat():
                     "tunnel_uuid": latest_node.get("tunnel_uuid") or "",
                     "portal_domain": f"reverse.{node_id}.hub.internal"
                 }
+            if current_key and client_key != current_key:
+                stage2_resp["tofu_assigned_key"] = current_key
             return jsonify(stage2_resp)
 
         conn.close()

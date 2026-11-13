@@ -146,6 +146,7 @@ docker compose up -d
 | `EDGE_AGENT_REVERSE_TUNNEL` | *(空)* | 可选布尔覆写：`true` 强制反穿 |
 | `SERVER_IP` / `SERVER_IPV6` | *(自动探测)* | 手动指定节点对外汇报的 IPv4 / IPv6 地址（覆盖外部 IP 探测与 `/proc/net/if_inet6` 采集） |
 | `PORT` | `443` | 节点直连监听端口（反穿模式下对外端口由 Hub 代理接管） |
+| `HEALTH_PORT` | `10087` | 仅绑定回环 `127.0.0.1` 的本地 `/healthz` 健康检查端口（设为 `0` 禁用，Docker `HEALTHCHECK` 自动回退直连探测） |
 | `DEST` | `www.microsoft.com:443` | REALITY 伪装回落目标 |
 | `SERVER_NAMES` | `www.microsoft.com,microsoft.com` | REALITY 伪装 SNI 列表（逗号分隔） |
 | `DATA_DIR` | `/data` | 持久化数据目录，存储 `node_id.txt`、`node_key.txt`、`public_key.txt`、`short_id.txt`、`config.json` |
@@ -159,12 +160,13 @@ docker compose up -d
 
 ```text
 /app/
-├── __init__.py         # 包声明与版本号 (v1.0.16)
+├── __init__.py         # 包声明与版本号 (v1.0.17)
 ├── __main__.py         # 容器唯一启动入口 (python3 -m app) & 信号优雅退出
 ├── config.py           # 环境变量与路径解析配置
 ├── net_detector.py     # 纯标准库双栈公网 IPv4/IPv6 采集器 (交由 Hub 主动拨测)
 ├── config_builder.py   # 构建 Direct REALITY 与本地 TCP Loopback 反穿 config.json
 ├── xray_manager.py     # 密钥推导、ShortId、xray -test 语法预检与看门狗
+├── health.py           # 纯标准库本地回环 /healthz 端点与 Docker HEALTHCHECK 探针
 ├── tunnel.py           # WSS 反向隧道全双工桥接与 Ping-Pong 心跳探活
 └── hub_client.py       # 主控端心跳握手、TOFU 准入、用户同步与增量流量结算
 ```
