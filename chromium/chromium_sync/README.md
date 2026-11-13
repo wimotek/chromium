@@ -16,7 +16,7 @@
 3. **三镜像统一安全加固（`dumb-init` + Root-Init-Drop `gosu` -> `UID 1000` + Multi-stage 瘦身）**：
    - Hub (`chromium_sync`) 与节点 (`chromium_novnc` / `chromium_kasmvnc`) 均在启动阶段短暂以 `root` 自愈 `/data` 权限并将宿主机宝塔/Certbot `/certs` 安全拷贝到容器内 `/etc/ssl/app`（绝不改动宿主机 `/certs` 权限），随后立即 `exec gosu` 降权为 `UID/GID 1000` 非特权运行业务进程；
    - 多阶段构建隔离前端 Node 与后端 `/opt/venv`，剔除冗余工具并全栈内建 Python 原生 `HEALTHCHECK`。
-4. **多策略 Cookie 调度中枢与安全 WSS 网关 (`8443`)**：
+4. **多策略 Cookie 调度中枢与安全 WSS 网关 (默认 `8443`，可自定义 `HUB_PORT`)**：
    - 支持智能双向合并 (Smart Merge)、组对组、节点对组及自动清理熔断，原生支持 RFC 2732 IPv6 `[host]:port` CDP 连接。
 
 ---
@@ -62,11 +62,18 @@ sudo setfacl -m u:1000:r /etc/letsencrypt/archive/yourdomain.com/privkey*.pem
 
 ```bash
 cd chromium/chromium_sync
+# 1. 使用默认 8443 端口启动
 docker compose up -d --build
+
+# 2. 自定义容器内外统一端口（如 9443:9443）：
+HUB_PORT=9443 docker compose up -d --build
+
+# 3. 宿主机映射不同对外端口（如 3000:8443，容器内仍监听 8443，对外端点自动识别为 3000）：
+HUB_EXTERNAL_PORT=3000 docker compose up -d --build
 ```
 
-* **访问地址**：`https://<服务器IP或域名>:8443`
-* **默认账号密码**：`admin` / `Admin@123456`（由 `docker-compose.yml` 中 `ADMIN_INIT_PASS` 控制）
+* **访问地址**：`https://<服务器IP或域名>:${HUB_PORT:-8443}`
+* **默认账号密码**：`admin` / `123456`（可选参数 `ADMIN_INIT_USER` / `ADMIN_INIT_PASS` 控制，仅首次初始化 `/data/app.db` 时生效）
 * **宝塔证书挂载示例**：将 `docker-compose.yml` 中 `./certs:/certs:ro` 改为 `/www/server/panel/vhost/cert/yourdomain.com:/certs:ro` 即可。
 
 ---
@@ -114,6 +121,11 @@ docker run -d \
 | `PUBLIC_IPV4` / `PUBLIC_IPV4_PORT` | Node | 自动嗅探 | 上报供 Hub TCP 探测的公网 IPv4 及外部端口 |
 | `PUBLIC_IPV6` / `PUBLIC_IPV6_PORT` | Node | 自动嗅探 | 上报供 Hub TCP 探测的公网 IPv6 及外部端口 |
 | `DIRECT_PORT` | Node | `9222` | 宿主机对外映射的 CDP 端口 |
+| `HUB_PORT` | Hub | `8443` | Hub 容器内部 HTTPS/WSS 监听端口（同步 `HEALTHCHECK`） |
+| `HUB_EXTERNAL_PORT` | Hub | 自动推导 | 宿主机对外映射端口（如 `-p 3000:8443` 时填 `3000`；不填也会从 `Host` / `X-Forwarded-Port` 请求头自动识别） |
+| `HUB_PUBLIC_HOST` | Hub | *(空)* | 强制指定对外拼接域名/IP（适用于多级反代改写 `Host` 头时） |
+| `HUB_HOST` | Hub | `::` | 默认同时监听 IPv4 + IPv6 双栈（容器未开启 IPv6 时自动回退 `0.0.0.0`） |
+| `ADMIN_INIT_USER` / `ADMIN_INIT_PASS` | Hub | `admin` / `123456` | 可选参数；首次初始化空库时的管理员账号与密码（已存在库或已改密则不覆盖） |
 | `EDGE_AGENT_ALLOW_NON_PUBLIC_PROBE` | Hub | `false` | 是否允许探测内网/私网 IP（生产公网务必保持 `false` 防 SSRF） |
 | `EDGE_AGENT_NETWORK_PROBE_TIMEOUT_SECONDS` | Hub | `2.0` | Hub TCP 三次握手探测超时秒数 |
 | `EDGE_AGENT_SESSION_TICKET_TTL_SECONDS` | Hub | `300` | Session Ticket 有效期（秒） |

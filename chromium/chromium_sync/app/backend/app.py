@@ -12,7 +12,7 @@ from fastapi import FastAPI
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
-from config import DIST_DIR, SSL_CERT_FILE, SSL_KEY_FILE
+from config import DIST_DIR, HUB_HOST, HUB_PORT, SSL_CERT_FILE, SSL_KEY_FILE
 from core.database import init_db_and_jwt, get_setting
 from core.security import ensure_ssl_certificates
 from services.tunnel_manager import tunnel_mgr, tunnel_watchdog_loop
@@ -96,13 +96,83 @@ else:
     async def fallback_error():
         return HTMLResponse("<h3>❌ 前端静态资源尚未生成，请检查前端打包。</h3>", status_code=500)
 
+def _create_listen_sockets(host: str, port: int):
+    """
+    当 HUB_HOST 为 '::' / 'auto' / 'dual' 时，优先创建 IPV6_V6ONLY=0 的双栈 Socket
+    同时承载 IPv4 与 IPv6；若系统内核禁用了双栈或容器未启用 IPv6，则自动降级为
+    双独立 Socket 或回退 0.0.0.0，确保在纯 IPv4 宿主机下也能正常启动。
+    """
+    import socket
+    from config import logger
+
+    normalized = (host or "::").strip().strip("[]")
+    if normalized not in {"::", "auto", "dual", ""}:
+        return None
+
+    # 1. 尝试单 Socket IPv4/IPv6 双栈 (IPV6_V6ONLY=0)
+    if getattr(socket, "has_ipv6", False):
+        sock6 = None
+        try:
+            sock6 = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+            sock6.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            sock6.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
+            sock6.bind(("::", port))
+            sock6.listen(2048)
+            sock6.set_inheritable(True)
+            logger.info(f"🌐 [Dual-Stack] 已启用 IPv4/IPv6 双栈监听 [::]:{port} (IPV6_V6ONLY=0)")
+            return [sock6]
+        except OSError as dual_err:
+            if sock6 is not None:
+                try:
+                    sock6.close()
+                except OSError:
+                    pass
+            # 2. 若内核不允许 IPV6_V6ONLY=0，尝试分别绑定 IPv4(0.0.0.0) + IPv6(::)
+            sockets = []
+            try:
+                s4 = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                s4.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                s4.bind(("0.0.0.0", port))
+                s4.listen(2048)
+                s4.set_inheritable(True)
+                sockets.append(s4)
+
+                s6 = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+                s6.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                s6.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
+                s6.bind(("::", port))
+                s6.listen(2048)
+                s6.set_inheritable(True)
+                sockets.append(s6)
+                logger.info(f"🌐 [Dual-Stack] 已启用独立双栈监听 0.0.0.0:{port} + [::]:{port}")
+                return sockets
+            except OSError:
+                for s in sockets:
+                    try:
+                        s.close()
+                    except OSError:
+                        pass
+                logger.warning(f"⚠️ 当前运行环境未启用 IPv6 ({dual_err})，自动回退监听 0.0.0.0:{port} (仅 IPv4)")
+
+    sock4 = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock4.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    sock4.bind(("0.0.0.0", port))
+    sock4.listen(2048)
+    sock4.set_inheritable(True)
+    return [sock4]
+
+
 # 5. 服务入口
 if __name__ == "__main__":
     cert_path, key_path = ensure_ssl_certificates()
-    uvicorn.run(
+    listen_sockets = _create_listen_sockets(HUB_HOST, HUB_PORT)
+    uv_config = uvicorn.Config(
         app,
-        host="0.0.0.0",
-        port=8443,
+        host=HUB_HOST.strip("[]") or "0.0.0.0",
+        port=HUB_PORT,
         ssl_certfile=cert_path,
-        ssl_keyfile=key_path
+        ssl_keyfile=key_path,
+        proxy_headers=True,
+        forwarded_allow_ips="*",
     )
+    uvicorn.Server(uv_config).run(sockets=listen_sockets)

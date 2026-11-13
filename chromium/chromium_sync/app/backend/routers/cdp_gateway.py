@@ -1,11 +1,12 @@
 import sqlite3
 import asyncio
+import secrets
 from typing import Optional
 import httpx
 import websockets
 from fastapi import APIRouter, HTTPException, Depends, Request, Query, WebSocket, WebSocketDisconnect
 
-from config import logger
+from config import logger, HUB_PORT, resolve_hub_access_info
 from core.database import get_setting, get_db_connection
 from core.security import verify_agent_access
 from services.tunnel_manager import tunnel_mgr
@@ -30,7 +31,9 @@ async def cdp_gateway_version(
         raise HTTPException(status_code=404, detail="目标节点不存在")
     node = dict(row)
     api_key = get_setting('api_key')
-    domain = request.headers.get("host", "localhost:8443")
+    hub_info = resolve_hub_access_info(request)
+    ws_scheme = hub_info["ws_scheme"]
+    domain = hub_info["public_netloc"]
 
     # 分支 A：NAT4 反向穿透节点，向边缘代理获取真实浏览器版本
     if node.get('conn_type') == 'reverse':
@@ -46,19 +49,21 @@ async def cdp_gateway_version(
                     "Protocol-Version": "1.3",
                     "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36"
                 }
-            data["webSocketDebuggerUrl"] = f"wss://{domain}/cdp/{node_id}/ws?api_key={api_key}"
+            data["webSocketDebuggerUrl"] = f"{ws_scheme}://{domain}/cdp/{node_id}/ws?api_key={api_key}"
             return data
         except Exception as e:
             raise HTTPException(status_code=502, detail=f"无法从反向节点拉取版本: {e}")
 
-    # 分支 B：常规直连 / SSH 隧道节点
+    # 分支 B：常规直连 / SSH 隧道节点 (兼容 IPv6 RFC 2732)
     target_h = node.get('direct_host', '127.0.0.1') if node['is_local'] else "127.0.0.1"
     try:
         host, _ = await resolve_cdp_endpoint(node['local_bind_port'], target_h)
+        clean_h = host.strip("[]")
+        netloc = f"[{clean_h}]:{node['local_bind_port']}" if ":" in clean_h else f"{clean_h}:{node['local_bind_port']}"
         async with httpx.AsyncClient(timeout=3.0) as client:
-            res = await client.get(f"http://{host}:{node['local_bind_port']}/json/version")
+            res = await client.get(f"http://{netloc}/json/version")
             data = res.json()
-            data["webSocketDebuggerUrl"] = f"wss://{domain}/cdp/{node_id}/ws?api_key={api_key}"
+            data["webSocketDebuggerUrl"] = f"{ws_scheme}://{domain}/cdp/{node_id}/ws?api_key={api_key}"
             return data
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"无法连通该节点的 CDP 服务: {e}")
@@ -87,22 +92,32 @@ async def cdp_gateway_ws(
         return
     node = dict(row)
 
-    # 分支 A: 反向穿透节点
+    # 分支 A: 反向穿透节点 (全双工 CDP WebSocket 多路复用转发)
     if node.get('conn_type') == 'reverse':
         session = tunnel_mgr.get_reverse_session(node_id)
         if not session or session.is_closed:
             await websocket.close(code=1011, reason="Target Reverse Node Offline")
             return
         await websocket.accept()
-        # 保持连接挂载
+        stream_id = secrets.token_hex(8)
+        session.cdp_ws_streams[stream_id] = websocket
+        await session.send_raw_json({"type": "cdp_ws_open", "stream_id": stream_id})
         try:
             while True:
                 msg = await websocket.receive_text()
-                # 转发心跳或调试命令
-                if msg == "ping":
-                    await websocket.send_text("pong")
+                await session.send_raw_json({
+                    "type": "cdp_ws_frame",
+                    "stream_id": stream_id,
+                    "data": msg,
+                })
         except (WebSocketDisconnect, Exception):
             pass
+        finally:
+            session.cdp_ws_streams.pop(stream_id, None)
+            try:
+                await session.send_raw_json({"type": "cdp_ws_close", "stream_id": stream_id})
+            except Exception:
+                pass
         return
 
     # 分支 B: 直连 / SSH 隧道节点双向中继

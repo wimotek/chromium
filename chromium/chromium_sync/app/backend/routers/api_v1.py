@@ -4,7 +4,7 @@ import ipaddress
 from typing import Optional, List, Tuple
 from fastapi import APIRouter, HTTPException, Depends, Request, Query
 
-from config import DB_PATH
+from config import DB_PATH, HUB_PORT, resolve_hub_access_info
 from core.database import get_setting, set_setting, get_db_connection
 from core.security import verify_token, verify_agent_access
 from services.cdp_engine import fetch_cookies_native, inject_cookies_native
@@ -68,9 +68,11 @@ def external_list_nodes(
     rows = [dict(r) for r in cur.fetchall()]
     conn.close()
 
-    domain = request.headers.get("host", "localhost:8443")
+    hub_info = resolve_hub_access_info(request)
+    ws_scheme = hub_info["ws_scheme"]
+    domain = hub_info["public_netloc"]
+    same_host_port = hub_info["same_host_port"]
     api_key = get_setting('api_key')
-    host_only = extract_host_from_domain(domain)
 
     nodes_result = []
     for r in rows:
@@ -114,11 +116,11 @@ def external_list_nodes(
             topology_type = "direct"
             topology_desc = "本地 / 局域网端口直连"
 
-        # 异机标准连接端点 (支持 IPv4 / IPv6 域名)
-        remote_gateway_ws = f"wss://{domain}/cdp/{node_id}/ws?api_key={api_key}"
+        # 异机标准连接端点 (支持 IPv4 / IPv6 域名及 -p 3000:8443 对外映射端口)
+        remote_gateway_ws = f"{ws_scheme}://{domain}/cdp/{node_id}/ws?api_key={api_key}"
         
-        # 同机标准连接端点 (走 127.0.0.1 极速回环)
-        same_host_gateway_ws = f"wss://127.0.0.1:8443/cdp/{node_id}/ws?api_key={api_key}"
+        # 同机标准连接端点 (使用宿主机对外映射端口 same_host_port，如 3000:8443 场景下为 3000)
+        same_host_gateway_ws = f"{ws_scheme}://127.0.0.1:{same_host_port}/cdp/{node_id}/ws?api_key={api_key}"
         
         # 同机裸连端点 (仅 direct 与 ssh 节点具备本地监听端口；反向节点物理上无裸端口)
         if topology_type == "direct":
@@ -140,7 +142,7 @@ def external_list_nodes(
                 "desc": "部署在外部服务器、本地开发机或独立容器的远程自动化脚本 (支持 IPv4/IPv6)",
                 "recommended_endpoint": remote_gateway_ws,
                 "gateway_url": remote_gateway_ws,
-                "note": "异机强制统一使用 8443 安全网关 (已下线公网裸端口，杜绝扫描入侵)"
+                "note": f"异机强制统一使用 {domain} 安全网关 (已下线公网裸端口，杜绝扫描入侵)"
             }
         }
 
@@ -163,6 +165,8 @@ def external_list_nodes(
 
     return {
         "code": 200,
+        "hub_internal_port": hub_info["internal_port"],
+        "hub_external_port": same_host_port,
         "total": len(nodes_result),
         "online_count": len([n for n in nodes_result if n["status"] == "connected"]),
         "nodes": nodes_result

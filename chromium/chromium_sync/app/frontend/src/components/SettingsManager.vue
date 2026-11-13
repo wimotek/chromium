@@ -32,6 +32,11 @@ const currentHubUrl = computed(() => {
   return `${window.location.protocol}//${window.location.host}`
 })
 
+const currentHubPort = computed(() => {
+  if (window.location.port) return window.location.port
+  return window.location.protocol === 'https:' ? '443' : '80'
+})
+
 const loadData = async () => {
   const [pRes, kRes, cRes] = await Promise.all([
     props.api('/api/profile'),
@@ -66,7 +71,7 @@ const copySameHostScript = () => {
   const code = `import httpx, asyncio, random
 from playwright.async_api import async_playwright
 
-HUB_URL = "https://127.0.0.1:8443"
+HUB_URL = "https://127.0.0.1:${currentHubPort.value}"
 API_KEY = "${profile.api_key}"
 
 async def run_same_host():
@@ -122,7 +127,7 @@ async def run_remote():
 
     # 2. 随机/轮询选取目标节点 (多节点负载均衡，杜绝单 IP 触发反爬)
     target = random.choice(online_nodes)
-    cdp_url = target["preferred_cdp_url"]  # 8443 TLS 统一网关端点
+    cdp_url = target["preferred_cdp_url"]  # TLS 统一网关端点
     print(f"异机分配节点: [{target['name']}] (拓扑: {target['topology_desc']})")
 
     # 3. 穿透接管 (无论节点在 NAT4 家宽内网还是公网云机)
@@ -302,7 +307,7 @@ onMounted(() => {
       <div class="content-full-card">
         <div class="table-header-bar" style="margin-bottom:10px; padding-bottom:8px;">
           <h3 class="card-inner-h3">🌐 外部自动化 / Agent 准入控制与指南</h3>
-          <span class="badge-recommend">8443 统一中枢 · IPv4/IPv6 双栈</span>
+          <span class="badge-recommend">{{ currentHubPort }} 统一中枢 · IPv4/IPv6 双栈</span>
         </div>
 
         <!-- 凭据: 外部 Agent API Key -->
@@ -333,7 +338,7 @@ onMounted(() => {
             <span style="font-size:12px; font-weight:bold; color:#34d399;">零信任架构安全收敛生效中</span>
           </div>
           <p style="font-size:11px; color:#94a3b8; margin-top:4px; line-height:1.5;">
-            已下线未鉴权公网裸端口映射。所有 SSH 隧道与本地端点锁死在 <code>127.0.0.1</code>；外部远程脚本统一通过 8443 安全网关带 Key 访问，彻底杜绝外网扫描。系统完全支持 IPv4 / IPv6 双栈。
+            已下线未鉴权公网裸端口映射。所有 SSH 隧道与本地端点锁死在 <code>127.0.0.1</code>；外部远程脚本统一通过 {{ currentHubPort }} 安全网关带 Key 访问，彻底杜绝外网扫描。系统完全支持 IPv4 / IPv6 双栈。
           </p>
         </div>
 
@@ -386,7 +391,7 @@ onMounted(() => {
 import httpx, asyncio, random
 from playwright.async_api import async_playwright
 
-HUB_URL = "https://127.0.0.1:8443"
+HUB_URL = "https://127.0.0.1:{{ currentHubPort }}"
 API_KEY = "{{ profile.api_key }}"
 
 async def run_same_host():
@@ -442,7 +447,7 @@ asyncio.run(run_same_host())</code></pre>
               </button>
             </div>
             <p style="font-size:11px; color:#94a3b8; line-height:1.5; margin:0 0 8px 0;">
-              异机统一通过 Hub 8443 TLS 鉴权网关穿透（全拓扑通杀），随机调度防止单一 IP 被风控封锁。
+              异机统一通过 Hub {{ currentHubPort }} TLS 鉴权网关穿透（全拓扑通杀），随机调度防止单一 IP 被风控封锁。
             </p>
 
             <div class="code-viewport-container" :class="{ 'code-expanded': isCodeExpanded }">
@@ -468,7 +473,7 @@ async def run_remote():
 
     # 2. 随机/轮询选取目标节点 (多节点负载均衡，杜绝单 IP 触发反爬)
     target = random.choice(online_nodes)
-    cdp_url = target["preferred_cdp_url"]  # 8443 TLS 统一网关端点
+    cdp_url = target["preferred_cdp_url"]  # TLS 统一网关端点
     print(f"异机分配节点: [{target['name']}] (拓扑: {target['topology_desc']})")
 
     # 3. 穿透接管 (无论节点在 NAT4 家宽内网还是公网云机)

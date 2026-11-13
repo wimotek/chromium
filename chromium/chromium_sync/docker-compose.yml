@@ -8,8 +8,9 @@ services:
     container_name: cdp_sync_manager
     restart: unless-stopped
     ports:
-      # HTTPS 管理端口（如需直接使用 443 访问，可改为 "443:8443"）
-      - "8443:8443"
+      # HUB_EXTERNAL_PORT 为宿主机对外映射端口，HUB_PORT 为容器内部监听端口
+      # 示例：若需映射 3000:8443，设置 HUB_EXTERNAL_PORT=3000（容器内仍监听 8443，对外端点自动识别为 3000）
+      - "${HUB_EXTERNAL_PORT:-${HUB_PORT:-8443}}:${HUB_PORT:-8443}"
       # 本地转发的 CDP 端口段
       - "19200-19250:19200-19250"
     volumes:
@@ -18,11 +19,22 @@ services:
       # 映射外部 SSL 证书目录（支持宝塔/Certbot 0600 root 私钥，仅只读拷贝至容器内 /etc/ssl/app，绝不改动宿主机权限）
       - ./certs:/certs:ro
     environment:
-      - ADMIN_INIT_PASS=${ADMIN_INIT_PASS:-Admin@123456}
-      # 仅当 Hub 与节点位于同宿主机/局域网私网段时设为 true；公网部署保持 false 防止 SSRF 探测
+      # [可选参数] 监听地址（默认值: "::"，同时支持 IPv4 + IPv6 双栈；若未开启 IPv6 将自动回退 0.0.0.0）
+      - HUB_HOST=${HUB_HOST:-::}
+      # [可选参数] 容器内部 HTTPS/WSS 监听端口（默认值: 8443）
+      - HUB_PORT=${HUB_PORT:-8443}
+      # [可选参数] 宿主机对外映射端口，如 -p 3000:8443 时可填 3000（默认值: 空，自动从 Host/X-Forwarded-* 请求头提取）
+      - HUB_EXTERNAL_PORT=${HUB_EXTERNAL_PORT:-}
+      # [可选参数] 强制指定对外拼接域名/IP，适用于多级反代改写 Host 时（默认值: 空，自动识别）
+      - HUB_PUBLIC_HOST=${HUB_PUBLIC_HOST:-}
+      # [可选参数] 首次初始化空库 (/data/app.db) 时的管理员账号与密码（默认值: admin / 123456）
+      # 注：仅在首次建库时生效；若数据库已存在或已在后台改密，修改这两个变量不会覆盖现有凭据
+      - ADMIN_INIT_USER=${ADMIN_INIT_USER:-admin}
+      - ADMIN_INIT_PASS=${ADMIN_INIT_PASS:-123456}
+      # [可选参数] 仅当 Hub 与节点位于同宿主机/局域网私网段时设为 true（默认值: false，公网保持 false 防止 SSRF 探测）
       - EDGE_AGENT_ALLOW_NON_PUBLIC_PROBE=${EDGE_AGENT_ALLOW_NON_PUBLIC_PROBE:-false}
     healthcheck:
-      test: ["CMD", "python3", "-c", "import ssl, urllib.request; ctx = ssl._create_unverified_context(); urllib.request.urlopen('https://127.0.0.1:8443/api/auth/status', context=ctx, timeout=3)"]
+      test: ["CMD-SHELL", "python3 -c \"import os, ssl, urllib.request; p = os.getenv('HUB_PORT') or '8443'; urllib.request.urlopen(f'https://127.0.0.1:{p}/api/auth/status', context=ssl._create_unverified_context(), timeout=3)\" || python3 -c \"import os, ssl, urllib.request; p = os.getenv('HUB_PORT') or '8443'; urllib.request.urlopen(f'https://[::1]:{p}/api/auth/status', context=ssl._create_unverified_context(), timeout=3)\""]
       interval: 30s
       timeout: 5s
       retries: 3

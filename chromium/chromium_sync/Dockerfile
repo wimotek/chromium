@@ -32,6 +32,8 @@ ARG PGID=1000
 WORKDIR /app
 
 ENV TZ=Asia/Shanghai \
+    HUB_HOST=:: \
+    HUB_PORT=8443 \
     PATH="/opt/venv/bin:${PATH}" \
     PYTHONPATH=/app/backend \
     PYTHONUNBUFFERED=1 \
@@ -65,11 +67,11 @@ COPY --chmod=755 entrypoint.sh /entrypoint.sh
 
 WORKDIR /app/backend
 
-EXPOSE 8443
+EXPOSE ${HUB_PORT}
 VOLUME ["/data"]
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
-    CMD ["python3", "-c", "import ssl, urllib.request; ctx = ssl._create_unverified_context(); urllib.request.urlopen('https://127.0.0.1:8443/api/auth/status', context=ctx, timeout=3)"]
+    CMD ["sh", "-c", "python3 -c \"import os, ssl, urllib.request; p = os.getenv('HUB_PORT') or '8443'; urllib.request.urlopen(f'https://127.0.0.1:{p}/api/auth/status', context=ssl._create_unverified_context(), timeout=3)\" || python3 -c \"import os, ssl, urllib.request; p = os.getenv('HUB_PORT') or '8443'; urllib.request.urlopen(f'https://[::1]:{p}/api/auth/status', context=ssl._create_unverified_context(), timeout=3)\""]
 
 ENTRYPOINT ["/usr/bin/dumb-init", "--", "/entrypoint.sh"]
 CMD ["python3", "app.py"]
