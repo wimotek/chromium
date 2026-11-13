@@ -42,6 +42,9 @@ ENV DEBIAN_FRONTEND=noninteractive \
     CHROME_ARGS= \
     REVERSE_TUNNEL= \
     PATH="/opt/venv/bin:${PATH}" \
+    HOME=/home/appuser \
+    XDG_CONFIG_HOME=/home/appuser/.config \
+    XDG_CACHE_HOME=/home/appuser/.cache \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1
 
@@ -65,6 +68,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && echo "zh_CN.UTF-8 UTF-8" > /etc/locale.gen \
     && echo "en_US.UTF-8 UTF-8" >> /etc/locale.gen \
     && locale-gen \
+    && (fc-cache -f || true) \
     && ln -f /usr/share/novnc/vnc.html /usr/share/novnc/index.html \
     && rm -rf /var/lib/apt/lists/* \
         /usr/share/doc/* \
@@ -76,7 +80,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 RUN groupadd -g "${PGID}" appuser \
     && useradd -m -u "${PUID}" -g "${PGID}" -s /bin/bash appuser \
-    && mkdir -p /data /certs /etc/ssl/app /tmp/crashpad /tmp/.X11-unix /home/appuser/.vnc \
+    && mkdir -p /data /certs /etc/ssl/app /tmp/crashpad /tmp/.X11-unix \
+        /home/appuser/.vnc /home/appuser/.config /home/appuser/.cache/openbox /home/appuser/.cache/fontconfig \
     && chown -R "${PUID}:${PGID}" /data /etc/ssl/app /tmp/crashpad /home/appuser \
     && chmod 1777 /tmp /tmp/.X11-unix /tmp/crashpad
 
@@ -86,8 +91,10 @@ COPY --chmod=755 edge_node_client.py /opt/edge_node_client.py
 
 WORKDIR /data
 
-# 暴露端口：6080(HTTP), 6443(HTTPS), 9222(CDP原生端口), 9223(socat穿透端口)
-EXPOSE 6080 6443 9222 9223
+ENV EDGE_WSS_PORT=9443
+
+# 暴露端口：6080(noVNC HTTP), 6443(noVNC HTTPS), 9443(认证加密 WSS 节点直连端口；9222 仅限容器本地 127.0.0.1)
+EXPOSE 6080 6443 9443
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
     CMD ["python3", "-c", "import socket, urllib.request; urllib.request.urlopen('http://127.0.0.1:9222/json/version', timeout=3); socket.create_connection(('127.0.0.1', 6080), timeout=3).close()"]

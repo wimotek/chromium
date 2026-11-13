@@ -181,6 +181,15 @@ async def run_chromium_sync_instance(
         return {"status": "failed", "details": str(e), "error": str(e)}
 
 
+def _resolve_node_target_host(node: dict) -> str:
+    conn_type = node.get("conn_type")
+    if conn_type in ("public_wss", "wss_direct"):
+        return "public-wss"
+    if conn_type == "reverse":
+        return "reverse-nat4"
+    return node.get("direct_host", "127.0.0.1") if node.get("is_local") else "127.0.0.1"
+
+
 async def execute_policy_task(policy_id: int):
     """
     多策略执行引擎：
@@ -266,7 +275,7 @@ async def execute_policy_task(policy_id: int):
                     fetch_tasks = [
                         fetch_cookies_native(
                             n['local_bind_port'],
-                            target_host="reverse-nat4" if n.get('conn_type') == 'reverse' else (n.get('direct_host', '127.0.0.1') if n['is_local'] else "127.0.0.1"),
+                            target_host=_resolve_node_target_host(n),
                             node_id=n['id']
                         )
                         for n in merge_pool_nodes
@@ -318,7 +327,7 @@ async def execute_policy_task(policy_id: int):
                         for item in node_in_memory_data:
                             n = item["node"]
                             match_inject = next((x for x in nodes_to_inject if x["node"]["id"] == n["id"]), None)
-                            t_host = "reverse-nat4" if n.get('conn_type') == 'reverse' else (n.get('direct_host', '127.0.0.1') if n['is_local'] else "127.0.0.1")
+                            t_host = _resolve_node_target_host(n)
 
                             if match_inject:
                                 purged_cnt = await purge_stale_cookies_on_node(n['local_bind_port'], t_host, exclude_domains, node_id=n['id'])
@@ -353,7 +362,7 @@ async def execute_policy_task(policy_id: int):
                     fetch_tasks = [
                         fetch_cookies_native(
                             n['local_bind_port'],
-                            target_host="reverse-nat4" if n.get('conn_type') == 'reverse' else (n.get('direct_host', '127.0.0.1') if n['is_local'] else "127.0.0.1"),
+                            target_host=_resolve_node_target_host(n),
                             node_id=n['id']
                         )
                         for n in src_active_nodes
@@ -371,7 +380,7 @@ async def execute_policy_task(policy_id: int):
                     else:
                         injected_any = False
                         for target in dest_nodes:
-                            t_host = "reverse-nat4" if target.get('conn_type') == 'reverse' else (target.get('direct_host', '127.0.0.1') if target['is_local'] else "127.0.0.1")
+                            t_host = _resolve_node_target_host(target)
                             curr_c = await fetch_cookies_native(target['local_bind_port'], t_host, node_id=target['id'])
                             diff_c, skipped = compute_cookie_diff(curr_c, group_cookies)
 
@@ -398,7 +407,7 @@ async def execute_policy_task(policy_id: int):
                     status = "SKIPPED"
                 else:
                     source_node_desc = f"{source['name']} ({'本地' if source['is_local'] else (source.get('conn_type') or 'SSH')})"
-                    src_host = "reverse-nat4" if source.get('conn_type') == 'reverse' else (source.get('direct_host', '127.0.0.1') if source['is_local'] else "127.0.0.1")
+                    src_host = _resolve_node_target_host(source)
 
                     raw_c = await fetch_cookies_native(source['local_bind_port'], src_host, node_id=source['id'])
                     cookies, _, _ = filter_cookies_by_domains(raw_c, include_domains, exclude_domains)
@@ -411,7 +420,7 @@ async def execute_policy_task(policy_id: int):
                     else:
                         injected_any = False
                         for target in dest_nodes:
-                            tgt_host = "reverse-nat4" if target.get('conn_type') == 'reverse' else (target.get('direct_host', '127.0.0.1') if target['is_local'] else "127.0.0.1")
+                            tgt_host = _resolve_node_target_host(target)
                             curr_c = await fetch_cookies_native(target['local_bind_port'], tgt_host, node_id=target['id'])
                             diff_c, skipped = compute_cookie_diff(curr_c, cookies)
 

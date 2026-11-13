@@ -4,9 +4,12 @@ class Config:
     SECRET_KEY = os.getenv("SECRET_KEY", "xray_secure_key_default")
     DB_PATH = os.getenv("DB_PATH", "/data/xray_web.db")
     
-    # Web 端口与代理端口彻底解耦 (主控统一使用 HTTPS 8443 端口)
+    # Web 端口与代理端口彻底解耦 (容器内部默认 8443，支持 -e WEB_PORT=xxx 更改)
     WEB_PORT = int(os.getenv("WEB_PORT", 8443))
     PORT = WEB_PORT
+    # 对外暴露端口/入口 URL（当使用 -p 3000:8443 端口映射或反向代理时自动识别，也可显式指定）
+    PUBLIC_PORT = int(os.getenv("PUBLIC_PORT", "0") or 0)
+    PUBLIC_URL = os.getenv("PUBLIC_URL", "").strip().rstrip("/")
     # 强制启用原生 HTTPS TLS 加密
     SSL_ENABLE = os.getenv("SSL_ENABLE", "true").strip().lower() in ("true", "1", "yes")
     

@@ -1,10 +1,12 @@
 import os
 import json
+import ssl
 import time
 import sqlite3
 import asyncio
 import secrets
-from typing import Dict, Optional, Set, Any
+from typing import Dict, Optional, Set, Any, Tuple
+import websockets
 
 from config import (
     KEYS_DIR,
@@ -21,9 +23,44 @@ _PENDING_FIRST_SEEN: Dict[str, float] = {}
 _NOTIFIED_PENDING_NODES: Set[str] = set()
 
 
+class _OutboundWsAdapter:
+    """将 websockets 客户端连接适配为与 FastAPI WebSocket 一致的 send_text/close 接口"""
+    def __init__(self, ws):
+        self._ws = ws
+
+    async def send_text(self, data: str):
+        await self._ws.send(data)
+
+    async def close(self):
+        await self._ws.close()
+
+
+def _format_wss_url(endpoint: Optional[str], fallback_host: Optional[str] = None, fallback_port: int = 9443) -> Optional[str]:
+    ep = (endpoint or "").strip()
+    if not ep:
+        host = (fallback_host or "").strip().strip("[]")
+        if not host or host in {"reverse-nat4", "public-wss", "wss-direct"}:
+            return None
+        ep = f"[{host}]:{fallback_port}" if ":" in host else f"{host}:{fallback_port}"
+
+    if ep.startswith("wss://") or ep.startswith("ws://"):
+        base = ep.rstrip("/")
+        return base if base.endswith("/ws") else f"{base}/ws"
+
+    if ep.startswith("[") and "]:" in ep:
+        netloc = ep
+    elif ep.count(":") > 1:
+        netloc = f"[{ep.strip('[]')}]:{fallback_port}"
+    elif ":" in ep:
+        netloc = ep
+    else:
+        netloc = f"{ep}:{fallback_port}"
+    return f"wss://{netloc}/ws"
+
+
 class ReverseTunnelSession:
     """
-    生产级 NAT4 / WSS 反向长连接会话管理器：
+    生产级 NAT4 / WSS 长连接会话管理器（同时承载入站反向穿透与出站公网 WSS 直连）：
     1. 独占 WebSocket 读取，杜绝并发 receive_text 竞态报错
     2. 基于 req_id 挂载 Future，支持并发 CDP 指令分发
     3. 支持心跳自动回包，支持下发审批通过广播
@@ -38,7 +75,7 @@ class ReverseTunnelSession:
 
     async def send_command(self, action: str, payload: dict = None, timeout: float = 10.0) -> dict:
         if self.is_closed:
-            raise ConnectionError(f"节点 ID:{self.node_id} 反向隧道会话已断开")
+            raise ConnectionError(f"节点 ID:{self.node_id} WSS 隧道会话已断开")
 
         loop = asyncio.get_running_loop()
         req_id = secrets.randbelow(900000) + 100000
@@ -59,7 +96,7 @@ class ReverseTunnelSession:
             self.pending_requests.pop(req_id, None)
 
     async def send_raw_json(self, data: dict):
-        """向边缘节点推送非应答类通知 (如审批通过)"""
+        """向边缘节点推送非应答类通知 (如审批通过 / CDP WS 帧)"""
         if not self.is_closed:
             async with self._write_lock:
                 await self.ws.send_text(json.dumps(data))
@@ -94,7 +131,7 @@ class ReverseTunnelSession:
         self.is_closed = True
         for fut in list(self.pending_requests.values()):
             if not fut.done():
-                fut.set_exception(ConnectionResetError("反向长连接已断开"))
+                fut.set_exception(ConnectionResetError("WSS 长连接已断开"))
         self.pending_requests.clear()
         for client_ws in list(self.cdp_ws_streams.values()):
             try:
@@ -108,38 +145,199 @@ class TunnelManager:
     """
     CDP 集群统一隧道调度中心：
     - 模式 4 (SSH 穿透): 委托由专用的通用商业模块 wimotek-ssh-tunnel 管理
-    - 模式 3 (WSS 反穿): 由内置 ReverseTunnelSession 长连接池承载
+    - 模式 3 (NAT4 反穿 / 公网 WSS 直连): 统一由内置 ReverseTunnelSession 长连接池承载
     """
     def __init__(self):
         # 存放所有正在运行的 SSH 隧道实例 (由 wimotek-ssh-tunnel 实例化)
         self.tunnels: Dict[int, Any] = {}
-        # 存放所有 NAT4 反向 WebSocket 隧道会话
+        # 存放所有 NAT4 反向及公网 WSS 直连长连接会话
         self.reverse_sessions: Dict[int, ReverseTunnelSession] = {}
+        # 存放 Hub 主动连向公网节点的 WSS 客户端保活任务
+        self.public_wss_tasks: Dict[int, asyncio.Task] = {}
+        self.public_wss_targets: Dict[int, Tuple[str, str]] = {}
 
     def register_reverse_tunnel(self, node_id: int, ws_client) -> ReverseTunnelSession:
         if node_id in self.reverse_sessions:
             self.reverse_sessions[node_id].close()
         session = ReverseTunnelSession(node_id, ws_client)
         self.reverse_sessions[node_id] = session
-        logger.info(f"🔌 节点 ID:{node_id} 反向穿透隧道已接入安全连接池")
+        logger.info(f"🔌 节点 ID:{node_id} WSS 长连接通道已接入安全连接池")
         return session
 
-    def unregister_reverse_tunnel(self, node_id: int):
-        if node_id in self.reverse_sessions:
-            self.reverse_sessions[node_id].close()
-            del self.reverse_sessions[node_id]
-            logger.info(f"🔌 节点 ID:{node_id} 反向穿透隧道已移出安全连接池")
+    def unregister_reverse_tunnel(self, node_id: int, expected_session: Optional[ReverseTunnelSession] = None):
+        cur_session = self.reverse_sessions.get(node_id)
+        if cur_session is None:
+            return
+        if expected_session is not None and cur_session is not expected_session:
+            return
+        cur_session.close()
+        del self.reverse_sessions[node_id]
+        logger.info(f"🔌 节点 ID:{node_id} WSS 长连接通道已移出安全连接池")
 
     def get_reverse_session(self, node_id: int) -> Optional[ReverseTunnelSession]:
         return self.reverse_sessions.get(node_id)
 
+    def stop_public_wss_session(self, node_id: int):
+        task = self.public_wss_tasks.pop(node_id, None)
+        self.public_wss_targets.pop(node_id, None)
+        if task and not task.done():
+            task.cancel()
+        if node_id in self.reverse_sessions:
+            self.unregister_reverse_tunnel(node_id)
+
+    def ensure_public_wss_session(self, node: dict):
+        """确保对公网 WSS 直连节点存在 Hub -> 节点的加密长连接客户端任务"""
+        node_id = node["id"]
+        if node.get("enabled", 1) == 0 or node.get("approval_status", 1) == 0:
+            self.stop_public_wss_session(node_id)
+            return
+
+        endpoint = node.get("wss_endpoint") or node.get("recommended_endpoint")
+        wss_url = _format_wss_url(endpoint, fallback_host=node.get("direct_host"), fallback_port=9443)
+        if not wss_url:
+            logger.warning(f"⚠️ 节点 ID:{node_id} 缺少有效的 wss_endpoint，无法发起公网 WSS 直连")
+            return
+
+        edge_secret = (node.get("edge_wss_secret") or "").strip()
+        target_sig = (wss_url, edge_secret)
+        existing_task = self.public_wss_tasks.get(node_id)
+        if existing_task and not existing_task.done() and self.public_wss_targets.get(node_id) == target_sig:
+            return
+
+        if existing_task and not existing_task.done():
+            existing_task.cancel()
+
+        self.public_wss_targets[node_id] = target_sig
+        self.public_wss_tasks[node_id] = asyncio.create_task(
+            self._public_wss_client_loop(node_id, wss_url, edge_secret)
+        )
+
+    async def _public_wss_client_loop(self, node_id: int, wss_url: str, edge_secret: str):
+        from services.cdp_engine import probe_node_cookies
+
+        ssl_ctx = ssl.create_default_context()
+        ssl_ctx.check_hostname = False
+        ssl_ctx.verify_mode = ssl.CERT_NONE
+
+        headers: Dict[str, str] = {}
+        if edge_secret:
+            headers["X-Edge-Auth"] = edge_secret
+
+        common_kwargs = {
+            "ssl": ssl_ctx if wss_url.startswith("wss://") else None,
+            "max_size": 100 * 1024 * 1024,
+            "ping_interval": 20,
+            "ping_timeout": 10,
+            "open_timeout": 8,
+        }
+
+        backoff = 2
+        try:
+            while True:
+                conn = get_db_connection()
+                conn.row_factory = sqlite3.Row
+                cur = conn.cursor()
+                cur.execute("SELECT enabled, approval_status, conn_type FROM nodes WHERE id=?", (node_id,))
+                row = cur.fetchone()
+                conn.close()
+
+                if (
+                    not row
+                    or row["enabled"] == 0
+                    or row["approval_status"] == 0
+                    or row["conn_type"] not in ("public_wss", "wss_direct")
+                ):
+                    break
+
+                ws = None
+                session = None
+                try:
+                    try:
+                        ws = await websockets.connect(wss_url, additional_headers=headers, **common_kwargs)
+                    except TypeError:
+                        ws = await websockets.connect(wss_url, extra_headers=headers, **common_kwargs)
+
+                    adapter = _OutboundWsAdapter(ws)
+                    session = self.register_reverse_tunnel(node_id, adapter)
+                    backoff = 2
+                    self._update_node_status(node_id, "connected")
+                    logger.info(f"🛡️ [Public-WSS] Hub 已主动连入节点 ID:{node_id} ({wss_url})")
+
+                    async def _refresh_probe(nid: int):
+                        try:
+                            await asyncio.sleep(0.6)
+                            cnt, msg = await probe_node_cookies(9222, target_host="public-wss", node_id=nid)
+                            if msg == "OK":
+                                self._update_node_status(nid, "connected", cnt)
+                        except Exception:
+                            pass
+
+                    asyncio.create_task(_refresh_probe(node_id))
+
+                    while True:
+                        try:
+                            raw = await asyncio.wait_for(ws.recv(), timeout=15.0)
+                        except asyncio.TimeoutError:
+                            await session.send_raw_json({"action": "ping"})
+                            continue
+
+                        if isinstance(raw, bytes):
+                            raw = raw.decode("utf-8", errors="replace")
+                        if raw in ("ping", "pong"):
+                            continue
+                        try:
+                            parsed = json.loads(raw)
+                            if isinstance(parsed, dict) and parsed.get("type") == "pong":
+                                continue
+                        except Exception:
+                            pass
+                        session.handle_incoming_text(raw)
+
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:
+                    logger.warning(f"⚠️ [Public-WSS] 节点 ID:{node_id} 直连中断 ({type(e).__name__}: {e})，{backoff}s 后重连")
+                    if self.reverse_sessions.get(node_id) in (None, session):
+                        conn_chk = get_db_connection()
+                        cur_chk = conn_chk.cursor()
+                        cur_chk.execute("UPDATE nodes SET status='stopped' WHERE id=? AND enabled=1", (node_id,))
+                        conn_chk.commit()
+                        conn_chk.close()
+                    await asyncio.sleep(backoff)
+                    backoff = min(backoff * 2, 30)
+                finally:
+                    if session is not None:
+                        self.unregister_reverse_tunnel(node_id, expected_session=session)
+                    if ws is not None:
+                        try:
+                            await ws.close()
+                        except Exception:
+                            pass
+        except asyncio.CancelledError:
+            pass
+
     async def start_tunnel(self, node: dict):
         from services.cdp_engine import probe_node_cookies
         node_id = node['id']
+        conn_type = node.get('conn_type')
+
+        # 1. 公网 WSS 直连节点 (Hub 主动入站连向节点 9443 加密 WSS 端口)
+        if conn_type in ('public_wss', 'wss_direct'):
+            self.stop_tunnel(node_id)
+            self.ensure_public_wss_session(node)
+            for _ in range(12):
+                session = self.get_reverse_session(node_id)
+                if session and not session.is_closed:
+                    count, msg = await probe_node_cookies(node['local_bind_port'], target_host="public-wss", node_id=node_id)
+                    self._update_node_status(node_id, "connected" if msg == "OK" else "error: refused", count if msg == "OK" else 0)
+                    return True, f"公网 WSS 直连在线，探测到 {count} 条 Cookies"
+                await asyncio.sleep(0.25)
+            return False, "正在向节点发起公网 WSS 直连 (等待边缘 WSS 端口就绪)"
+
         self.stop_tunnel(node_id)
 
-        # 1. 反向长连 / WSS 穿透节点
-        if node.get('conn_type') == 'reverse':
+        # 2. NAT4 反向长连节点
+        if conn_type == 'reverse':
             session = self.get_reverse_session(node_id)
             if session and not session.is_closed:
                 count, msg = await probe_node_cookies(node['local_bind_port'], target_host="reverse-nat4", node_id=node_id)
@@ -149,7 +347,7 @@ class TunnelManager:
                 self._update_node_status(node_id, "stopped", 0)
                 return False, "反向隧道未接入 (等待边缘容器启动连入)"
 
-        # 2. 本地 / 局域网直连节点
+        # 3. 本地 / 局域网直连节点
         if node.get('is_local') == 1:
             direct_host = node.get('direct_host') or '127.0.0.1'
             try:
@@ -164,7 +362,7 @@ class TunnelManager:
                 self._update_node_status(node_id, "error: offline", 0)
                 return False, f"连接异常: {e}"
 
-        # 3. 远程 SSH 节点 (全面对接 wimotek-ssh-tunnel 商业引擎)
+        # 4. 远程 SSH 节点 (全面对接 wimotek-ssh-tunnel 商业引擎)
         ssh_key_param = None
         if node.get('ssh_key_filename'):
             key_path = os.path.join(KEYS_DIR, node['ssh_key_filename'])
@@ -246,6 +444,8 @@ class TunnelManager:
             except Exception:
                 pass
             del self.tunnels[node_id]
+        if node_id in self.public_wss_tasks or node_id in self.public_wss_targets:
+            self.stop_public_wss_session(node_id)
         self._update_node_status(node_id, "stopped")
 
     def _update_node_status(self, node_id: int, status: str, cookie_count: Optional[int] = None):
@@ -267,7 +467,7 @@ async def tunnel_watchdog_loop():
     """
     全量后台守护看门狗：
     1. TOFU 待审批挂起超时自动预警 (邮件与微信 Server酱推送)
-    2. 直连、SSH 隧道与反向长连接健康巡检探活
+    2. 直连、SSH 隧道、公网 WSS 直连与反向长连接健康巡检探活
     """
     from services.cdp_engine import probe_node_cookies
     from services.notification import dispatch_notification
@@ -331,7 +531,17 @@ async def tunnel_watchdog_loop():
                 node_id = node['id']
                 conn_type = node.get('conn_type', 'direct')
 
-                if conn_type == 'reverse':
+                if conn_type in ('public_wss', 'wss_direct'):
+                    session = tunnel_mgr.get_reverse_session(node_id)
+                    if session and not session.is_closed:
+                        count, msg = await probe_node_cookies(node['local_bind_port'], target_host="public-wss", node_id=node_id)
+                        new_status = "connected" if msg == "OK" else "error: refused"
+                        tunnel_mgr._update_node_status(node_id, new_status, count if msg == "OK" else 0)
+                    else:
+                        tunnel_mgr.ensure_public_wss_session(node)
+                        tunnel_mgr._update_node_status(node_id, "stopped", 0)
+
+                elif conn_type == 'reverse':
                     session = tunnel_mgr.get_reverse_session(node_id)
                     if session and not session.is_closed:
                         count, msg = await probe_node_cookies(node['local_bind_port'], target_host="reverse-nat4", node_id=node_id)

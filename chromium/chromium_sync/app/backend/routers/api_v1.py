@@ -187,7 +187,8 @@ async def external_get_cookies(node_id: int, auth: dict = Depends(verify_agent_a
     node = dict(row)
 
     try:
-        target_h = node.get('direct_host', '127.0.0.1') if node['is_local'] else "127.0.0.1"
+        c_type = node.get('conn_type')
+        target_h = "public-wss" if c_type in ("public_wss", "wss_direct") else ("reverse-nat4" if c_type == "reverse" else (node.get('direct_host', '127.0.0.1') if node['is_local'] else "127.0.0.1"))
         cookies = await fetch_cookies_native(node['local_bind_port'], target_h, node_id=node['id'])
         return {
             "code": 200,
@@ -222,7 +223,8 @@ async def external_inject_cookies(
         raise HTTPException(status_code=400, detail="cookies 字段必须为列表")
 
     try:
-        target_h = node.get('direct_host', '127.0.0.1') if node['is_local'] else "127.0.0.1"
+        c_type = node.get('conn_type')
+        target_h = "public-wss" if c_type in ("public_wss", "wss_direct") else ("reverse-nat4" if c_type == "reverse" else (node.get('direct_host', '127.0.0.1') if node['is_local'] else "127.0.0.1"))
         injected = await inject_cookies_native(node['local_bind_port'], cookies, target_h, node_id=node['id'])
         return {
             "code": 200,

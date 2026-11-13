@@ -48,6 +48,8 @@ def init_db_and_jwt():
         last_sync TEXT,
         network_mode TEXT DEFAULT '',
         recommended_endpoint TEXT DEFAULT '',
+        wss_endpoint TEXT DEFAULT '',
+        edge_wss_secret TEXT DEFAULT '',
         ipv4_reachable INTEGER DEFAULT 0,
         ipv6_reachable INTEGER DEFAULT 0
     )''')
@@ -106,6 +108,8 @@ def init_db_and_jwt():
         ("cookie_count", "INTEGER DEFAULT 0"),
         ("network_mode", "TEXT DEFAULT ''"),
         ("recommended_endpoint", "TEXT DEFAULT ''"),
+        ("wss_endpoint", "TEXT DEFAULT ''"),
+        ("edge_wss_secret", "TEXT DEFAULT ''"),
         ("ipv4_reachable", "INTEGER DEFAULT 0"),
         ("ipv6_reachable", "INTEGER DEFAULT 0")
     ]

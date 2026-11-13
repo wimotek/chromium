@@ -186,8 +186,8 @@ async def fetch_cookies_native(local_port: int, target_host: str = "127.0.0.1", 
     """提取 Cookies：反向节点严格走隧道，彻底杜绝尝试访问 reverse-nat4 伪域名"""
     from services.tunnel_manager import tunnel_mgr
 
-    # 判定为反向长连节点
-    is_reverse = (target_host in ["reverse-nat4", "reverse"]) or (node_id and tunnel_mgr.get_reverse_session(node_id))
+    # 判定为 WSS 通道节点 (反向长连或公网 WSS 直连)
+    is_reverse = (target_host in ["reverse-nat4", "reverse", "public-wss", "wss-direct"]) or (node_id and tunnel_mgr.get_reverse_session(node_id))
     if is_reverse:
         session = tunnel_mgr.get_reverse_session(node_id) if node_id else None
         if not session or session.is_closed:
@@ -225,7 +225,7 @@ async def inject_cookies_native(local_port: int, cookies: List[dict], target_hos
         return 0
 
     from services.tunnel_manager import tunnel_mgr
-    is_reverse = (target_host in ["reverse-nat4", "reverse"]) or (node_id and tunnel_mgr.get_reverse_session(node_id))
+    is_reverse = (target_host in ["reverse-nat4", "reverse", "public-wss", "wss-direct"]) or (node_id and tunnel_mgr.get_reverse_session(node_id))
     if is_reverse:
         session = tunnel_mgr.get_reverse_session(node_id) if node_id else None
         if not session or session.is_closed:
@@ -285,7 +285,7 @@ async def inject_cookies_native(local_port: int, cookies: List[dict], target_hos
 async def purge_stale_cookies_on_node(local_port: int, target_host: str = "127.0.0.1", exclude_domains: List[str] = None, node_id: Optional[int] = None) -> int:
     """清理过期与黑名单 Cookies"""
     from services.tunnel_manager import tunnel_mgr
-    is_reverse = (target_host in ["reverse-nat4", "reverse"]) or (node_id and tunnel_mgr.get_reverse_session(node_id))
+    is_reverse = (target_host in ["reverse-nat4", "reverse", "public-wss", "wss-direct"]) or (node_id and tunnel_mgr.get_reverse_session(node_id))
     if is_reverse:
         session = tunnel_mgr.get_reverse_session(node_id) if node_id else None
         if session and not session.is_closed:

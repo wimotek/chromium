@@ -36,14 +36,15 @@ WORKDIR /app
 LABEL maintainer="Wimotek <i@Wimotek.com>"
 LABEL description="Xray-Web Master Control Hub (Optimized & Precompiled)"
 
-# 仅安装生产必须的运行时动态链接库 (无 gcc/cargo/pip 缓存污染)
-RUN apk add --no-cache ca-certificates tzdata openssl
+# 仅安装生产必须的运行时动态链接库 (dumb-init + gosu 实现 Root-Init-Drop 安全降权，libcap 支持非 root 绑定 443)
+RUN apk add --no-cache ca-certificates tzdata openssl dumb-init gosu libcap
 
 # adduser 与 mkdir/chown 逻辑相关，合并成一层是合理的 (包含持久化 /data /data/backups 与运行期证书目录 /app/certs)
 RUN addgroup -g 10001 -S appgroup && \
     adduser -u 10001 -S -G appgroup -s /sbin/nologin appuser && \
     mkdir -p /data /data/backups /app/certs && \
-    chown -R appuser:appgroup /data /app/certs
+    chown -R appuser:appgroup /data /app/certs && \
+    setcap 'cap_net_bind_service=+ep' "$(readlink -f "$(which python3)")"
 
 # 关键：bind mount，wheels 不进入任何层
 RUN --mount=type=bind,from=python-builder,source=/wheels,target=/wheels \
@@ -58,16 +59,17 @@ ENV TZ=Asia/Shanghai \
     PYTHONDONTWRITEBYTECODE=1 \
     WEB_PORT=8443
 
-USER appuser
+# 注：不静态固定 USER appuser，而是由 dumb-init + entrypoint.sh (Root-Init) 读取宝塔/外部 0600 证书并修复 /data 权限后，
+# 再通过 gosu appuser:appgroup 不可逆降权为 UID 10001 运行 Granian！
 
-# EXPOSE 为镜像默认元数据声明（默认 8443，运行时可通过 -e WEB_PORT=自定义端口 自由指定）
+# EXPOSE 为镜像默认元数据声明（默认 8443，支持 -e WEB_PORT=自定义端口 或 -p 3000:8443 端口映射）
 EXPOSE 8443
 VOLUME ["/data"]
 
-# 容器健康检查：动态解析 ${WEB_PORT} 端口与 /healthz 端点
+# 容器健康检查：动态探测容器内部 ${WEB_PORT} 端口与 /healthz 端点（兼容 3000:8443 外部端口映射）
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
     CMD wget --no-check-certificate -q --spider "https://127.0.0.1:${WEB_PORT:-8443}/healthz" || exit 1
 
-# 关键：使用 entrypoint.sh 统一接管证书预热与动态 ${WEB_PORT} 端口启动
-ENTRYPOINT ["/app/backend/entrypoint.sh"]
+# 关键：dumb-init (PID 1 信号转发) -> entrypoint.sh (Root-Init-Drop 证书与权限初始化) -> gosu appuser
+ENTRYPOINT ["/usr/bin/dumb-init", "--", "/app/backend/entrypoint.sh"]
 CMD ["granian-default"]

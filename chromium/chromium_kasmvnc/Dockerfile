@@ -47,6 +47,9 @@ ENV DEBIAN_FRONTEND=noninteractive \
     CHROME_ARGS= \
     REVERSE_TUNNEL= \
     PATH="/opt/venv/bin:${PATH}" \
+    HOME=/home/kasm-user \
+    XDG_CONFIG_HOME=/home/kasm-user/.config \
+    XDG_CACHE_HOME=/home/kasm-user/.cache \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1
 
@@ -77,6 +80,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && echo "zh_CN.UTF-8 UTF-8" > /etc/locale.gen \
     && echo "en_US.UTF-8 UTF-8" >> /etc/locale.gen \
     && locale-gen \
+    && (fc-cache -f || true) \
     && rm -rf /var/lib/apt/lists/* \
         /usr/share/doc/* \
         /usr/share/man/* \
@@ -87,7 +91,7 @@ RUN groupadd -g "${PGID}" kasm-user \
     && useradd -m -u "${PUID}" -g "${PGID}" -s /bin/bash kasm-user \
     && usermod -aG ssl-cert kasm-user \
     && mkdir -p /data /certs /etc/ssl/app /tmp/crashpad /tmp/.X11-unix \
-        /home/kasm-user/.vnc /home/kasm-user/.config /home/kasm-user/.cache /etc/kasmvnc \
+        /home/kasm-user/.vnc /home/kasm-user/.config /home/kasm-user/.cache/openbox /home/kasm-user/.cache/fontconfig /etc/kasmvnc \
     && chown -R "${PUID}:${PGID}" /data /etc/ssl/app /tmp/crashpad /home/kasm-user /etc/kasmvnc \
     && chmod 1777 /tmp /tmp/.X11-unix /tmp/crashpad
 
@@ -97,8 +101,10 @@ COPY --chmod=755 edge_node_client.py /opt/edge_node_client.py
 
 WORKDIR /data
 
-# 暴露端口：6901(KasmVNC Web), 9222(CDP原生端口), 9223(socat备用穿透端口)
-EXPOSE 6901 9222 9223
+ENV EDGE_WSS_PORT=9443
+
+# 暴露端口：6901(KasmVNC Web), 9443(认证加密 WSS 节点直连端口；9222 仅限容器本地 127.0.0.1)
+EXPOSE 6901 9443
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
     CMD ["python3", "-c", "import socket, urllib.request; urllib.request.urlopen('http://127.0.0.1:9222/json/version', timeout=3); socket.create_connection(('127.0.0.1', 6901), timeout=3).close()"]

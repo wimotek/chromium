@@ -6,7 +6,7 @@ from config import Config
 from core.db import get_db, hash_pwd, get_setting
 from core.captcha import generate_math_captcha, verify_captcha
 from services.notify_service import send_smtp_email
-from routes import get_node_snis, build_node_link, normalize_expire_date, is_user_allowed_for_node
+from routes import get_node_snis, build_node_link, normalize_expire_date, is_user_allowed_for_node, resolve_public_endpoint
 
 auth_bp = Blueprint('auth_bp', __name__)
 
@@ -67,14 +67,14 @@ def login():
     visible_nodes = [n for n in all_nodes if is_user_allowed_for_node(user_dict, n)]
 
     nodes_data = []
-    host_prefix = request.host_url.rstrip('/')
+    hub_host, hub_port, host_prefix = resolve_public_endpoint(request)
     sub_url = f"{host_prefix}/api/sub?token={user_dict['uuid']}"
 
     for n in visible_nodes:
         if len(n.get("pbk", "")) == 43:
             snis = get_node_snis(n)
             random_sni = random.choice(snis)
-            link = build_node_link(user_dict['uuid'], n, f"{n['name']}", chosen_sni=random_sni, hub_domain=request.host)
+            link = build_node_link(user_dict['uuid'], n, f"{n['name']}", chosen_sni=random_sni, hub_domain=hub_host, hub_port=hub_port)
             nodes_data.append({
                 "id": n["id"],
                 "name": n["name"],

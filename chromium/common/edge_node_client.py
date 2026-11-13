@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
 Wimotek Edge Node Client Runner (Aligned with wimotek-edge-agent >= 1.0.17)
-- 端点上报：主动采集并上传节点公网 IPv4/IPv6 与映射端口，由 Hub 端执行并发 TCP 三次握手探测
-- 权威回传：接收 Hub 回传的 network_mode (direct_dual/direct_ipv4/direct_ipv6/reverse_tunnel) 与 session_ticket
-- 主动心跳：每 5 秒推送应用层 ping，彻底终结 no close frame 闪断重连
-- 真实抓取：Network.enable + Network.getAllCookies 穿透提取 CookieJar
-- CDP 中继：支持直连与 NAT4 反向 WebSocket CDP 全双工透传
+- 安全隔离：Chromium CDP 9222 仅监听容器内 127.0.0.1，绝不直接暴露到公网
+- 双栈鉴权 WSS 直连：内置 IPv4/IPv6 双栈 TLS WebSocket 服务 (默认 EDGE_WSS_PORT=9443)
+- 智能自适应选路：启动后由 Hub 对节点 WSS 端口执行 TCP 三次握手（兼容 Oracle/云主机的内网网卡 1:1 NAT）
+  * 握手成功 -> 公网 WSS 直连 (conn_type="public_wss")，Hub 主动连 wss://<节点IP>:9443
+  * 握手失败 -> NAT4 反向穿透 (conn_type="reverse")，节点出站连 wss://<Hub>/api/nodes/reverse-tunnel
+- 主动心跳与复用：每 5 秒应用层 ping，全双工 CDP WebSocket 多路复用与 SessionTicket 持久化
 """
 
 import os
@@ -20,6 +21,8 @@ import ssl
 import time
 import asyncio
 import hashlib
+import secrets
+import subprocess
 import uuid
 import socket
 from urllib.parse import quote
@@ -28,14 +31,18 @@ from typing import Optional, Tuple, List, Dict, Any
 import httpx
 import websockets
 
-# 容器内部 Chromium 原生监听标准端口
+# Chromium 原生仅监听容器内 127.0.0.1:9222
 CDP_PORT = int(os.getenv("CDP_PORT", "9222"))
+
+# 节点内置鉴权 WSS 服务监听地址与端口 (默认 "::" 双栈 + 9443)
+EDGE_WSS_HOST = (os.getenv("EDGE_WSS_HOST") or "::").strip()
+EDGE_WSS_PORT = int(os.getenv("EDGE_WSS_PORT") or "9443")
 
 
 async def get_local_cdp_base() -> str:
-    """智能嗅探本地 Chromium 调试端口 (容器内优先 9222 回环)"""
+    """获取容器本地 Chromium 回环调试地址 (仅 127.0.0.1)"""
     candidate_ports = [9222]
-    if CDP_PORT != 9222:
+    if CDP_PORT not in candidate_ports:
         candidate_ports.append(CDP_PORT)
 
     for p in candidate_ports:
@@ -47,11 +54,11 @@ async def get_local_cdp_base() -> str:
                     return url
         except Exception:
             continue
-    return "http://127.0.0.1:9222"
+    return f"http://127.0.0.1:{CDP_PORT}"
 
 
-def ensure_identity(data_dir: Path) -> Tuple[str, str]:
-    """生成或读取持久化的 node_uuid 与 fingerprint"""
+def ensure_identity(data_dir: Path) -> Tuple[str, str, str]:
+    """生成或读取持久化的 node_uuid、fingerprint 与入站 WSS 鉴权密钥 edge_wss_secret"""
     data_dir.mkdir(parents=True, exist_ok=True)
     id_file = data_dir / ".edge_identity.json"
     env_name = os.getenv("NODE_NAME", "").strip()
@@ -63,7 +70,14 @@ def ensure_identity(data_dir: Path) -> Tuple[str, str]:
                 if env_name and d.get("node_uuid") != env_name:
                     pass
                 else:
-                    return d["node_uuid"], d["fingerprint"]
+                    sec = (d.get("edge_wss_secret") or "").strip()
+                    if not sec:
+                        sec = secrets.token_urlsafe(32)
+                        d["edge_wss_secret"] = sec
+                        with open(id_file, "w", encoding="utf-8") as wf:
+                            json.dump(d, wf)
+                        os.chmod(id_file, 0o600)
+                    return d["node_uuid"], d["fingerprint"], sec
         except Exception:
             pass
 
@@ -79,15 +93,23 @@ def ensure_identity(data_dir: Path) -> Tuple[str, str]:
 
     raw_key = f"{node_uuid}-{uuid.uuid4()}"
     fingerprint = f"sha256:{hashlib.sha256(raw_key.encode()).hexdigest()[:32]}"
+    edge_wss_secret = secrets.token_urlsafe(32)
 
     try:
         with open(id_file, "w", encoding="utf-8") as f:
-            json.dump({"node_uuid": node_uuid, "fingerprint": fingerprint}, f)
+            json.dump(
+                {
+                    "node_uuid": node_uuid,
+                    "fingerprint": fingerprint,
+                    "edge_wss_secret": edge_wss_secret,
+                },
+                f,
+            )
         os.chmod(id_file, 0o600)
     except Exception:
         pass
 
-    return node_uuid, fingerprint
+    return node_uuid, fingerprint, edge_wss_secret
 
 
 def load_session_ticket(data_dir: Path) -> Optional[str]:
@@ -143,9 +165,7 @@ def _detect_public_ipv4_http() -> Optional[str]:
 
 def collect_node_endpoints(default_port: int) -> Dict[str, Any]:
     """
-    收集节点上报的 IPv4 / IPv6 与端口 (对齐 wimotek-edge-agent 1.0.17 协议)：
-    优先读取显式环境变量 PUBLIC_IPV4 / EDGE_AGENT_PUBLIC_IPV4 与 PUBLIC_IPV6 / EDGE_AGENT_PUBLIC_IPV6；
-    若未配置且开启 AUTO_DETECT_PUBLIC_IP (默认 true)，自动嗅探本机可用地址。
+    收集节点上报的公网 IPv4 / IPv6 与对外 WSS 端口 (默认 EDGE_WSS_PORT=9443)。
     """
     public_ipv4 = (
         os.getenv("EDGE_AGENT_PUBLIC_IPV4", "").strip()
@@ -187,7 +207,7 @@ def collect_node_endpoints(default_port: int) -> Dict[str, Any]:
 
 
 def parse_reverse_tunnel_mode() -> Optional[bool]:
-    """解析运行模式: None (智能) | True (穿透) | False (直连)"""
+    """解析运行模式: None (智能自适应) | True (强制反向穿透) | False (强制公网 WSS 直连)"""
     val = os.getenv("REVERSE_TUNNEL")
     if val is None:
         val = os.getenv("EDGE_AGENT_REVERSE_TUNNEL")
@@ -204,20 +224,130 @@ def parse_reverse_tunnel_mode() -> Optional[bool]:
     return None
 
 
+def _resolve_node_ssl_context(data_dir: Path) -> ssl.SSLContext:
+    """加载节点 TLS 证书用于内置 WSS 服务（复用宝塔/entrypoint 证书或自动自签）"""
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+
+    novnc_pem = Path("/etc/ssl/app/novnc.pem")
+    kasm_crt = Path("/etc/ssl/app/kasm.crt")
+    kasm_key = Path("/etc/ssl/app/kasm.key")
+
+    if novnc_pem.exists() and novnc_pem.stat().st_size > 0:
+        ctx.load_cert_chain(certfile=str(novnc_pem))
+        return ctx
+
+    if kasm_crt.exists() and kasm_key.exists() and kasm_crt.stat().st_size > 0 and kasm_key.stat().st_size > 0:
+        ctx.load_cert_chain(certfile=str(kasm_crt), keyfile=str(kasm_key))
+        return ctx
+
+    fallback_pem = data_dir / ".edge_wss.pem"
+    if not fallback_pem.exists() or fallback_pem.stat().st_size == 0:
+        key_tmp = data_dir / ".edge_wss.key"
+        crt_tmp = data_dir / ".edge_wss.crt"
+        try:
+            subprocess.run(
+                [
+                    "openssl", "req", "-x509", "-nodes", "-days", "3650",
+                    "-newkey", "rsa:2048",
+                    "-keyout", str(key_tmp),
+                    "-out", str(crt_tmp),
+                    "-subj", "/CN=edge-wss",
+                ],
+                check=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            fallback_pem.write_text(
+                crt_tmp.read_text(encoding="utf-8") + key_tmp.read_text(encoding="utf-8"),
+                encoding="utf-8",
+            )
+            os.chmod(fallback_pem, 0o600)
+        finally:
+            for tmp_p in (key_tmp, crt_tmp):
+                try:
+                    if tmp_p.exists():
+                        tmp_p.unlink()
+                except OSError:
+                    pass
+
+    ctx.load_cert_chain(certfile=str(fallback_pem))
+    return ctx
+
+
+def _create_dualstack_wss_sockets(host: str, port: int) -> List[socket.socket]:
+    """创建 IPv4/IPv6 双栈监听 Socket（纯 IPv4 容器环境自动回退 0.0.0.0）"""
+    normalized = (host or "::").strip().strip("[]")
+    if normalized not in {"::", "auto", "dual", ""}:
+        family = socket.AF_INET6 if ":" in normalized else socket.AF_INET
+        s = socket.socket(family, socket.SOCK_STREAM)
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        s.bind((normalized, port))
+        s.listen(1024)
+        s.setblocking(False)
+        return [s]
+
+    if getattr(socket, "has_ipv6", False):
+        s6 = None
+        try:
+            s6 = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+            s6.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            s6.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
+            s6.bind(("::", port))
+            s6.listen(1024)
+            s6.setblocking(False)
+            return [s6]
+        except OSError:
+            if s6 is not None:
+                try:
+                    s6.close()
+                except OSError:
+                    pass
+            socks: List[socket.socket] = []
+            try:
+                s4 = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                s4.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                s4.bind(("0.0.0.0", port))
+                s4.listen(1024)
+                s4.setblocking(False)
+                socks.append(s4)
+
+                s6_only = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+                s6_only.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                s6_only.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
+                s6_only.bind(("::", port))
+                s6_only.listen(1024)
+                s6_only.setblocking(False)
+                socks.append(s6_only)
+                return socks
+            except OSError:
+                for sock_item in socks:
+                    try:
+                        sock_item.close()
+                    except OSError:
+                        pass
+
+    s4_fb = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s4_fb.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    s4_fb.bind(("0.0.0.0", port))
+    s4_fb.listen(1024)
+    s4_fb.setblocking(False)
+    return [s4_fb]
+
+
 async def check_hub_can_reach_me(
     hub_url: str,
-    cdp_port: int,
+    probe_port: int,
     endpoints: Dict[str, Any],
     node_uuid: str,
 ) -> Dict[str, Any]:
     """
-    上传节点 IPv4 / IPv6 与端口，由 Hub 调用 wimotek-edge-agent 执行并发 TCP 三次握手探测，
+    上传节点 IPv4 / IPv6 与 WSS 服务端口，由 Hub 调用 wimotek-edge-agent 执行并发 TCP 三次握手探测，
     并返回权威网络类型 (network_mode, network_profile, recommended_endpoint, probe_results)。
     """
     detect_api = f"{hub_url}/api/nodes/detect-mode"
     payload = {
         "node_uuid": node_uuid,
-        "cdp_port": cdp_port,
+        "cdp_port": probe_port,
         "public_ipv4": endpoints.get("public_ipv4"),
         "public_ipv4_port": endpoints.get("public_ipv4_port"),
         "public_ipv6": endpoints.get("public_ipv6"),
@@ -230,8 +360,7 @@ async def check_hub_can_reach_me(
             if res.status_code == 200:
                 return res.json()
             if res.status_code == 405:
-                # 兼容旧版 Hub GET 接口
-                res_get = await client.get(f"{detect_api}?cdp_port={cdp_port}")
+                res_get = await client.get(f"{detect_api}?cdp_port={probe_port}")
                 if res_get.status_code == 200:
                     return res_get.json()
         except Exception as e:
@@ -242,7 +371,7 @@ async def check_hub_can_reach_me(
         "network_mode": "reverse_tunnel",
         "network_profile": "nat4_reverse",
         "detected_ip": endpoints.get("public_ipv4") or "",
-        "recommended_port": cdp_port,
+        "recommended_port": probe_port,
         "recommended_endpoint": None,
     }
 
@@ -251,12 +380,13 @@ async def execute_http_auto_register(
     hub_url: str,
     node_uuid: str,
     fingerprint: str,
-    cdp_port: int,
+    wss_port: int,
+    edge_wss_secret: str,
     endpoints: Dict[str, Any],
     detect_result: Optional[Dict[str, Any]] = None,
     data_dir: Path = Path("/data"),
 ) -> Optional[Dict[str, Any]]:
-    """直连登记模式 (携带节点 IP/端口与探测到的 network_mode)"""
+    """公网 WSS 直连登记模式 (携带节点 WSS 端口、鉴权密钥与探测到的 network_mode)"""
     api_url = f"{hub_url}/api/nodes/auto-register"
     join_token = os.getenv("JOIN_TOKEN", "").strip()
     node_name = os.getenv("NODE_NAME", "").strip() or node_uuid
@@ -273,12 +403,15 @@ async def execute_http_auto_register(
         "public_key_fingerprint": fingerprint,
         "name": node_name,
         "group_name": group_name,
-        "cdp_port": cdp_port,
+        "conn_type": "public_wss",
+        "cdp_port": CDP_PORT,
+        "wss_port": wss_port,
+        "edge_wss_secret": edge_wss_secret,
         "public_ipv4": endpoints.get("public_ipv4"),
         "public_ipv4_port": endpoints.get("public_ipv4_port"),
         "public_ipv6": endpoints.get("public_ipv6"),
         "public_ipv6_port": endpoints.get("public_ipv6_port"),
-        "network_mode": det.get("network_mode"),
+        "network_mode": det.get("network_mode") or "direct",
         "recommended_endpoint": det.get("recommended_endpoint"),
         "ipv4_reachable": det.get("ipv4_reachable"),
         "ipv6_reachable": det.get("ipv6_reachable"),
@@ -286,43 +419,22 @@ async def execute_http_auto_register(
     }
 
     print(
-        f"📡 [Direct Register] 正在向 Hub 发送直连登记包: {api_url} "
-        f"(端口: {cdp_port}, mode={det.get('network_mode', 'direct')})",
+        f"📡 [WSS Direct Register] 正在向 Hub 上报公网 WSS 直连节点: {api_url} "
+        f"(WSS端口: {wss_port}, mode={det.get('network_mode', 'direct')})",
         flush=True,
     )
     async with httpx.AsyncClient(verify=False, timeout=8.0) as client:
         try:
             res = await client.post(api_url, json=payload, headers=headers)
-            print(f"✅ [Direct Register] 直连接入响应: {res.status_code}", flush=True)
+            print(f"✅ [WSS Direct Register] 登记响应: {res.status_code}", flush=True)
             if res.status_code == 200:
                 body = res.json()
                 if body.get("session_ticket"):
                     save_session_ticket(data_dir, body["session_ticket"])
                 return body
         except Exception as e:
-            print(f"❌ [Direct Register] 直连登记受阻: {e}", flush=True)
+            print(f"❌ [WSS Direct Register] 登记受阻: {e}", flush=True)
     return None
-
-
-async def direct_keepalive_loop(
-    hub_url: str,
-    node_uuid: str,
-    fingerprint: str,
-    cdp_port: int,
-    endpoints: Dict[str, Any],
-    detect_result: Dict[str, Any],
-    data_dir: Path,
-):
-    """直连模式下定期心跳保活，防止节点退出触发 Watchdog 反复重注册"""
-    interval = int(os.getenv("DIRECT_HEARTBEAT_SECONDS", "60"))
-    await execute_http_auto_register(
-        hub_url, node_uuid, fingerprint, cdp_port, endpoints, detect_result, data_dir
-    )
-    while True:
-        await asyncio.sleep(interval)
-        await execute_http_auto_register(
-            hub_url, node_uuid, fingerprint, cdp_port, endpoints, detect_result, data_dir
-        )
 
 
 async def send_cdp_json_command(ws, method: str, params: dict = None, req_id: int = 1) -> dict:
@@ -342,10 +454,10 @@ async def send_cdp_json_command(ws, method: str, params: dict = None, req_id: in
 
 
 async def extract_all_cookies(http_client: httpx.AsyncClient) -> List[dict]:
-    """真实穿透提取 Chromium 全量 CookieJar"""
+    """真实穿透提取本地 Chromium (127.0.0.1:9222) 全量 CookieJar"""
     local_base = await get_local_cdp_base()
 
-    # 策略 1: 优先从活跃 Page 端点抓取 (全量 CookieJar)
+    # 策略 1: 优先从活跃 Page 端点抓取
     try:
         list_res = await http_client.get(f"{local_base}/json/list", timeout=3.0)
         pages = [t for t in list_res.json() if t.get("type") == "page" and "webSocketDebuggerUrl" in t]
@@ -383,7 +495,7 @@ async def extract_all_cookies(http_client: httpx.AsyncClient) -> List[dict]:
 
 
 async def bridge_cdp_ws_stream(tunnel_ws, stream_id: str, inbound_queue: asyncio.Queue):
-    """通过反向隧道多路复用透传 Playwright / Puppeteer CDP WebSocket 会话"""
+    """通过 WSS 通道多路复用透传 Playwright / Puppeteer CDP WebSocket 会话至本地 127.0.0.1:9222"""
     try:
         local_base = await get_local_cdp_base()
         async with httpx.AsyncClient(timeout=3.0) as client:
@@ -406,7 +518,7 @@ async def bridge_cdp_ws_stream(tunnel_ws, stream_id: str, inbound_queue: asyncio
                         break
                     await cdp_ws.send(payload)
 
-            done, pending = await asyncio.wait(
+            _, pending = await asyncio.wait(
                 [asyncio.create_task(_cdp_to_hub()), asyncio.create_task(_hub_to_cdp())],
                 return_when=asyncio.FIRST_COMPLETED,
             )
@@ -434,7 +546,7 @@ async def handle_cdp_command(
     cmd_text: str,
     ws_streams: Dict[str, asyncio.Queue],
 ):
-    """业务指令调度执行器"""
+    """业务指令调度执行器 (所有指令均对接本地 127.0.0.1:9222)"""
     try:
         cmd = json.loads(cmd_text)
     except Exception:
@@ -445,7 +557,6 @@ async def handle_cdp_command(
     req_id = cmd.get("req_id")
     payload = cmd.get("payload", {})
 
-    # Hub 下发网络模式变更 / 重探结果
     if msg_type in {"network_update", "network_probe_result"}:
         print(
             f"🌐 [Hub 网络回传] network_mode={cmd.get('network_mode')} | "
@@ -524,6 +635,95 @@ async def handle_cdp_command(
         await ws.send(json.dumps({"type": "pong"}))
 
 
+async def start_public_wss_servers(
+    edge_wss_secret: str,
+    data_dir: Path,
+    activity_tracker: Dict[str, float],
+) -> Tuple[List[Any], List[socket.socket]]:
+    """启动节点双栈鉴权 WSS 服务端，供有公网可达的 Hub 主动直连"""
+    ssl_ctx = _resolve_node_ssl_context(data_dir)
+    join_token = os.getenv("JOIN_TOKEN", "").strip()
+    socks = _create_dualstack_wss_sockets(EDGE_WSS_HOST, EDGE_WSS_PORT)
+
+    def _get_header(headers_obj, name: str) -> str:
+        if not headers_obj:
+            return ""
+        try:
+            val = headers_obj.get(name)
+            return str(val or "").strip()
+        except Exception:
+            return ""
+
+    async def _ws_handler(websocket, *_unused):
+        req = getattr(websocket, "request", None)
+        req_headers = getattr(req, "headers", None) if req is not None else getattr(websocket, "request_headers", {})
+
+        presented_edge = _get_header(req_headers, "x-edge-auth")
+        presented_bearer = _get_header(req_headers, "authorization")
+        if presented_bearer.lower().startswith("bearer "):
+            presented_bearer = presented_bearer[7:].strip()
+        presented_join = _get_header(req_headers, "x-join-token")
+
+        authorized = False
+        if presented_edge and secrets.compare_digest(presented_edge, edge_wss_secret):
+            authorized = True
+        elif presented_bearer and secrets.compare_digest(presented_bearer, edge_wss_secret):
+            authorized = True
+        elif join_token and presented_join and secrets.compare_digest(presented_join, join_token):
+            authorized = True
+
+        if not authorized:
+            await websocket.close(code=1008, reason="Unauthorized Edge WSS Client")
+            return
+
+        activity_tracker["last_inbound"] = time.monotonic()
+        print("🔐 [Edge WSS Server] Hub 鉴权直连已建立！正在桥接本地 127.0.0.1:9222 ...", flush=True)
+        ws_streams: Dict[str, asyncio.Queue] = {}
+        try:
+            async with httpx.AsyncClient(timeout=4.0) as http_client:
+                async for msg_text in websocket:
+                    activity_tracker["last_inbound"] = time.monotonic()
+                    if msg_text == "pong" or '"type":"pong"' in msg_text:
+                        continue
+                    asyncio.create_task(handle_cdp_command(websocket, http_client, msg_text, ws_streams))
+        except Exception as e:
+            print(f"ℹ️ [Edge WSS Server] Hub 直连会话断开: {type(e).__name__}", flush=True)
+        finally:
+            for q in ws_streams.values():
+                await q.put(None)
+            ws_streams.clear()
+
+    servers = []
+    for sock_obj in socks:
+        srv = await websockets.serve(
+            _ws_handler,
+            sock=sock_obj,
+            ssl=ssl_ctx,
+            max_size=100 * 1024 * 1024,
+            ping_interval=20,
+            ping_timeout=10,
+        )
+        servers.append(srv)
+
+    addr_desc = [(s.family.name, s.getsockname()) for s in socks]
+    print(f"🛡️ [Edge WSS Server] 已就绪（双栈 TLS+密钥鉴权）: {addr_desc}", flush=True)
+    return servers, socks
+
+
+async def stop_public_wss_servers(servers: List[Any], socks: List[socket.socket]):
+    for srv in servers:
+        try:
+            srv.close()
+            await srv.wait_closed()
+        except Exception:
+            pass
+    for sock_obj in socks:
+        try:
+            sock_obj.close()
+        except OSError:
+            pass
+
+
 async def keep_alive_heartbeat(ws):
     """每 5 秒主动向 Hub 发送一次应用层 ping，防止中间网关断连"""
     while True:
@@ -540,7 +740,7 @@ async def run_tunnel_client(
     handshake_payload: dict,
     data_dir: Path = Path("/data"),
 ):
-    """全双工反向长连接隧道 (接收 Hub 网络判定回传与 session_ticket)"""
+    """全双工反向长连接隧道 (NAT4/无公网回落通道)"""
     is_wss = tunnel_url.startswith("wss://")
     ssl_ctx = ssl.create_default_context()
     ssl_ctx.check_hostname = False
@@ -558,7 +758,6 @@ async def run_tunnel_client(
     while True:
         ws_streams: Dict[str, asyncio.Queue] = {}
         try:
-            # 每次重连尝试刷新本地保存的 session_ticket
             latest_ticket = load_session_ticket(data_dir)
             if latest_ticket:
                 handshake_payload["session_ticket"] = latest_ticket
@@ -570,7 +769,7 @@ async def run_tunnel_client(
             except TypeError:
                 ws = await websockets.connect(tunnel_url, extra_headers=headers, **common_kwargs)
 
-            print("✅ [Tunnel] 底层隧道建立成功！正在上传节点 IP/端口与身份握手包...", flush=True)
+            print("✅ [Tunnel] 底层隧道建立成功！正在上传节点身份与网络信息...", flush=True)
             await ws.send(json.dumps(handshake_payload))
 
             raw_resp = await asyncio.wait_for(ws.recv(), timeout=10.0)
@@ -590,7 +789,7 @@ async def run_tunnel_client(
                 )
 
             if status == "ok":
-                print("🎉 [认证放行] 节点已被 Hub 信任放行！全双工长连通道就绪！", flush=True)
+                print("🎉 [认证放行] 节点已被 Hub 信任放行！WSS 反向长连通道就绪！", flush=True)
                 backoff = 2
             elif status == "pending_tofu":
                 print("⏳ [TOFU 隔离] 节点已接入待审队列，等待管理员在后台点击 [认领并信任] ...", flush=True)
@@ -629,107 +828,143 @@ async def run_tunnel_client(
             backoff = min(backoff * 2, 30)
 
 
-def main():
+async def run_edge_lifecycle():
     hub_url = os.getenv("HUB_URL", "").strip().rstrip("/")
     if not hub_url:
         print("[Edge Client] 未配置 HUB_URL，跳过边缘入网流程。", flush=True)
         return
 
     data_dir = Path(os.getenv("DATA_DIR", "/data"))
-    node_uuid, fingerprint = ensure_identity(data_dir)
+    node_uuid, fingerprint, edge_wss_secret = ensure_identity(data_dir)
     join_token = os.getenv("JOIN_TOKEN", "").strip() or None
     node_name = os.getenv("NODE_NAME", "").strip() or node_uuid
     group_name = os.getenv("NODE_GROUP", "默认分组").strip()
 
-    ext_direct_port = int(
-        os.getenv("DIRECT_PORT") or os.getenv("EXTERNAL_PORT") or os.getenv("CDP_PORT") or 9222
+    ext_wss_port = int(
+        os.getenv("EDGE_WSS_EXTERNAL_PORT")
+        or os.getenv("DIRECT_PORT")
+        or os.getenv("EXTERNAL_PORT")
+        or EDGE_WSS_PORT
     )
-    endpoints = collect_node_endpoints(ext_direct_port)
+    endpoints = collect_node_endpoints(ext_wss_port)
     tunnel_mode: Optional[bool] = parse_reverse_tunnel_mode()
 
     print(
-        f"📋 [节点参数] 名称: {node_name} | IPv4: {endpoints.get('public_ipv4')}:{endpoints.get('public_ipv4_port')} | "
+        f"📋 [节点参数] 名称: {node_name} | 本地CDP: 127.0.0.1:{CDP_PORT} | "
+        f"对外WSS端口: {ext_wss_port} | IPv4: {endpoints.get('public_ipv4')}:{endpoints.get('public_ipv4_port')} | "
         f"IPv6: {endpoints.get('public_ipv6')}:{endpoints.get('public_ipv6_port')} | 模式: {tunnel_mode}",
         flush=True,
     )
 
-    # 预先等待 Chromium 内部 9222 端口完全就绪，确保 TCP 探测前端口已监听
-    async def _wait_cdp_ready():
-        async with httpx.AsyncClient(timeout=2.0) as client:
-            for _ in range(15):
-                try:
-                    local_url = await get_local_cdp_base()
-                    res = await client.get(f"{local_url}/json/version")
-                    if res.status_code == 200:
-                        print(f"✅ [CDP Ready] 本地 Chromium 调试端口已就绪 ({local_url})！", flush=True)
-                        return
-                except Exception:
-                    pass
-                await asyncio.sleep(1.0)
+    # 等待本地 127.0.0.1:9222 Chromium 就绪
+    async with httpx.AsyncClient(timeout=2.0) as client:
+        for _ in range(15):
+            try:
+                local_url = await get_local_cdp_base()
+                res = await client.get(f"{local_url}/json/version")
+                if res.status_code == 200:
+                    print(f"✅ [CDP Ready] 本地 Chromium 调试端口已就绪 ({local_url})！", flush=True)
+                    break
+            except Exception:
+                pass
+            await asyncio.sleep(1.0)
 
-    asyncio.run(_wait_cdp_ready())
+    use_public_wss = False
+    detect_res: Dict[str, Any] = {}
+    wss_servers: List[Any] = []
+    wss_socks: List[socket.socket] = []
+    activity_tracker = {"last_inbound": time.monotonic()}
 
-    # 1. 强制直连
-    if tunnel_mode is False:
-        print(f"⚙️ [Edge Mode] reverse_tunnel=False ➔ 【强制直连登记 (端口: {ext_direct_port})】", flush=True)
-        detect_res = {
-            "network_mode": "direct",
-            "network_profile": "direct",
-            "recommended_endpoint": f"{endpoints['public_ipv4']}:{ext_direct_port}" if endpoints.get("public_ipv4") else None,
-        }
-        asyncio.run(
-            direct_keepalive_loop(hub_url, node_uuid, fingerprint, ext_direct_port, endpoints, detect_res, data_dir)
-        )
-        return
-
-    # 2. 强制穿透
-    elif tunnel_mode is True:
-        print(f"⚙️ [Edge Mode] reverse_tunnel=True ➔ 【强制反向穿透 (端口: {ext_direct_port})】", flush=True)
-
-    # 3. 智能自适应：上传节点 IP + 端口给 Hub 执行 TCP 三次握手判定
+    if tunnel_mode is True:
+        print("⚙️ [Edge Mode] reverse_tunnel=True ➔ 【强制 WSS 反向穿透】", flush=True)
     else:
-        print(
-            f"🧠 [Edge Mode] reverse_tunnel=None ➔ 【上传 IP/端口由 Hub TCP 三次握手判定】...",
-            flush=True,
-        )
-        detect_res = asyncio.run(
-            check_hub_can_reach_me(hub_url, cdp_port=ext_direct_port, endpoints=endpoints, node_uuid=node_uuid)
-        )
-        network_mode = detect_res.get("network_mode", "reverse_tunnel")
-        can_direct = bool(detect_res.get("can_direct")) or network_mode in {"direct_dual", "direct_ipv4", "direct_ipv6", "direct"}
+        # 先启动节点双栈鉴权 WSS 服务端，再让 Hub 探测 EDGE_WSS_PORT (9443)，彻底绕开 9222 隔离限制
+        wss_servers, wss_socks = await start_public_wss_servers(edge_wss_secret, data_dir, activity_tracker)
 
-        if can_direct:
-            rec_ep = detect_res.get("recommended_endpoint") or f"{detect_res.get('detected_ip', '')}:{detect_res.get('recommended_port', ext_direct_port)}"
+        if tunnel_mode is False:
+            print(f"⚙️ [Edge Mode] reverse_tunnel=False ➔ 【强制公网 WSS 直连 (端口: {ext_wss_port})】", flush=True)
+            v6 = endpoints.get("public_ipv6")
+            v4 = endpoints.get("public_ipv4")
+            rec_ep = f"[{v6}]:{ext_wss_port}" if v6 and not v4 else (f"{v4}:{ext_wss_port}" if v4 else None)
+            detect_res = {
+                "network_mode": "direct_ipv6" if (v6 and not v4) else "direct_ipv4",
+                "network_profile": "direct",
+                "ipv4_reachable": bool(v4),
+                "ipv6_reachable": bool(v6),
+                "recommended_endpoint": rec_ep,
+            }
+            use_public_wss = True
+        else:
             print(
-                f"🎯 [Smart Check] Hub 探测成功！network_mode={network_mode}, recommended_endpoint={rec_ep}",
+                f"🧠 [Edge Mode] 自动网络检测 ➔ 上传 IP 与 WSS 端口 :{ext_wss_port}，由 Hub 执行 TCP 三次握手判定...",
                 flush=True,
             )
-            print("   -> 自动判定为直连网络，执行直连登记并维持轻量保活。", flush=True)
-            asyncio.run(
-                direct_keepalive_loop(
+            detect_res = await check_hub_can_reach_me(
+                hub_url, probe_port=ext_wss_port, endpoints=endpoints, node_uuid=node_uuid
+            )
+            network_mode = detect_res.get("network_mode", "reverse_tunnel")
+            can_direct = bool(detect_res.get("can_direct")) or network_mode in {
+                "direct_dual", "direct_ipv4", "direct_ipv6", "direct"
+            }
+            if can_direct:
+                rec_ep = detect_res.get("recommended_endpoint") or f"{detect_res.get('detected_ip', '')}:{ext_wss_port}"
+                print(
+                    f"🎯 [Smart Check] Hub 探测成功！network_mode={network_mode}, recommended_wss={rec_ep}",
+                    flush=True,
+                )
+                print("   -> 自动判定为【公网 WSS 直连模式】：Hub 将主动直连本节点加密 WSS 端口！", flush=True)
+                use_public_wss = True
+            else:
+                print(
+                    f"🛡️ [Smart Check] Hub 探测不可达: network_mode={network_mode} (无公网/NAT4/防火墙未放行 :{ext_wss_port})",
+                    flush=True,
+                )
+                print("   -> 关闭入站监听，自动切换为【NAT4 出站 WSS 反向穿透模式】！", flush=True)
+                await stop_public_wss_servers(wss_servers, wss_socks)
+                wss_servers, wss_socks = [], []
+
+    # 1. 公网 WSS 直连保活主循环
+    if use_public_wss:
+        hb_interval = int(os.getenv("DIRECT_HEARTBEAT_SECONDS", "60"))
+        try:
+            while True:
+                reg_res = await execute_http_auto_register(
                     hub_url,
                     node_uuid,
                     fingerprint,
-                    detect_res.get("recommended_port", ext_direct_port),
+                    ext_wss_port,
+                    edge_wss_secret,
                     endpoints,
                     detect_res,
                     data_dir,
                 )
-            )
-            return
-        else:
-            print(
-                f"🛡️ [Smart Check] Hub 探测回传: network_mode={network_mode} (公网不可直连 / 处于 NAT4 或防火墙后)",
-                flush=True,
-            )
-            print("   -> 自动无感切换为【NAT4 出站反向长连接穿透模式】！", flush=True)
+                pending_tofu = bool(reg_res and reg_res.get("approval_status") == 0)
+                sleep_sec = 5 if pending_tofu else hb_interval
+                await asyncio.sleep(sleep_sec)
 
+                # 自愈降级检查：若处于 auto 模式且长时间未收到 Hub 入站连接，重探是否已变为 NAT4
+                if tunnel_mode is None and not pending_tofu and (time.monotonic() - activity_tracker["last_inbound"]) > 180:
+                    re_det = await check_hub_can_reach_me(
+                        hub_url, probe_port=ext_wss_port, endpoints=endpoints, node_uuid=node_uuid
+                    )
+                    re_ok = bool(re_det.get("can_direct")) or re_det.get("network_mode") in {
+                        "direct_dual", "direct_ipv4", "direct_ipv6", "direct"
+                    }
+                    if not re_ok:
+                        print("⚠️ [Auto Fallback] 节点 WSS 端口已不可达，自动降级为 WSS 反向穿透！", flush=True)
+                        break
+                    detect_res = re_det
+        finally:
+            await stop_public_wss_servers(wss_servers, wss_socks)
+
+    # 2. NAT4 / 强制反向穿透主循环
     headers = {
         "X-Node-UUID": node_uuid,
         "X-Node-Fingerprint": fingerprint,
         "X-Node-Name": quote(node_name),
         "X-Node-Group": quote(group_name),
-        "X-CDP-Port": str(ext_direct_port),
+        "X-CDP-Port": str(CDP_PORT),
+        "X-External-Port": str(ext_wss_port),
     }
     if join_token:
         headers["X-Join-Token"] = join_token
@@ -741,23 +976,31 @@ def main():
         "session_ticket": load_session_ticket(data_dir),
         "name": node_name,
         "group": group_name,
-        "port": ext_direct_port,
+        "port": CDP_PORT,
+        "wss_port": ext_wss_port,
+        "external_port": ext_wss_port,
         "nat_type": "nat4" if tunnel_mode is True else "unknown",
     }
     if tunnel_mode is True:
         handshake_payload["reverse_tunnel"] = True
-    if endpoints.get("public_ipv4"):
-        handshake_payload["public_ipv4"] = endpoints["public_ipv4"]
-        handshake_payload["public_ipv4_port"] = endpoints["public_ipv4_port"]
-    if endpoints.get("public_ipv6"):
-        handshake_payload["public_ipv6"] = endpoints["public_ipv6"]
-        handshake_payload["public_ipv6_port"] = endpoints["public_ipv6_port"]
+    else:
+        # 通知 Hub 本节点已探测为反向模式，避免 Hub 握手阶段二次探测失败覆盖或误报
+        if endpoints.get("public_ipv4"):
+            handshake_payload["public_ipv4"] = endpoints["public_ipv4"]
+            handshake_payload["public_ipv4_port"] = endpoints["public_ipv4_port"]
+        if endpoints.get("public_ipv6"):
+            handshake_payload["public_ipv6"] = endpoints["public_ipv6"]
+            handshake_payload["public_ipv6_port"] = endpoints["public_ipv6_port"]
 
     base_ws_url = hub_url.replace("https://", "wss://").replace("http://", "ws://")
     tunnel_url = f"{base_ws_url}/api/nodes/reverse-tunnel"
 
-    print(f"🚀 [Edge Client] 启动隧道主循环 -> 目标: {tunnel_url}", flush=True)
-    asyncio.run(run_tunnel_client(tunnel_url, headers, handshake_payload, data_dir))
+    print(f"🚀 [Edge Client] 启动反向 WSS 隧道主循环 -> 目标: {tunnel_url}", flush=True)
+    await run_tunnel_client(tunnel_url, headers, handshake_payload, data_dir)
+
+
+def main():
+    asyncio.run(run_edge_lifecycle())
 
 
 if __name__ == "__main__":

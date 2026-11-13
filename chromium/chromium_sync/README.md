@@ -6,10 +6,11 @@
 
 ## 🌟 核心特性与架构升级
 
-1. **`wimotek-edge-agent >= 1.0.17` 深度集成与 TCP 三次握手实测**：
-   - 节点启动时自动采集公网 IPv4 / IPv6 与映射端口 (`public_ipv4`, `public_ipv4_port`, `public_ipv6`, `public_ipv6_port`) 上传至 Hub (`POST /api/nodes/detect-mode` 或反向隧道握手)；
-   - Hub 调用 `wimotek_edge_agent.nat.detect_network_mode` 并发执行异步 **TCP 三次握手**（内置 SSRF 私网拦截，无需 ICMP 权限），判定 `network_mode`（`direct_dual` / `direct_ipv4` / `direct_ipv6` / `reverse_tunnel`）与最佳低延迟端点 `recommended_endpoint` 并实时回传至节点；
-   - NAT4 / 家宽 / 防火墙节点自动回落到 `/api/nodes/reverse-tunnel` WSS 反向长连接，网关 `/cdp/{node_id}/ws` 原生支持多路复用 `cdp_ws_open` / `cdp_ws_frame` / `cdp_ws_close`，Playwright / Puppeteer 可直接穿透控制内网节点。
+1. **`wimotek-edge-agent >= 1.0.17` 深度集成与对称加密 WSS 选路（绝不暴露裸 9222）**：
+   - Chromium 原生 CDP `9222` 仅绑定容器内部 `127.0.0.1:9222`，绝不直接对外映射；
+   - 节点内置双栈加密 + `X-Edge-Auth` 密钥鉴权的 WSS 服务端（默认 `EDGE_WSS_PORT=9443`），启动后上报公网 IPv4 / IPv6 与外部 WSS 端口至 Hub (`POST /api/nodes/detect-mode`)，由 Hub 并发执行异步 **TCP 三次握手**（完全兼容 Oracle Cloud / 云主机的 1:1 NAT 内网网卡，并内置 SSRF 私网拦截）；
+   - **有公网 IP 且 9443 可达**：节点登记为 `public_wss`，Hub 通过 `wss://<节点IP>:9443/ws` 携带独立 `edge_wss_secret` 主动建立加密长连并桥接至节点 `127.0.0.1:9222`；
+   - **无公网 / NAT4 / 防火墙未放行**：节点自动关闭入站监听并回落为 `reverse`（出站连 `/api/nodes/reverse-tunnel`），网关 `/cdp/{node_id}/ws` 统一多路复用透传至 Playwright / Puppeteer。
 2. **零信任准入控制与 Session Ticket**：
    - 严格使用 `secrets.compare_digest` 校验 `JOIN_TOKEN` 与 `SessionTicketManager` 签发的短时复用凭据（默认 300 秒 TTL）；
    - 未提供 Token 时进入 TOFU 待审隔离区，管理员在控制台审批放行后通过反向信道即时下发通行指令与最新 `network_mode`。
@@ -91,23 +92,22 @@ cp common/edge_node_client.py chromium_kasmvnc/edge_node_client.py
 docker build -t wimotek/chromium:kasmvnc ./chromium_kasmvnc
 ```
 
-### 运行 noVNC 节点（自适应 TCP 探测 / NAT4 穿透）
+### 运行 noVNC 节点（公网 WSS 9443 直连 / NAT4 自动回落反向穿透）
 
 ```bash
 docker run -d \
   --name chromium-novnc \
   -p 6080:6080 \
-  -p 9222:9222 \
+  -p 9443:9443 \
   -e HUB_URL=https://hub.yourdomain.com:8443 \
   -e JOIN_TOKEN=hub_join_xxxxxxxxxxxxxxxxxxxx \
-  -e DIRECT_PORT=9222 \
-  -v ./novnc_data:/data \
+  -v /home/docker/chromium_novnc:/data \
   --shm-size="2gb" \
   --restart unless-stopped \
   wimotek/chromium:novnc
 ```
 
-> 若节点拥有公网 IPv6/IPv4 且宿主机映射到自定义端口（如 `-p 1922:9222`），传入 `DIRECT_PORT=1922`（或分别设置 `PUBLIC_IPV4` / `PUBLIC_IPV4_PORT` / `PUBLIC_IPV6` / `PUBLIC_IPV6_PORT`），Hub 将通过并发 TCP 三次握手实测并回传最优选路 `network_mode`。
+> 若宿主机将容器内 `9443` 映射到其他外部端口（如 `-p 19443:9443`），传入 `-e EDGE_WSS_EXTERNAL_PORT=19443`，Hub 将对外部端口执行并发 TCP 三次握手并自动完成 `public_wss` 鉴权建连（不可达则自动转 `reverse` 反向穿透）。
 
 ---
 
@@ -117,10 +117,10 @@ docker run -d \
 | :--- | :--- | :--- | :--- |
 | `HUB_URL` | Node | *(空)* | Hub 地址，填入后激活 `edge_node_client.py` |
 | `JOIN_TOKEN` | Node | *(空)* | 集群入网通行码，留空走 TOFU 待审 |
-| `REVERSE_TUNNEL` | Node | *(auto)* | 留空智能探测；`true` 强制反连；`false` 强制直连 |
-| `PUBLIC_IPV4` / `PUBLIC_IPV4_PORT` | Node | 自动嗅探 | 上报供 Hub TCP 探测的公网 IPv4 及外部端口 |
-| `PUBLIC_IPV6` / `PUBLIC_IPV6_PORT` | Node | 自动嗅探 | 上报供 Hub TCP 探测的公网 IPv6 及外部端口 |
-| `DIRECT_PORT` | Node | `9222` | 宿主机对外映射的 CDP 端口 |
+| `REVERSE_TUNNEL` | Node | *(auto)* | 留空智能探测 WSS 端口；`true` 强制反连；`false` 强制公网 WSS 直连 |
+| `PUBLIC_IPV4` / `PUBLIC_IPV6` | Node | 自动嗅探 | 上报供 Hub TCP 探测的公网 IPv4 / IPv6 |
+| `EDGE_WSS_PORT` | Node | `9443` | 节点内置加密鉴权 WSS 服务端监听端口 |
+| `EDGE_WSS_EXTERNAL_PORT` | Node | `EDGE_WSS_PORT` | 宿主机对外映射的 WSS 端口（兼容旧参数 `DIRECT_PORT`） |
 | `HUB_PORT` | Hub | `8443` | Hub 容器内部 HTTPS/WSS 监听端口（同步 `HEALTHCHECK`） |
 | `HUB_EXTERNAL_PORT` | Hub | 自动推导 | 宿主机对外映射端口（如 `-p 3000:8443` 时填 `3000`；不填也会从 `Host` / `X-Forwarded-Port` 请求头自动识别） |
 | `HUB_PUBLIC_HOST` | Hub | *(空)* | 强制指定对外拼接域名/IP（适用于多级反代改写 `Host` 头时） |

@@ -61,6 +61,11 @@ async def lifespan(app: FastAPI):
                 s.close()
             except Exception:
                 pass
+        for t in list(getattr(tunnel_mgr, "public_wss_tasks", {}).values()):
+            try:
+                t.cancel()
+            except Exception:
+                pass
     except Exception:
         pass
 

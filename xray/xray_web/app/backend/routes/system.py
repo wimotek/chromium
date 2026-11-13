@@ -16,16 +16,20 @@ from core.backup_manager import (
     delete_backup_file,
     ensure_backup_dir
 )
-from routes import check_admin
+from routes import check_admin, resolve_public_endpoint
 
 system_bp = Blueprint('system_bp', __name__)
 
 @system_bp.route('/api/system/info', methods=['GET'])
 def system_info():
+    _, public_port, public_url = resolve_public_endpoint(request)
     return jsonify({
         "code": 200,
         "data": {
             "mode": Config.APP_MODE,
+            "web_port": Config.WEB_PORT,
+            "public_port": public_port,
+            "public_url": public_url,
             "system_notice": get_setting("system_notice", "").strip()
         }
     })

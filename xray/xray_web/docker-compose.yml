@@ -1,0 +1,25 @@
+services:
+  xray-web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: xray-web:latest
+    container_name: xray-web-master
+    restart: unless-stopped
+    # 方式 A：host 网络模式（开箱即用支持 IPv4+IPv6 双栈，默认监听 8443）
+    network_mode: "host"
+    # 方式 B：若改用端口映射（如对外 3000 -> 容器 8443），请注释上方 network_mode 并启用 ports：
+    # ports:
+    #   - "3000:8443"
+    environment:
+      - TZ=Asia/Shanghai
+      - APP_MODE=all
+      - WEB_PORT=8443
+      # - PUBLIC_PORT=3000        # 可选：若经过端口映射/转发未透传 Host 端口，可显式声明对外端口
+      # - PUBLIC_URL=https://panel.example.com:3000
+    volumes:
+      - ./data:/data
+      - ./data/backups:/data/backups
+      # 支持直接只读挂载宝塔证书目录（Root-Init-Drop 自动读取 0600 私钥并安全降权运行，无需修改宿主机权限）
+      # - /www/server/panel/vhost/cert/你的域名:/certs:ro
+      - ./certs:/certs:ro

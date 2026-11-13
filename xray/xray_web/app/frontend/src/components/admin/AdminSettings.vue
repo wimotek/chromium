@@ -134,7 +134,7 @@
                   <th>类型</th>
                   <th>大小</th>
                   <th>生成时间</th>
-                  <th style="text-align: right; padding-right: 20px; width: 270px;">操作</th>
+                  <th style="text-align: right; padding-right: 28px; width: 290px;">操作</th>
                 </tr>
               </thead>
               <tbody>
@@ -156,7 +156,7 @@
                   </td>
                   <td class="font-mono text-xs">{{ item.size_human }}</td>
                   <td class="font-mono text-xs text-muted">{{ item.created_at }}</td>
-                  <td style="text-align: right; padding-right: 20px;">
+                  <td style="text-align: right; padding-right: 28px;">
                     <div class="backup-btn-group">
                       <button class="btn-backup-action btn-backup-download" title="下载备份快照到本地" @click="handleDownloadBackup(item.filename)">📥 下载</button>
                       <button class="btn-backup-action btn-backup-restore" title="一键安全恢复整个数据库" @click="openRestoreModal(item.filename)">🔄 一键恢复</button>
@@ -556,13 +556,13 @@
                   如需使用已有域名证书（如腾讯云/阿里云/Cloudflare/宝塔证书），仅需在启动 Docker 容器时挂载只读目录：
                 </p>
                 <pre class="font-mono" style="padding: 10px; background: rgba(0,0,0,0.4); border-radius: 6px; font-size: 11px; color: #38bdf8; overflow-x: auto; margin-bottom: 10px;">
-docker run -d -p 8443:8443 \
+docker run -d -p 3000:8443 \
   -v /data/xray:/data \
-  -v /etc/letsencrypt/live/example.com:/certs:ro \
+  -v /www/server/panel/vhost/cert/example.com:/certs:ro \
   wimotek/xray-web
                 </pre>
                 <p style="color: #94a3b8; margin: 0;">
-                  系统在启动时将全自动扫描匹配 <code>fullchain.pem</code> 与 <code>privkey.pem</code>，安全复制并设置最佳权限。
+                  采用 <code>dumb-init + gosu</code> Root-Init-Drop 架构：启动初瞬以 root 读取宝塔等 <code>0600</code> 只读证书至容器内部隔离区并设 <code>appuser</code> 权属后立即降权运行，不修改宿主机原文件；同时自动识别 <code>-p 3000:8443</code> 等对外映射端口。
                 </p>
               </div>
 
@@ -1169,11 +1169,15 @@ const triggerManualTask = async () => {
 }
 
 .btn-backup-action {
+  appearance: none !important;
+  -webkit-appearance: none !important;
+  -moz-appearance: none !important;
+  box-sizing: border-box !important;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: 4px;
-  padding: 5px 12px;
+  gap: 5px;
+  padding: 6px 13px;
   font-size: 12px;
   font-weight: 600;
   border-radius: 6px;
@@ -1182,48 +1186,49 @@ const triggerManualTask = async () => {
   line-height: 1.2;
   transition: all 0.2s ease;
   outline: none;
-  border: 1px solid transparent;
+  border-style: solid !important;
+  border-width: 1px !important;
 }
 
 /* 1. 下载按钮：科技青蓝风格 */
 .btn-backup-download {
-  background: rgba(14, 165, 233, 0.15);
-  border-color: rgba(56, 189, 248, 0.4);
-  color: #38bdf8;
+  background: rgba(14, 165, 233, 0.15) !important;
+  border-color: rgba(56, 189, 248, 0.45) !important;
+  color: #38bdf8 !important;
 }
 .btn-backup-download:hover {
-  background: rgba(14, 165, 233, 0.32);
-  border-color: #38bdf8;
-  color: #ffffff;
-  box-shadow: 0 0 10px rgba(56, 189, 248, 0.25);
+  background: rgba(14, 165, 233, 0.32) !important;
+  border-color: #38bdf8 !important;
+  color: #ffffff !important;
+  box-shadow: 0 0 10px rgba(56, 189, 248, 0.3);
   transform: translateY(-1px);
 }
 
 /* 2. 一键恢复按钮：高亮极客蓝渐变风格 */
 .btn-backup-restore {
-  background: linear-gradient(135deg, #0284c7 0%, #2563eb 100%);
-  border-color: #38bdf8;
-  color: #ffffff;
+  background: linear-gradient(135deg, #0284c7 0%, #2563eb 100%) !important;
+  border-color: #38bdf8 !important;
+  color: #ffffff !important;
   box-shadow: 0 0 8px rgba(56, 189, 248, 0.25);
 }
 .btn-backup-restore:hover {
-  background: linear-gradient(135deg, #0369a1 0%, #1d4ed8 100%);
-  border-color: #7dd3fc;
+  background: linear-gradient(135deg, #0369a1 0%, #1d4ed8 100%) !important;
+  border-color: #7dd3fc !important;
   box-shadow: 0 0 12px rgba(56, 189, 248, 0.4);
   transform: translateY(-1px);
 }
 
 /* 3. 删除按钮：警示暗红质感风格 (告别土黄与 3D 凸起) */
 .btn-backup-delete {
-  background: rgba(239, 68, 68, 0.15);
-  border-color: rgba(239, 68, 68, 0.35);
-  color: #f87171;
+  background: rgba(239, 68, 68, 0.15) !important;
+  border-color: rgba(239, 68, 68, 0.4) !important;
+  color: #f87171 !important;
 }
 .btn-backup-delete:hover {
-  background: rgba(239, 68, 68, 0.32);
-  border-color: #ef4444;
-  color: #ffffff;
-  box-shadow: 0 0 10px rgba(239, 68, 68, 0.25);
+  background: rgba(239, 68, 68, 0.32) !important;
+  border-color: #ef4444 !important;
+  color: #ffffff !important;
+  box-shadow: 0 0 10px rgba(239, 68, 68, 0.3);
   transform: translateY(-1px);
 }
 </style>

@@ -6,6 +6,7 @@ import random
 import qrcode
 import qrcode.image.svg
 from flask import Flask, request, send_from_directory, abort, send_file
+from werkzeug.middleware.proxy_fix import ProxyFix
 
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 if CURRENT_DIR not in sys.path:
@@ -17,7 +18,7 @@ from core.cert_manager import ensure_certificates
 from services.scheduler_service import start_scheduler_thread
 
 # 导入通用路由工具与所有领域蓝图
-from routes import get_node_snis, build_node_link, is_user_allowed_for_node
+from routes import get_node_snis, build_node_link, is_user_allowed_for_node, resolve_public_endpoint
 from routes.auth import auth_bp
 from routes.user import user_bp
 from routes.node import node_bp
@@ -26,6 +27,7 @@ from routes.card import card_bp
 from routes.system import system_bp
 
 app = Flask(__name__, static_folder='../frontend/dist', static_url_path='/')
+app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_port=1)
 
 app.register_blueprint(auth_bp)
 app.register_blueprint(user_bp)
@@ -43,7 +45,11 @@ def health_check():
 
 @app.route('/')
 def index():
-    return send_from_directory(app.static_folder, 'index.html')
+    response = send_from_directory(app.static_folder, 'index.html')
+    response.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate, max-age=0'
+    response.headers['Pragma'] = 'no-cache'
+    response.headers['Expires'] = '0'
+    return response
 
 @app.route('/api/qrcode', methods=['GET'])
 def get_qrcode_svg():
@@ -81,14 +87,14 @@ def get_subscription():
     # 权限过滤器：仅提取启用的且用户被允许访问的节点
     allowed_nodes = [n for n in all_nodes if is_user_allowed_for_node(user, n)]
 
+    hub_host, hub_port, _ = resolve_public_endpoint(request)
     links = []
     for n in allowed_nodes:
         if len(n.get("pbk", "")) == 43:
             snis = get_node_snis(n)
             chosen_sni = forced_sni if (forced_sni and forced_sni in snis) else random.choice(snis)
             remark = f"{n['name']}"
-            hub_domain = request.host
-            links.append(build_node_link(user['uuid'], n, remark, chosen_sni=chosen_sni, hub_domain=hub_domain))
+            links.append(build_node_link(user['uuid'], n, remark, chosen_sni=chosen_sni, hub_domain=hub_host, hub_port=hub_port))
 
     sub_text = "\n".join(links)
     b64_sub = base64.b64encode(sub_text.encode('utf-8')).decode('utf-8')

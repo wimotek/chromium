@@ -202,8 +202,13 @@ def _append_audit_log(event: str, **kwargs):
     except Exception:
         pass
 
-def _get_available_bind_port(cur, preferred_port: int, exclude_node_id: Optional[int] = None) -> int:
-    """确保 local_bind_port 在集群内全局唯一，杜绝触发 SQLite UNIQUE 约束异常"""
+def _get_available_bind_port(
+    cur,
+    preferred_port: int,
+    exclude_node_id: Optional[int] = None,
+    current_bind_port: Optional[int] = None,
+) -> int:
+    """确保 local_bind_port 在集群内全局唯一，杜绝触发 SQLite UNIQUE 约束异常与心跳端口漂移"""
     if exclude_node_id:
         cur.execute("SELECT id FROM nodes WHERE local_bind_port=? AND id!=?", (preferred_port, exclude_node_id))
     else:
@@ -211,9 +216,16 @@ def _get_available_bind_port(cur, preferred_port: int, exclude_node_id: Optional
     if not cur.fetchone():
         return preferred_port
 
-    cur.execute("SELECT local_bind_port FROM nodes")
-    used_ports = {r[0] for r in cur.fetchall()}
-    candidate = max(max(used_ports, default=10000) + 1, 10000)
+    if exclude_node_id:
+        cur.execute("SELECT local_bind_port FROM nodes WHERE id!=?", (exclude_node_id,))
+    else:
+        cur.execute("SELECT local_bind_port FROM nodes")
+    used_ports = {r[0] for r in cur.fetchall() if r[0] is not None}
+
+    if current_bind_port and current_bind_port >= 10000 and current_bind_port not in used_ports:
+        return current_bind_port
+
+    candidate = 10000
     while candidate in used_ports:
         candidate += 1
     return candidate
@@ -234,7 +246,10 @@ class NodeAutoRegisterDTO(BaseModel):
     public_key_fingerprint: Optional[str] = ""
     name: Optional[str] = ""
     group_name: Optional[str] = "默认分组"
+    conn_type: Optional[str] = None
     cdp_port: int = 9222
+    wss_port: Optional[int] = None
+    edge_wss_secret: Optional[str] = None
     public_ipv4: Optional[str] = None
     public_ipv4_port: Optional[int] = None
     public_ipv6: Optional[str] = None
@@ -295,7 +310,7 @@ def list_nodes(user: dict = Depends(verify_token)):
             r["status"] = "disabled"
         elif r.get("approval_status") == 0:
             r["status"] = "pending_approval"
-        elif r.get("conn_type") == "reverse":
+        elif r.get("conn_type") in ("reverse", "public_wss", "wss_direct"):
             session = tunnel_mgr.get_reverse_session(r["id"])
             r["status"] = "connected" if (session and not session.is_closed) else "stopped"
 
@@ -348,7 +363,7 @@ async def update_node(node_id: int, data: dict, user: dict = Depends(verify_toke
     name = (data.get('name') or orig_node['name']).strip()
     l_port = int(data.get('local_bind_port') or orig_node['local_bind_port'])
 
-    if orig_node["conn_type"] == "reverse":
+    if orig_node["conn_type"] in ("reverse", "public_wss", "wss_direct"):
         cur.execute("""
             UPDATE nodes SET name=?, group_name=?, local_bind_port=? WHERE id=?
         """, (name, grp_name, l_port, node_id))
@@ -388,6 +403,7 @@ async def update_node(node_id: int, data: dict, user: dict = Depends(verify_toke
 @router.delete("/api/nodes/{node_id}")
 def delete_node(node_id: int, user: dict = Depends(verify_token)):
     tunnel_mgr.stop_tunnel(node_id)
+    tunnel_mgr.stop_public_wss_session(node_id)
     tunnel_mgr.unregister_reverse_tunnel(node_id)
     conn = get_db_connection()
     cur = conn.cursor()
@@ -411,6 +427,7 @@ async def approve_node(node_id: int, user: dict = Depends(verify_token)):
     cur.execute("UPDATE nodes SET approval_status=1, status='connected' WHERE id=?", (node_id,))
     conn.commit()
     node = dict(node_row)
+    node["approval_status"] = 1
     conn.close()
 
     session = tunnel_mgr.get_reverse_session(node_id)
@@ -537,26 +554,48 @@ async def reprobe_registered_node(node_id: int, user: dict = Depends(verify_toke
         raise HTTPException(status_code=404, detail="节点不存在")
     node = dict(row)
 
-    host = node.get("direct_host") or ""
-    v4 = host if (host and ":" not in host and host != "reverse-nat4") else None
+    host = (node.get("direct_host") or "").strip().strip("[]")
+    if node.get("conn_type") in ("public_wss", "wss_direct"):
+        ep_host, port = _split_endpoint_host_port(
+            node.get("wss_endpoint") or node.get("recommended_endpoint"),
+            host,
+            9443,
+        )
+        host = ep_host.strip("[]") or host
+    else:
+        port = int(node.get("remote_cdp_port") or 9222)
+
+    v4 = host if (host and ":" not in host and host not in ("reverse-nat4", "public-wss", "wss-direct")) else None
     v6 = host if (host and ":" in host) else None
-    port = int(node.get("remote_cdp_port") or 9222)
     det = await _run_edge_network_detection(
         public_ipv4=v4,
         public_ipv4_port=port if v4 else None,
         public_ipv6=v6,
         public_ipv6_port=port if v6 else None,
     )
-    cur.execute(
-        "UPDATE nodes SET network_mode=?, recommended_endpoint=?, ipv4_reachable=?, ipv6_reachable=? WHERE id=?",
-        (
-            det.get("network_mode", ""),
-            det.get("recommended_endpoint") or "",
-            1 if det.get("ipv4_reachable") else 0,
-            1 if det.get("ipv6_reachable") else 0,
-            node_id,
-        ),
-    )
+    if node.get("conn_type") in ("public_wss", "wss_direct") and det.get("recommended_endpoint"):
+        cur.execute(
+            "UPDATE nodes SET network_mode=?, recommended_endpoint=?, wss_endpoint=?, ipv4_reachable=?, ipv6_reachable=? WHERE id=?",
+            (
+                det.get("network_mode", ""),
+                det.get("recommended_endpoint") or "",
+                det.get("recommended_endpoint") or "",
+                1 if det.get("ipv4_reachable") else 0,
+                1 if det.get("ipv6_reachable") else 0,
+                node_id,
+            ),
+        )
+    else:
+        cur.execute(
+            "UPDATE nodes SET network_mode=?, recommended_endpoint=?, ipv4_reachable=?, ipv6_reachable=? WHERE id=?",
+            (
+                det.get("network_mode", ""),
+                det.get("recommended_endpoint") or "",
+                1 if det.get("ipv4_reachable") else 0,
+                1 if det.get("ipv6_reachable") else 0,
+                node_id,
+            ),
+        )
     conn.commit()
     conn.close()
 
@@ -603,7 +642,17 @@ async def http_auto_register_node(
 
     client_ip = request.headers.get("X-Forwarded-For", "").split(",")[0].strip() or (request.client.host if request.client else "127.0.0.1")
     fallback_ip = "127.0.0.1" if client_ip in ["127.0.0.1", "localhost", "::1"] else client_ip
-    direct_ip, rec_port = _split_endpoint_host_port(data.recommended_endpoint, data.public_ipv4 or data.public_ipv6 or fallback_ip, data.cdp_port)
+    is_public_wss = (
+        data.conn_type in ("public_wss", "wss_direct")
+        or bool(data.wss_port)
+        or bool(data.edge_wss_secret)
+    )
+    default_probe_port = int(data.wss_port or 9443) if is_public_wss else int(data.cdp_port or 9222)
+    direct_ip, rec_port = _split_endpoint_host_port(
+        data.recommended_endpoint,
+        data.public_ipv4 or data.public_ipv6 or fallback_ip,
+        default_probe_port,
+    )
 
     node_name = (data.name or "").strip() or f"Edge-{data.node_uuid[:6]}"
     grp_name = (data.group_name or "").strip() or "默认分组"
@@ -612,36 +661,69 @@ async def http_auto_register_node(
     v4_ok = 1 if data.ipv4_reachable else (1 if ":" not in direct_ip else 0)
     v6_ok = 1 if data.ipv6_reachable else (1 if ":" in direct_ip else 0)
 
+    conn_type_val = "public_wss" if is_public_wss else "direct"
+    is_local_val = 0 if is_public_wss else 1
+    remote_cdp_val = int(data.cdp_port or 9222) if is_public_wss else rec_port
+    preferred_bind_port = rec_port or remote_cdp_val
+    wss_endpoint_val = rec_ep if is_public_wss else ""
+    edge_secret_val = (data.edge_wss_secret or "").strip() if is_public_wss else ""
+
     conn = get_db_connection()
     conn.row_factory = sqlite3.Row
     cur = conn.cursor()
-    cur.execute("SELECT id, approval_status FROM nodes WHERE node_uuid=?", (data.node_uuid,))
+    cur.execute("SELECT id, conn_type, approval_status, enabled, local_bind_port FROM nodes WHERE node_uuid=?", (data.node_uuid,))
     existing = cur.fetchone()
 
+    node_enabled = 1
+    prev_conn_type = None
     if existing:
         node_id = existing["id"]
+        prev_conn_type = existing["conn_type"]
         appr = existing["approval_status"] if approval_status == 0 else 1
-        allocated_port = _get_available_bind_port(cur, rec_port, exclude_node_id=node_id)
+        node_enabled = existing["enabled"] if "enabled" in existing.keys() else 1
+        allocated_port = _get_available_bind_port(
+            cur,
+            preferred_bind_port,
+            exclude_node_id=node_id,
+            current_bind_port=existing["local_bind_port"],
+        )
+        final_status = "disabled" if node_enabled == 0 else ("pending_approval" if appr == 0 else status)
         cur.execute("""
-            UPDATE nodes SET direct_host=?, remote_cdp_port=?, local_bind_port=?, name=?, group_name=?,
-                approval_status=?, fingerprint=?, network_mode=?, recommended_endpoint=?, ipv4_reachable=?, ipv6_reachable=?
+            UPDATE nodes SET conn_type=?, is_local=?, direct_host=?, remote_cdp_port=?, local_bind_port=?, name=?, group_name=?,
+                approval_status=?, status=?, fingerprint=?, network_mode=?, recommended_endpoint=?,
+                wss_endpoint=?, edge_wss_secret=?, ipv4_reachable=?, ipv6_reachable=?
             WHERE id=?
-        """, (direct_ip, rec_port, allocated_port, node_name, grp_name, appr, fp, net_mode, rec_ep, v4_ok, v6_ok, node_id))
+        """, (
+            conn_type_val, is_local_val, direct_ip, remote_cdp_val, allocated_port, node_name, grp_name,
+            appr, final_status, fp, net_mode, rec_ep, wss_endpoint_val, edge_secret_val, v4_ok, v6_ok, node_id
+        ))
         approval_status = appr
     else:
-        allocated_port = _get_available_bind_port(cur, rec_port)
+        allocated_port = _get_available_bind_port(cur, preferred_bind_port)
         cur.execute("""
             INSERT INTO nodes (
                 name, group_name, enabled, approval_status, conn_type, node_uuid, fingerprint,
                 is_source, is_local, direct_host, ssh_host, ssh_port, ssh_user,
                 ssh_key_filename, ssh_password, remote_cdp_port, local_bind_port, status,
-                network_mode, recommended_endpoint, ipv4_reachable, ipv6_reachable
-            ) VALUES (?, ?, 1, ?, 'direct', ?, ?, 0, 1, ?, '', 22, '', '', '', ?, ?, ?, ?, ?, ?, ?)
-        """, (node_name, grp_name, approval_status, data.node_uuid, fp, direct_ip, rec_port, allocated_port, status, net_mode, rec_ep, v4_ok, v6_ok))
+                network_mode, recommended_endpoint, wss_endpoint, edge_wss_secret, ipv4_reachable, ipv6_reachable
+            ) VALUES (?, ?, 1, ?, ?, ?, ?, 0, ?, ?, '', 22, '', '', '', ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            node_name, grp_name, approval_status, conn_type_val, data.node_uuid, fp,
+            is_local_val, direct_ip, remote_cdp_val, allocated_port, status,
+            net_mode, rec_ep, wss_endpoint_val, edge_secret_val, v4_ok, v6_ok
+        ))
         node_id = cur.lastrowid
 
     conn.commit()
+    cur.execute("SELECT * FROM nodes WHERE id=?", (node_id,))
+    saved_node = dict(cur.fetchone())
     conn.close()
+
+    if prev_conn_type == "reverse" and is_public_wss:
+        tunnel_mgr.unregister_reverse_tunnel(node_id)
+
+    if is_public_wss and approval_status == 1 and node_enabled == 1:
+        tunnel_mgr.ensure_public_wss_session(saved_node)
 
     _append_audit_log(
         "access_decision",
@@ -660,6 +742,7 @@ async def http_auto_register_node(
         "code": 200,
         "node_id": node_id,
         "approval_status": approval_status,
+        "conn_type": conn_type_val,
         "network_mode": net_mode,
         "network_profile": "direct",
         "recommended_endpoint": rec_ep,
@@ -720,6 +803,12 @@ async def reverse_tunnel_endpoint(
     except Exception:
         cdp_port = port or 9222
 
+    header_ext_port_str = websocket.headers.get("x-external-port")
+    try:
+        ext_port = int(header_ext_port_str) if header_ext_port_str else None
+    except Exception:
+        ext_port = None
+
     node_uuid = (
         websocket.headers.get("x-node-uuid")
         or uuid
@@ -757,7 +846,7 @@ async def reverse_tunnel_endpoint(
             enroll_token = handshake_data.get("join_token") or enroll_token
             node_name = handshake_data.get("name") or node_name or node_uuid
             node_group = handshake_data.get("group") or node_group
-            cdp_port = handshake_data.get("port") or cdp_port
+            cdp_port = int(handshake_data.get("port") or cdp_port)
         except Exception as e:
             logger.error(f"❌ [Tunnel 握手失败] 未收到节点身份: {e}")
             await websocket.close(code=1008, reason="Handshake timeout or invalid JSON")
@@ -769,7 +858,9 @@ async def reverse_tunnel_endpoint(
             handshake_data = json.loads(first_msg_raw)
             node_fp = handshake_data.get("public_key_fingerprint") or node_fp
             enroll_token = handshake_data.get("join_token") or enroll_token
-            cdp_port = handshake_data.get("port") or cdp_port
+            node_name = handshake_data.get("name") or node_name
+            node_group = handshake_data.get("group") or node_group
+            cdp_port = int(handshake_data.get("port") or cdp_port)
         except Exception:
             handshake_data = {}
 
@@ -777,6 +868,14 @@ async def reverse_tunnel_endpoint(
     pub_v4_port = handshake_data.get("public_ipv4_port") or (cdp_port if pub_v4 else None)
     pub_v6 = handshake_data.get("public_ipv6")
     pub_v6_port = handshake_data.get("public_ipv6_port") or (cdp_port if pub_v6 else None)
+    reported_port = int(
+        handshake_data.get("external_port")
+        or handshake_data.get("wss_port")
+        or ext_port
+        or pub_v4_port
+        or pub_v6_port
+        or cdp_port
+    )
     session_ticket = handshake_data.get("session_ticket")
     forced_reverse = handshake_data.get("reverse_tunnel")
 
@@ -862,31 +961,40 @@ async def reverse_tunnel_endpoint(
             reason = "tofu_pending_admin_approval"
 
     try:
-        cur.execute("SELECT id, local_bind_port, enabled FROM nodes WHERE node_uuid=?", (node_uuid,))
+        cur.execute("SELECT id, conn_type, local_bind_port, enabled FROM nodes WHERE node_uuid=?", (node_uuid,))
         existing_row = cur.fetchone()
 
+        prev_conn_type = None
         if existing_row:
             node_id = existing_row["id"]
-            allocated_port = existing_row["local_bind_port"]
+            prev_conn_type = existing_row["conn_type"]
+            allocated_port = _get_available_bind_port(
+                cur,
+                reported_port,
+                exclude_node_id=node_id,
+                current_bind_port=existing_row["local_bind_port"],
+            )
             is_currently_enabled = existing_row["enabled"] if "enabled" in existing_row.keys() else 1
             final_status = "disabled" if is_currently_enabled == 0 else status
 
             cur.execute("""
                 UPDATE nodes SET 
-                    conn_type='reverse', direct_host='reverse-nat4', remote_cdp_port=?, local_bind_port=?,
+                    conn_type='reverse', is_local=1, direct_host='reverse-nat4',
+                    wss_endpoint='', edge_wss_secret='',
+                    remote_cdp_port=?, local_bind_port=?,
                     status=?, approval_status=?, name=?, group_name=?, fingerprint=?,
                     network_mode=?, recommended_endpoint=?, ipv4_reachable=?, ipv6_reachable=?
                 WHERE id=?
             """, (cdp_port, allocated_port, final_status, approved, node_name, node_group, node_fp, net_mode, rec_endpoint, v4_ok_int, v6_ok_int, node_id))
         else:
-            allocated_port = _get_available_bind_port(cur, cdp_port)
+            allocated_port = _get_available_bind_port(cur, reported_port)
             cur.execute("""
                 INSERT INTO nodes (
                     name, group_name, enabled, approval_status, conn_type, node_uuid, fingerprint,
                     is_source, is_local, direct_host, ssh_host, ssh_port, ssh_user,
                     ssh_key_filename, ssh_password, remote_cdp_port, local_bind_port, status,
-                    network_mode, recommended_endpoint, ipv4_reachable, ipv6_reachable
-                ) VALUES (?, ?, 1, ?, 'reverse', ?, ?, 0, 1, 'reverse-nat4', '', 22, '', '', '', ?, ?, ?, ?, ?, ?, ?)
+                    network_mode, recommended_endpoint, wss_endpoint, edge_wss_secret, ipv4_reachable, ipv6_reachable
+                ) VALUES (?, ?, 1, ?, 'reverse', ?, ?, 0, 1, 'reverse-nat4', '', 22, '', '', '', ?, ?, ?, ?, ?, '', '', ?, ?)
             """, (node_name, node_group, approved, node_uuid, node_fp, cdp_port, allocated_port, status, net_mode, rec_endpoint, v4_ok_int, v6_ok_int))
             node_id = cur.lastrowid
 
@@ -898,6 +1006,9 @@ async def reverse_tunnel_endpoint(
         return
 
     conn.close()
+
+    if prev_conn_type in ("public_wss", "wss_direct"):
+        tunnel_mgr.stop_public_wss_session(node_id)
 
     session = tunnel_mgr.register_reverse_tunnel(node_id, websocket)
 
@@ -1001,15 +1112,16 @@ async def reverse_tunnel_endpoint(
         pass
     finally:
         if node_id:
-            tunnel_mgr.unregister_reverse_tunnel(node_id)
-            try:
-                conn = get_db_connection()
-                cur = conn.cursor()
-                cur.execute("UPDATE nodes SET status='stopped' WHERE id=? AND enabled=1", (node_id,))
-                conn.commit()
-                conn.close()
-            except Exception:
-                pass
+            tunnel_mgr.unregister_reverse_tunnel(node_id, expected_session=session)
+            if tunnel_mgr.get_reverse_session(node_id) is None:
+                try:
+                    conn = get_db_connection()
+                    cur = conn.cursor()
+                    cur.execute("UPDATE nodes SET status='stopped' WHERE id=? AND enabled=1", (node_id,))
+                    conn.commit()
+                    conn.close()
+                except Exception:
+                    pass
 
 # ==================== 8. 探针与详情接口 ====================
 @router.get("/api/nodes/{node_id}/cookie-details")
@@ -1027,7 +1139,8 @@ async def get_node_cookie_details(node_id: int, user: dict = Depends(verify_toke
 
     now_ts = time.time()
     try:
-        target_h = node.get('direct_host', '127.0.0.1') if node['is_local'] else "127.0.0.1"
+        c_type = node.get('conn_type')
+        target_h = "public-wss" if c_type in ("public_wss", "wss_direct") else ("reverse-nat4" if c_type == "reverse" else (node.get('direct_host', '127.0.0.1') if node['is_local'] else "127.0.0.1"))
         raw_cookies = await fetch_cookies_native(node['local_bind_port'], target_h, node_id=node['id'])
         analyzed = []
         valid_count = 0
@@ -1088,7 +1201,8 @@ async def probe_node(node_id: int, user: dict = Depends(verify_token)):
     node = dict(cur.fetchone())
     conn.close()
 
-    target_h = node.get('direct_host', '127.0.0.1') if node['is_local'] else "127.0.0.1"
+    c_type = node.get('conn_type')
+    target_h = "public-wss" if c_type in ("public_wss", "wss_direct") else ("reverse-nat4" if c_type == "reverse" else (node.get('direct_host', '127.0.0.1') if node['is_local'] else "127.0.0.1"))
     count, msg = await probe_node_cookies(node['local_bind_port'], target_h, node_id=node['id'])
     new_status = "connected" if msg == "OK" else "error: refused"
 
@@ -1111,7 +1225,12 @@ async def toggle_tunnel(node_id: int, user: dict = Depends(verify_token)):
     node = dict(cur.fetchone())
     conn.close()
 
-    if node.get('is_local') != 1 and node_id in tunnel_mgr.tunnels:
+    if node.get('conn_type') in ('public_wss', 'wss_direct'):
+        session = tunnel_mgr.get_reverse_session(node_id)
+        if session and not session.is_closed:
+            tunnel_mgr.stop_tunnel(node_id)
+            return {"status": "stopped", "message": "公网 WSS 直连已手动断开"}
+    elif node.get('is_local') != 1 and node_id in tunnel_mgr.tunnels:
         tunnel_mgr.stop_tunnel(node_id)
         return {"status": "stopped", "message": "隧道已手动切断"}
 

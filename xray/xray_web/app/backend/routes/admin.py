@@ -7,7 +7,7 @@ import time
 from flask import Blueprint, request, jsonify
 from core.db import get_db, hash_pwd, get_setting, set_setting
 from services.notify_service import notify_user
-from routes import check_admin, get_node_snis, build_node_link, normalize_expire_date
+from routes import check_admin, get_node_snis, build_node_link, normalize_expire_date, resolve_public_endpoint
 
 admin_bp = Blueprint('admin_bp', __name__)
 
@@ -31,7 +31,7 @@ def admin_data():
     raw_users = c.fetchall()
     conn.close()
 
-    host_prefix = request.host_url.rstrip('/')
+    hub_host, hub_port, host_prefix = resolve_public_endpoint(request)
     users = []
     for r in raw_users:
         d = dict(r)
@@ -53,7 +53,7 @@ def admin_data():
                     "sni": chosen_sni,
                     "server_names": snis,
                     "selected_sni": chosen_sni,
-                    "link": build_node_link(d['uuid'], n, f"{n['name']}", chosen_sni=chosen_sni, hub_domain=request.host)
+                    "link": build_node_link(d['uuid'], n, f"{n['name']}", chosen_sni=chosen_sni, hub_domain=hub_host, hub_port=hub_port)
                 })
         users.append(d)
 

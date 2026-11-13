@@ -6,7 +6,7 @@ from flask import Blueprint, request, jsonify, send_file, abort
 from core.db import get_db, hash_pwd
 from services.notify_service import send_smtp_email, notify_user
 from services.client_pack_service import generate_windows_package, ensure_base_v2rayng_apk
-from routes import get_node_snis, build_node_link, normalize_expire_date, is_user_allowed_for_node
+from routes import get_node_snis, build_node_link, normalize_expire_date, is_user_allowed_for_node, resolve_public_endpoint
 
 user_bp = Blueprint('user_bp', __name__)
 
@@ -32,15 +32,14 @@ def user_refresh_info():
     visible_nodes = [n for n in all_nodes if is_user_allowed_for_node(user_dict, n)]
 
     nodes_data = []
-    host_prefix = request.host_url.rstrip('/')
+    hub_host, hub_port, host_prefix = resolve_public_endpoint(request)
     sub_url = f"{host_prefix}/api/sub?token={user_dict['uuid']}"
 
     for n in visible_nodes:
         if len(n.get("pbk", "")) == 43:
             snis = get_node_snis(n)
             random_sni = random.choice(snis)
-            hub_domain = request.host
-            link = build_node_link(user_dict['uuid'], n, f"{n['name']}", chosen_sni=random_sni, hub_domain=hub_domain)
+            link = build_node_link(user_dict['uuid'], n, f"{n['name']}", chosen_sni=random_sni, hub_domain=hub_host, hub_port=hub_port)
             nodes_data.append({
                 "id": n["id"],
                 "name": n["name"],
@@ -95,15 +94,14 @@ def user_reset_uuid():
 
     visible_nodes = [n for n in all_nodes if is_user_allowed_for_node(user_dict, n)]
 
-    host_prefix = request.host_url.rstrip('/')
+    hub_host, hub_port, host_prefix = resolve_public_endpoint(request)
     sub_url = f"{host_prefix}/api/sub?token={new_uuid}"
     nodes_data = []
     for n in visible_nodes:
         if len(n.get("pbk", "")) == 43:
             snis = get_node_snis(n)
             random_sni = random.choice(snis)
-            hub_domain = request.host
-            link = build_node_link(new_uuid, n, f"{n['name']}", chosen_sni=random_sni, hub_domain=hub_domain)
+            link = build_node_link(new_uuid, n, f"{n['name']}", chosen_sni=random_sni, hub_domain=hub_host, hub_port=hub_port)
             nodes_data.append({
                 "id": n["id"],
                 "name": n["name"],
@@ -276,7 +274,7 @@ def download_windows_client():
 
     if not user: abort(404)
 
-    host_prefix = request.host_url.rstrip('/')
+    _, _, host_prefix = resolve_public_endpoint(request)
     try:
         mem_file = generate_windows_package(dict(user), host_prefix)
         filename = f"v2rayN_WithCore_{user['username']}.zip"

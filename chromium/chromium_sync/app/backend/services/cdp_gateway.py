@@ -6,7 +6,7 @@ import httpx
 import websockets
 from fastapi import APIRouter, HTTPException, Depends, Request, Query, WebSocket, WebSocketDisconnect
 
-from config import logger
+from config import logger, HUB_PORT, resolve_hub_access_info
 from core.database import get_setting, get_db_connection
 from core.security import verify_agent_access
 from services.tunnel_manager import tunnel_mgr
@@ -31,13 +31,15 @@ async def cdp_gateway_version(
         raise HTTPException(status_code=404, detail="目标节点不存在")
     node = dict(row)
     api_key = get_setting('api_key')
-    domain = request.headers.get("host", "localhost:8443")
+    hub_info = resolve_hub_access_info(request)
+    ws_scheme = hub_info["ws_scheme"]
+    domain = hub_info["public_netloc"]
 
-    # 分支 A：NAT4 反向穿透节点，向边缘代理获取真实浏览器版本
-    if node.get('conn_type') == 'reverse':
+    # 分支 A：WSS 通道节点（NAT4 反向穿透或公网 WSS 直连），经 WSS 向节点本地 127.0.0.1:9222 获取真实浏览器版本
+    if node.get('conn_type') in ('reverse', 'public_wss', 'wss_direct'):
         session = tunnel_mgr.get_reverse_session(node_id)
         if not session or session.is_closed:
-            raise HTTPException(status_code=502, detail="NAT4 反向节点当前处于离线状态")
+            raise HTTPException(status_code=502, detail="WSS 节点当前处于离线状态")
         try:
             res = await session.send_command("get_version", timeout=4.0)
             data = res.get("version", {})
@@ -47,7 +49,7 @@ async def cdp_gateway_version(
                     "Protocol-Version": "1.3",
                     "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36"
                 }
-            data["webSocketDebuggerUrl"] = f"wss://{domain}/cdp/{node_id}/ws?api_key={api_key}"
+            data["webSocketDebuggerUrl"] = f"{ws_scheme}://{domain}/cdp/{node_id}/ws?api_key={api_key}"
             return data
         except Exception as e:
             raise HTTPException(status_code=502, detail=f"无法从反向节点拉取版本: {e}")
@@ -61,7 +63,7 @@ async def cdp_gateway_version(
         async with httpx.AsyncClient(timeout=3.0) as client:
             res = await client.get(f"http://{netloc}/json/version")
             data = res.json()
-            data["webSocketDebuggerUrl"] = f"wss://{domain}/cdp/{node_id}/ws?api_key={api_key}"
+            data["webSocketDebuggerUrl"] = f"{ws_scheme}://{domain}/cdp/{node_id}/ws?api_key={api_key}"
             return data
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"无法连通该节点的 CDP 服务: {e}")
@@ -90,11 +92,11 @@ async def cdp_gateway_ws(
         return
     node = dict(row)
 
-    # 分支 A: 反向穿透节点 (全双工 CDP WebSocket 多路复用转发)
-    if node.get('conn_type') == 'reverse':
+    # 分支 A: WSS 通道节点 (NAT4 反向穿透或公网 WSS 直连，全双工 CDP WebSocket 多路复用转发)
+    if node.get('conn_type') in ('reverse', 'public_wss', 'wss_direct'):
         session = tunnel_mgr.get_reverse_session(node_id)
         if not session or session.is_closed:
-            await websocket.close(code=1011, reason="Target Reverse Node Offline")
+            await websocket.close(code=1011, reason="Target WSS Node Offline")
             return
         await websocket.accept()
         stream_id = secrets.token_hex(8)

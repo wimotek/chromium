@@ -3,8 +3,8 @@
 基于 **Xray-core (VLESS-REALITY-Vision / WSS 反向打洞隧道)** 打造的高性能分布式节点管理与商业化运营中枢。
 
 系统采用 **Master-Agent（主控中心 - 边缘工作节点）彻底解耦架构**：
-* **`xray_web` (主控端)**：轻量化 Web 管理面板（非 Root `UID 10001` 运行，Granian 原生支持 IPv4+IPv6 双栈 HTTPS），内置官方 **`wimotek-edge-agent`** 零信任安全引擎，负责用户生命周期、数据库备份恢复、卡密核销、邮件通知、聚合订阅下发、单次防重放 Join Token 签发与审计流水；
-* **`xray_core` (节点端)**：极致精简的纯 Python 异步守护镜像（Alpine 多阶段构建 + 非 Root `UID 10001` + `dumb-init` 信号链），部署于任意海外 VPS 或家庭内网主机，专注高速 REALITY 代理与反向穿透。
+* **`xray_web` (主控端)**：轻量化 Web 管理面板（**`dumb-init + gosu` Root-Init-Drop 安全降权架构**，业务层以非 Root `UID 10001` 运行，Granian 原生支持 IPv4+IPv6 双栈 HTTPS，支持自由修改 `WEB_PORT` 与 `-p 3000:8443` 端口映射智能识别），内置官方 **`wimotek-edge-agent >= 1.0.17`** 零信任安全引擎，负责用户生命周期、数据库备份恢复、卡密核销、邮件通知、聚合订阅下发、单次防重放 Join Token 签发与审计流水；
+* **`xray_core` (节点端)**：极致精简的纯 Python 异步守护镜像（Alpine 多阶段构建 + 非 Root `UID 10001` + `dumb-init` 信号链 + 仅回环 `/healthz` 健康探针），部署于任意海外 VPS 或家庭内网主机，专注高速 REALITY 代理与反向穿透。
 
 ---
 
@@ -31,34 +31,64 @@
 
 ---
 
-## ⚠️ 非 Root 容器与宿主机挂载目录权限要求（必读）
+## 🔒 非 Root 运行、宝塔证书零侵入挂载与 Root-Init-Drop (`dumb-init + gosu`) 架构
 
-为遵循容器最小权限安全规范，**`xray_web`（主控端）与 `xray_core`（节点端）镜像均默认以非 Root 用户 `appuser`（UID `10001` / GID `10001`）运行**。
+为遵循容器最小权限安全规范，**`xray_web` 与 `xray_core` 业务主进程均以非特权用户 `appuser`（UID `10001` / GID `10001`）运行**。
 
-在 Linux 宿主机使用 `-v ./xxx:/data` 绑定挂载本地目录时，若本地目录事先不存在或归属为 `root:root`，容器内的 `appuser` 将因无写入权限而直接报错启动失败（`PermissionError: [Errno 13] Permission denied`）。
+### 1. 主控端 (`xray_web`) 如何完美解决“非 Root + 宝塔证书 `0600`”权限冲突？
 
-### 1. 主控端 (`xray_web`) 宿主机目录授权
+宝塔面板 / Certbot 签发的证书目录（如 `/www/server/panel/vhost/cert/你的域名`）中，私钥 `privkey.pem` 在宿主机默认归属 `root:root` 且权限为 `0600`。如果容器启动时直接切为 `USER appuser (10001)`，容器将因 `PermissionError` 无法读取 `/certs:ro/privkey.pem`；而如果强行修改宿主机宝塔目录属主，又会影响宝塔面板或 Nginx 自动续签。
 
-启动主控前请先创建并授权数据与备份目录：
+为此，`xray_web` 采用工业标准的 **Root-Init-Drop（`dumb-init` + `gosu`）两阶段安全降权架构**：
+1. **阶段 1 · Root-Init（启动瞬时初始化）**：
+   - 容器由 `dumb-init`（PID 1）引导 `entrypoint.sh` 短暂以 `root` 身份完成初始化；
+   - 自动创建并修复 `/data`、`/data/backups`、`/app/certs` 的属主为 `10001:10001`（**即使宿主机忘记提前 `chown` `./data` 也能正常启动**）；
+   - 由 `cert_init` 读取只读挂载 `/certs:ro` 中的宝塔证书与 `0600` 私钥，安全复制到容器内部隔离目录 `/app/certs/`，将其属主设为 `appuser:appgroup`（`10001:10001`）、权限收口为 `0644`（证书）/ `0600`（私钥），**全程绝不修改宿主机 `/certs:ro` 原文件权限，宝塔续签零干扰**；
+2. **阶段 2 · Drop（不可逆降权运行）**：
+   - 初始化完成后，`entrypoint.sh` 通过 `exec gosu appuser:appgroup granian ...` **彻底放弃 root 权限并替换进程**，整个 Granian Web 服务、Flask 路由、SQLite、定时备份与邮件线程 **100% 运行在非特权 `appuser (10001)` 沙箱下**；
+   - 同时镜像已为 `python3` 写入 `cap_net_bind_service=+ep`，即使用户将 `-e WEB_PORT=443` 设为特权端口，降权后依然可直接监听 `443`。
 
-```bash
-mkdir -p ./data/backups ./certs
-chown -R 10001:10001 ./data
-```
-
-* **`./data:/data`（读写）**：存放 `xray_web.db`、自动冷备及 `edge_agent_data/`（密钥、TrustStore、审计日志），**必须对 UID `10001` 可写**；
-* **`./certs:/certs:ro`（只读，可选）**：若挂载外部商业 SSL 证书（`fullchain.pem` 与 `privkey.pem`），需确保容器内 UID `10001` 具有**读取权限**（例如执行 `chmod 755 ./certs && chmod 644 ./certs/*.pem`，或 `chown -R 10001:10001 ./certs` 后配合 `chmod 600 ./certs/privkey.pem`）。容器启动时 `cert_init` 会自动将其复制到内部 `/app/certs` 并修正为 `0644/0600`。若不挂载则自动生成 10 年期现代自签名证书。
+> **宝塔证书直接挂载示例**：
+> ```yaml
+> volumes:
+>   - ./data:/data
+>   - /www/server/panel/vhost/cert/你的域名:/certs:ro
+> ```
+> *(宝塔自动续签更新宿主机证书后，重启一次 `xray-web` 容器即可自动重新同步最新证书。)*
 
 ### 2. 节点端 (`xray_core`) 宿主机目录授权
 
-启动节点容器前，同样**必须先创建并授权 `./data` 目录**：
+`xray_core` 为极致无状态边缘代理容器，直接以 `USER appuser`（`10001`）启动，启动前需提前创建并授权 `./data` 目录（或改用 Docker 命名卷 `xray_node_data:/data`）：
 
 ```bash
 mkdir -p ./data
 chown -R 10001:10001 ./data
 ```
 
-> **提示**：如不想在宿主机手动执行 `chown`，可改用 **Docker 命名卷**（如 `xray_node_data:/data`），Docker 会自动继承镜像内 `/data` 的 `10001:10001` 权限。同时请勿为节点容器添加 `--security-opt=no-new-privileges:true`，以免屏蔽 `/usr/bin/xray` 上的 `cap_net_bind_service=+ep` 导致无法绑定 443 端口。
+> **提示**：请勿为节点容器添加 `--security-opt=no-new-privileges:true`，以免屏蔽 `/usr/bin/xray` 上的 `cap_net_bind_service=+ep` 导致无法绑定 443 端口。
+
+---
+
+## 🌐 对外端口自定义与端口映射智能处理（如 `-p 3000:8443`）
+
+系统默认容器内部监听 **`WEB_PORT=8443`**（HTTPS TLS），支持**任意修改对外端口**或使用 **宿主机端口映射**：
+
+| 部署场景 | 配置示例 | 系统自动判断与处理机制 |
+| :--- | :--- | :--- |
+| **默认双栈直通** | `network_mode: host`，默认 `WEB_PORT=8443` | 监听 `[::]:8443`，`HEALTHCHECK` 探测 `127.0.0.1:8443/healthz`，订阅/部署命令自动使用 `:8443` |
+| **修改容器内部端口** | `network_mode: host` + `-e WEB_PORT=9443` | Granian 监听 `[::]:9443`，`HEALTHCHECK` 动态读取 `${WEB_PORT}` 探测 `127.0.0.1:9443/healthz` |
+| **宿主机端口映射** | `-p 3000:8443`（容器内保持 `WEB_PORT=8443`） | 容器内部健康检查仍探测 `8443` 不失效；后端通过 `ProxyFix` + `resolve_public_endpoint` 自动识别请求 `Host` 头或 `X-Forwarded-Port` 中的对外端口 **`3000`**，自动将管理端生成的 `PANEL_URL`、聚合订阅 `sub_url` 与 `reverse_wss` 节点链接全部对齐为 `:3000`！ |
+| **反代 / NAT 隐藏端口** | Nginx/Cloudflare 443 反代至 `8443`，或穿透映射 `3000:8443` | 自动读取 `X-Forwarded-Host` / `X-Forwarded-Port`；若上游未透传对外端口，可显式追加 `-e PUBLIC_PORT=3000` 或 `-e PUBLIC_URL=https://panel.example.com:3000` 强制锁定 |
+
+> **端口映射示例 (`docker run -p 3000:8443`)**：
+> ```bash
+> docker run -d --name xray-web-master --restart unless-stopped \
+>   -p 3000:8443 \
+>   -v $(pwd)/data:/data \
+>   -v /www/server/panel/vhost/cert/你的域名:/certs:ro \
+>   xray-web:latest
+> ```
+> 访问 `https://你的域名:3000` 后，面板生成的节点接入命令、`PANEL_URL`、订阅地址及 WSS 反穿端口将自动全部切换为 `3000`。
 
 ---
 
@@ -68,12 +98,11 @@ chown -R 10001:10001 ./data
 
 > 建议部署在连接性良好的 Linux VPS（主控默认监听 `[::]:8443` 双栈原生 HTTPS TLS；若需 443 端口承接 WSS 反穿，可通过 Nginx/Caddy 反代或直接 `-e WEB_PORT=443`）。
 
-1. **克隆项目并初始化目录权限**：
+1. **克隆项目并准备目录**：
    ```bash
    git clone https://github.com/wimotek/chromium.git
    cd chromium/xray/xray_web
    mkdir -p ./data/backups ./certs
-   chown -R 10001:10001 ./data
    ```
 
 2. **检查或修改 `docker-compose.yml`**：
@@ -87,17 +116,23 @@ chown -R 10001:10001 ./data
        container_name: xray-web-master
        restart: unless-stopped
        network_mode: "host"
+       # 若改用端口映射（如 3000:8443），可注释 network_mode: "host" 并取消下面注释：
+       # ports:
+       #   - "3000:8443"
        environment:
          - TZ=Asia/Shanghai
          - APP_MODE=all
          - WEB_PORT=8443
+         # - PUBLIC_PORT=3000                     # 可选：显式指定对外映射端口
          # 可选：手动强制监听地址 (默认留空则自动探测 IPv4+IPv6 双栈 "::"，禁用 IPv6 环境自动回退 "0.0.0.0")
          # - WEB_HOST=::
          - NODE_KEY=xray_cluster_secret_key_2026   # 集群通信引导令牌 (可自定义)
        volumes:
          - ./data:/data
          - ./data/backups:/data/backups
-         - ./certs:/certs:ro                      # 可选挂载外部权威证书 (需 UID 10001 可读)
+         # 可直接挂载宝塔证书目录（Root-Init-Drop 自动兼容 0600 私钥权限）
+         # - /www/server/panel/vhost/cert/你的域名:/certs:ro
+         - ./certs:/certs:ro
    ```
 
 3. **启动主控容器**：

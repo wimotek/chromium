@@ -31,22 +31,30 @@ def ensure_dirs():
 
 ensure_dirs()
 
+APP_UID = 10001
+APP_GID = 10001
+
 def set_safe_permissions(cert_file: str, key_file: str):
     """
-    为目标证书与私钥设置严格安全的 Linux 权限:
+    为目标证书与私钥设置严格安全的 Linux 权限与属主:
+    - 若当前在 Root-Init 阶段 (euid==0)，自动将 /app/certs 与落地文件属主设为 appuser (10001:10001)
     - 公钥证书: 0644 (所有组可读)
     - 私钥文件: 0600 (仅属主 appuser 可读写)
     """
-    try:
-        if os.path.exists(cert_file):
-            os.chmod(cert_file, 0o644)
-    except Exception:
-        pass
-    try:
-        if os.path.exists(key_file):
-            os.chmod(key_file, 0o600)
-    except Exception:
-        pass
+    is_root = hasattr(os, "geteuid") and os.geteuid() == 0
+    if is_root:
+        try:
+            os.chown(CERT_DIR, APP_UID, APP_GID)
+        except Exception:
+            pass
+    for target, mode in ((cert_file, 0o644), (key_file, 0o600)):
+        if os.path.exists(target):
+            try:
+                if is_root:
+                    os.chown(target, APP_UID, APP_GID)
+                os.chmod(target, mode)
+            except Exception:
+                pass
 
 def generate_self_signed_cert(target_cert: str = CERT_PATH, target_key: str = KEY_PATH):
     """使用 openssl CLI 生成符合现代 TLS 1.2/1.3 规范（含 digitalSignature）的 10 年期证书至 /app/certs"""
@@ -77,6 +85,7 @@ DNS.3 = *.internal
 DNS.4 = *
 IP.1 = 127.0.0.1
 IP.2 = 0.0.0.0
+IP.3 = ::1
 """
     tmp_cnf = "/tmp/openssl_san.cnf"
     try:

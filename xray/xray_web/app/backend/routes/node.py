@@ -7,7 +7,7 @@ from flask import Blueprint, request, jsonify
 from core.db import get_db, get_setting
 from core.edge_agent_service import EdgeAgentService
 from wimotek_edge_agent.models import AccessDecision
-from routes import get_node_snis, is_user_allowed_for_node, extract_host
+from routes import get_node_snis, is_user_allowed_for_node, resolve_public_endpoint
 
 node_bp = Blueprint('node_bp', __name__)
 
@@ -254,9 +254,10 @@ def node_heartbeat():
                 }
             }
             if net_mode == "reverse_wss":
+                hub_host, hub_port, _ = resolve_public_endpoint(request)
                 resp_data["tunnel_config"] = {
-                    "hub_ws_host": extract_host(request.host),
-                    "hub_ws_port": 443,
+                    "hub_ws_host": hub_host,
+                    "hub_ws_port": hub_port,
                     "hub_ws_path": f"/api/tunnel/bridge/{node_id}",
                     "tunnel_uuid": tunnel_uuid,
                     "portal_domain": f"reverse.{node_id}.hub.internal"
@@ -350,9 +351,10 @@ def node_heartbeat():
             if client_key != final_node_key:
                 resync_resp["tofu_assigned_key"] = final_node_key
             if resync_net_mode == "reverse_wss":
+                hub_host, hub_port, _ = resolve_public_endpoint(request)
                 resync_resp["tunnel_config"] = {
-                    "hub_ws_host": extract_host(request.host),
-                    "hub_ws_port": 443,
+                    "hub_ws_host": hub_host,
+                    "hub_ws_port": hub_port,
                     "hub_ws_path": f"/api/tunnel/bridge/{node_id}",
                     "tunnel_uuid": resynced_node.get("tunnel_uuid") or "",
                     "portal_domain": f"reverse.{node_id}.hub.internal"
@@ -430,9 +432,10 @@ def node_heartbeat():
                 }
             }
             if stage2_net_mode == "reverse_wss":
+                hub_host, hub_port, _ = resolve_public_endpoint(request)
                 stage2_resp["tunnel_config"] = {
-                    "hub_ws_host": extract_host(request.host),
-                    "hub_ws_port": 443,
+                    "hub_ws_host": hub_host,
+                    "hub_ws_port": hub_port,
                     "hub_ws_path": f"/api/tunnel/bridge/{node_id}",
                     "tunnel_uuid": latest_node.get("tunnel_uuid") or "",
                     "portal_domain": f"reverse.{node_id}.hub.internal"
@@ -616,8 +619,7 @@ def create_gateway_session():
         session_uuid = str(uuid.uuid4())
         is_reverse = (node.get("net_mode") == "reverse_wss")
 
-        hub_host = extract_host(request.host)
-        hub_port = 443
+        hub_host, hub_port, _ = resolve_public_endpoint(request)
 
         raw_node_ip = str(node["ip"]).strip()
         formatted_node_ip = f"[{raw_node_ip}]" if (":" in raw_node_ip and not raw_node_ip.startswith("[")) else raw_node_ip

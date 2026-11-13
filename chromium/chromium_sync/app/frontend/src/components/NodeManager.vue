@@ -247,6 +247,8 @@ const openCreateModal = () => {
   showNodeModal.value = true
 }
 
+const isWssManagedNode = (connType) => ['reverse', 'public_wss', 'wss_direct'].includes(connType)
+
 const openEditModal = (node) => {
   isEditMode.value = true
   editingNodeId.value = node.id
@@ -415,33 +417,34 @@ onUnmounted(() => {
         <div v-if="deployTab === 'docker'">
           <pre class="code-pre"><code>docker run -d \
   --name chromium-novnc \
+  --shm-size="2gb" \
   -p 6080:6080 \
-  -p 9222:9222 \
+  -p 9443:9443 \
   -e HUB_URL={{ currentHubUrl }} \
   -e JOIN_TOKEN={{ clusterJoinToken }} \
-  -v ./data:/data \
+  -v /home/docker/chromium_novnc:/data \
   wimotek/chromium:novnc</code></pre>
           <div style="display:flex; justify-content:space-between; align-items:center; margin-top:6px;">
-            <span style="font-size:11px; color:#64748b;">* 若宿主机映射其他端口可追加 <code>-e DIRECT_PORT=3030</code>；非 root 容器需确保宿主机目录 <code>chown -R 1000:1000 ./data</code>。</span>
-            <button @click="copyText(`docker run -d --name chromium-novnc -p 6080:6080 -p 9222:9222 -e HUB_URL=${currentHubUrl} -e JOIN_TOKEN=${clusterJoinToken} -v ./data:/data wimotek/chromium:novnc`, 'Docker 启动命令')" class="link-probe">一键复制 CLI</button>
+            <span style="font-size:11px; color:#64748b;">* 原生 CDP <code>9222</code> 仅监听容器内 <code>127.0.0.1</code> 绝不公网裸露；对外通过鉴权加密 WSS <code>9443</code> 端口建连并自动自适应 NAT4 反向穿透；自定义外部 WSS 端口可加 <code>-e EDGE_WSS_EXTERNAL_PORT=3030</code>。</span>
+            <button @click="copyText(`docker run -d --name chromium-novnc --shm-size=&quot;2gb&quot; -p 6080:6080 -p 9443:9443 -e HUB_URL=${currentHubUrl} -e JOIN_TOKEN=${clusterJoinToken} -v /home/docker/chromium_novnc:/data wimotek/chromium:novnc`, 'Docker 启动命令')" class="link-probe">一键复制 CLI</button>
           </div>
         </div>
 
         <div v-else>
-          <pre class="code-pre"><code>version: '3.8'
-services:
+          <pre class="code-pre"><code>services:
   chromium-node:
     image: wimotek/chromium:novnc
     restart: unless-stopped
+    shm_size: "2gb"
     ports:
       - "6080:6080"
-      - "9222:9222"
+      - "9443:9443"
     environment:
       - HUB_URL={{ currentHubUrl }}
       - JOIN_TOKEN={{ clusterJoinToken }}
-      # - DIRECT_PORT=3030
+      # - EDGE_WSS_EXTERNAL_PORT=9443
     volumes:
-      - ./data:/data</code></pre>
+      - /home/docker/chromium_novnc:/data</code></pre>
         </div>
       </div>
     </div>
@@ -529,7 +532,7 @@ services:
                 <span v-if="node.enabled === 0" style="font-size:10px; color:#f87171; margin-left:4px;">[已禁用]</span>
               </div>
               <div class="cell-sub-desc">
-                <span v-if="node.conn_type === 'reverse'">指纹: {{ node.fingerprint ? node.fingerprint.slice(0, 16) + '...' : (node.node_uuid || 'Client') }}</span>
+                <span v-if="isWssManagedNode(node.conn_type)">指纹: {{ node.fingerprint ? node.fingerprint.slice(0, 16) + '...' : (node.node_uuid || 'Client') }}</span>
                 <span v-else-if="node.is_local">直连: {{ node.direct_host || '127.0.0.1' }}</span>
                 <span v-else>{{ node.ssh_user }}@{{ node.ssh_host }}:{{ node.ssh_port }}</span>
               </div>
@@ -542,7 +545,10 @@ services:
             </td>
 
             <td class="font-cyan-mono">
-              <span v-if="node.conn_type === 'reverse'">Reverse-WSS (:{{ node.local_bind_port }})</span>
+              <span v-if="node.conn_type === 'public_wss' || node.conn_type === 'wss_direct'">
+                wss://{{ node.wss_endpoint || node.recommended_endpoint || (node.direct_host + ':9443') }}
+              </span>
+              <span v-else-if="node.conn_type === 'reverse'">Reverse-WSS (:{{ node.local_bind_port }})</span>
               <span v-else-if="node.recommended_endpoint">{{ node.recommended_endpoint }}</span>
               <span v-else>{{ node.is_local ? (node.direct_host || '127.0.0.1') : '127.0.0.1' }}:{{ node.local_bind_port }}</span>
             </td>
@@ -554,7 +560,10 @@ services:
             </td>
 
             <td>
-              <span v-if="node.conn_type === 'reverse'" class="tag-topo-reverse">
+              <span v-if="node.conn_type === 'public_wss' || node.conn_type === 'wss_direct'" class="tag-topo-direct">
+                WSS 公网直连
+              </span>
+              <span v-else-if="node.conn_type === 'reverse'" class="tag-topo-reverse">
                 {{ node.network_mode === 'reverse_tunnel' ? 'NAT4 反向隧道' : 'WSS 反向长连' }}
               </span>
               <span v-else-if="node.conn_type === 'ssh'" class="tag-topo-ssh">SSH 穿透</span>
@@ -577,8 +586,12 @@ services:
                 >
                   {{ node.enabled === 0 ? '▶️' : '⏸️' }}
                 </button>
-                <button @click="toggleTunnel(node)" :disabled="node.enabled === 0 || node.conn_type === 'reverse'" class="btn-micro btn-orange">
-                  🔑 {{ node.conn_type === 'reverse' ? '长连' : (node.status === 'connected' ? '断开' : '穿透') }}
+                <button
+                  @click="toggleTunnel(node)"
+                  :disabled="node.enabled === 0 || node.conn_type === 'reverse'"
+                  class="btn-micro btn-orange"
+                >
+                  🔑 {{ node.conn_type === 'reverse' ? '长连' : ((node.conn_type === 'public_wss' || node.conn_type === 'wss_direct') ? (node.status === 'connected' ? '断开' : '直连') : (node.status === 'connected' ? '断开' : '穿透')) }}
                 </button>
                 <button @click="probeNode(node)" :disabled="node.enabled === 0" class="btn-micro btn-purple">探针</button>
                 <button @click="openEditModal(node)" class="btn-micro" style="background:#2563eb;">✏️</button>
@@ -624,7 +637,7 @@ services:
             </td>
 
             <td class="font-cyan-mono">
-              :{{ node.local_bind_port }}
+              {{ node.wss_endpoint || (':' + node.local_bind_port) }}
             </td>
 
             <td class="font-cyan-mono" style="font-size:11px;" :title="node.fingerprint">
@@ -632,7 +645,9 @@ services:
             </td>
 
             <td>
-              <span class="tag-topo-reverse">WSS 隔离通道</span>
+              <span class="tag-topo-reverse">
+                {{ (node.conn_type === 'public_wss' || node.conn_type === 'wss_direct') ? 'WSS 公网直连' : 'WSS 隔离通道' }}
+              </span>
             </td>
 
             <td style="text-align: right;">
@@ -719,13 +734,17 @@ services:
 
         <form @submit.prevent="submitNodeForm" class="form-v-stack" style="margin-top:14px;">
           
-          <div v-if="isEditMode && nodeForm.conn_type === 'reverse'" class="reverse-node-locked-box">
+          <div v-if="isEditMode && isWssManagedNode(nodeForm.conn_type)" class="reverse-node-locked-box">
             <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">
-              <span class="locked-badge-purple">🌐 接入类别：WSS 反向长连接</span>
+              <span class="locked-badge-purple">
+                🌐 接入类别：{{ nodeForm.conn_type === 'reverse' ? 'WSS 反向长连接' : '公网 WSS 鉴权直连' }}
+              </span>
               <span class="locked-tag-lock">🔒 边缘 Agent 托管信道 (不可切换)</span>
             </div>
             <p style="font-size:11px; color:#cbd5e1; margin:0; line-height:1.5;">
-              该节点通过出站 WSS 建立长连接，通信由加密反向隧道承载，无需配置直连 IP。
+              {{ nodeForm.conn_type === 'reverse'
+                ? '该节点通过出站 WSS 建立反向长连接，安全桥接容器内 127.0.0.1:9222。'
+                : 'Hub 通过入站鉴权 WSS 加密直连节点 9443 端口，安全桥接容器内 127.0.0.1:9222。' }}
             </p>
           </div>
 
@@ -757,14 +776,19 @@ services:
             </div>
           </div>
 
-          <div v-if="isEditMode && nodeForm.conn_type === 'reverse'" class="form-v-stack">
+          <div v-if="isEditMode && isWssManagedNode(nodeForm.conn_type)" class="form-v-stack">
             <div class="row-flex-gap">
               <div class="form-field-block" style="flex:1;">
-                <label class="form-label">通信通道 <span style="color:#64748b;">[反向隧道托管]</span></label>
-                <input value="reverse-nat4 (WSS长连接信道)" disabled class="cdp-input cdp-disabled font-cyan-mono" style="width:100% !important;">
+                <label class="form-label">通信通道 <span style="color:#64748b;">[边缘托管]</span></label>
+                <input
+                  :value="nodeForm.conn_type === 'reverse' ? 'reverse-nat4 (出站 WSS 反向隧道)' : 'public-wss (入站 WSS 公网直连)'"
+                  disabled
+                  class="cdp-input cdp-disabled font-cyan-mono"
+                  style="width:100% !important;"
+                >
               </div>
               <div class="form-field-block" style="flex:1;">
-                <label class="form-label">申报/映射 CDP 端口 (如 3030)</label>
+                <label class="form-label">申报/映射 CDP 端口 (如 9222)</label>
                 <input v-model="nodeForm.local_bind_port" type="number" required class="cdp-input font-cyan-mono" style="width:100% !important;">
               </div>
             </div>

@@ -6,7 +6,7 @@ set -e
 # ==============================================================================
 if [ "$(id -u)" = "0" ]; then
     echo "[Init] (Root阶段) 正在执行权限自愈与证书扫描，随后立即降权至 appuser..."
-    mkdir -p /tmp/.X11-unix /data /etc/ssl/app /tmp/crashpad /home/appuser/.vnc /usr/share/novnc
+    mkdir -p /tmp/.X11-unix /data /etc/ssl/app /tmp/crashpad /home/appuser/.vnc /home/appuser/.config /home/appuser/.cache/openbox /home/appuser/.cache/fontconfig /usr/share/novnc
     chmod 1777 /tmp /tmp/.X11-unix /tmp/crashpad
 
     rm -f /tmp/.X0-lock /tmp/.X11-unix/X0 /data/SingletonLock /data/SingletonCookie /data/SingletonSocket 2>/dev/null || true
@@ -59,7 +59,9 @@ if [ "$(id -u)" = "0" ]; then
     fi
 
     # 仅调整容器自有目录与证书副本属主，绝对不触碰宿主机 /certs
-    chown -R appuser:appuser /data /home/appuser "$SSL_OUT_DIR" 2>/dev/null || true
+    if ! chown -R appuser:appuser /data /home/appuser "$SSL_OUT_DIR"; then
+        echo "[WARN] (Root阶段) 部分目录 chown 失败（如 NFS root_squash、只读挂载或磁盘已满），将在降权后执行真实写入探测"
+    fi
     chmod 600 "$SSL_OUT_DIR/novnc.pem" 2>/dev/null || true
 
     export HOME=/home/appuser
@@ -77,16 +79,26 @@ GID_NOW="$(id -g)"
 export HOME=/home/appuser
 export USER=appuser
 export LOGNAME=appuser
+export XDG_CONFIG_HOME=/home/appuser/.config
+export XDG_CACHE_HOME=/home/appuser/.cache
 export DISPLAY=:0
 export NO_AT_BRIDGE=1
 export PYTHONUNBUFFERED=1
 
-if [ ! -d "/data" ] || [ ! -w "/data" ]; then
-    echo "[ERROR] /data 不可写 (UID=${UID_NOW}, GID=${GID_NOW})，请检查宿主机目录权限 (如 --user 模式需 chown -R ${UID_NOW}:${GID_NOW} ./novnc_data)"
+if [ ! -d "/data" ] || ! touch /data/.rw_probe 2>/tmp/.rw_err; then
+    ERR_MSG="$(cat /tmp/.rw_err 2>/dev/null || true)"
+    rm -f /tmp/.rw_err 2>/dev/null || true
+    echo "[ERROR] /data 无法写入 (UID=${UID_NOW}, GID=${GID_NOW}): ${ERR_MSG}"
+    echo "[ERROR] 若使用宿主机挂载，请确保挂载专属子目录（如 -v /home/docker/chromium_novnc:/data），检查宿主磁盘空间/inode (df -h / df -i) 与权限 (chown -R ${UID_NOW}:${GID_NOW} / SELinux :Z)"
+    df -h /data /tmp /dev/shm 2>/dev/null || true
     exit 1
 fi
+rm -f /data/.rw_probe /tmp/.rw_err 2>/dev/null || true
 
-mkdir -p "$HOME/.vnc" /etc/ssl/app /tmp/crashpad 2>/dev/null || true
+if ! mkdir -p "$HOME/.vnc" "$HOME/.config" "$HOME/.cache/openbox" "$HOME/.cache/fontconfig" /etc/ssl/app /tmp/crashpad; then
+    echo "[WARN] 容器内部缓存目录创建异常，请检查宿主机 Docker 存储盘空间 (df -h / df -i / docker system df)："
+    df -h "$HOME" /tmp /dev/shm 2>/dev/null || true
+fi
 rm -f /tmp/.X0-lock /tmp/.X11-unix/X0 /data/SingletonLock /data/SingletonCookie /data/SingletonSocket 2>/dev/null || true
 
 RESOLUTION=${RESOLUTION:-1920x1080}
@@ -152,10 +164,11 @@ if [ -f "$FINAL_PEM" ]; then
     /usr/share/novnc/utils/novnc_proxy --vnc 127.0.0.1:5900 --listen 6443 --cert "$FINAL_PEM" --web /usr/share/novnc &
 fi
 
-# 6. 本地调试通道：socat 监听 9223 转发至原生 9222
-socat TCP-LISTEN:9223,fork,reuseaddr TCP:127.0.0.1:9222 &
+# 6. CDP 安全隔离：Chromium 原生仅绑定 127.0.0.1:9222，绝不直接暴露到公网；外部由 edge_node_client 的 WSS (默认 9443) 鉴权代理
+EDGE_WSS_PORT="${EDGE_WSS_PORT:-9443}"
+export EDGE_WSS_PORT
 
-echo "[Ready] noVNC(UID=${UID_NOW}) HTTP :6080, HTTPS :6443, CDP :9222"
+echo "[Ready] noVNC(UID=${UID_NOW}) HTTP :6080, HTTPS :6443, Local CDP 127.0.0.1:9222, Edge WSS :${EDGE_WSS_PORT}"
 
 # 7. 启动 Wimotek Agent 守护进程 (带故障自动重生看门狗)
 if [ -n "$HUB_URL" ]; then
@@ -175,10 +188,24 @@ if [ $# -eq 0 ]; then
     set -- "$HOMEPAGE"
 fi
 
-echo "Starting Chromium under noVNC (non-root UID=${UID_NOW}) with native CDP 9222..."
+# 自动检测 /dev/shm 容量：未设置 --shm-size="2gb" (默认仅 64MB) 时自动启用 --disable-dev-shm-usage 防止崩溃循环
+SHM_KB="$(df -Pk /dev/shm 2>/dev/null | awk 'NR==2 {print $2}')"
+EXTRA_SHM_FLAG=""
+if [ -n "$SHM_KB" ] && [ "$SHM_KB" -lt 524288 ] 2>/dev/null; then
+    case " $CHROME_ARGS " in
+        *" --disable-dev-shm-usage "*) ;;
+        *)
+            echo "[WARN] 检测到 /dev/shm 仅 $((SHM_KB / 1024))MB (< 512MB)，自动追加 --disable-dev-shm-usage（建议启动时配置 --shm-size=\"2gb\"）"
+            EXTRA_SHM_FLAG="--disable-dev-shm-usage"
+            ;;
+    esac
+fi
+
+echo "Starting Chromium under noVNC (non-root UID=${UID_NOW}) with local-only CDP 127.0.0.1:9222..."
 while true; do
     rm -f /data/SingletonLock /data/SingletonCookie /data/SingletonSocket 2>/dev/null || true
 
+    set +e
     chromium \
         --no-sandbox \
         --test-type \
@@ -203,9 +230,12 @@ while true; do
         --window-position=0,0 \
         --start-maximized \
         --user-data-dir=/data \
+        $EXTRA_SHM_FLAG \
         $CHROME_ARGS \
-        "$@" || true
+        "$@"
+    CHROME_EXIT=$?
+    set -e
 
-    echo "Chromium 窗口已关闭，1 秒后自动拉起..."
-    sleep 1
+    echo "[Chromium] 进程已退出 (exit=${CHROME_EXIT})，2 秒后自动拉起..."
+    sleep 2
 done
