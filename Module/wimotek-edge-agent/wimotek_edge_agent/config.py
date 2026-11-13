@@ -48,7 +48,7 @@ class Config:
     audit_max_bytes: int = 10 * 1024 * 1024  # 默认 10MB
     audit_backup_count: int = 5              # 默认保留 5 个归档
 
-    # 网络连通性主动探测配置
+    # 网络连通性主动探测配置 (TCP 三次握手)
     network_probe_timeout_seconds: float = 2.0
     allow_non_public_probe: bool = False
 

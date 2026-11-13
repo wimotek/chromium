@@ -36,7 +36,8 @@ class NetworkDetectionResult:
     """
     简化的网络模式探测结果：
     1. 远程节点上报自己的公网 IPv4 / IPv6 与端口；
-    2. 本模块并发测试连通性，判定最终网络模式并传回给远程节点。
+    2. 本模块并发执行 TCP 三次握手测试连通性（不依赖 ICMP ping，兼容禁 ping 主机）；
+    3. 判定最终网络模式并传回给远程节点。
     """
 
     network_mode: str  # "direct_dual" | "direct_ipv4" | "direct_ipv6" | "reverse_tunnel"
@@ -107,7 +108,7 @@ async def probe_tcp_endpoint(
     allow_non_public: bool = False,
 ) -> EndpointProbeResult:
     """
-    对上报的 IPv4 或 IPv6 端口执行异步 TCP 连通性拨测。
+    对上报的 IPv4 或 IPv6 端口执行异步 TCP 三次握手拨测（不使用 ICMP ping，兼容禁 ping 主机）。
     """
     addr, port_int, err = _validate_endpoint(host, port, family, allow_non_public)
     if err is not None or addr is None or port_int is None:
@@ -183,7 +184,7 @@ async def detect_network_mode(
     """
     核心网络模式判定入口：
     - 若管理员强制 reverse_tunnel=True，直接返回 reverse_tunnel。
-    - 否则并发探测远程节点上报的公网 IPv4 / IPv6 端口：
+    - 否则并发通过 TCP 三次握手探测远程节点上报的公网 IPv4 / IPv6 端口：
       - 均通 -> direct_dual
       - 仅 IPv6 通 -> direct_ipv6
       - 仅 IPv4 通 -> direct_ipv4

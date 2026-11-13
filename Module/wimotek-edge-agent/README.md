@@ -27,7 +27,7 @@ Commercial-grade edge access control, service bridge, and tunnel agent featuring
 1. **Local connections default allow**, gated by `local_bypass_token` (mode `0600`), preventing unauthorized local processes from abusing `127.0.0.1`.
 2. **External connections default TOFU**. Unauthenticated nodes are quarantined to heartbeats only. No business data is relayed until approved by an administrator.
 3. **External connections with token use Edge Agent mode**. Single-use HMAC-SHA256 tokens verify signature, TTL, audience, issuer, optional node UUID, IP CIDR binding, and replay prevention.
-4. **Simple reachability-driven network mode (`direct_dual` / `direct_ipv4` / `direct_ipv6` / `reverse_tunnel`)**. Remote nodes report their public IPv4 / IPv6 addresses and ports; this module actively tests TCP reachability, decides the network mode, and returns it directly to the remote node without complex NAT traversal heuristics. Authentication strength remains identical across all modes.
+4. **Simple reachability-driven network mode (`direct_dual` / `direct_ipv4` / `direct_ipv6` / `reverse_tunnel`)**. Remote nodes report their public IPv4 / IPv6 addresses and ports; this module actively tests reachability via **TCP 3-way handshake** (never relying on ICMP `ping`, and requiring zero extra HTTP endpoints on the remote node), decides the network mode, and returns it directly to the remote node. Authentication strength remains identical across all modes.
 5. **Trusted nodes re-auth with short-lived session tickets**. Trusted nodes without token or session are denied, strictly preventing downgrade attacks to TOFU.
 
 ## Architecture
@@ -37,9 +37,9 @@ Remote Node Handshake (public_ipv4/port, public_ipv6/port, token/ticket)
                  │
                  ▼
   +--------------------------------------+
-  | Network Prober (nat.py)              | ---> Concurrent IPv4/IPv6 TCP Probe
-  |  SSRF Guard -> direct_dual / ipv4 /  |      Returns network_mode +
-  |  ipv6 / reverse_tunnel               |      recommended_endpoint to peer
+  | Network Prober (nat.py)              | ---> Concurrent IPv4/IPv6 TCP Handshake
+  |  SSRF Guard -> direct_dual / ipv4 /  |      (No ICMP ping required)
+  |  ipv6 / reverse_tunnel               |      Returns network_mode to peer
   +--------------------------------------+
                  │
                  ▼
@@ -58,7 +58,14 @@ Remote Node Handshake (public_ipv4/port, public_ipv6/port, token/ticket)
 
 ## Network mode detection (IPv4 / IPv6 Reachability)
 
-To keep NAT/network classification simple, deterministic, and verifiable, `wimotek-edge-agent` replaces complex STUN/NAT-type guessing with a direct 2-step reachability handshake:
+### Why TCP 3-way Handshake (and NOT ICMP `ping`)?
+
+`wimotek-edge-agent` uses asynchronous **TCP 3-way handshake (`asyncio.open_connection`)** rather than ICMP `ping`:
+- **Works when ICMP `ping` is blocked**: Cloud VMs, security groups, carrier firewalls, and edge routers routinely drop ICMP Echo packets (`ping` fails even when service ports are reachable). TCP handshake tests the exact destination port directly.
+- **No root / `CAP_NET_RAW` privileges**: Unprivileged containers and services can run it safely.
+- **Protocol-agnostic & zero extra setup**: Works identically for EdgeAgent TLS/TCP, JSON-Line, gRPC, or Web services without requiring the remote node to expose `/healthz` or extra HTTP routes. Once connected directly, EdgeAgent's own handshake + heartbeat + session ticket natively confirm application liveness.
+
+### Two-Step Handshake Flow
 
 1. **Step 1 — Remote node reports endpoints**:
    The remote node includes its public IPv4 and/or IPv6 addresses and listening ports in the handshake payload (or configures `EDGE_AGENT_PUBLIC_IPV4*` / `EDGE_AGENT_PUBLIC_IPV6*`):
@@ -73,8 +80,8 @@ To keep NAT/network classification simple, deterministic, and verifiable, `wimot
      "public_ipv6_port": 8443
    }
    ```
-2. **Step 2 — Central module tests reachability & returns `network_mode`**:
-   When receiving the handshake (or a `{"type": "network_probe", ...}` control message, or calling `detect-network`), this module concurrently runs async TCP connection probes (`asyncio.open_connection`) against the reported IPv4 and IPv6 endpoints and classifies the result:
+2. **Step 2 — Central module tests TCP reachability & returns `network_mode`**:
+   When receiving the handshake (or a `{"type": "network_probe", ...}` control message, or calling `detect-network`), this module concurrently runs async TCP connection probes against the reported IPv4 and IPv6 ports and classifies the result:
 
    | IPv4 Reachable | IPv6 Reachable | `network_mode` Returned | `network_profile` | Behavior |
    |---|---|---|---|---|
@@ -365,7 +372,7 @@ Read or generate the local bypass token:
 wimotek-edge-agent bypass-token
 ```
 
-Test public IPv4 / IPv6 reachability and determine `network_mode`:
+Test public IPv4 / IPv6 reachability (TCP 3-way handshake, works even when ICMP ping is blocked) and determine `network_mode`:
 
 ```bash
 wimotek-edge-agent detect-network \
