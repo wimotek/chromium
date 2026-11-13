@@ -45,7 +45,11 @@ def init_db_and_jwt():
         cookie_count INTEGER DEFAULT 0,
         auto_tunnel INTEGER DEFAULT 1,
         status TEXT DEFAULT 'stopped',
-        last_sync TEXT
+        last_sync TEXT,
+        network_mode TEXT DEFAULT '',
+        recommended_endpoint TEXT DEFAULT '',
+        ipv4_reachable INTEGER DEFAULT 0,
+        ipv6_reachable INTEGER DEFAULT 0
     )''')
 
     # 2. 多策略管理表
@@ -99,7 +103,11 @@ def init_db_and_jwt():
         ("group_name", "TEXT DEFAULT '默认分组'"),
         ("direct_host", "TEXT DEFAULT '127.0.0.1'"),
         ("auto_tunnel", "INTEGER DEFAULT 1"),
-        ("cookie_count", "INTEGER DEFAULT 0")
+        ("cookie_count", "INTEGER DEFAULT 0"),
+        ("network_mode", "TEXT DEFAULT ''"),
+        ("recommended_endpoint", "TEXT DEFAULT ''"),
+        ("ipv4_reachable", "INTEGER DEFAULT 0"),
+        ("ipv6_reachable", "INTEGER DEFAULT 0")
     ]
 
     for col_name, col_def in node_patches:

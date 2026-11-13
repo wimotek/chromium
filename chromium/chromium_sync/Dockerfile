@@ -8,40 +8,68 @@ RUN npm install --registry=https://registry.npmmirror.com
 COPY app/frontend/ ./
 RUN npm run build
 
-# ================= 阶段 2：轻量主控面板生产运行环境 =================
-FROM python:3.11-slim
+# ================= 阶段 2：编译隔离 Python 虚拟环境 =================
+FROM python:3.11-slim-bookworm AS backend-builder
+WORKDIR /build
+
+ENV PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PIP_NO_CACHE_DIR=1
+
+COPY app/backend/requirements.txt ./requirements.txt
+RUN python -m venv /opt/venv \
+    && /opt/venv/bin/pip install --no-cache-dir -r ./requirements.txt \
+        --index-url https://pypi.org/simple \
+        --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple \
+    && find /opt/venv -type d -name "__pycache__" -prune -exec rm -rf {} + \
+    && find /opt/venv -type f -name "*.pyc" -delete
+
+# ================= 阶段 3：轻量主控面板生产运行环境 (dumb-init + Root-Init-Drop gosu) =================
+FROM python:3.11-slim-bookworm
+
+ARG PUID=1000
+ARG PGID=1000
+
 WORKDIR /app
 
-# 默认设置上海时区 (Asia/Shanghai, UTC+8)
-ENV TZ=Asia/Shanghai
+ENV TZ=Asia/Shanghai \
+    PATH="/opt/venv/bin:${PATH}" \
+    PYTHONPATH=/app/backend \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1
 
-# 安装 SSH 客户端、openssl、tzdata 时区包及基础工具
+# 安装 dumb-init、gosu、SSH 客户端、openssl、tzdata 并清理文档缓存
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    dumb-init \
+    gosu \
     ca-certificates \
-    curl \
     openssh-client \
     openssl \
     tzdata \
-    && ln -fs /usr/share/zoneinfo/${TZ} /etc/localtime \
-    && echo ${TZ} > /etc/timezone \
-    && rm -rf /var/lib/apt/lists/*
+    && ln -fs "/usr/share/zoneinfo/${TZ}" /etc/localtime \
+    && echo "${TZ}" > /etc/timezone \
+    && rm -rf /var/lib/apt/lists/* \
+        /usr/share/doc/* \
+        /usr/share/man/* \
+        /usr/share/info/* \
+        /tmp/*
 
-COPY app/backend/requirements.txt ./backend/
-RUN pip install --no-cache-dir -r ./backend/requirements.txt \
-    --index-url https://pypi.org/simple \
-    --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
+RUN groupadd -g "${PGID}" hubuser \
+    && useradd -m -u "${PUID}" -g "${PGID}" -s /bin/bash hubuser \
+    && mkdir -p /data/keys /data/certs /certs /etc/ssl/app /app/backend /app/frontend \
+    && chown -R "${PUID}:${PGID}" /data /etc/ssl/app /app
 
-COPY app/backend/ ./backend/
-COPY --from=frontend-builder /build/dist ./frontend/dist
-
-# 确保数据持久化目录与证书目录
-RUN mkdir -p /data/keys /certs
+COPY --from=backend-builder --chown="${PUID}:${PGID}" /opt/venv /opt/venv
+COPY --chown="${PUID}:${PGID}" app/backend/ ./backend/
+COPY --from=frontend-builder --chown="${PUID}:${PGID}" /build/dist ./frontend/dist
+COPY --chmod=755 entrypoint.sh /entrypoint.sh
 
 WORKDIR /app/backend
-ENV PYTHONPATH=/app/backend
-ENV PYTHONUNBUFFERED=1
 
 EXPOSE 8443
 VOLUME ["/data"]
 
+HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
+    CMD ["python3", "-c", "import ssl, urllib.request; ctx = ssl._create_unverified_context(); urllib.request.urlopen('https://127.0.0.1:8443/api/auth/status', context=ctx, timeout=3)"]
+
+ENTRYPOINT ["/usr/bin/dumb-init", "--", "/entrypoint.sh"]
 CMD ["python3", "app.py"]

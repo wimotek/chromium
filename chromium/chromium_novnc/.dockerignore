@@ -1,2 +1,9 @@
 **/.git
+**/.venv
+**/__pycache__
+**/*.pyc
+**/node_modules
+**/data
+**/certs
 *.md
+*.log

@@ -1,12 +1,13 @@
 import os
 import asyncio
+import ipaddress
 import json
 import time
 import sqlite3
 import secrets
 from datetime import datetime, timezone
 from urllib.parse import unquote
-from typing import Optional, List
+from typing import Optional, List, Dict, Any
 from fastapi import APIRouter, HTTPException, Depends, Request, Query, Header as ReqHeader, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
 import httpx
@@ -17,10 +18,175 @@ from core.security import verify_token
 from services.tunnel_manager import tunnel_mgr, REVERSE_TUNNEL_POOL
 from services.cdp_engine import fetch_cookies_native, probe_node_cookies
 
+try:
+    from wimotek_edge_agent.nat import detect_network_mode as _edge_detect_network_mode
+    from wimotek_edge_agent.tokens import SessionTicketManager as _EdgeSessionTicketManager
+    HAS_EDGE_AGENT_LIB = True
+except ImportError:
+    _edge_detect_network_mode = None
+    _EdgeSessionTicketManager = None
+    HAS_EDGE_AGENT_LIB = False
+
 router = APIRouter(tags=["节点管理与边缘接入"])
+
 
 def _issue_join_token() -> str:
     return "hub_join_" + secrets.token_urlsafe(24)
+
+
+def _get_ticket_manager():
+    if not HAS_EDGE_AGENT_LIB or _EdgeSessionTicketManager is None:
+        return None
+    secret_raw = (os.getenv("EDGE_AGENT_TOKEN_SECRET") or get_setting("edge_agent_secret") or "").strip()
+    if len(secret_raw.encode("utf-8")) < 32:
+        secret_raw = (secret_raw + "0" * 32)[:32]
+    ttl = int(os.getenv("EDGE_AGENT_SESSION_TICKET_TTL_SECONDS", "300"))
+    return _EdgeSessionTicketManager(secret=secret_raw.encode("utf-8"), ttl_seconds=ttl)
+
+
+def _issue_session_ticket(node_uuid: str, fingerprint: str) -> Optional[str]:
+    mgr = _get_ticket_manager()
+    if mgr is None or not node_uuid:
+        return None
+    try:
+        return mgr.issue(node_uuid, fingerprint or "sha256:unknown")
+    except Exception:
+        return None
+
+
+def _verify_session_ticket(ticket: Optional[str], node_uuid: str, fingerprint: str) -> bool:
+    if not ticket:
+        return False
+    mgr = _get_ticket_manager()
+    if mgr is None:
+        return False
+    try:
+        return bool(mgr.verify(ticket, node_uuid, fingerprint or "sha256:unknown"))
+    except Exception:
+        return False
+
+
+def _verify_join_token(presented: Optional[str], valid_token: str) -> bool:
+    if not presented or not valid_token:
+        return False
+    return secrets.compare_digest(presented.strip(), valid_token.strip())
+
+
+def _allow_non_public_probe() -> bool:
+    val = os.getenv("EDGE_AGENT_ALLOW_NON_PUBLIC_PROBE", "").strip().lower()
+    if val in {"1", "true", "yes", "on"}:
+        return True
+    if val in {"0", "false", "no", "off"}:
+        return False
+    # 默认允许私网探测仅在 Docker/LAN 内显式开启，或由环境变量控制；Hub 本地部署默认从 env 读取
+    return False
+
+
+async def _run_edge_network_detection(
+    public_ipv4: Optional[str] = None,
+    public_ipv4_port: Optional[int] = None,
+    public_ipv6: Optional[str] = None,
+    public_ipv6_port: Optional[int] = None,
+    force_reverse: Optional[bool] = None,
+) -> Dict[str, Any]:
+    """
+    调用 wimotek-edge-agent 1.0.17 detect_network_mode 执行并发 TCP 三次握手探测。
+    若模块不可用，降级为纯 asyncio.open_connection TCP 探测。
+    """
+    timeout_sec = float(os.getenv("EDGE_AGENT_NETWORK_PROBE_TIMEOUT_SECONDS", "2.0"))
+    allow_non_public = _allow_non_public_probe()
+
+    if HAS_EDGE_AGENT_LIB and _edge_detect_network_mode is not None:
+        det = await _edge_detect_network_mode(
+            public_ipv4=public_ipv4,
+            public_ipv4_port=public_ipv4_port,
+            public_ipv6=public_ipv6,
+            public_ipv6_port=public_ipv6_port,
+            timeout=timeout_sec,
+            allow_non_public=allow_non_public,
+            force_reverse=force_reverse,
+        )
+        d = det.to_dict()
+        d["can_direct"] = d.get("network_profile") == "direct" and bool(
+            d.get("ipv4_reachable") or d.get("ipv6_reachable")
+        )
+        d["probe_results"] = {"ipv4": d.get("ipv4"), "ipv6": d.get("ipv6")}
+        return d
+
+    # 降级 TCP 三次握手探测
+    async def _tcp_probe(host: Optional[str], port: Optional[int], family: str):
+        if not host or not port:
+            return None
+        t0 = time.perf_counter()
+        writer = None
+        try:
+            _, writer = await asyncio.wait_for(asyncio.open_connection(host, int(port)), timeout=timeout_sec)
+            lat = round((time.perf_counter() - t0) * 1000, 2)
+            return {"family": family, "host": host, "port": int(port), "reachable": True, "latency_ms": lat, "error": None}
+        except Exception as exc:
+            return {"family": family, "host": host, "port": int(port), "reachable": False, "latency_ms": None, "error": str(exc)}
+        finally:
+            if writer:
+                writer.close()
+
+    if force_reverse is True:
+        return {
+            "network_mode": "reverse_tunnel",
+            "network_profile": "nat4_reverse",
+            "ipv4_reachable": False,
+            "ipv6_reachable": False,
+            "recommended_endpoint": None,
+            "can_direct": False,
+            "probe_results": {"ipv4": None, "ipv6": None},
+        }
+
+    v4_res, v6_res = await asyncio.gather(
+        _tcp_probe(public_ipv4, public_ipv4_port, "ipv4"),
+        _tcp_probe(public_ipv6, public_ipv6_port, "ipv6"),
+    )
+    v4_ok = bool(v4_res and v4_res["reachable"])
+    v6_ok = bool(v6_res and v6_res["reachable"])
+    if v4_ok and v6_ok:
+        mode = "direct_dual"
+        rec = (
+            f"[{v6_res['host']}]:{v6_res['port']}"
+            if v6_res["latency_ms"] < v4_res["latency_ms"]
+            else f"{v4_res['host']}:{v4_res['port']}"
+        )
+    elif v6_ok:
+        mode = "direct_ipv6"
+        rec = f"[{v6_res['host']}]:{v6_res['port']}"
+    elif v4_ok:
+        mode = "direct_ipv4"
+        rec = f"{v4_res['host']}:{v4_res['port']}"
+    else:
+        mode = "reverse_tunnel"
+        rec = None
+
+    profile = "direct" if (v4_ok or v6_ok) else "nat4_reverse"
+    return {
+        "network_mode": mode,
+        "network_profile": profile,
+        "ipv4_reachable": v4_ok,
+        "ipv6_reachable": v6_ok,
+        "recommended_endpoint": rec,
+        "can_direct": v4_ok or v6_ok,
+        "probe_results": {"ipv4": v4_res, "ipv6": v6_res},
+    }
+
+
+def _split_endpoint_host_port(endpoint: Optional[str], fallback_host: str, fallback_port: int) -> tuple[str, int]:
+    if not endpoint:
+        return fallback_host, fallback_port
+    ep = endpoint.strip()
+    if ep.startswith("[") and "]:" in ep:
+        h, p = ep[1:].split("]:", 1)
+        return h, int(p)
+    if ":" in ep and ep.count(":") == 1:
+        h, p = ep.rsplit(":", 1)
+        return h, int(p)
+    return fallback_host, fallback_port
+
 
 def _append_audit_log(event: str, **kwargs):
     audit_path = "/data/audit.jsonl"
@@ -52,11 +218,33 @@ def _get_available_bind_port(cur, preferred_port: int, exclude_node_id: Optional
         candidate += 1
     return candidate
 
+
+class DetectModeDTO(BaseModel):
+    node_uuid: Optional[str] = None
+    cdp_port: int = 9222
+    public_ipv4: Optional[str] = None
+    public_ipv4_port: Optional[int] = None
+    public_ipv6: Optional[str] = None
+    public_ipv6_port: Optional[int] = None
+    force_reverse: Optional[bool] = None
+
+
 class NodeAutoRegisterDTO(BaseModel):
     node_uuid: str
+    public_key_fingerprint: Optional[str] = ""
     name: Optional[str] = ""
     group_name: Optional[str] = "默认分组"
     cdp_port: int = 9222
+    public_ipv4: Optional[str] = None
+    public_ipv4_port: Optional[int] = None
+    public_ipv6: Optional[str] = None
+    public_ipv6_port: Optional[int] = None
+    network_mode: Optional[str] = None
+    recommended_endpoint: Optional[str] = None
+    ipv4_reachable: Optional[bool] = None
+    ipv6_reachable: Optional[bool] = None
+    session_ticket: Optional[str] = None
+
 
 class TofuSettingsDTO(BaseModel):
     tofu_enabled: bool
@@ -227,16 +415,21 @@ async def approve_node(node_id: int, user: dict = Depends(verify_token)):
 
     session = tunnel_mgr.get_reverse_session(node_id)
     if session:
+        ticket = _issue_session_ticket(node.get("node_uuid") or str(node_id), node.get("fingerprint", ""))
         await session.send_raw_json({
             "status": "approved",
             "decision": "tofu_approved",
-            "network_profile": "nat4_reverse"
+            "network_mode": node.get("network_mode") or "reverse_tunnel",
+            "network_profile": "direct" if str(node.get("network_mode", "")).startswith("direct") else "nat4_reverse",
+            "recommended_endpoint": node.get("recommended_endpoint") or None,
+            "session_ticket": ticket,
         })
 
     _append_audit_log(
         "node_approved",
         node_uuid=node.get("node_uuid") or node.get("name"),
-        fingerprint=node.get("fingerprint", "")
+        fingerprint=node.get("fingerprint", ""),
+        network_mode=node.get("network_mode") or "reverse_tunnel",
     )
 
     await tunnel_mgr.start_tunnel(node)
@@ -271,34 +464,107 @@ def reset_join_token(user: dict = Depends(verify_token)):
     set_setting('cluster_join_token', new_token)
     return {"message": "集群入网通行码已重置", "join_token": new_token}
 
-# ==================== 5. 智能回声探测与 HTTP 直连登记 ====================
-@router.get("/api/nodes/detect-mode", summary="为边缘节点提供双向回声探活检测")
-async def detect_node_reachability(request: Request, cdp_port: int = Query(9222)):
-    client_ip = request.client.host
-    direct_ip = "127.0.0.1" if client_ip in ["127.0.0.1", "localhost", "::1"] else client_ip
-    
-    can_direct = False
-    ports_to_try = [cdp_port]
-    for fallback in [9222, 9223]:
-        if fallback not in ports_to_try:
-            ports_to_try.append(fallback)
+# ==================== 5. 智能 TCP 三次握手探测与 HTTP 直连登记 ====================
+@router.get("/api/nodes/detect-mode", summary="为边缘节点提供双向 TCP 探活检测 (兼容 GET)")
+async def detect_node_reachability_get(request: Request, cdp_port: int = Query(9222)):
+    return await _handle_detect_mode(
+        request,
+        DetectModeDTO(cdp_port=cdp_port),
+    )
 
-    async with httpx.AsyncClient(timeout=2.0) as client:
-        for p in ports_to_try:
-            try:
-                res = await client.get(f"http://{direct_ip}:{p}/json/version")
-                if res.status_code == 200:
-                    can_direct = True
-                    cdp_port = p
-                    break
-            except Exception:
-                continue
 
-    return {
-        "detected_ip": direct_ip,
-        "can_direct": can_direct,
-        "recommended_port": cdp_port
-    }
+@router.post("/api/nodes/detect-mode", summary="接收节点上传 IP/端口并执行 wimotek-edge-agent TCP 三次握手探测")
+async def detect_node_reachability_post(data: DetectModeDTO, request: Request):
+    return await _handle_detect_mode(request, data)
+
+
+async def _handle_detect_mode(request: Request, data: DetectModeDTO) -> Dict[str, Any]:
+    client_ip = request.headers.get("X-Forwarded-For", "").split(",")[0].strip() or (request.client.host if request.client else "127.0.0.1")
+    v4_host = data.public_ipv4
+    v6_host = data.public_ipv6
+
+    # 若节点未显式上传 IP，回退使用请求源 IP 归类到 IPv4 或 IPv6
+    if not v4_host and not v6_host and client_ip:
+        try:
+            ip_obj = ipaddress.ip_address(client_ip.strip("[]"))
+            if ip_obj.version == 6:
+                v6_host = str(ip_obj)
+            else:
+                v4_host = str(ip_obj)
+        except ValueError:
+            v4_host = client_ip
+
+    v4_port = data.public_ipv4_port or data.cdp_port
+    v6_port = data.public_ipv6_port or data.cdp_port
+
+    det = await _run_edge_network_detection(
+        public_ipv4=v4_host,
+        public_ipv4_port=v4_port if v4_host else None,
+        public_ipv6=v6_host,
+        public_ipv6_port=v6_port if v6_host else None,
+        force_reverse=data.force_reverse,
+    )
+
+    rec_host, rec_port = _split_endpoint_host_port(
+        det.get("recommended_endpoint"),
+        v4_host or v6_host or client_ip,
+        data.cdp_port,
+    )
+    det["detected_ip"] = rec_host
+    det["recommended_port"] = rec_port
+
+    _append_audit_log(
+        "network_detected",
+        node_uuid=data.node_uuid or "probe",
+        network_mode=det.get("network_mode"),
+        network_profile=det.get("network_profile"),
+        ipv4_reachable=det.get("ipv4_reachable"),
+        ipv6_reachable=det.get("ipv6_reachable"),
+        recommended_endpoint=det.get("recommended_endpoint"),
+    )
+    return det
+
+
+@router.post("/api/nodes/{node_id}/detect-network", summary="手动触发对已注册节点的 TCP 三次握手网络重探")
+async def reprobe_registered_node(node_id: int, user: dict = Depends(verify_token)):
+    conn = get_db_connection()
+    conn.row_factory = sqlite3.Row
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM nodes WHERE id=?", (node_id,))
+    row = cur.fetchone()
+    if not row:
+        conn.close()
+        raise HTTPException(status_code=404, detail="节点不存在")
+    node = dict(row)
+
+    host = node.get("direct_host") or ""
+    v4 = host if (host and ":" not in host and host != "reverse-nat4") else None
+    v6 = host if (host and ":" in host) else None
+    port = int(node.get("remote_cdp_port") or 9222)
+    det = await _run_edge_network_detection(
+        public_ipv4=v4,
+        public_ipv4_port=port if v4 else None,
+        public_ipv6=v6,
+        public_ipv6_port=port if v6 else None,
+    )
+    cur.execute(
+        "UPDATE nodes SET network_mode=?, recommended_endpoint=?, ipv4_reachable=?, ipv6_reachable=? WHERE id=?",
+        (
+            det.get("network_mode", ""),
+            det.get("recommended_endpoint") or "",
+            1 if det.get("ipv4_reachable") else 0,
+            1 if det.get("ipv6_reachable") else 0,
+            node_id,
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+    session = tunnel_mgr.get_reverse_session(node_id)
+    if session and not session.is_closed:
+        await session.send_raw_json({"type": "network_update", **det})
+    return det
+
 
 @router.post("/api/nodes/auto-register", summary="HTTP 自动上报直连接入")
 async def http_auto_register_node(
@@ -309,13 +575,19 @@ async def http_auto_register_node(
     valid_token = get_setting('cluster_join_token')
     tofu_enabled = (get_setting("tofu_enabled", "1") == "1")
     tofu_auto_approve = (get_setting("tofu_auto_approve", "0") == "1")
+    fp = data.public_key_fingerprint or ""
 
-    # 准入规则判定
-    if x_join_token and (x_join_token == valid_token or x_join_token.startswith("hub_join_")):
+    # 严格准入规则判定 (修复前缀绕过漏洞，支持 Join Token 与 Session Ticket)
+    if _verify_join_token(x_join_token, valid_token):
         approval_status = 1
         status = "connected"
         decision = "allow_token"
         reason = "edge_agent_token_verified"
+    elif _verify_session_ticket(data.session_ticket, data.node_uuid, fp):
+        approval_status = 1
+        status = "connected"
+        decision = "allow_session"
+        reason = "session_ticket_verified"
     elif not tofu_enabled:
         raise HTTPException(status_code=403, detail="TOFU 未授权接入功能已关闭，请配置合法 JOIN_TOKEN")
     elif tofu_auto_approve:
@@ -329,10 +601,16 @@ async def http_auto_register_node(
         decision = "pending_tofu"
         reason = "tofu_pending_admin_approval"
 
-    client_ip = request.client.host
-    direct_ip = "127.0.0.1" if client_ip in ["127.0.0.1", "localhost", "::1"] else client_ip
-    node_name = data.name.strip() or f"Edge-{data.node_uuid[:6]}"
-    grp_name = data.group_name.strip() or "默认分组"
+    client_ip = request.headers.get("X-Forwarded-For", "").split(",")[0].strip() or (request.client.host if request.client else "127.0.0.1")
+    fallback_ip = "127.0.0.1" if client_ip in ["127.0.0.1", "localhost", "::1"] else client_ip
+    direct_ip, rec_port = _split_endpoint_host_port(data.recommended_endpoint, data.public_ipv4 or data.public_ipv6 or fallback_ip, data.cdp_port)
+
+    node_name = (data.name or "").strip() or f"Edge-{data.node_uuid[:6]}"
+    grp_name = (data.group_name or "").strip() or "默认分组"
+    net_mode = data.network_mode or ("direct_ipv6" if ":" in direct_ip else "direct_ipv4")
+    rec_ep = data.recommended_endpoint or (f"[{direct_ip}]:{rec_port}" if ":" in direct_ip else f"{direct_ip}:{rec_port}")
+    v4_ok = 1 if data.ipv4_reachable else (1 if ":" not in direct_ip else 0)
+    v6_ok = 1 if data.ipv6_reachable else (1 if ":" in direct_ip else 0)
 
     conn = get_db_connection()
     conn.row_factory = sqlite3.Row
@@ -343,20 +621,23 @@ async def http_auto_register_node(
     if existing:
         node_id = existing["id"]
         appr = existing["approval_status"] if approval_status == 0 else 1
-        allocated_port = _get_available_bind_port(cur, data.cdp_port, exclude_node_id=node_id)
+        allocated_port = _get_available_bind_port(cur, rec_port, exclude_node_id=node_id)
         cur.execute("""
-            UPDATE nodes SET direct_host=?, remote_cdp_port=?, local_bind_port=?, name=?, group_name=?, approval_status=?
+            UPDATE nodes SET direct_host=?, remote_cdp_port=?, local_bind_port=?, name=?, group_name=?,
+                approval_status=?, fingerprint=?, network_mode=?, recommended_endpoint=?, ipv4_reachable=?, ipv6_reachable=?
             WHERE id=?
-        """, (direct_ip, data.cdp_port, allocated_port, node_name, grp_name, appr, node_id))
+        """, (direct_ip, rec_port, allocated_port, node_name, grp_name, appr, fp, net_mode, rec_ep, v4_ok, v6_ok, node_id))
+        approval_status = appr
     else:
-        allocated_port = _get_available_bind_port(cur, data.cdp_port)
+        allocated_port = _get_available_bind_port(cur, rec_port)
         cur.execute("""
             INSERT INTO nodes (
                 name, group_name, enabled, approval_status, conn_type, node_uuid, fingerprint,
                 is_source, is_local, direct_host, ssh_host, ssh_port, ssh_user,
-                ssh_key_filename, ssh_password, remote_cdp_port, local_bind_port, status
-            ) VALUES (?, ?, 1, ?, 'direct', ?, '', 0, 1, ?, '', 22, '', '', '', ?, ?, ?)
-        """, (node_name, grp_name, approval_status, data.node_uuid, direct_ip, data.cdp_port, allocated_port, status))
+                ssh_key_filename, ssh_password, remote_cdp_port, local_bind_port, status,
+                network_mode, recommended_endpoint, ipv4_reachable, ipv6_reachable
+            ) VALUES (?, ?, 1, ?, 'direct', ?, ?, 0, 1, ?, '', 22, '', '', '', ?, ?, ?, ?, ?, ?, ?)
+        """, (node_name, grp_name, approval_status, data.node_uuid, fp, direct_ip, rec_port, allocated_port, status, net_mode, rec_ep, v4_ok, v6_ok))
         node_id = cur.lastrowid
 
     conn.commit()
@@ -369,13 +650,20 @@ async def http_auto_register_node(
         is_loopback=(client_ip in ["127.0.0.1", "localhost", "::1"]),
         decision=decision,
         reason=reason,
-        network_profile="direct"
+        network_profile="direct",
+        network_mode=net_mode,
+        recommended_endpoint=rec_ep,
     )
 
+    session_ticket = _issue_session_ticket(data.node_uuid, fp) if approval_status == 1 else None
     return {
         "code": 200,
         "node_id": node_id,
         "approval_status": approval_status,
+        "network_mode": net_mode,
+        "network_profile": "direct",
+        "recommended_endpoint": rec_ep,
+        "session_ticket": session_ticket,
         "message": "已自动接入" if approval_status == 1 else "已进入 TOFU 待审核队列"
     }
 
@@ -459,20 +747,62 @@ async def reverse_tunnel_endpoint(
         or "默认分组"
     )
 
+    handshake_data: Dict[str, Any] = {}
     if not node_uuid:
         try:
             first_msg_raw = await asyncio.wait_for(websocket.receive_text(), timeout=8.0)
-            data = json.loads(first_msg_raw)
-            node_uuid = data.get("node_uuid")
-            node_fp = data.get("public_key_fingerprint", "")
-            enroll_token = data.get("join_token") or enroll_token
-            node_name = data.get("name") or node_name or node_uuid
-            node_group = data.get("group") or node_group
-            cdp_port = data.get("port") or cdp_port
+            handshake_data = json.loads(first_msg_raw)
+            node_uuid = handshake_data.get("node_uuid")
+            node_fp = handshake_data.get("public_key_fingerprint", "")
+            enroll_token = handshake_data.get("join_token") or enroll_token
+            node_name = handshake_data.get("name") or node_name or node_uuid
+            node_group = handshake_data.get("group") or node_group
+            cdp_port = handshake_data.get("port") or cdp_port
         except Exception as e:
             logger.error(f"❌ [Tunnel 握手失败] 未收到节点身份: {e}")
             await websocket.close(code=1008, reason="Handshake timeout or invalid JSON")
             return
+    else:
+        # 即使 Header 携带了 node_uuid，仍读取首帧握手 JSON 以接收 public_ipv4 / public_ipv6 / session_ticket
+        try:
+            first_msg_raw = await asyncio.wait_for(websocket.receive_text(), timeout=8.0)
+            handshake_data = json.loads(first_msg_raw)
+            node_fp = handshake_data.get("public_key_fingerprint") or node_fp
+            enroll_token = handshake_data.get("join_token") or enroll_token
+            cdp_port = handshake_data.get("port") or cdp_port
+        except Exception:
+            handshake_data = {}
+
+    pub_v4 = handshake_data.get("public_ipv4")
+    pub_v4_port = handshake_data.get("public_ipv4_port") or (cdp_port if pub_v4 else None)
+    pub_v6 = handshake_data.get("public_ipv6")
+    pub_v6_port = handshake_data.get("public_ipv6_port") or (cdp_port if pub_v6 else None)
+    session_ticket = handshake_data.get("session_ticket")
+    forced_reverse = handshake_data.get("reverse_tunnel")
+
+    # 收到节点 IP/端口且未强制 reverse_tunnel=True 时，主动执行 TCP 三次握手确定网络类型
+    if (pub_v4 or pub_v6) and forced_reverse is not True:
+        detection = await _run_edge_network_detection(
+            public_ipv4=pub_v4,
+            public_ipv4_port=pub_v4_port,
+            public_ipv6=pub_v6,
+            public_ipv6_port=pub_v6_port,
+        )
+    else:
+        detection = {
+            "network_mode": "reverse_tunnel",
+            "network_profile": "nat4_reverse",
+            "ipv4_reachable": False,
+            "ipv6_reachable": False,
+            "recommended_endpoint": None,
+            "probe_results": {"ipv4": None, "ipv6": None},
+        }
+
+    net_mode = detection.get("network_mode", "reverse_tunnel")
+    net_profile = detection.get("network_profile", "nat4_reverse")
+    rec_endpoint = detection.get("recommended_endpoint") or ""
+    v4_ok_int = 1 if detection.get("ipv4_reachable") else 0
+    v6_ok_int = 1 if detection.get("ipv6_reachable") else 0
 
     node_name = node_name or f"Edge-{node_uuid[:6]}"
     valid_token = get_setting('cluster_join_token')
@@ -483,20 +813,25 @@ async def reverse_tunnel_endpoint(
     conn.row_factory = sqlite3.Row
     cur = conn.cursor()
 
-    # 核心准入逻辑判定
-    if enroll_token and (enroll_token == valid_token or enroll_token.startswith("hub_join_")):
+    # 严格准入逻辑判定 (Join Token / Session Ticket / TOFU 隔离)
+    if _verify_join_token(enroll_token, valid_token):
         approved = 1
         status = "connected"
         decision = "allow_token"
         reason = "edge_agent_token_verified"
+    elif _verify_session_ticket(session_ticket, node_uuid, node_fp):
+        approved = 1
+        status = "connected"
+        decision = "allow_session"
+        reason = "session_ticket_verified"
     else:
         cur.execute("SELECT * FROM nodes WHERE node_uuid=?", (node_uuid,))
         existing_node = cur.fetchone()
-        if existing_node and existing_node["approval_status"] == 1:
+        if existing_node and existing_node["approval_status"] == 1 and (not existing_node["fingerprint"] or existing_node["fingerprint"] == node_fp):
             approved = 1
             status = "connected"
             decision = "allow_session"
-            reason = "trusted_session_ticket_verified"
+            reason = "trusted_fingerprint_verified"
         elif not tofu_enabled:
             decision = "deny"
             reason = "tofu_access_disabled"
@@ -508,7 +843,8 @@ async def reverse_tunnel_endpoint(
                 is_loopback=(client_host in ["127.0.0.1", "localhost", "::1"]),
                 decision="deny",
                 reason=reason,
-                network_profile="nat4_reverse"
+                network_profile=net_profile,
+                network_mode=net_mode,
             )
             conn.close()
             await websocket.close(code=1008, reason="TOFU Access Disabled")
@@ -533,24 +869,25 @@ async def reverse_tunnel_endpoint(
             node_id = existing_row["id"]
             allocated_port = existing_row["local_bind_port"]
             is_currently_enabled = existing_row["enabled"] if "enabled" in existing_row.keys() else 1
-            # 若处于手动禁用态，保持 disabled 状态；否则更新为在线状态
             final_status = "disabled" if is_currently_enabled == 0 else status
 
             cur.execute("""
                 UPDATE nodes SET 
                     conn_type='reverse', direct_host='reverse-nat4', remote_cdp_port=?, local_bind_port=?,
-                    status=?, approval_status=?, name=?, group_name=?, fingerprint=?
+                    status=?, approval_status=?, name=?, group_name=?, fingerprint=?,
+                    network_mode=?, recommended_endpoint=?, ipv4_reachable=?, ipv6_reachable=?
                 WHERE id=?
-            """, (cdp_port, allocated_port, final_status, approved, node_name, node_group, node_fp, node_id))
+            """, (cdp_port, allocated_port, final_status, approved, node_name, node_group, node_fp, net_mode, rec_endpoint, v4_ok_int, v6_ok_int, node_id))
         else:
             allocated_port = _get_available_bind_port(cur, cdp_port)
             cur.execute("""
                 INSERT INTO nodes (
                     name, group_name, enabled, approval_status, conn_type, node_uuid, fingerprint,
                     is_source, is_local, direct_host, ssh_host, ssh_port, ssh_user,
-                    ssh_key_filename, ssh_password, remote_cdp_port, local_bind_port, status
-                ) VALUES (?, ?, 1, ?, 'reverse', ?, ?, 0, 1, 'reverse-nat4', '', 22, '', '', '', ?, ?, ?)
-            """, (node_name, node_group, approved, node_uuid, node_fp, cdp_port, allocated_port, status))
+                    ssh_key_filename, ssh_password, remote_cdp_port, local_bind_port, status,
+                    network_mode, recommended_endpoint, ipv4_reachable, ipv6_reachable
+                ) VALUES (?, ?, 1, ?, 'reverse', ?, ?, 0, 1, 'reverse-nat4', '', 22, '', '', '', ?, ?, ?, ?, ?, ?, ?)
+            """, (node_name, node_group, approved, node_uuid, node_fp, cdp_port, allocated_port, status, net_mode, rec_endpoint, v4_ok_int, v6_ok_int))
             node_id = cur.lastrowid
 
         conn.commit()
@@ -572,16 +909,29 @@ async def reverse_tunnel_endpoint(
         is_loopback=(client_host in ["127.0.0.1", "localhost", "::1"]),
         decision=decision,
         reason=reason,
-        network_profile="nat4_reverse"
+        network_profile=net_profile,
+        network_mode=net_mode,
+        recommended_endpoint=rec_endpoint or None,
     )
 
+    feedback_fields = {
+        "network_mode": net_mode,
+        "network_profile": net_profile,
+        "ipv4_reachable": bool(v4_ok_int),
+        "ipv6_reachable": bool(v6_ok_int),
+        "recommended_endpoint": rec_endpoint or None,
+        "probe_results": detection.get("probe_results"),
+    }
+
     if approved == 1:
+        issued_ticket = _issue_session_ticket(node_uuid, node_fp)
         await session.send_raw_json({
             "status": "ok",
             "decision": decision,
-            "network_profile": "nat4_reverse"
+            "session_ticket": issued_ticket,
+            **feedback_fields,
         })
-        logger.info(f"✅ [反向长连接打通] 节点 [{node_name}] (ID: {node_id}, 端口: {cdp_port}) 认证放行！")
+        logger.info(f"✅ [反向长连接打通] 节点 [{node_name}] (ID: {node_id}, mode: {net_mode}) 认证放行！")
         
         async def _auto_probe_on_connect(nid: int, lport: int):
             try:
@@ -589,7 +939,6 @@ async def reverse_tunnel_endpoint(
                 c_cnt, _ = await probe_node_cookies(lport, node_id=nid)
                 c_conn = get_db_connection()
                 c_cur = c_conn.cursor()
-                # 探活成功：同步写回最新存量与 connected 状态
                 c_cur.execute("UPDATE nodes SET cookie_count=?, status='connected' WHERE id=? AND enabled=1", (c_cnt, nid))
                 c_conn.commit()
                 c_conn.close()
@@ -602,27 +951,51 @@ async def reverse_tunnel_endpoint(
         await session.send_raw_json({
             "status": "pending_tofu",
             "reason": "tofu_pending_admin_approval",
-            "network_profile": "nat4_reverse"
+            **feedback_fields,
         })
-        logger.info(f"🔔 [TOFU 发现新节点] 节点 [{node_name}] (UUID: {node_uuid}, 端口: {cdp_port}) 进入待审队列...")
+        logger.info(f"🔔 [TOFU 发现新节点] 节点 [{node_name}] (UUID: {node_uuid}, mode: {net_mode}) 进入待审队列...")
 
     try:
         while True:
             text = await websocket.receive_text()
-            is_ping = False
             if text in ["ping", "pong"]:
-                is_ping = True
-            elif "ping" in text:
-                try:
-                    parsed = json.loads(text)
-                    if isinstance(parsed, dict) and (parsed.get("action") == "ping" or parsed.get("type") == "ping"):
-                        is_ping = True
-                except Exception:
-                    pass
-
-            if is_ping:
                 await websocket.send_text("pong")
-            else:
+                continue
+
+            handled_control = False
+            try:
+                parsed = json.loads(text)
+                if isinstance(parsed, dict):
+                    if parsed.get("action") == "ping" or parsed.get("type") == "ping":
+                        await websocket.send_text("pong")
+                        handled_control = True
+                    elif parsed.get("type") == "network_probe":
+                        re_det = await _run_edge_network_detection(
+                            public_ipv4=parsed.get("public_ipv4") or parsed.get("ipv4"),
+                            public_ipv4_port=parsed.get("public_ipv4_port") or parsed.get("ipv4_port") or parsed.get("port"),
+                            public_ipv6=parsed.get("public_ipv6") or parsed.get("ipv6"),
+                            public_ipv6_port=parsed.get("public_ipv6_port") or parsed.get("ipv6_port") or parsed.get("port"),
+                        )
+                        u_conn = get_db_connection()
+                        u_cur = u_conn.cursor()
+                        u_cur.execute(
+                            "UPDATE nodes SET network_mode=?, recommended_endpoint=?, ipv4_reachable=?, ipv6_reachable=? WHERE id=?",
+                            (
+                                re_det.get("network_mode", ""),
+                                re_det.get("recommended_endpoint") or "",
+                                1 if re_det.get("ipv4_reachable") else 0,
+                                1 if re_det.get("ipv6_reachable") else 0,
+                                node_id,
+                            ),
+                        )
+                        u_conn.commit()
+                        u_conn.close()
+                        await session.send_raw_json({"type": "network_probe_result", **re_det})
+                        handled_control = True
+            except Exception:
+                pass
+
+            if not handled_control:
                 session.handle_incoming_text(text)
     except (WebSocketDisconnect, Exception):
         pass

@@ -98,11 +98,11 @@ else:
 
 # 5. 服务入口
 if __name__ == "__main__":
-    ensure_ssl_certificates()
+    cert_path, key_path = ensure_ssl_certificates()
     uvicorn.run(
         app,
         host="0.0.0.0",
         port=8443,
-        ssl_certfile=SSL_CERT_FILE,
-        ssl_keyfile=SSL_KEY_FILE
+        ssl_certfile=cert_path,
+        ssl_keyfile=key_path
     )

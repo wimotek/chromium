@@ -29,8 +29,17 @@ CERTS_DIR = "/certs"
 SSL_CERT_FILE = os.path.join(CERTS_DIR, "fullchain.pem")
 SSL_KEY_FILE = os.path.join(CERTS_DIR, "privkey.pem")
 
-os.makedirs(KEYS_DIR, exist_ok=True)
-os.makedirs(CERTS_DIR, exist_ok=True)
+try:
+    os.makedirs(KEYS_DIR, exist_ok=True)
+except PermissionError as exc:
+    logger.error(f"❌ /data/keys 目录不可写 ({exc})！非 root 容器默认以 UID 1000 运行，请在宿主机执行: chown -R 1000:1000 ./data")
+    raise
+
+try:
+    os.makedirs(CERTS_DIR, exist_ok=True)
+except OSError:
+    # /certs 可能以只读 (:ro) 挂载，跳过创建并交由 ensure_ssl_certificates() 回退至 /data/certs
+    pass
 
 # 管理员初始凭据 (未设置默认: admin / 123456)
 INIT_USERNAME = (os.getenv("ADMIN_INIT_USER") or "admin").strip()

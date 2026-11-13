@@ -422,7 +422,7 @@ onUnmounted(() => {
   -v ./data:/data \
   wimotek/chromium:novnc</code></pre>
           <div style="display:flex; justify-content:space-between; align-items:center; margin-top:6px;">
-            <span style="font-size:11px; color:#64748b;">* 若宿主机映射了其他自定义端口（例如 -p 3030:9222），追加参数：<code>-e DIRECT_PORT=3030</code> 即可自动直连。</span>
+            <span style="font-size:11px; color:#64748b;">* 若宿主机映射其他端口可追加 <code>-e DIRECT_PORT=3030</code>；非 root 容器需确保宿主机目录 <code>chown -R 1000:1000 ./data</code>。</span>
             <button @click="copyText(`docker run -d --name chromium-novnc -p 6080:6080 -p 9222:9222 -e HUB_URL=${currentHubUrl} -e JOIN_TOKEN=${clusterJoinToken} -v ./data:/data wimotek/chromium:novnc`, 'Docker 启动命令')" class="link-probe">一键复制 CLI</button>
           </div>
         </div>
@@ -543,6 +543,7 @@ services:
 
             <td class="font-cyan-mono">
               <span v-if="node.conn_type === 'reverse'">Reverse-WSS (:{{ node.local_bind_port }})</span>
+              <span v-else-if="node.recommended_endpoint">{{ node.recommended_endpoint }}</span>
               <span v-else>{{ node.is_local ? (node.direct_host || '127.0.0.1') : '127.0.0.1' }}:{{ node.local_bind_port }}</span>
             </td>
 
@@ -553,9 +554,13 @@ services:
             </td>
 
             <td>
-              <span v-if="node.conn_type === 'reverse'" class="tag-topo-reverse">WSS 反向长连</span>
+              <span v-if="node.conn_type === 'reverse'" class="tag-topo-reverse">
+                {{ node.network_mode === 'reverse_tunnel' ? 'NAT4 反向隧道' : 'WSS 反向长连' }}
+              </span>
               <span v-else-if="node.conn_type === 'ssh'" class="tag-topo-ssh">SSH 穿透</span>
-              <span v-else class="tag-topo-direct">本地直连</span>
+              <span v-else class="tag-topo-direct">
+                {{ node.network_mode || '本地直连' }}
+              </span>
             </td>
 
             <td>

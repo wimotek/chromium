@@ -69,20 +69,42 @@ def generate_self_signed_cert(cert_file: str, key_file: str):
 
 def ensure_ssl_certificates():
     global SSL_CERT_FILE, SSL_KEY_FILE
-    has_cert = os.path.exists(SSL_CERT_FILE) and os.path.getsize(SSL_CERT_FILE) > 0
-    has_key = os.path.exists(SSL_KEY_FILE) and os.path.getsize(SSL_KEY_FILE) > 0
+    candidates = [
+        ("/etc/ssl/app/fullchain.pem", "/etc/ssl/app/privkey.pem"),
+        (SSL_CERT_FILE, SSL_KEY_FILE),
+    ]
+    for cert_path, key_path in candidates:
+        cert_exists = os.path.exists(cert_path) and os.path.getsize(cert_path) > 0
+        key_exists = os.path.exists(key_path) and os.path.getsize(key_path) > 0
+        if cert_exists and key_exists and os.access(cert_path, os.R_OK) and os.access(key_path, os.R_OK):
+            SSL_CERT_FILE = cert_path
+            SSL_KEY_FILE = key_path
+            return cert_path, key_path
 
-    if not (has_cert and has_key):
-        logger.warning("未检测到有效证书，正在生成自签 SSL 证书...")
-        try:
-            os.makedirs(CERTS_DIR, exist_ok=True)
-            generate_self_signed_cert(SSL_CERT_FILE, SSL_KEY_FILE)
-        except Exception as e:
-            fallback_dir = os.path.join(DATA_DIR, "certs")
-            os.makedirs(fallback_dir, exist_ok=True)
-            SSL_CERT_FILE = os.path.join(fallback_dir, "fullchain.pem")
-            SSL_KEY_FILE = os.path.join(fallback_dir, "privkey.pem")
-            generate_self_signed_cert(SSL_CERT_FILE, SSL_KEY_FILE)
+    cert_exists = os.path.exists(SSL_CERT_FILE) and os.path.getsize(SSL_CERT_FILE) > 0
+    key_exists = os.path.exists(SSL_KEY_FILE) and os.path.getsize(SSL_KEY_FILE) > 0
+    if (cert_exists or key_exists) and not (os.access(SSL_CERT_FILE, os.R_OK) and os.access(SSL_KEY_FILE, os.R_OK)):
+        logger.warning(
+            f"⚠️ 检测到宿主机 /certs 证书或私钥，但当前进程 (UID={os.getuid()}) 无读取权限，"
+            "将回退至 /data/certs 自签证书。若以默认入口启动，entrypoint 将自动完成安全副本降权读取。"
+        )
+    else:
+        logger.warning("未检测到有效证书，正在生成/复用自签 SSL 证书...")
+
+    try:
+        os.makedirs(CERTS_DIR, exist_ok=True)
+        generate_self_signed_cert(SSL_CERT_FILE, SSL_KEY_FILE)
+        return SSL_CERT_FILE, SSL_KEY_FILE
+    except Exception:
+        fallback_dir = os.path.join(DATA_DIR, "certs")
+        os.makedirs(fallback_dir, exist_ok=True)
+        fallback_cert = os.path.join(fallback_dir, "fullchain.pem")
+        fallback_key = os.path.join(fallback_dir, "privkey.pem")
+        if not (os.path.exists(fallback_cert) and os.path.exists(fallback_key)):
+            generate_self_signed_cert(fallback_cert, fallback_key)
+        SSL_CERT_FILE = fallback_cert
+        SSL_KEY_FILE = fallback_key
+        return fallback_cert, fallback_key
 
 def verify_token(authorization: Optional[str] = ReqHeader(None)):
     if not authorization or not authorization.startswith("Bearer "):

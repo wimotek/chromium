@@ -1,6 +1,10 @@
 services:
   chromium-sync:
-    build: .
+    build:
+      context: .
+      args:
+        PUID: ${PUID:-1000}
+        PGID: ${PGID:-1000}
     container_name: cdp_sync_manager
     restart: unless-stopped
     ports:
@@ -9,8 +13,17 @@ services:
       # 本地转发的 CDP 端口段
       - "19200-19250:19200-19250"
     volumes:
+      # 持久化目录：容器启动瞬态会自动修正属主为 hubuser(1000:1000) 并立即降权运行
       - ./data:/data
-      # 映射外部 SSL 证书目录（留空则容器自动生成自签证书）
-      - ./certs:/certs
+      # 映射外部 SSL 证书目录（支持宝塔/Certbot 0600 root 私钥，仅只读拷贝至容器内 /etc/ssl/app，绝不改动宿主机权限）
+      - ./certs:/certs:ro
     environment:
-      - ADMIN_INIT_PASS=Admin@123456
+      - ADMIN_INIT_PASS=${ADMIN_INIT_PASS:-Admin@123456}
+      # 仅当 Hub 与节点位于同宿主机/局域网私网段时设为 true；公网部署保持 false 防止 SSRF 探测
+      - EDGE_AGENT_ALLOW_NON_PUBLIC_PROBE=${EDGE_AGENT_ALLOW_NON_PUBLIC_PROBE:-false}
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import ssl, urllib.request; ctx = ssl._create_unverified_context(); urllib.request.urlopen('https://127.0.0.1:8443/api/auth/status', context=ctx, timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s

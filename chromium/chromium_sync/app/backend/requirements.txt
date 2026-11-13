@@ -9,7 +9,6 @@ websockets==12.0
 httpx==0.27.0
 cryptography>=3.3
 python-multipart==0.0.9
-playwright>=1.40.0
-wimotek-edge-agent
+wimotek-edge-agent>=1.0.17
 wimotek-ssh-tunnel>=1.0.0
 wimotek-chromium-sync>=1.3.0

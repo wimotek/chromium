@@ -2,32 +2,29 @@
 set -e
 
 # ==============================================================================
-# 阶段 1：Root 权限自愈与宝塔证书安全合成 (绝对不触碰宿主机 /certs 权限)
+# 阶段 1：Root 权限初始化、/data 权限自愈与宝塔证书安全副本合成 (绝不修改宿主机 /certs)
 # ==============================================================================
 if [ "$(id -u)" = "0" ]; then
-    echo "[Init] (Root阶段) 正在执行 Kasm 权限自愈与宝塔证书扫描..."
-
-    mkdir -p /tmp/.X11-unix /home/kasm-user/.vnc /home/kasm-user/.config /home/kasm-user/.cache /tmp/crashpad /etc/ssl/app /etc/kasmvnc
+    echo "[Init] (Root阶段) 正在执行 Kasm 权限自愈与宝塔证书扫描，随后立即降权至 kasm-user..."
+    mkdir -p /tmp/.X11-unix /data /home/kasm-user/.vnc /home/kasm-user/.config /home/kasm-user/.cache /tmp/crashpad /etc/ssl/app /etc/kasmvnc
     chmod 1777 /tmp /tmp/.X11-unix /tmp/crashpad
 
-    rm -rf /tmp/.X0-lock /tmp/.X11-unix/X0 /data/SingletonLock /data/SingletonCookie /data/SingletonSocket
+    rm -f /tmp/.X0-lock /tmp/.X11-unix/X0 /data/SingletonLock /data/SingletonCookie /data/SingletonSocket 2>/dev/null || true
 
     CERTS_DIR="/certs"
     SSL_OUT_DIR="/etc/ssl/app"
     CERT_FILE=""
     KEY_FILE=""
 
-    # 扫描外部公钥证书 (支持宝塔、Certbot 等格式)
     for f in "$SSL_CERT_FILE" "$CERTS_DIR"/fullchain*.pem "$CERTS_DIR"/fullchain*.crt "$CERTS_DIR"/fullchain "$CERTS_DIR"/cert*.pem "$CERTS_DIR"/tls.crt "$CERTS_DIR"/*.crt "$CERTS_DIR"/*.pem; do
-        if [ -f "$f" ] && [ "$f" != "$CERTS_DIR/privkey.pem" ] && [ "$f" != "$CERTS_DIR/key.pem" ]; then
+        if [ -n "$f" ] && [ -f "$f" ] && [ "$f" != "$CERTS_DIR/privkey.pem" ] && [ "$f" != "$CERTS_DIR/key.pem" ]; then
             CERT_FILE="$f"
             break
         fi
     done
 
-    # 扫描外部私钥 (由 Root 读取 600 权限，绝不修改宿主机权限)
     for k in "$SSL_KEY_FILE" "$CERTS_DIR"/privkey*.pem "$CERTS_DIR"/privkey*.key "$CERTS_DIR"/privkey "$CERTS_DIR"/key*.pem "$CERTS_DIR"/tls.key "$CERTS_DIR"/*.key; do
-        if [ -f "$k" ]; then
+        if [ -n "$k" ] && [ -f "$k" ]; then
             KEY_FILE="$k"
             break
         fi
@@ -40,7 +37,7 @@ if [ "$(id -u)" = "0" ]; then
         cp "$CERT_FILE" "$SSL_OUT_DIR/kasm.crt"
         cp "$KEY_FILE" "$SSL_OUT_DIR/kasm.key"
     else
-        echo "[SSL] (Root阶段) 未检测到有效证书，自动生成 10 年 SAN 自签证书..."
+        echo "[SSL] (Root阶段) 未检测到有效证书，生成/复用 10 年 SAN 自签证书..."
         if [ ! -f "$SSL_OUT_DIR/kasm.crt" ] || [ ! -f "$SSL_OUT_DIR/kasm.key" ]; then
             openssl req -x509 -nodes -days 3650 -newkey rsa:2048 \
                 -keyout "$SSL_OUT_DIR/kasm.key" \
@@ -54,8 +51,8 @@ if [ "$(id -u)" = "0" ]; then
         fi
     fi
 
-    # 核心隔离原则：只对容器自有的数据目录过户，绝对不碰宿主机 /certs
-    chown -R kasm-user:kasm-user /data /home/kasm-user "$SSL_OUT_DIR" /etc/kasmvnc /opt/venv 2>/dev/null || true
+    # 仅调整容器自有目录与证书副本属主，绝对不触碰宿主机 /certs
+    chown -R kasm-user:kasm-user /data /home/kasm-user "$SSL_OUT_DIR" /etc/kasmvnc 2>/dev/null || true
     chmod 600 "$SSL_OUT_DIR/kasm.key" 2>/dev/null || true
 
     export HOME=/home/kasm-user
@@ -65,8 +62,11 @@ if [ "$(id -u)" = "0" ]; then
 fi
 
 # ==============================================================================
-# 阶段 2：以普通用户 kasm-user 正式启动服务
+# 阶段 2：以非 root 普通用户 kasm-user 运行所有业务进程
 # ==============================================================================
+UID_NOW="$(id -u)"
+GID_NOW="$(id -g)"
+
 export HOME=/home/kasm-user
 export USER=kasm-user
 export LOGNAME=kasm-user
@@ -75,18 +75,46 @@ export XDG_CACHE_HOME=/home/kasm-user/.cache
 export NO_AT_BRIDGE=1
 export PYTHONUNBUFFERED=1
 
+if [ ! -d "/data" ] || [ ! -w "/data" ]; then
+    echo "[ERROR] /data 不可写 (UID=${UID_NOW}, GID=${GID_NOW})，请检查宿主机目录权限 (如 --user 模式需 chown -R ${UID_NOW}:${GID_NOW} ./kasm_data)"
+    exit 1
+fi
+
+mkdir -p "$HOME/.vnc" "$HOME/.config" "$HOME/.cache" /etc/ssl/app /tmp/crashpad 2>/dev/null || true
+rm -f /tmp/.X0-lock /tmp/.X11-unix/X0 /data/SingletonLock /data/SingletonCookie /data/SingletonSocket 2>/dev/null || true
+
 RESOLUTION=${RESOLUTION:-1920x1080}
 WIDTH=$(echo "$RESOLUTION" | cut -d'x' -f1)
 HEIGHT=$(echo "$RESOLUTION" | cut -d'x' -f2)
 CHROME_RES="${WIDTH},${HEIGHT}"
 HOMEPAGE="${HOMEPAGE:-about:blank}"
 CHROME_ARGS="${CHROME_ARGS:-}"
+VNC_USER="${VNC_USER:-kasm-user}"
 
 FINAL_CERT="/etc/ssl/app/kasm.crt"
 FINAL_KEY="/etc/ssl/app/kasm.key"
 
+if [ ! -f "$FINAL_CERT" ] || [ ! -f "$FINAL_KEY" ]; then
+    openssl req -x509 -nodes -days 3650 -newkey rsa:2048 \
+        -keyout "$FINAL_KEY" \
+        -out "$FINAL_CERT" \
+        -subj "/CN=kasm-user" \
+        -addext "subjectAltName=DNS:localhost,IP:127.0.0.1,IP:0.0.0.0" 2>/dev/null || \
+    openssl req -x509 -nodes -days 3650 -newkey rsa:2048 \
+        -keyout "$FINAL_KEY" \
+        -out "$FINAL_CERT" \
+        -subj "/CN=kasm-user" 2>/dev/null
+    chmod 600 "$FINAL_KEY"
+fi
+
+cleanup() {
+    echo "[Shutdown] 收到退出信号，正在优雅停止子进程..."
+    pkill -P $$ 2>/dev/null || true
+    exit 0
+}
+trap cleanup TERM INT
+
 # 1. 动态生成 KasmVNC 运行时 YAML 配置
-mkdir -p "$HOME/.vnc"
 cat <<EOF > "$HOME/.vnc/kasmvnc.yaml"
 network:
   websocket_port: 6901
@@ -104,14 +132,15 @@ EOF
 AUTH_FLAG="-SecurityTypes None"
 if [ -n "$VNC_PASSWORD" ]; then
     if command -v kasmvncpasswd >/dev/null 2>&1; then
-        echo -e "${VNC_PASSWORD}\n${VNC_PASSWORD}" | kasmvncpasswd -u kasm-user
+        printf '%s\n%s\n' "$VNC_PASSWORD" "$VNC_PASSWORD" | kasmvncpasswd -u "$VNC_USER" -w >/dev/null 2>&1 || \
+        printf '%s\n%s\n' "$VNC_PASSWORD" "$VNC_PASSWORD" | kasmvncpasswd -u "$VNC_USER" || true
         AUTH_FLAG="-SecurityTypes VncAuth"
-        echo "[KasmVNC] 密码认证已成功启用"
+        echo "[KasmVNC] 密码认证已成功启用 (User=${VNC_USER})"
     fi
 fi
 
 # 3. 启动 KasmVNC Server (:0)
-echo "[KasmVNC] 正在拉起 Xvnc 服务 (:0)..."
+echo "[KasmVNC] 正在拉起 Xvnc 服务 (:0, UID=${UID_NOW})..."
 Xvnc :0 \
     -geometry "$RESOLUTION" \
     -depth 24 \
@@ -126,7 +155,7 @@ Xvnc :0 \
 
 export DISPLAY=:0
 
-for i in {1..30}; do
+for i in $(seq 1 30); do
     if [ -e /tmp/.X11-unix/X0 ]; then
         break
     fi
@@ -141,36 +170,32 @@ fi
 # 5. 启动轻量窗口管理器 Openbox
 openbox &
 
-# 6. 【本地调试备用通道】：socat 监听 9223 转发至原生 9222
+# 6. 本地调试通道：socat 监听 9223 转发至原生 9222
 socat TCP-LISTEN:9223,fork,reuseaddr TCP:127.0.0.1:9222 &
 
-echo "[Ready] KasmVNC Web 端运行于 :6901 (HTTPS), CDP 调试端点 :9222"
+echo "[Ready] KasmVNC(UID=${UID_NOW}) Web HTTPS :6901, CDP :9222"
 
-# ==============================================================================
 # 7. 启动 Wimotek Agent 守护进程 (带故障自动重生看门狗)
-# ==============================================================================
 if [ -n "$HUB_URL" ]; then
     echo "[Edge] 检测到 HUB_URL 配置 ($HUB_URL)，拉起 Agent 后台守护看门狗..."
     (
         while true; do
             echo "[Edge Watchdog] 正在拉起 edge_node_client 进程..."
             python3 -u /opt/edge_node_client.py || true
-            echo "[Edge Watchdog] ⚠️ 警告: edge_node_client 异常退出，3 秒后自动重生拉起..."
+            echo "[Edge Watchdog] ⚠️ edge_node_client 异常退出，3 秒后自动重生..."
             sleep 3
         done
     ) &
 fi
 
-# ==============================================================================
 # 8. 循环守护启动 Chromium (原生使用 9222 调试端口)
-# ==============================================================================
 if [ $# -eq 0 ]; then
     set -- "$HOMEPAGE"
 fi
 
-echo "Starting Chromium under Kasm with native CDP 9222..."
+echo "Starting Chromium under KasmVNC (non-root UID=${UID_NOW}) with native CDP 9222..."
 while true; do
-    rm -f /data/SingletonLock /data/SingletonCookie /data/SingletonSocket
+    rm -f /data/SingletonLock /data/SingletonCookie /data/SingletonSocket 2>/dev/null || true
 
     chromium \
         --no-sandbox \

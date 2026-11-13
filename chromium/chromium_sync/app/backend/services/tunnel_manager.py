@@ -32,6 +32,7 @@ class ReverseTunnelSession:
         self.node_id = node_id
         self.ws = ws
         self.pending_requests: Dict[int, asyncio.Future] = {}
+        self.cdp_ws_streams: Dict[str, Any] = {}
         self.is_closed = False
         self._write_lock = asyncio.Lock()
 
@@ -64,9 +65,23 @@ class ReverseTunnelSession:
                 await self.ws.send_text(json.dumps(data))
 
     def handle_incoming_text(self, text: str):
-        """接收下行数据并派发给对应挂起的 Future"""
+        """接收下行数据并派发给对应挂起的 Future 或 CDP WebSocket 中继流"""
         try:
             data = json.loads(text)
+            msg_type = data.get("type")
+            if msg_type == "cdp_ws_frame":
+                sid = data.get("stream_id")
+                client_ws = self.cdp_ws_streams.get(sid)
+                if client_ws is not None:
+                    asyncio.create_task(client_ws.send_text(data.get("data", "")))
+                return
+            if msg_type in {"cdp_ws_close", "cdp_ws_error"}:
+                sid = data.get("stream_id")
+                client_ws = self.cdp_ws_streams.pop(sid, None)
+                if client_ws is not None:
+                    asyncio.create_task(client_ws.close())
+                return
+
             req_id = data.get("req_id")
             if req_id is not None and req_id in self.pending_requests:
                 fut = self.pending_requests[req_id]
@@ -81,6 +96,12 @@ class ReverseTunnelSession:
             if not fut.done():
                 fut.set_exception(ConnectionResetError("反向长连接已断开"))
         self.pending_requests.clear()
+        for client_ws in list(self.cdp_ws_streams.values()):
+            try:
+                asyncio.create_task(client_ws.close())
+            except Exception:
+                pass
+        self.cdp_ws_streams.clear()
 
 
 class TunnelManager:

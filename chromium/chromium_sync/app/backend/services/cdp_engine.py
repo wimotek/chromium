@@ -154,24 +154,29 @@ async def resolve_cdp_endpoint(local_port: int, target_host: str = "127.0.0.1", 
     else:
         candidate_hosts = [host_clean]
 
+    def _fmt_host_port(h: str, p: int) -> str:
+        clean = h.strip("[]")
+        return f"[{clean}]:{p}" if ":" in clean else f"{clean}:{p}"
+
     async with httpx.AsyncClient(timeout=3.0) as client:
         for host in candidate_hosts:
+            netloc = _fmt_host_port(host, local_port)
             try:
                 if prefer_page:
-                    list_res = await client.get(f"http://{host}:{local_port}/json/list")
+                    list_res = await client.get(f"http://{netloc}/json/list")
                     if list_res.status_code == 200:
                         targets = list_res.json()
                         page_targets = [t for t in targets if t.get("type") == "page" and "webSocketDebuggerUrl" in t]
                         if page_targets:
                             raw_ws = page_targets[0]["webSocketDebuggerUrl"]
                             parsed = urlparse(raw_ws)
-                            return host, urlunparse(parsed._replace(netloc=f"{host}:{local_port}"))
+                            return host, urlunparse(parsed._replace(netloc=netloc))
 
-                ver_res = await client.get(f"http://{host}:{local_port}/json/version")
+                ver_res = await client.get(f"http://{netloc}/json/version")
                 if ver_res.status_code == 200:
                     raw_ws = ver_res.json()["webSocketDebuggerUrl"]
                     parsed = urlparse(raw_ws)
-                    return host, urlunparse(parsed._replace(netloc=f"{host}:{local_port}"))
+                    return host, urlunparse(parsed._replace(netloc=netloc))
             except Exception:
                 continue
     raise ConnectionRefusedError(f"无法连通主机 {host_clean}:{local_port} 的 CDP 调试端口")
@@ -197,7 +202,7 @@ async def fetch_cookies_native(local_port: int, target_host: str = "127.0.0.1", 
 
     # 常规直连/SSH 节点分支
     host, ws_url = await resolve_cdp_endpoint(local_port, target_host, prefer_page=False)
-    async with websockets.connect(ws_url, timeout=5.0) as ws:
+    async with websockets.connect(ws_url, open_timeout=5.0) as ws:
         await ws.send(json.dumps({"id": 1, "method": "Network.enable"}))
         await ws.recv()
         await ws.send(json.dumps({"id": 2, "method": "Network.getAllCookies"}))
@@ -239,7 +244,7 @@ async def inject_cookies_native(local_port: int, cookies: List[dict], target_hos
         logger.error(f"无法获取 Page 注入端点: {e}")
         return 0
 
-    async with websockets.connect(ws_url, timeout=10.0, max_size=100 * 1024 * 1024) as ws:
+    async with websockets.connect(ws_url, open_timeout=10.0, max_size=100 * 1024 * 1024) as ws:
         await ws.send(json.dumps({"id": 1, "method": "Network.enable"}))
         await asyncio.wait_for(ws.recv(), timeout=3.0)
 
@@ -314,7 +319,7 @@ async def purge_stale_cookies_on_node(local_port: int, target_host: str = "127.0
             return 0
 
         host, ws_url = await resolve_cdp_endpoint(local_port, target_host, prefer_page=True)
-        async with websockets.connect(ws_url, timeout=8.0) as ws:
+        async with websockets.connect(ws_url, open_timeout=8.0) as ws:
             for i, d in enumerate(to_delete):
                 await ws.send(json.dumps({
                     "id": 8000 + i,
