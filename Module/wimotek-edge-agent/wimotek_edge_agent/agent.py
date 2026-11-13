@@ -16,7 +16,13 @@ from .models import (
     ConnectionContext,
     TrustStatus,
 )
-from .nat import detect_network_profile
+from .nat import (
+    NetworkDetectionResult,
+    ProbeFn,
+    detect_network_mode,
+    detect_network_mode_sync,
+    detect_network_profile,
+)
 from .policy import AccessPolicyEngine
 from .tokens import JoinTokenIssuer, JoinTokenVerifier, SessionTicketManager
 from .transport import JsonLineTransport, TunnelDialer, open_reverse_tunnel
@@ -25,11 +31,41 @@ from .trust_store import TrustStore
 DataHandler = Callable[[JsonLineTransport, ConnectionContext], Awaitable[None]]
 
 
+def _parse_int_port(value: object) -> Optional[int]:
+    if value is None or value == "":
+        return None
+    try:
+        return int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+
+
+def _split_host_port(
+    host: Optional[str], port: Optional[int], family: str
+) -> tuple[Optional[str], Optional[int]]:
+    if not host:
+        return None, port
+    cleaned = str(host).strip()
+    if not cleaned:
+        return None, port
+    if port is None:
+        if family == "ipv4" and ":" in cleaned and cleaned.count(":") == 1:
+            h, p = cleaned.rsplit(":", 1)
+            return h.strip(), _parse_int_port(p)
+        if family == "ipv6" and cleaned.startswith("[") and "]:" in cleaned:
+            h, p = cleaned[1:].split("]:", 1)
+            return h.strip(), _parse_int_port(p)
+    if family == "ipv6" and cleaned.startswith("[") and cleaned.endswith("]"):
+        cleaned = cleaned[1:-1]
+    return cleaned, port
+
+
 class EdgeAgent:
     def __init__(
         self,
         config: Config,
         data_handler: Optional[DataHandler] = None,
+        probe_fn: Optional[ProbeFn] = None,
     ) -> None:
         if not config.token_secret:
             raise ValueError(
@@ -39,6 +75,9 @@ class EdgeAgent:
         self.config = config
         self.config.ensure_dirs()
         self.data_handler = data_handler
+        self.probe_fn = probe_fn
+        self.last_network_mode: Optional[str] = None
+        self.last_network_detection: Optional[NetworkDetectionResult] = None
 
         self.audit = AuditLogger(
             config.audit_log_path,
@@ -85,10 +124,113 @@ class EdgeAgent:
         except ValueError:
             return False
 
+    def _extract_reported_endpoints(
+        self, handshake: dict
+    ) -> tuple[Optional[str], Optional[int], Optional[str], Optional[int]]:
+        shared_port = _parse_int_port(handshake.get("port"))
+        v4_raw = handshake.get("public_ipv4") or handshake.get("ipv4")
+        v4_port = _parse_int_port(
+            handshake.get("public_ipv4_port") or handshake.get("ipv4_port")
+        )
+        v4_host, v4_port = _split_host_port(v4_raw, v4_port, "ipv4")
+        if v4_host and v4_port is None:
+            v4_port = shared_port
+
+        v6_raw = handshake.get("public_ipv6") or handshake.get("ipv6")
+        v6_port = _parse_int_port(
+            handshake.get("public_ipv6_port") or handshake.get("ipv6_port")
+        )
+        v6_host, v6_port = _split_host_port(v6_raw, v6_port, "ipv6")
+        if v6_host and v6_port is None:
+            v6_port = shared_port
+
+        return v4_host, v4_port, v6_host, v6_port
+
+    async def detect_remote_network(
+        self,
+        handshake: Optional[dict] = None,
+        public_ipv4: Optional[str] = None,
+        public_ipv4_port: Optional[int] = None,
+        public_ipv6: Optional[str] = None,
+        public_ipv6_port: Optional[int] = None,
+        timeout: Optional[float] = None,
+        allow_non_public: Optional[bool] = None,
+    ) -> NetworkDetectionResult:
+        if handshake is not None:
+            h_v4, h_v4_p, h_v6, h_v6_p = self._extract_reported_endpoints(handshake)
+            public_ipv4 = public_ipv4 or h_v4
+            public_ipv4_port = public_ipv4_port if public_ipv4_port is not None else h_v4_p
+            public_ipv6 = public_ipv6 or h_v6
+            public_ipv6_port = public_ipv6_port if public_ipv6_port is not None else h_v6_p
+
+        result = await detect_network_mode(
+            public_ipv4=public_ipv4,
+            public_ipv4_port=public_ipv4_port,
+            public_ipv6=public_ipv6,
+            public_ipv6_port=public_ipv6_port,
+            timeout=timeout if timeout is not None else self.config.network_probe_timeout_seconds,
+            allow_non_public=(
+                allow_non_public
+                if allow_non_public is not None
+                else self.config.allow_non_public_probe
+            ),
+            force_reverse=self.config.reverse_tunnel,
+            probe_fn=self.probe_fn,
+        )
+        self.last_network_detection = result
+        self.audit.emit(
+            "network_detected",
+            network_mode=result.network_mode,
+            network_profile=result.network_profile,
+            ipv4_reachable=result.ipv4_reachable,
+            ipv6_reachable=result.ipv6_reachable,
+            recommended_endpoint=result.recommended_endpoint,
+            public_ipv4=public_ipv4,
+            public_ipv4_port=public_ipv4_port,
+            public_ipv6=public_ipv6,
+            public_ipv6_port=public_ipv6_port,
+        )
+        return result
+
+    def detect_remote_network_sync(
+        self,
+        handshake: Optional[dict] = None,
+        public_ipv4: Optional[str] = None,
+        public_ipv4_port: Optional[int] = None,
+        public_ipv6: Optional[str] = None,
+        public_ipv6_port: Optional[int] = None,
+        timeout: Optional[float] = None,
+        allow_non_public: Optional[bool] = None,
+    ) -> NetworkDetectionResult:
+        if handshake is not None:
+            h_v4, h_v4_p, h_v6, h_v6_p = self._extract_reported_endpoints(handshake)
+            public_ipv4 = public_ipv4 or h_v4
+            public_ipv4_port = public_ipv4_port if public_ipv4_port is not None else h_v4_p
+            public_ipv6 = public_ipv6 or h_v6
+            public_ipv6_port = public_ipv6_port if public_ipv6_port is not None else h_v6_p
+
+        result = detect_network_mode_sync(
+            public_ipv4=public_ipv4,
+            public_ipv4_port=public_ipv4_port,
+            public_ipv6=public_ipv6,
+            public_ipv6_port=public_ipv6_port,
+            timeout=timeout if timeout is not None else self.config.network_probe_timeout_seconds,
+            allow_non_public=(
+                allow_non_public
+                if allow_non_public is not None
+                else self.config.allow_non_public_probe
+            ),
+            force_reverse=self.config.reverse_tunnel,
+            probe_fn=self.probe_fn,
+        )
+        self.last_network_detection = result
+        return result
+
     def context_from_handshake(
         self,
         handshake: dict,
         peer_ip: str,
+        network_detection: Optional[NetworkDetectionResult] = None,
     ) -> ConnectionContext:
         node_uuid = str(handshake.get("node_uuid", "")).strip()
         fingerprint = str(handshake.get("public_key_fingerprint", "")).strip()
@@ -97,18 +239,45 @@ class EdgeAgent:
         if not fingerprint:
             raise ValueError("handshake missing public_key_fingerprint")
 
+        v4_host, v4_port, v6_host, v6_port = self._extract_reported_endpoints(handshake)
+        has_reported_endpoints = bool(v4_host or v6_host)
+
         advertised_nat_type = handshake.get("nat_type")
         advertised_reverse = handshake.get("reverse_tunnel")
         if advertised_reverse is not None:
             advertised_reverse = bool(advertised_reverse)
 
-        network_profile, nat_type = detect_network_profile(
-            self.config,
-            advertised_nat_type=str(advertised_nat_type)
-            if advertised_nat_type
-            else None,
-            advertised_reverse=advertised_reverse,
-        )
+        if network_detection is None and has_reported_endpoints and not advertised_reverse:
+            network_detection = self.detect_remote_network_sync(
+                public_ipv4=v4_host,
+                public_ipv4_port=v4_port,
+                public_ipv6=v6_host,
+                public_ipv6_port=v6_port,
+            )
+
+        if network_detection is not None:
+            network_profile = network_detection.network_profile
+            network_mode = network_detection.network_mode
+            nat_type = str(advertised_nat_type or "probed").lower()
+        else:
+            network_profile, nat_type = detect_network_profile(
+                self.config,
+                advertised_nat_type=str(advertised_nat_type)
+                if advertised_nat_type
+                else None,
+                advertised_reverse=advertised_reverse,
+            )
+            network_mode = (
+                "reverse_tunnel" if network_profile == "nat4_reverse" else "direct"
+            )
+
+        metadata = {
+            "user_agent": handshake.get("user_agent"),
+            "network_profile": network_profile,
+            "network_mode": network_mode,
+        }
+        if network_detection is not None:
+            metadata["network_probe"] = network_detection.to_dict()
 
         return ConnectionContext(
             source_ip=peer_ip,
@@ -120,10 +289,12 @@ class EdgeAgent:
             session_ticket=handshake.get("session_ticket"),
             nat_type=nat_type,
             reverse_tunnel=(network_profile == "nat4_reverse"),
-            metadata={
-                "user_agent": handshake.get("user_agent"),
-                "network_profile": network_profile,
-            },
+            public_ipv4=v4_host,
+            public_ipv4_port=v4_port,
+            public_ipv6=v6_host,
+            public_ipv6_port=v6_port,
+            network_mode=network_mode,
+            metadata=metadata,
         )
 
     def authenticate(self, ctx: ConnectionContext) -> AccessDecisionResult:
@@ -136,21 +307,49 @@ class EdgeAgent:
             decision=result.decision.value,
             reason=result.reason,
             network_profile=result.network_profile,
+            network_mode=result.network_mode,
             nat_type=ctx.nat_type,
             fingerprint=ctx.public_key_fingerprint,
             node_status=result.node_status.value if result.node_status else None,
         )
         return result
 
+    def _network_feedback_fields(
+        self,
+        result: AccessDecisionResult,
+        ctx: ConnectionContext,
+        network_detection: Optional[NetworkDetectionResult] = None,
+    ) -> dict:
+        payload: dict = {
+            "network_profile": result.network_profile,
+            "network_mode": result.network_mode
+            or ctx.network_mode
+            or ("reverse_tunnel" if result.network_profile == "nat4_reverse" else "direct"),
+        }
+        if network_detection is not None:
+            payload.update(
+                {
+                    "ipv4_reachable": network_detection.ipv4_reachable,
+                    "ipv6_reachable": network_detection.ipv6_reachable,
+                    "recommended_endpoint": network_detection.recommended_endpoint,
+                    "probe_results": {
+                        "ipv4": network_detection.to_dict()["ipv4"],
+                        "ipv6": network_detection.to_dict()["ipv6"],
+                    },
+                }
+            )
+        return payload
+
     def _ok_response(
         self,
         result: AccessDecisionResult,
         ctx: ConnectionContext,
+        network_detection: Optional[NetworkDetectionResult] = None,
     ) -> dict:
         response = {
             "status": "ok",
             "decision": result.decision.value,
-            "network_profile": result.network_profile,
+            **self._network_feedback_fields(result, ctx, network_detection),
         }
         if result.decision in {
             AccessDecision.ALLOW_LOCAL,
@@ -173,8 +372,20 @@ class EdgeAgent:
             await transport.close()
             return
 
+        network_detection: Optional[NetworkDetectionResult] = None
+        v4_host, v4_port, v6_host, v6_port = self._extract_reported_endpoints(handshake)
+        if (v4_host or v6_host) and not handshake.get("reverse_tunnel"):
+            network_detection = await self.detect_remote_network(
+                public_ipv4=v4_host,
+                public_ipv4_port=v4_port,
+                public_ipv6=v6_host,
+                public_ipv6_port=v6_port,
+            )
+
         try:
-            ctx = self.context_from_handshake(handshake, peer_ip)
+            ctx = self.context_from_handshake(
+                handshake, peer_ip, network_detection=network_detection
+            )
         except ValueError as exc:
             await transport.write_message(
                 {"status": "denied", "reason": str(exc)}
@@ -186,7 +397,11 @@ class EdgeAgent:
 
         if result.decision == AccessDecision.DENY:
             await transport.write_message(
-                {"status": "denied", "reason": result.reason}
+                {
+                    "status": "denied",
+                    "reason": result.reason,
+                    **self._network_feedback_fields(result, ctx, network_detection),
+                }
             )
             await transport.close()
             return
@@ -196,19 +411,22 @@ class EdgeAgent:
                 {
                     "status": "pending_tofu",
                     "reason": result.reason,
-                    "network_profile": result.network_profile,
+                    **self._network_feedback_fields(result, ctx, network_detection),
                 }
             )
-            await self._quarantine(transport, ctx)
+            await self._quarantine(transport, ctx, network_detection)
             return
 
-        await transport.write_message(self._ok_response(result, ctx))
+        await transport.write_message(
+            self._ok_response(result, ctx, network_detection)
+        )
         await self._run_data(transport, ctx)
 
     async def _quarantine(
         self,
         transport: JsonLineTransport,
         ctx: ConnectionContext,
+        network_detection: Optional[NetworkDetectionResult] = None,
     ) -> None:
         """
         TOFU 隔离区：只发送心跳，不允许业务数据中继，直到管理员 approve。
@@ -217,16 +435,29 @@ class EdgeAgent:
             node = self.trust_store.get_node(ctx.node_uuid)
 
             if node is not None and node.status == TrustStatus.TRUSTED:
-                await transport.write_message(
-                    {
-                        "status": "approved",
-                        "decision": "tofu_approved",
-                        "network_profile": node.network_profile,
-                        "session_ticket": self.session_manager.issue(
-                            ctx.node_uuid, ctx.public_key_fingerprint
-                        ),
-                    }
-                )
+                approved_payload = {
+                    "status": "approved",
+                    "decision": "tofu_approved",
+                    "network_profile": node.network_profile,
+                    "network_mode": ctx.network_mode
+                    or (
+                        "reverse_tunnel"
+                        if node.network_profile == "nat4_reverse"
+                        else "direct"
+                    ),
+                    "session_ticket": self.session_manager.issue(
+                        ctx.node_uuid, ctx.public_key_fingerprint
+                    ),
+                }
+                if network_detection is not None:
+                    approved_payload.update(
+                        {
+                            "ipv4_reachable": network_detection.ipv4_reachable,
+                            "ipv6_reachable": network_detection.ipv6_reachable,
+                            "recommended_endpoint": network_detection.recommended_endpoint,
+                        }
+                    )
+                await transport.write_message(approved_payload)
                 await self._run_data(transport, ctx)
                 return
 
@@ -271,6 +502,11 @@ class EdgeAgent:
             if msg_type == "ping":
                 await transport.write_message(
                     {"type": "pong", "ts": int(time.time())}
+                )
+            elif msg_type == "network_probe":
+                detection = await self.detect_remote_network(handshake=msg)
+                await transport.write_message(
+                    {"type": "network_probe_result", **detection.to_dict()}
                 )
             elif msg_type == "close":
                 await transport.close()
@@ -330,19 +566,29 @@ class EdgeAgent:
                     certificate_pin_sha256=self.config.certificate_pin_sha256,
                 )
 
-                await transport.write_message(
-                    {
-                        "node_uuid": self.config.node_uuid,
-                        "public_key_fingerprint": self.config.public_key_fingerprint,
-                        "join_token": self.config.join_token,
-                        "nat_type": self.config.nat_type or "nat4",
-                        "reverse_tunnel": True,
-                        "user_agent": "edge-agent-reverse/1.0",
-                    }
-                )
+                handshake_payload = {
+                    "node_uuid": self.config.node_uuid,
+                    "public_key_fingerprint": self.config.public_key_fingerprint,
+                    "join_token": self.config.join_token,
+                    "nat_type": self.config.nat_type or "nat4",
+                    "reverse_tunnel": True,
+                    "user_agent": "edge-agent-reverse/1.0",
+                }
+                if self.config.public_ipv4:
+                    handshake_payload["public_ipv4"] = self.config.public_ipv4
+                if self.config.public_ipv4_port is not None:
+                    handshake_payload["public_ipv4_port"] = self.config.public_ipv4_port
+                if self.config.public_ipv6:
+                    handshake_payload["public_ipv6"] = self.config.public_ipv6
+                if self.config.public_ipv6_port is not None:
+                    handshake_payload["public_ipv6_port"] = self.config.public_ipv6_port
+
+                await transport.write_message(handshake_payload)
 
                 while True:
                     response = await transport.read_message()
+                    if "network_mode" in response:
+                        self.last_network_mode = response.get("network_mode")
                     status = response.get("status")
 
                     if status in {"ok", "approved"}:
@@ -454,8 +700,27 @@ def build_parser() -> argparse.ArgumentParser:
     p_sim.add_argument("--session-ticket", default=None)
     p_sim.add_argument("--reverse-tunnel", action="store_true")
     p_sim.add_argument("--nat-type", default="unknown")
+    p_sim.add_argument("--ipv4", default=None, help="Remote node reported public IPv4")
+    p_sim.add_argument("--ipv4-port", type=int, default=None, help="Remote node reported IPv4 port")
+    p_sim.add_argument("--ipv6", default=None, help="Remote node reported public IPv6")
+    p_sim.add_argument("--ipv6-port", type=int, default=None, help="Remote node reported IPv6 port")
+    p_sim.add_argument("--timeout", type=float, default=2.0, help="Probe timeout seconds")
+    p_sim.add_argument("--allow-non-public", action="store_true", help="Allow probing private/loopback IPs")
 
-    # 13. clean-audit
+    # 13. detect-network
+    p_det = subparsers.add_parser(
+        "detect-network",
+        help="Probe remote node public IPv4/IPv6 ports and determine network mode",
+    )
+    p_det.add_argument("--ipv4", default=None, help="Remote node public IPv4")
+    p_det.add_argument("--ipv4-port", type=int, default=None, help="Remote node IPv4 port")
+    p_det.add_argument("--ipv6", default=None, help="Remote node public IPv6")
+    p_det.add_argument("--ipv6-port", type=int, default=None, help="Remote node IPv6 port")
+    p_det.add_argument("--port", type=int, default=None, help="Shared port if IPv4/IPv6 use same port")
+    p_det.add_argument("--timeout", type=float, default=2.0, help="TCP probe timeout seconds")
+    p_det.add_argument("--allow-non-public", action="store_true", help="Allow probing non-public/loopback IPs")
+
+    # 14. clean-audit
     p_clean = subparsers.add_parser("clean-audit", help="Truncate or clear audit log")
     p_clean.add_argument(
         "--keep",
@@ -596,8 +861,43 @@ def main(argv: Optional[list[str]] = None) -> int:
             sys.stderr.write(f"Token verification failed: {e}\n")
             return 1
 
+    if args.command == "detect-network":
+        v4_port = args.ipv4_port if args.ipv4_port is not None else args.port
+        v6_port = args.ipv6_port if args.ipv6_port is not None else args.port
+        detection = agent.detect_remote_network_sync(
+            public_ipv4=args.ipv4,
+            public_ipv4_port=v4_port,
+            public_ipv6=args.ipv6,
+            public_ipv6_port=v6_port,
+            timeout=args.timeout,
+            allow_non_public=True if args.allow_non_public else None,
+        )
+        print(json.dumps(detection.to_dict(), indent=2, ensure_ascii=False))
+        return 0
+
     if args.command == "simulate":
         is_loop = agent._is_loopback(args.source_ip)
+        detection = None
+        if (args.ipv4 or args.ipv6) and not args.reverse_tunnel:
+            detection = agent.detect_remote_network_sync(
+                public_ipv4=args.ipv4,
+                public_ipv4_port=args.ipv4_port,
+                public_ipv6=args.ipv6,
+                public_ipv6_port=args.ipv6_port,
+                timeout=args.timeout,
+                allow_non_public=True if args.allow_non_public else None,
+            )
+
+        network_profile = (
+            detection.network_profile
+            if detection is not None
+            else ("nat4_reverse" if args.reverse_tunnel else "direct")
+        )
+        network_mode = (
+            detection.network_mode
+            if detection is not None
+            else ("reverse_tunnel" if args.reverse_tunnel else "direct")
+        )
         ctx = ConnectionContext(
             source_ip=args.source_ip,
             is_loopback=is_loop,
@@ -607,16 +907,28 @@ def main(argv: Optional[list[str]] = None) -> int:
             local_bypass_token=args.local_bypass_token,
             session_ticket=args.session_ticket,
             nat_type=args.nat_type,
-            reverse_tunnel=args.reverse_tunnel,
+            reverse_tunnel=(network_profile == "nat4_reverse"),
+            public_ipv4=args.ipv4,
+            public_ipv4_port=args.ipv4_port,
+            public_ipv6=args.ipv6,
+            public_ipv6_port=args.ipv6_port,
+            network_mode=network_mode,
         )
         res = agent.authenticate(ctx)
         out = {
             "decision": res.decision.value,
             "reason": res.reason,
             "network_profile": res.network_profile,
+            "network_mode": res.network_mode,
             "node_status": res.node_status.value if res.node_status else None,
         }
-        print(json.dumps(out, indent=2))
+        if detection is not None:
+            det_dict = detection.to_dict()
+            out["ipv4_reachable"] = det_dict["ipv4_reachable"]
+            out["ipv6_reachable"] = det_dict["ipv6_reachable"]
+            out["recommended_endpoint"] = det_dict["recommended_endpoint"]
+            out["probe_results"] = {"ipv4": det_dict["ipv4"], "ipv6": det_dict["ipv6"]}
+        print(json.dumps(out, indent=2, ensure_ascii=False))
         return 0
 
     if args.command == "listen":

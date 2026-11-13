@@ -40,6 +40,9 @@ class AccessPolicyEngine:
 
     def decide(self, ctx: ConnectionContext) -> AccessDecisionResult:
         network_profile = "nat4_reverse" if ctx.reverse_tunnel else "direct"
+        network_mode = ctx.network_mode or (
+            "reverse_tunnel" if ctx.reverse_tunnel else "direct"
+        )
 
         existing = self.trust_store.get_node(ctx.node_uuid)
 
@@ -50,6 +53,7 @@ class AccessPolicyEngine:
                 "node_revoked",
                 network_profile,
                 existing.status,
+                network_mode=network_mode,
             )
 
         # 1. 本地连接：默认放行，但商业默认要求 local_bypass_token。
@@ -60,12 +64,14 @@ class AccessPolicyEngine:
                     "local_loopback_bypass_ok",
                     network_profile,
                     existing.status if existing else None,
+                    network_mode=network_mode,
                 )
             return AccessDecisionResult(
                 AccessDecision.DENY,
                 "local_bypass_token_required_or_invalid",
                 network_profile,
                 existing.status if existing else None,
+                network_mode=network_mode,
             )
 
         # 2. 外网 + Edge Agent token。
@@ -82,6 +88,7 @@ class AccessPolicyEngine:
                     f"token_invalid:{exc}",
                     network_profile,
                     existing.status if existing else None,
+                    network_mode=network_mode,
                 )
 
             self.trust_store.bind_token(
@@ -95,6 +102,7 @@ class AccessPolicyEngine:
                 "edge_agent_token_verified",
                 network_profile,
                 TrustStatus.TRUSTED,
+                network_mode=network_mode,
             )
 
         # 3. 已信任节点短期会话票据重连。
@@ -117,6 +125,7 @@ class AccessPolicyEngine:
                     "trusted_session_ticket_verified",
                     network_profile,
                     TrustStatus.TRUSTED,
+                    network_mode=network_mode,
                 )
 
         # 已信任节点不允许无 token/session 降级回 TOFU。
@@ -130,6 +139,7 @@ class AccessPolicyEngine:
                 reason,
                 network_profile,
                 existing.status,
+                network_mode=network_mode,
             )
 
         # 待审核节点指纹不一致，拒绝，防止首次 TOFU 被覆盖。
@@ -143,6 +153,7 @@ class AccessPolicyEngine:
                 "pending_node_fingerprint_mismatch",
                 network_profile,
                 existing.status,
+                network_mode=network_mode,
             )
 
         # 4. TOFU 隔离待审核。
@@ -157,4 +168,5 @@ class AccessPolicyEngine:
             "tofu_pending_admin_approval",
             network_profile,
             TrustStatus.PENDING,
+            network_mode=network_mode,
         )

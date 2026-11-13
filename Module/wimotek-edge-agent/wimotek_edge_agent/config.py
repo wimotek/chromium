@@ -48,9 +48,19 @@ class Config:
     audit_max_bytes: int = 10 * 1024 * 1024  # 默认 10MB
     audit_backup_count: int = 5              # 默认保留 5 个归档
 
+    # 网络连通性主动探测配置
+    network_probe_timeout_seconds: float = 2.0
+    allow_non_public_probe: bool = False
+
     # None 表示自动判断；True 表示强制反向隧道；False 表示强制直连。
     reverse_tunnel: Optional[bool] = None
     nat_type: Optional[str] = None
+
+    # 远程节点上报的公网 IPv4 / IPv6 与端口
+    public_ipv4: Optional[str] = None
+    public_ipv4_port: Optional[int] = None
+    public_ipv6: Optional[str] = None
+    public_ipv6_port: Optional[int] = None
 
     tls_server_name: Optional[str] = None
     certificate_pin_sha256: Optional[str] = None
@@ -85,6 +95,8 @@ class Config:
     def from_env(cls) -> "Config":
         token_secret_raw = os.getenv("EDGE_AGENT_TOKEN_SECRET", "")
         token_secret = token_secret_raw.encode("utf-8") if token_secret_raw else b""
+        v4_port_raw = os.getenv("EDGE_AGENT_PUBLIC_IPV4_PORT", "").strip()
+        v6_port_raw = os.getenv("EDGE_AGENT_PUBLIC_IPV6_PORT", "").strip()
 
         return cls(
             data_dir=Path(os.getenv("EDGE_AGENT_DATA_DIR", "./edge_agent_data")),
@@ -109,8 +121,18 @@ class Config:
             audit_backup_count=int(
                 os.getenv("EDGE_AGENT_AUDIT_BACKUP_COUNT", "5")
             ),
+            network_probe_timeout_seconds=float(
+                os.getenv("EDGE_AGENT_NETWORK_PROBE_TIMEOUT_SECONDS", "2.0")
+            ),
+            allow_non_public_probe=_env_bool(
+                "EDGE_AGENT_ALLOW_NON_PUBLIC_PROBE", False
+            ),
             reverse_tunnel=_env_opt_bool("EDGE_AGENT_REVERSE_TUNNEL"),
             nat_type=os.getenv("EDGE_AGENT_NAT_TYPE") or None,
+            public_ipv4=os.getenv("EDGE_AGENT_PUBLIC_IPV4") or None,
+            public_ipv4_port=int(v4_port_raw) if v4_port_raw else None,
+            public_ipv6=os.getenv("EDGE_AGENT_PUBLIC_IPV6") or None,
+            public_ipv6_port=int(v6_port_raw) if v6_port_raw else None,
             tls_server_name=os.getenv("EDGE_AGENT_TLS_SERVER_NAME") or None,
             certificate_pin_sha256=(
                 os.getenv("EDGE_AGENT_CERTIFICATE_PIN_SHA256") or None

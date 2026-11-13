@@ -6,6 +6,7 @@ Commercial-grade edge access control, service bridge, and tunnel agent featuring
 
 - [Design goals](#design-goals)
 - [Architecture](#architecture)
+- [Network mode detection (IPv4 / IPv6 Reachability)](#network-mode-detection-ipv4--ipv6-reachability)
 - [Decision matrix](#decision-matrix)
 - [Installation & Quickstart](#installation--quickstart)
   - [PyPI 安装与 ModuleNotFoundError 深度排查](#pypi-安装与-modulenotfounderror-深度排查)
@@ -26,38 +27,81 @@ Commercial-grade edge access control, service bridge, and tunnel agent featuring
 1. **Local connections default allow**, gated by `local_bypass_token` (mode `0600`), preventing unauthorized local processes from abusing `127.0.0.1`.
 2. **External connections default TOFU**. Unauthenticated nodes are quarantined to heartbeats only. No business data is relayed until approved by an administrator.
 3. **External connections with token use Edge Agent mode**. Single-use HMAC-SHA256 tokens verify signature, TTL, audience, issuer, optional node UUID, IP CIDR binding, and replay prevention.
-4. **NAT4 / no public IP uses reverse tunnel**. Authentication strength remains identical under `nat4_reverse` network profiles.
+4. **Simple reachability-driven network mode (`direct_dual` / `direct_ipv4` / `direct_ipv6` / `reverse_tunnel`)**. Remote nodes report their public IPv4 / IPv6 addresses and ports; this module actively tests TCP reachability, decides the network mode, and returns it directly to the remote node without complex NAT traversal heuristics. Authentication strength remains identical across all modes.
 5. **Trusted nodes re-auth with short-lived session tickets**. Trusted nodes without token or session are denied, strictly preventing downgrade attacks to TOFU.
 
 ## Architecture
 
 ```text
-                 +---------------------------+
-   loopback ---> |  AccessPolicyEngine       | ---> ALLOW_LOCAL
-                 |  (Single Decision Point)  |
-   external ---> |                           | ---> ALLOW_TOKEN
-   + token       |  1. Local bypass token    |
-                 |  2. Join token verify     | ---> ALLOW_SESSION
-   external ---> |  3. Session ticket        |
-   no token      |  4. TOFU quarantine       | ---> PENDING_TOFU
-                 |  5. Revoked / mismatch    |
-   nat4_rev ---> |                           | ---> DENY
-                 +---------------------------+
-                               |
-                               v
-                     +-------------------+
-                     | TrustStore        |
-                     | SQLite WAL        |
-                     | pending/trusted/  |
-                     | revoked + jti     |
-                     +-------------------+
-                               |
-                               v
-                     +-------------------+
-                     | AuditLogger       |
-                     | JSON Lines        |
-                     +-------------------+
+Remote Node Handshake (public_ipv4/port, public_ipv6/port, token/ticket)
+                 │
+                 ▼
+  +--------------------------------------+
+  | Network Prober (nat.py)              | ---> Concurrent IPv4/IPv6 TCP Probe
+  |  SSRF Guard -> direct_dual / ipv4 /  |      Returns network_mode +
+  |  ipv6 / reverse_tunnel               |      recommended_endpoint to peer
+  +--------------------------------------+
+                 │
+                 ▼
+  +--------------------------------------+
+  | AccessPolicyEngine                   | ---> ALLOW_LOCAL / ALLOW_TOKEN /
+  | (Single Decision Point)              |      ALLOW_SESSION / PENDING_TOFU / DENY
+  +--------------------------------------+
+                 │
+       ┌─────────┴─────────┐
+       ▼                   ▼
++--------------+    +--------------+
+| TrustStore   |    | AuditLogger  |
+| SQLite WAL   |    | JSON Lines   |
++--------------+    +--------------+
 ```
+
+## Network mode detection (IPv4 / IPv6 Reachability)
+
+To keep NAT/network classification simple, deterministic, and verifiable, `wimotek-edge-agent` replaces complex STUN/NAT-type guessing with a direct 2-step reachability handshake:
+
+1. **Step 1 — Remote node reports endpoints**:
+   The remote node includes its public IPv4 and/or IPv6 addresses and listening ports in the handshake payload (or configures `EDGE_AGENT_PUBLIC_IPV4*` / `EDGE_AGENT_PUBLIC_IPV6*`):
+   ```json
+   {
+     "node_uuid": "edge-gw-01",
+     "public_key_fingerprint": "sha256:...",
+     "join_token": "...",
+     "public_ipv4": "203.0.113.10",
+     "public_ipv4_port": 8443,
+     "public_ipv6": "2001:db8::10",
+     "public_ipv6_port": 8443
+   }
+   ```
+2. **Step 2 — Central module tests reachability & returns `network_mode`**:
+   When receiving the handshake (or a `{"type": "network_probe", ...}` control message, or calling `detect-network`), this module concurrently runs async TCP connection probes (`asyncio.open_connection`) against the reported IPv4 and IPv6 endpoints and classifies the result:
+
+   | IPv4 Reachable | IPv6 Reachable | `network_mode` Returned | `network_profile` | Behavior |
+   |---|---|---|---|---|
+   | Yes | Yes | `direct_dual` | `direct` | Both stacks reachable; picks lowest-latency endpoint as `recommended_endpoint` |
+   | Yes | No / Unreported | `direct_ipv4` | `direct` | IPv4 public endpoint reachable |
+   | No / Unreported | Yes | `direct_ipv6` | `direct` | IPv6 public endpoint reachable |
+   | No | No | `reverse_tunnel` | `nat4_reverse` | Unreachable from public internet; instructs remote node to use reverse tunnel |
+
+   Response returned back to the remote node (`status`: `ok`, `pending_tofu`, `approved`, or `denied`):
+   ```json
+   {
+     "status": "ok",
+     "decision": "allow_token",
+     "network_mode": "direct_dual",
+     "network_profile": "direct",
+     "ipv4_reachable": true,
+     "ipv6_reachable": true,
+     "recommended_endpoint": "203.0.113.10:8443",
+     "probe_results": {
+       "ipv4": {"family": "ipv4", "host": "203.0.113.10", "port": 8443, "reachable": true, "latency_ms": 12.4, "error": null},
+       "ipv6": {"family": "ipv6", "host": "2001:db8::10", "port": 8443, "reachable": true, "latency_ms": 18.1, "error": null}
+     },
+     "session_ticket": "..."
+   }
+   ```
+
+> **SSRF Protection**: By default (`EDGE_AGENT_ALLOW_NON_PUBLIC_PROBE=false`), the prober rejects loopback (`127.0.0.0/8`, `::1`), RFC 1918 private networks (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`), CGNAT (`100.64.0.0/10`), link-local, multicast, and IPv6 ULA (`fc00::/7`) with `private_ip_not_public` / `non_routable_ip`. Enable `EDGE_AGENT_ALLOW_NON_PUBLIC_PROBE=true` (or `--allow-non-public`) only for private VPC or local testing.
 
 ## Decision matrix
 
@@ -246,8 +290,14 @@ npx wimotek-edge-agent --help
 | `EDGE_AGENT_REQUIRE_LOCAL_BYPASS_TOKEN` | no | `true` | Require local bypass token for loopback |
 | `EDGE_AGENT_AUDIT_MAX_BYTES` | no | `10485760` (10MB) | Max audit log size before auto-rotation |
 | `EDGE_AGENT_AUDIT_BACKUP_COUNT` | no | `5` | Number of rotated audit log files to keep |
-| `EDGE_AGENT_REVERSE_TUNNEL` | no | auto | Force reverse tunnel (`true`/`false`) |
-| `EDGE_AGENT_NAT_TYPE` | no | `unknown` | Network NAT type (`nat4`, `symmetric`, etc.) |
+| `EDGE_AGENT_REVERSE_TUNNEL` | no | auto | Force reverse tunnel (`true`/`false`), overriding active probes |
+| `EDGE_AGENT_NAT_TYPE` | no | `unknown` | Optional legacy NAT hint (`nat4`, `symmetric`, etc.) |
+| `EDGE_AGENT_NETWORK_PROBE_TIMEOUT_SECONDS` | no | `2.0` | TCP reachability probe timeout per endpoint (seconds) |
+| `EDGE_AGENT_ALLOW_NON_PUBLIC_PROBE` | no | `false` | Allow probing private/loopback/CGNAT IPs (for LAN/local test only) |
+| `EDGE_AGENT_PUBLIC_IPV4` | no | - | Remote node public IPv4 reported during handshake/reverse tunnel |
+| `EDGE_AGENT_PUBLIC_IPV4_PORT` | no | - | Remote node public IPv4 listening port (1–65535) |
+| `EDGE_AGENT_PUBLIC_IPV6` | no | - | Remote node public IPv6 reported during handshake/reverse tunnel |
+| `EDGE_AGENT_PUBLIC_IPV6_PORT` | no | - | Remote node public IPv6 listening port (1–65535) |
 | `EDGE_AGENT_NODE_UUID` | reverse only | - | Agent node UUID |
 | `EDGE_AGENT_PUBLIC_KEY_FINGERPRINT` | reverse only | - | Agent public key fingerprint |
 | `EDGE_AGENT_JOIN_TOKEN` | reverse only | - | Join token for reverse tunnel connection |
@@ -315,6 +365,25 @@ Read or generate the local bypass token:
 wimotek-edge-agent bypass-token
 ```
 
+Test public IPv4 / IPv6 reachability and determine `network_mode`:
+
+```bash
+wimotek-edge-agent detect-network \
+  --ipv4 203.0.113.10 --ipv4-port 8443 \
+  --ipv6 2001:db8::10 --ipv6-port 8443 \
+  --timeout 2.0
+```
+
+Simulate policy evaluation together with endpoint reachability probing:
+
+```bash
+wimotek-edge-agent simulate \
+  --source-ip 203.0.113.10 \
+  --node-uuid node-xxx \
+  --fingerprint sha256:... \
+  --ipv4 203.0.113.10 --ipv4-port 8443
+```
+
 Clean or truncate the audit log (keep recent N lines or 0 for complete truncate):
 
 ```bash
@@ -372,7 +441,9 @@ await agent.run_reverse_tunnel(
 )
 ```
 
-- Sends handshake fields (`node_uuid`, `public_key_fingerprint`, `join_token`, `nat_type`, `reverse_tunnel`);
+- Sends handshake fields (`node_uuid`, `public_key_fingerprint`, `join_token`, `nat_type`, `reverse_tunnel`, and configured `public_ipv4` / `public_ipv4_port` / `public_ipv6` / `public_ipv6_port`);
+- Stores the central server's returned `network_mode` on `agent.last_network_mode`;
+- Supports direct on-demand probing via `await agent.detect_remote_network(public_ipv4=..., public_ipv4_port=..., public_ipv6=..., public_ipv6_port=...)` or handshake-less `{"type": "network_probe", ...}` messages on an established connection;
 - Supports TLS pinning via `EDGE_AGENT_CERTIFICATE_PIN_SHA256`;
 - Quarantines in `pending_tofu` until approved by central administrator;
 - Exponential backoff on reconnection attempts.

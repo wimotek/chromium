@@ -33,6 +33,12 @@ class ConnectionContext:
     nat_type: str = "unknown"
     reverse_tunnel: bool = False
 
+    public_ipv4: Optional[str] = None
+    public_ipv4_port: Optional[int] = None
+    public_ipv6: Optional[str] = None
+    public_ipv6_port: Optional[int] = None
+    network_mode: Optional[str] = None
+
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
@@ -42,6 +48,7 @@ class AccessDecisionResult:
     reason: str
     network_profile: str
     node_status: Optional[TrustStatus] = None
+    network_mode: Optional[str] = None
 
 
 @dataclass(frozen=True)
