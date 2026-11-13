@@ -44,11 +44,10 @@ FROM alpine:3.21
 LABEL maintainer="Wimotek <i@Wimotek.com>"
 LABEL description="Xray REALITY Core (Headless, Slim & Non-Root Multi-Stage)"
 
-# 安装轻量运行时依赖：dumb-init 处理进程信号链、ca-certificates、openssl、libcap、Python 运行环境
+# 安装轻量运行时依赖：dumb-init 处理进程信号链、ca-certificates (TLS 根证书)、libcap (赋予低端口能力)、Python
 RUN apk add --no-cache \
     dumb-init \
     ca-certificates \
-    openssl \
     libcap \
     python3 \
     py3-websockets
@@ -70,10 +69,11 @@ RUN ln -sf /usr/share/zoneinfo/Asia/Shanghai /etc/localtime
 COPY --from=xray-builder /out/usr/bin/xray /usr/bin/xray
 COPY --from=xray-builder /out/usr/share/xray /usr/share/xray
 
-# 创建专用非 root 用户 (UID 10001: appuser)，并赋予 Xray 低特权绑定 443 端口权限
+# 创建专用非 root 用户 (UID 10001: appuser)，并赋予 Xray 与 Python 低特权绑定 443 端口权限
 RUN addgroup -g 10001 appgroup && \
     adduser -u 10001 -G appgroup -s /bin/sh -D appuser && \
-    setcap 'cap_net_bind_service=+ep' /usr/bin/xray
+    setcap 'cap_net_bind_service=+ep' /usr/bin/xray && \
+    setcap 'cap_net_bind_service=+ep' $(readlink -f /usr/bin/python3)
 
 # 显式创建各持久化挂载与运行目录并授予 appuser 所有权，避免未挂载数据卷时启动即报错
 RUN mkdir -p /app /etc/xray /data /tmp && \

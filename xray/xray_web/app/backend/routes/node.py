@@ -5,6 +5,8 @@ import datetime
 import traceback
 from flask import Blueprint, request, jsonify
 from core.db import get_db, get_setting
+from core.edge_agent_service import EdgeAgentService
+from wimotek_edge_agent.models import AccessDecision
 from routes import get_node_snis, is_user_allowed_for_node
 
 node_bp = Blueprint('node_bp', __name__)
@@ -96,33 +98,78 @@ def node_heartbeat():
             auto_approve_setting = get_setting("node_auto_approve", "true").lower() == "true"
             strict_token_setting = get_setting("strict_token_only", "false").lower() == "true"
 
-            token_valid = bool(valid_cluster_token and bootstrap_token == valid_cluster_token)
+            # 优先使用 wimotek-edge-agent 单次 40 字符 HMAC 令牌验证 (抗重放)
+            edge_claims = EdgeAgentService.get_instance().verify_token(
+                token=bootstrap_token,
+                source_ip=node_ip or "127.0.0.1",
+                node_uuid=node_id
+            )
+            is_edge_token_valid = edge_claims is not None
+            is_cluster_token_valid = bool(valid_cluster_token and bootstrap_token == valid_cluster_token)
+            token_valid = is_edge_token_valid or is_cluster_token_valid
 
             # 准入决策：
-            # 1. 附带了正确集群 Token -> 自动准入上线
+            # 1. 附带了正确 wimotek-edge-agent Token 或集群 Token -> 自动准入上线
             # 2. 未附带有效 Token，但全局开启了【免审核自动接入】且非严格模式 -> 自动准入上线
             # 3. 未附带有效 Token 且关闭了免审核 -> 放入隔离区等待人工审核
             # 4. 启用了严格 Token 模式且无正确 Token -> 立即 403 阻断
             if token_valid:
                 is_approved = 1
                 status = 1
-                admit_reason = "凭有效集群 Token 自动加入"
+                admit_reason = "凭 wimotek-edge-agent 单次防重放令牌准入" if is_edge_token_valid else "凭有效集群 Token 自动加入"
+                EdgeAgentService.get_instance().log_access(
+                    source_ip=node_ip or "127.0.0.1",
+                    node_uuid=node_id,
+                    fingerprint=node_pubkey or "none",
+                    decision=AccessDecision.ALLOW_TOKEN,
+                    reason=admit_reason,
+                    network_profile=data.get("net_mode", "direct"),
+                    node_status="trusted",
+                    join_token=bootstrap_token
+                )
             elif auto_approve_setting and not strict_token_setting:
                 is_approved = 1
                 status = 1
                 admit_reason = "TOFU 免审核策略自动准入"
+                EdgeAgentService.get_instance().log_access(
+                    source_ip=node_ip or "127.0.0.1",
+                    node_uuid=node_id,
+                    fingerprint=node_pubkey or "none",
+                    decision=AccessDecision.PENDING_TOFU,
+                    reason=admit_reason,
+                    network_profile=data.get("net_mode", "direct"),
+                    node_status="trusted"
+                )
             elif strict_token_setting:
+                EdgeAgentService.get_instance().log_access(
+                    source_ip=node_ip or "127.0.0.1",
+                    node_uuid=node_id,
+                    fingerprint=node_pubkey or "none",
+                    decision=AccessDecision.DENY,
+                    reason="严格模式拦截：缺少合法的单次防重放或集群引导令牌",
+                    network_profile=data.get("net_mode", "direct"),
+                    node_status="revoked"
+                )
                 c.execute(
                     "INSERT INTO audit_logs (level, event_type, node_id, ip, message) VALUES (?, ?, ?, ?, ?)",
                     ("security", "TOKEN_REJECTED", node_id, node_ip, f"严格令牌模式阻断：新节点未携带合法集群引导令牌")
                 )
                 conn.commit()
                 conn.close()
-                return jsonify({"code": 403, "msg": "【安全拦截】严格模式已激活：必须提供合法的集群引导令牌 (Cluster Token)！"}), 403
+                return jsonify({"code": 403, "msg": "【安全拦截】严格模式已激活：必须提供合法的单次引导令牌 (Join Token)！"}), 403
             else:
                 is_approved = 0
                 status = 0
                 admit_reason = "进入待审隔离区等待审批"
+                EdgeAgentService.get_instance().log_access(
+                    source_ip=node_ip or "127.0.0.1",
+                    node_uuid=node_id,
+                    fingerprint=node_pubkey or "none",
+                    decision=AccessDecision.PENDING_TOFU,
+                    reason=admit_reason,
+                    network_profile=data.get("net_mode", "direct"),
+                    node_status="pending"
+                )
 
             # 签发专属通信凭据与密码学锁定
             assigned_node_key = "nk_" + secrets.token_hex(20)
@@ -504,3 +551,71 @@ def create_gateway_session():
     except Exception as e:
         traceback.print_exc()
         return jsonify({"code": 500, "msg": f"生成网关会话失败: {str(e)}"}), 500
+
+# =========================================================================
+# wimotek-edge-agent 原生集成扩展 API：单次 Token 签发与结构化日志管理
+# =========================================================================
+@node_bp.route('/api/node/edge_agent/issue_token', methods=['POST'])
+def edge_agent_issue_token():
+    """使用 wimotek-edge-agent 签发高强度 40 字符单次 Join Token"""
+    data = request.get_json(silent=True) or {}
+    node_group = data.get("node_group", "default").strip()
+    ttl_seconds = int(data.get("ttl_seconds", 600))
+    node_uuid = data.get("node_uuid", "").strip() or None
+    allowed_ip_cidr = data.get("allowed_ip_cidr", "").strip() or None
+
+    svc = EdgeAgentService.get_instance()
+    token = svc.issue_token(
+        node_group=node_group,
+        ttl_seconds=ttl_seconds,
+        node_uuid=node_uuid,
+        allowed_ip_cidr=allowed_ip_cidr
+    )
+    return jsonify({
+        "code": 200,
+        "token": token,
+        "token_len": len(token),
+        "ttl_seconds": ttl_seconds,
+        "node_uuid": node_uuid,
+        "node_group": node_group,
+        "msg": "已基于 wimotek-edge-agent 生成专属 40 字符单次防重放令牌"
+    })
+
+@node_bp.route('/api/node/edge_agent/audit_logs', methods=['GET'])
+def edge_agent_get_audit_logs():
+    """读取 wimotek-edge-agent 结构化 JSONL 审计日志"""
+    import json
+    limit = int(request.args.get("limit", 100))
+    audit_file = EdgeAgentService.get_instance().get_audit_log_path()
+    logs = []
+    if audit_file.exists():
+        try:
+            with open(audit_file, "r", encoding="utf-8") as f:
+                lines = f.readlines()
+            for line in lines[-limit:]:
+                line = line.strip()
+                if line:
+                    try:
+                        logs.append(json.loads(line))
+                    except Exception:
+                        pass
+        except Exception as e:
+            return jsonify({"code": 500, "msg": str(e)}), 500
+    return jsonify({
+        "code": 200,
+        "total_lines": len(logs),
+        "audit_file": str(audit_file),
+        "logs": logs
+    })
+
+@node_bp.route('/api/node/edge_agent/clean_audit', methods=['POST'])
+def edge_agent_clean_audit():
+    """清理或截断 wimotek-edge-agent 审计日志"""
+    data = request.get_json(silent=True) or {}
+    keep_lines = int(data.get("keep_lines", 500))
+    cleared = EdgeAgentService.get_instance().clean_audit_log(keep_lines=keep_lines)
+    return jsonify({
+        "code": 200,
+        "cleared_lines": cleared,
+        "msg": f"审计日志清理完成，保留最近 {keep_lines} 行"
+    })

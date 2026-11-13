@@ -81,7 +81,12 @@ class HubClient:
             "server_names": AppConfig.SERVER_NAMES,
             "pbk": pbk,
             "sid": sid,
-            "net_mode": net_mode
+            "net_mode": net_mode,
+            # wimotek-edge-agent 标准握手协议字段
+            "node_uuid": self.node_id,
+            "public_key_fingerprint": pbk,
+            "nat_type": "nat4" if net_mode == "reverse_wss" else "unknown",
+            "reverse_tunnel": (net_mode == "reverse_wss")
         }
 
         if self.is_bootstrapping:
