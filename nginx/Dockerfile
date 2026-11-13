@@ -2,18 +2,14 @@
 FROM golang:1.22-alpine AS builder
 WORKDIR /src
 
+# 1. 复制源码全部内容
 COPY . .
 
-# 利用缓存加速模块拉取
-COPY go.mod go.sum ./
-RUN --mount=type=cache,target=/go/pkg/mod go mod download || true
+# 2. 容错兜底：如果你本地没建 go.mod，自动在云端初始化
+RUN if [ ! -f go.mod ]; then go mod init github.com/wimotek/nginx; fi
 
-COPY . .
-
-# 核心效率优化：挂载编译器缓存目录，二次构建即使换架构也是增量编译
-# 禁用 CGO，使用 ldflags 彻底去除调试符号与 DWARF
-RUN --mount=type=cache,target=/go/pkg/mod \
-    --mount=type=cache,target=/root/.cache/go-build \
+# 3. 核心效率优化：挂载编译器缓存目录，实现毫秒级增量编译
+RUN --mount=type=cache,target=/root/.cache/go-build \
     CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /bin/nano-server ./cmd/server
 
 # ---- 阶段 2: 最终极致轻量镜像 ----
