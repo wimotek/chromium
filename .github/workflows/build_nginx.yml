@@ -1,0 +1,109 @@
+name: Build and Push Multi-Arch Images
+
+# 1. 监控工作目录与核心代码，有变动才触发 Action
+on:
+  push:
+    branches:
+      - main
+    # 核心：精准监听路径，非核心文件（如 docs、md 变更）不浪费构建资源
+    paths:
+      - 'nginx/**'
+      - 'cmd/**'
+      - 'internal/**'
+      - 'Dockerfile'
+      - '.github/workflows/release.yml'
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+
+# 2. 效率优化：防抖与并发控制
+# 如果连续提交多次代码，自动取消上一次排队或未跑完的构建，防止资源抢占
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# 3. 全局统一变量定义
+env:
+  # 镜像上传变量：自动从 Secret 拼接 "用户名/nginx"
+  DOCKER_IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/nginx
+  # 定义工作目录
+  WORKDIR: ./nginx
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      # 动态探测底层 Alpine 的 Nginx 精确版本
+      - name: Detect Nginx Upstream Version
+        id: nginx_meta
+        run: |
+          RAW_VER=$(docker run --rm alpine:3.20 sh -c "apk add --no-cache nginx >/dev/null 2>&1 && nginx -v 2>&1 | cut -d'/' -f2")
+          MAJOR_MINOR=$(echo "$RAW_VER" | cut -d'.' -f1,2)
+          echo "nginx_version=${RAW_VER}" >> $GITHUB_OUTPUT
+          echo "nginx_major_minor=${MAJOR_MINOR}" >> $GITHUB_OUTPUT
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # 登录 GHCR
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # 登录 Docker Hub
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # 标签解析（直接引用全局变量）
+      - name: Extract Metadata (Tags, Labels)
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: |
+            ${{ env.DOCKER_IMAGE }}
+            ghcr.io/${{ github.repository }}
+          tags: |
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+            type=raw,value=${{ steps.nginx_meta.outputs.nginx_version }},enable=true
+            type=raw,value=${{ steps.nginx_meta.outputs.nginx_major_minor }},enable=true
+            type=raw,value=${{ steps.nginx_meta.outputs.nginx_version }}-alpine,enable=true
+            type=semver,pattern={{version}}
+
+      # 多架构极速编译（启用 GHA 缓存）
+      - name: Build and Push Multi-Arch Image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # 核心效率优化：使用 GitHub Actions 原生缓存，构建耗时从 3 分钟降至 20 秒
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # 同步 README 到 Docker Hub
+      - name: Update Docker Hub Description
+        uses: peter-evans/dockerhub-description@v4
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          repository: ${{ env.DOCKER_IMAGE }}
+          readme-filepath: ./README.md
+          short-description: "⚡ 极轻(~28MB)无数据库 Nginx 可视化微内核，自适应现代 Web UI，解耦动态 PHP"

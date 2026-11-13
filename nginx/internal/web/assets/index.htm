@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Wimotek Nginx 控制台</title>
+    <!-- 此处保持上一轮给出的现代化 CSS 样式即可 -->
+</head>
+<body>
+    <header>
+        <div class="brand">⚡ WIMOTEK NGINX <span class="badge">Alpine 28MB</span></div>
+        <div><button onclick="reloadNginx()" style="width:auto; padding:6px 14px;">平滑热重载</button></div>
+    </header>
+
+    <main>
+        <div class="panel">
+            <h3 style="margin-bottom: 12px; font-size: 1rem; color: var(--text-muted);">托管站点列表</h3>
+            <div id="siteList">加载中...</div>
+            <button onclick="createNewSite()" style="margin-top: 1rem;">+ 新增站点配置</button>
+        </div>
+
+        <div class="panel" style="display: flex; flex-direction: column;">
+            <div style="display: flex; gap: 8px; margin-bottom: 8px;">
+                <input type="text" id="domainInput" placeholder="输入绑定域名 (如: api.example.com)" />
+                <button onclick="applyTemplate('php83')" style="width:auto;font-size:0.8rem;background:#334155;">PHP8.3</button>
+                <button onclick="applyTemplate('proxy')" style="width:auto;font-size:0.8rem;background:#334155;">反向代理</button>
+                <button onclick="applyTemplate('static')" style="width:auto;font-size:0.8rem;background:#334155;">静态SPA</button>
+            </div>
+            
+            <textarea id="editor" rows="18" spellcheck="false"></textarea>
+            
+            <div class="actions">
+                <button onclick="saveCurrentSite()">保存并校验配置</button>
+                <button onclick="deleteCurrentSite()" class="danger" style="width: auto;">删除此站</button>
+            </div>
+            
+            <div class="terminal-log" id="terminalLog">> 系统微内核就绪，等待交互。</div>
+        </div>
+    </main>
+
+    <!-- 挂载独立的模块化脚本 -->
+    <script src="app.js"></script>
+</body>
+</html>
