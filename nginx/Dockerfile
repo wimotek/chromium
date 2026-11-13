@@ -1,34 +1,30 @@
-# ---- 阶段 1: 静态构建 Go 控制器 ----
+# syntax=docker/dockerfile:1.4
 FROM golang:1.22-alpine AS builder
 WORKDIR /src
-
-# 1. 复制源码全部内容
 COPY . .
-
-# 2. 容错兜底：如果你本地没建 go.mod，自动在云端初始化
 RUN if [ ! -f go.mod ]; then go mod init github.com/wimotek/nginx; fi
-
-# 3. 核心效率优化：挂载编译器缓存目录，实现毫秒级增量编译
 RUN --mount=type=cache,target=/root/.cache/go-build \
     CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /bin/nano-server ./cmd/server
 
-# ---- 阶段 2: 最终极致轻量镜像 ----
 FROM alpine:3.20
 
-# 纯安装 Nginx 及必要时区，清理一切包管理缓存
-RUN apk add --no-cache nginx tzdata ca-certificates && \
-    mkdir -p /run/nginx /var/www/html /etc/nginx/conf.d
+# 1. 安装 Nginx、基础证书、特权控制工具 libcap 以及 acme.sh 运行依赖
+RUN apk add --no-cache nginx tzdata ca-certificates libcap curl openssl socat && \
+    mkdir -p /run/nginx /var/www/html /var/www/acme /etc/nginx/conf.d /etc/nginx/ssl /var/lib/nginx/tmp /var/log/nginx && \
+    # 2. 内置安装纯 Shell ACME 客户端（仅多 ~3MB）
+    curl https://get.acme.sh | sh -s email=admin@example.com && \
+    ln -s /root/.acme.sh/acme.sh /usr/local/bin/acme.sh
 
-# 复制仅 8MB 的单一纯静态二进制
 COPY --from=builder /bin/nano-server /usr/local/bin/nano-server
 
-# 容器数据卷挂载点
-VOLUME ["/etc/nginx/conf.d", "/etc/nginx/ssl", "/var/www/html"]
+# 3. 剥离 Root 特权，赋予绑定 80/443 能力，所有权转移给 nginx 用户
+RUN setcap 'cap_net_bind_service=+ep' /usr/sbin/nginx && \
+    setcap 'cap_net_bind_service=+ep' /usr/local/bin/nano-server && \
+    chown -R nginx:nginx /etc/nginx /var/www /run/nginx /var/log/nginx /var/lib/nginx /usr/local/bin/nano-server /root/.acme.sh && \
+    chmod -R 755 /etc/nginx/conf.d /var/www /run/nginx
 
+USER nginx
+VOLUME ["/etc/nginx/conf.d", "/etc/nginx/ssl", "/var/www/html", "/root/.acme.sh"]
 EXPOSE 80 443 8080
-
-# 具备内置健康检查探针
-HEALTHCHECK --interval=30s --timeout=3s --retries=3 \
-  CMD wget -q --spider http://127.0.0.1:8080/ || exit 1
 
 ENTRYPOINT ["/usr/local/bin/nano-server"]

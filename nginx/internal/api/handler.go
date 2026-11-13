@@ -13,10 +13,16 @@ type Handler struct {
 	cfg  *config.Config
 	mgr  *nginx.Manager
 	exec *nginx.Executor
+	acme *nginx.AcmeManager
 }
 
 func NewHandler(cfg *config.Config, mgr *nginx.Manager, exec *nginx.Executor) *Handler {
-	return &Handler{cfg: cfg, mgr: mgr, exec: exec}
+	return &Handler{
+		cfg:  cfg,
+		mgr:  mgr,
+		exec: exec,
+		acme: nginx.NewAcmeManager(),
+	}
 }
 
 func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
@@ -71,7 +77,7 @@ func (h *Handler) SaveSite(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]interface{}{"code": 400, "error": err.Error()})
 		return
 	}
-	w.Write([]byte(`{"code":200,"msg":"配置保存并校验成功"}`))
+	w.Write([]byte(`{"code":200,"msg":"配置校验通过并保存成功"}`))
 }
 
 func (h *Handler) DeleteSite(w http.ResponseWriter, r *http.Request) {
@@ -90,5 +96,21 @@ func (h *Handler) Reload(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]interface{}{"code": 500, "error": err.Error()})
 		return
 	}
-	w.Write([]byte(`{"code":200,"msg":"Nginx 毫秒级优雅平滑重载完成"}`))
+	w.Write([]byte(`{"code":200,"msg":"Nginx 毫秒级热重载完成"}`))
+}
+
+// IssueSSL 执行 ACME 证书一键申请
+func (h *Handler) IssueSSL(w http.ResponseWriter, r *http.Request) {
+	domain := r.URL.Query().Get("domain")
+	if domain == "" {
+		http.Error(w, `{"code":400,"error":"必须指定申请证书的域名"}`, 400)
+		return
+	}
+	if err := h.acme.IssueCert(domain); err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]interface{}{"code": 500, "error": err.Error()})
+		return
+	}
+	w.Write([]byte(`{"code":200,"msg":"SSL 证书签发并部署成功！"}`))
 }
