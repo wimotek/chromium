@@ -27,7 +27,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Prepare common client
-        run: 
+        run: |
           cp chromium/common/edge_node_client.py chromium/chromium_kasmvnc/edge_node_client.py
           cp -r chromium/common/desktop chromium/chromium_kasmvnc/desktop
 
