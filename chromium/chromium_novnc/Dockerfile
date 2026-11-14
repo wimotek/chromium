@@ -1,7 +1,9 @@
 # ==============================================================================
-# Stage 1: Python 边缘代理依赖构建层 (与运行时保持同源 Debian Bookworm Python 3.11)
+# Stage 1: Python 边缘代理依赖构建层 + 时区两文件提取 (与运行时保持同源 Debian Bookworm)
 # ==============================================================================
 FROM debian:bookworm-slim AS py-builder
+
+ARG TZ=Asia/Shanghai
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
@@ -12,16 +14,19 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     python3-venv \
     python3-pip \
     ca-certificates \
+    tzdata \
+    && cp "/usr/share/zoneinfo/${TZ}" /etc/localtime \
+    && echo "${TZ}" > /etc/timezone \
     && python3 -m venv /opt/venv \
     && /opt/venv/bin/pip install --no-cache-dir \
         "httpx>=0.27.0" \
         "websockets>=12.0" \
-        "wimotek-edge-agent>=1.0.17" \
         --index-url https://pypi.org/simple \
         --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple \
+    && rm -rf /opt/venv/lib/python*/site-packages/pip* /opt/venv/bin/pip* \
     && find /opt/venv -type d -name "__pycache__" -prune -exec rm -rf {} + \
-    && find /opt/venv -type f -name "*.pyc" -delete \
-    && rm -rf /var/lib/apt/lists/* /root/.cache
+    && find /opt/venv -type f \( -name "*.pyc" -o -name "*.pyo" \) -delete \
+    && rm -rf /var/lib/apt/lists/* /var/cache/apt/* /root/.cache
 
 # ==============================================================================
 # Stage 2: 轻量生产运行层 (dumb-init + Root-Init-Drop gosu -> UID/GID 1000)
@@ -31,8 +36,10 @@ FROM debian:bookworm-slim
 
 ARG PUID=1000
 ARG PGID=1000
+ARG TZ=Asia/Shanghai
 
 ENV DEBIAN_FRONTEND=noninteractive \
+    TZ=${TZ} \
     LANG=zh_CN.UTF-8 \
     LANGUAGE=zh_CN:zh \
     LC_ALL=zh_CN.UTF-8 \
@@ -41,12 +48,17 @@ ENV DEBIAN_FRONTEND=noninteractive \
     VNC_PASSWORD= \
     CHROME_ARGS= \
     REVERSE_TUNNEL= \
+    CDP_FORWARD_PORT= \
     PATH="/opt/venv/bin:${PATH}" \
     HOME=/home/appuser \
     XDG_CONFIG_HOME=/home/appuser/.config \
     XDG_CACHE_HOME=/home/appuser/.cache \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1
+
+# 仅提取分阶段构建产出的 2 个时区文件，不安装 tzdata 软件包
+COPY --from=py-builder /etc/localtime /etc/localtime
+COPY --from=py-builder /etc/timezone /etc/timezone
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     dumb-init \
@@ -71,6 +83,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && (fc-cache -f || true) \
     && ln -f /usr/share/novnc/vnc.html /usr/share/novnc/index.html \
     && rm -rf /var/lib/apt/lists/* \
+        /var/cache/apt/* \
+        /var/log/apt/* \
+        /var/log/dpkg.log \
         /usr/share/doc/* \
         /usr/share/man/* \
         /usr/share/info/* \

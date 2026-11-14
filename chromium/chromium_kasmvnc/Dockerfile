@@ -1,9 +1,10 @@
 # ==============================================================================
-# Stage 1: 构建 Python 边缘代理依赖 + 下载 KasmVNC Release .deb (支持 amd64/arm64)
+# Stage 1: 构建 Python 边缘代理依赖 + 时区两文件提取 + 下载 KasmVNC Release .deb (支持 amd64/arm64)
 # ==============================================================================
 FROM debian:bookworm-slim AS builder
 
 ARG KASMVNC_VER=1.3.3
+ARG TZ=Asia/Shanghai
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
@@ -15,18 +16,21 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     python3-pip \
     wget \
     ca-certificates \
+    tzdata \
+    && cp "/usr/share/zoneinfo/${TZ}" /etc/localtime \
+    && echo "${TZ}" > /etc/timezone \
     && python3 -m venv /opt/venv \
     && /opt/venv/bin/pip install --no-cache-dir \
         "httpx>=0.27.0" \
         "websockets>=12.0" \
-        "wimotek-edge-agent>=1.0.17" \
         --index-url https://pypi.org/simple \
         --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple \
+    && rm -rf /opt/venv/lib/python*/site-packages/pip* /opt/venv/bin/pip* \
     && find /opt/venv -type d -name "__pycache__" -prune -exec rm -rf {} + \
-    && find /opt/venv -type f -name "*.pyc" -delete \
+    && find /opt/venv -type f \( -name "*.pyc" -o -name "*.pyo" \) -delete \
     && ARCH="$(dpkg --print-architecture)" \
     && wget -q "https://github.com/kasmtech/KasmVNC/releases/download/v${KASMVNC_VER}/kasmvncserver_bookworm_${KASMVNC_VER}_${ARCH}.deb" -O /tmp/kasmvnc.deb \
-    && rm -rf /var/lib/apt/lists/* /root/.cache
+    && rm -rf /var/lib/apt/lists/* /var/cache/apt/* /root/.cache
 
 # ==============================================================================
 # Stage 2: 轻量生产运行层 (dumb-init + Root-Init-Drop gosu -> UID/GID 1000)
@@ -36,8 +40,10 @@ FROM debian:bookworm-slim
 
 ARG PUID=1000
 ARG PGID=1000
+ARG TZ=Asia/Shanghai
 
 ENV DEBIAN_FRONTEND=noninteractive \
+    TZ=${TZ} \
     LANG=zh_CN.UTF-8 \
     LANGUAGE=zh_CN:zh \
     LC_ALL=zh_CN.UTF-8 \
@@ -46,6 +52,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
     VNC_PASSWORD= \
     CHROME_ARGS= \
     REVERSE_TUNNEL= \
+    CDP_FORWARD_PORT= \
     PATH="/opt/venv/bin:${PATH}" \
     HOME=/home/kasm-user \
     XDG_CONFIG_HOME=/home/kasm-user/.config \
@@ -53,6 +60,9 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1
 
+# 仅提取分阶段构建产出的 2 个时区文件，不安装 tzdata 软件包
+COPY --from=builder /etc/localtime /etc/localtime
+COPY --from=builder /etc/timezone /etc/timezone
 COPY --from=builder /tmp/kasmvnc.deb /tmp/kasmvnc.deb
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -82,6 +92,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && locale-gen \
     && (fc-cache -f || true) \
     && rm -rf /var/lib/apt/lists/* \
+        /var/cache/apt/* \
+        /var/log/apt/* \
+        /var/log/dpkg.log \
         /usr/share/doc/* \
         /usr/share/man/* \
         /usr/share/info/* \

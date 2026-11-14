@@ -12,14 +12,15 @@
   * **阶段 1（瞬态 Root 初始化）**：启动时由 PID 1 `dumb-init` 拉起 `entrypoint.sh` 完成 `/data` 权限自愈，并将宿主机 `/certs` 中宝塔/Certbot 的 `0600 root` 私钥安全复制合成到容器内 `/etc/ssl/app/`（**绝不修改宿主机 `/certs` 属主与权限**）。
   * **阶段 2（非 root 业务运行）**：通过 `exec gosu` 彻底替换进程，随后 `Xvnc`、`openbox`、`novnc_proxy`、`edge_node_client.py` 与 `Chromium` 全部以非特权用户（noVNC 为 `appuser:1000`，KasmVNC 为 `kasm-user:1000`）运行，无任何常驻 root 进程。
 * **Multi-stage 构建与镜像瘦身**：
-  * `py-builder` / `builder` 阶段隔离构建 `/opt/venv`（`httpx`、`websockets`、`wimotek-edge-agent>=1.0.17`）并下载 KasmVNC `.deb`；
-  * 运行时剔除 `tini`、`curl`、`wget`、`procps`、`net-tools`、`autocutsel` 等冗余工具，并清理 `apt` 缓存、`/usr/share/doc`、`/usr/share/man` 与 noVNC 测试文档，压缩镜像体积与攻击面。
+  * `py-builder` / `builder` 阶段隔离构建 `/opt/venv`（节点端轻量代理 `edge_node_client.py` 仅依赖 `httpx` + `websockets`，剔除节点未使用的 `wimotek-edge-agent` 与 `pip` 缓存）；
+  * 分阶段安装 `tzdata` 并仅提取 `/etc/localtime` 与 `/etc/timezone` 两个时区文件进入运行层，免除整包 `/usr/share/zoneinfo` 体积；
+  * 运行时剔除 `tini`、`curl`、`wget`、`procps`、`net-tools`、`autocutsel` 等冗余工具，并清理 `apt` 缓存、`/var/log`、`/usr/share/doc`、`/usr/share/man` 与 noVNC 测试文档，压缩镜像体积与攻击面。
 * **`dumb-init` (PID 1) 信号转发与 Python 原生 `HEALTHCHECK`**：
   * `ENTRYPOINT ["/usr/bin/dumb-init", "--", "/entrypoint.sh"]` 自动回收 Chromium 崩溃产生的僵尸进程并转发 `SIGTERM`/`SIGINT`；
   * 无需依赖 `curl`，容器每 30 秒通过内置 Python 校验 `http://127.0.0.1:9222/json/version`（CDP）与 VNC 端口可用性（`6080` / `6901`）。
-* **严格隔离 9222 + 鉴权加密 WSS (`9443`) 对称选路 (`wimotek-edge-agent >= 1.0.17`)**：
-  * Chromium CDP `9222` 严格仅监听容器内部 `127.0.0.1:9222`（绝不直接暴露到公网）；
-  * 节点内置双栈 TLS + `X-Edge-Auth` 密钥鉴权 WSS 服务端（默认 `EDGE_WSS_PORT=9443`），启动后上报公网 IPv4 / IPv6 与 `9443` 端口给 Hub (`POST /api/nodes/detect-mode`) 执行 TCP 三次握手（完全兼容 Oracle / 云主机的 1:1 NAT 内网网卡）；
+* **严格隔离 9222 + 鉴权加密 WSS (`9443`) 对称选路（协议对齐 Hub 端 `wimotek-edge-agent >= 1.0.17`）**：
+  * Chromium CDP `9222` 严格仅监听容器内部 `127.0.0.1:9222`（绝不直接暴露到公网）；默认不启动 `socat` 转发，仅在显式设置 `CDP_FORWARD_PORT`（或 `ENABLE_CDP_FORWARD=true`）时才启用 `socat` 将指定端口（默认 `9223`）转发至 `127.0.0.1:9222`；
+  * 节点内置双栈 TLS + `X-Edge-Auth` 密钥鉴权 WSS 服务端（默认 `EDGE_WSS_PORT=9443`），启动后上报公网 IPv4 / IPv6 与 `9443` 端口给 Hub (`POST /api/nodes/detect-mode`)，由 Hub 调用 `wimotek-edge-agent` 执行并发 TCP 三次握手（完全兼容 Oracle / 云主机的 1:1 NAT 内网网卡）；
   * 握手可达走 `public_wss`（Hub 主动入站 `wss://<节点IP>:9443/ws`），不可达则自动关闭入站监听并回落为 `reverse`（节点出站连 `wss://<Hub>/api/nodes/reverse-tunnel`）。
 * **原生 UTF-8 剪贴板 & Num Lock ON & 自愈防黑屏**：
   * noVNC 版采用 `tigervnc-standalone-server` (Xvnc) 原生 Extended Clipboard，KasmVNC 版基于现代 WebSocket 流媒体协议；启动自动开启 `numlockx on`，进程异常 1~3 秒内自愈拉起。
@@ -145,3 +146,5 @@ docker run -d \
 | `PUBLIC_IPV4` / `PUBLIC_IPV6` | 自动嗅探 | 手动指定节点上报给 Hub 探测的公网 IPv4 / IPv6 |
 | `EDGE_WSS_PORT` | `9443` | 节点容器内部监听的双栈鉴权加密 WSS 服务端口 |
 | `EDGE_WSS_EXTERNAL_PORT` | `EDGE_WSS_PORT` | 宿主机映射到公网的 WSS 端口（如 `-p 19443:9443` 时填 `19443`；兼容旧变量 `DIRECT_PORT`） |
+| `CDP_FORWARD_PORT` | *(空，不启用)* | 可选 `socat` 明文 CDP 转发端口；仅设置后才启动 `socat` 转发到 `127.0.0.1:9222`（填 `true` 默认使用 `9223`，或填自定义端口号；也支持 `ENABLE_CDP_FORWARD=true`） |
+| `TZ` | `Asia/Shanghai` | 构建期 `--build-arg TZ=...` 与运行时默认时区（分阶段仅提取 `/etc/localtime` 与 `/etc/timezone`） |

@@ -181,10 +181,40 @@ fi
 openbox &
 
 # 6. CDP 安全隔离：Chromium 原生仅绑定 127.0.0.1:9222，绝不直接暴露到公网；外部由 edge_node_client 的 WSS (默认 9443) 鉴权代理
+# 仅当显式设置 CDP_FORWARD_PORT 或 ENABLE_CDP_FORWARD=true 时，才使用 socat 将变量端口（默认 9223）转发至 127.0.0.1:9222
 EDGE_WSS_PORT="${EDGE_WSS_PORT:-9443}"
 export EDGE_WSS_PORT
 
-echo "[Ready] KasmVNC(UID=${UID_NOW}) Web HTTPS :6901, Local CDP 127.0.0.1:9222, Edge WSS :${EDGE_WSS_PORT}"
+SOCAT_LISTEN_PORT=""
+if [ -n "${CDP_FORWARD_PORT:-}" ]; then
+    case "${CDP_FORWARD_PORT}" in
+        1|true|TRUE|yes|YES|on|ON) SOCAT_LISTEN_PORT="9223" ;;
+        0|false|FALSE|no|NO|off|OFF) SOCAT_LISTEN_PORT="" ;;
+        *[!0-9]*)
+            echo "[WARN] 忽略无效的 CDP_FORWARD_PORT='${CDP_FORWARD_PORT}'，未启用 socat CDP 转发"
+            SOCAT_LISTEN_PORT=""
+            ;;
+        *)
+            if [ "${CDP_FORWARD_PORT}" -ge 1 ] 2>/dev/null && [ "${CDP_FORWARD_PORT}" -le 65535 ] 2>/dev/null; then
+                SOCAT_LISTEN_PORT="${CDP_FORWARD_PORT}"
+            else
+                echo "[WARN] CDP_FORWARD_PORT='${CDP_FORWARD_PORT}' 超出端口范围 (1-65535)，未启用 socat CDP 转发"
+            fi
+            ;;
+    esac
+elif [ -n "${ENABLE_CDP_FORWARD:-}" ]; then
+    case "${ENABLE_CDP_FORWARD}" in
+        1|true|TRUE|yes|YES|on|ON) SOCAT_LISTEN_PORT="9223" ;;
+    esac
+fi
+
+if [ -n "$SOCAT_LISTEN_PORT" ]; then
+    echo "[CDP Forward] 变量已启用，启动 socat 转发: 0.0.0.0:${SOCAT_LISTEN_PORT} -> 127.0.0.1:9222"
+    socat TCP-LISTEN:"${SOCAT_LISTEN_PORT}",fork,reuseaddr TCP:127.0.0.1:9222 &
+    echo "[Ready] KasmVNC(UID=${UID_NOW}) Web HTTPS :6901, Local CDP 127.0.0.1:9222, Socat Forward :${SOCAT_LISTEN_PORT}, Edge WSS :${EDGE_WSS_PORT}"
+else
+    echo "[Ready] KasmVNC(UID=${UID_NOW}) Web HTTPS :6901, Local CDP 127.0.0.1:9222 (socat 未启用), Edge WSS :${EDGE_WSS_PORT}"
+fi
 
 # 7. 启动 Wimotek Agent 守护进程 (带故障自动重生看门狗)
 if [ -n "$HUB_URL" ]; then

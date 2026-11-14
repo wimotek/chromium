@@ -8,30 +8,39 @@ RUN npm install --registry=https://registry.npmmirror.com
 COPY app/frontend/ ./
 RUN npm run build
 
-# ================= 阶段 2：编译隔离 Python 虚拟环境 =================
+# ================= 阶段 2：编译隔离 Python 虚拟环境 + 时区两文件提取 =================
 FROM python:3.11-slim-bookworm AS backend-builder
 WORKDIR /build
 
+ARG TZ=Asia/Shanghai
+
 ENV PIP_DISABLE_PIP_VERSION_CHECK=1 \
-    PIP_NO_CACHE_DIR=1
+    PIP_NO_CACHE_DIR=1 \
+    DEBIAN_FRONTEND=noninteractive
 
 COPY app/backend/requirements.txt ./requirements.txt
-RUN python -m venv /opt/venv \
+RUN apt-get update && apt-get install -y --no-install-recommends tzdata \
+    && cp "/usr/share/zoneinfo/${TZ}" /etc/localtime \
+    && echo "${TZ}" > /etc/timezone \
+    && python -m venv /opt/venv \
     && /opt/venv/bin/pip install --no-cache-dir -r ./requirements.txt \
         --index-url https://pypi.org/simple \
         --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple \
+    && rm -rf /opt/venv/lib/python*/site-packages/pip* /opt/venv/bin/pip* \
     && find /opt/venv -type d -name "__pycache__" -prune -exec rm -rf {} + \
-    && find /opt/venv -type f -name "*.pyc" -delete
+    && find /opt/venv -type f \( -name "*.pyc" -o -name "*.pyo" \) -delete \
+    && rm -rf /var/lib/apt/lists/* /var/cache/apt/*
 
 # ================= 阶段 3：轻量主控面板生产运行环境 (dumb-init + Root-Init-Drop gosu) =================
 FROM python:3.11-slim-bookworm
 
 ARG PUID=1000
 ARG PGID=1000
+ARG TZ=Asia/Shanghai
 
 WORKDIR /app
 
-ENV TZ=Asia/Shanghai \
+ENV TZ=${TZ} \
     HUB_HOST=:: \
     HUB_PORT=8443 \
     PATH="/opt/venv/bin:${PATH}" \
@@ -39,23 +48,26 @@ ENV TZ=Asia/Shanghai \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1
 
-# 安装 dumb-init、gosu、SSH 客户端、openssl、tzdata 并清理文档缓存
+# 仅提取分阶段构建产出的 2 个时区文件，不安装 tzdata 软件包
+COPY --from=backend-builder /etc/localtime /etc/localtime
+COPY --from=backend-builder /etc/timezone /etc/timezone
+
+# 安装 dumb-init、gosu、SSH 客户端、openssl 并清理文档缓存
 RUN apt-get update && apt-get install -y --no-install-recommends \
     dumb-init \
     gosu \
     ca-certificates \
     openssh-client \
     openssl \
-    tzdata \
-    && ln -fs "/usr/share/zoneinfo/${TZ}" /etc/localtime \
-    && echo "${TZ}" > /etc/timezone \
     && rm -rf /var/lib/apt/lists/* \
+        /var/cache/apt/* \
+        /var/log/apt/* \
+        /var/log/dpkg.log \
         /usr/share/doc/* \
         /usr/share/man/* \
         /usr/share/info/* \
-        /tmp/*
-
-RUN groupadd -g "${PGID}" hubuser \
+        /tmp/* \
+    && groupadd -g "${PGID}" hubuser \
     && useradd -m -u "${PUID}" -g "${PGID}" -s /bin/bash hubuser \
     && mkdir -p /data/keys /data/certs /certs /etc/ssl/app /app/backend /app/frontend \
     && chown -R "${PUID}:${PGID}" /data /etc/ssl/app /app
