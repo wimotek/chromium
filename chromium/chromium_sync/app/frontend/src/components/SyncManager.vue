@@ -32,6 +32,10 @@ const cookiePolicy = reactive({
   sync_exclude_domains: 'doubleclick.net,google-analytics.com'
 })
 
+const isBlacklistActive = computed(() => {
+  return Boolean(cookiePolicy.sync_exclude_domains && cookiePolicy.sync_exclude_domains.trim().length > 0)
+})
+
 // 同步任务审计搜索与过滤状态 (核心新增)
 const logSearchText = ref('')
 const logStatusFilter = ref('')
@@ -443,15 +447,32 @@ onUnmounted(() => {
           </div>
 
           <div class="form-block">
-            <label class="block-label">域名白名单 (Include Domains，选填)</label>
-            <input v-model="cookiePolicy.sync_include_domains" placeholder="例如: google.com, twitter.com (留空则同步全部)" class="sync-input font-cyan-mono" style="width:100% !important;">
-            <p style="font-size:11px; color:#64748b; margin:2px 0 0 0;">仅同步匹配这些域名的 Cookie，多个域名用英文逗号分隔；留空表示不过滤。</p>
+            <div style="display:flex; align-items:center; justify-content:space-between; gap:8px;">
+              <label class="block-label">域名白名单 (Include Domains，二选一)</label>
+              <span v-if="isBlacklistActive" style="font-size:11px; color:#fbbf24; font-weight:bold;">
+                🔒 黑名单有内容时白名单自动禁用
+              </span>
+            </div>
+            <input
+              v-model="cookiePolicy.sync_include_domains"
+              :disabled="isBlacklistActive"
+              :style="{
+                width: '100% !important',
+                opacity: isBlacklistActive ? 0.45 : 1,
+                cursor: isBlacklistActive ? 'not-allowed' : 'text'
+              }"
+              placeholder="例如: google.com, twitter.com (需先清空下方黑名单才生效)"
+              class="sync-input font-cyan-mono"
+            >
+            <p style="font-size:11px; color:#94a3b8; margin:3px 0 0 0; line-height:1.45;">
+              <span style="color:#fbbf24;">⚠️ 二选一规则：</span>如果下方「域名黑名单」有内容，将自动禁用白名单（仅按黑名单排除）；如需使用白名单（仅同步指定域名），请先清空黑名单。
+            </p>
           </div>
 
           <div class="form-block">
-            <label class="block-label">域名黑名单 (Exclude Domains，选填)</label>
-            <input v-model="cookiePolicy.sync_exclude_domains" placeholder="例如: doubleclick.net, google-analytics.com" class="sync-input font-cyan-mono" style="width:100% !important;">
-            <p style="font-size:11px; color:#64748b; margin:2px 0 0 0;">全局自动剔除广告、数据统计类垃圾凭据，防止污染目标浏览器。</p>
+            <label class="block-label">域名黑名单 (Exclude Domains，填有内容时自动禁用白名单)</label>
+            <input v-model="cookiePolicy.sync_exclude_domains" placeholder="例如: doubleclick.net, google-analytics.com (留空则可启用上方白名单)" class="sync-input font-cyan-mono" style="width:100% !important;">
+            <p style="font-size:11px; color:#64748b; margin:2px 0 0 0;">全局自动剔除广告、数据统计类垃圾凭据；留空即可切换为上方白名单模式。</p>
           </div>
 
           <div style="display:flex; justify-content:flex-end; gap:8px; margin-top:8px;">

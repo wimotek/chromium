@@ -51,7 +51,9 @@ def init_db_and_jwt():
         wss_endpoint TEXT DEFAULT '',
         edge_wss_secret TEXT DEFAULT '',
         ipv4_reachable INTEGER DEFAULT 0,
-        ipv6_reachable INTEGER DEFAULT 0
+        ipv6_reachable INTEGER DEFAULT 0,
+        client_type TEXT DEFAULT 'desktop',
+        api_enabled INTEGER DEFAULT 1
     )''')
 
     # 2. 多策略管理表
@@ -111,7 +113,9 @@ def init_db_and_jwt():
         ("wss_endpoint", "TEXT DEFAULT ''"),
         ("edge_wss_secret", "TEXT DEFAULT ''"),
         ("ipv4_reachable", "INTEGER DEFAULT 0"),
-        ("ipv6_reachable", "INTEGER DEFAULT 0")
+        ("ipv6_reachable", "INTEGER DEFAULT 0"),
+        ("client_type", "TEXT DEFAULT 'desktop'"),
+        ("api_enabled", "INTEGER DEFAULT 1")
     ]
 
     for col_name, col_def in node_patches:

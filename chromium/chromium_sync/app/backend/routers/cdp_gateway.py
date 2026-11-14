@@ -30,16 +30,18 @@ async def cdp_gateway_version(
     if not row:
         raise HTTPException(status_code=404, detail="目标节点不存在")
     node = dict(row)
+    if node.get("api_enabled", 1) == 0 or (node.get("client_type") or "").lower() == "android":
+        raise HTTPException(status_code=403, detail="该节点已禁用第三方 API / CDP 网关接入")
     api_key = get_setting('api_key')
     hub_info = resolve_hub_access_info(request)
     ws_scheme = hub_info["ws_scheme"]
     domain = hub_info["public_netloc"]
 
-    # 分支 A：NAT4 反向穿透节点，向边缘代理获取真实浏览器版本
-    if node.get('conn_type') == 'reverse':
+    # 分支 A：WSS 通道节点（NAT4 反向穿透或公网 WSS 直连），经 WSS 向节点本地 127.0.0.1:9222 获取真实浏览器版本
+    if node.get('conn_type') in ('reverse', 'public_wss', 'wss_direct'):
         session = tunnel_mgr.get_reverse_session(node_id)
         if not session or session.is_closed:
-            raise HTTPException(status_code=502, detail="NAT4 反向节点当前处于离线状态")
+            raise HTTPException(status_code=502, detail="WSS 节点当前处于离线状态")
         try:
             res = await session.send_command("get_version", timeout=4.0)
             data = res.get("version", {})
@@ -91,12 +93,15 @@ async def cdp_gateway_ws(
         await websocket.close(code=1008, reason="Node Not Found")
         return
     node = dict(row)
+    if node.get("api_enabled", 1) == 0 or (node.get("client_type") or "").lower() == "android":
+        await websocket.close(code=1008, reason="Third-party API disabled for this node")
+        return
 
-    # 分支 A: 反向穿透节点 (全双工 CDP WebSocket 多路复用转发)
-    if node.get('conn_type') == 'reverse':
+    # 分支 A: WSS 通道节点 (NAT4 反向穿透或公网 WSS 直连，全双工 CDP WebSocket 多路复用转发)
+    if node.get('conn_type') in ('reverse', 'public_wss', 'wss_direct'):
         session = tunnel_mgr.get_reverse_session(node_id)
         if not session or session.is_closed:
-            await websocket.close(code=1011, reason="Target Reverse Node Offline")
+            await websocket.close(code=1011, reason="Target WSS Node Offline")
             return
         await websocket.accept()
         stream_id = secrets.token_hex(8)

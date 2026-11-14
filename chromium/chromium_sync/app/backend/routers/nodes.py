@@ -259,6 +259,23 @@ class NodeAutoRegisterDTO(BaseModel):
     ipv4_reachable: Optional[bool] = None
     ipv6_reachable: Optional[bool] = None
     session_ticket: Optional[str] = None
+    client_type: Optional[str] = None
+
+
+def _detect_client_type(headers: Any = None, payload: Optional[Dict[str, Any]] = None) -> str:
+    p = payload or {}
+    raw_hdr = ""
+    ua_hdr = ""
+    if headers is not None:
+        raw_hdr = str(headers.get("x-client-type") or headers.get("X-Client-Type") or "").strip().lower()
+        ua_hdr = str(headers.get("user-agent") or headers.get("User-Agent") or "").strip().lower()
+    raw_body = str(p.get("client_type") or p.get("os") or "").strip().lower()
+    val = raw_body or raw_hdr
+    if val == "android" or "android" in ua_hdr:
+        return "android"
+    if val in {"windows", "win32", "linux", "docker", "macos", "desktop"}:
+        return val
+    return "desktop"
 
 
 class TofuSettingsDTO(BaseModel):
@@ -323,14 +340,16 @@ def create_node(data: dict, user: dict = Depends(verify_token)):
     direct_h = (data.get('direct_host') or '127.0.0.1').strip()
     grp_name = (data.get('group_name') or '默认分组').strip()
     conn_type = "direct" if is_local else "ssh"
+    client_type = (data.get('client_type') or 'desktop').strip().lower()
+    api_enabled = 0 if client_type == 'android' else (0 if data.get('api_enabled') in (0, False, '0') else 1)
 
     conn = get_db_connection()
     cur = conn.cursor()
     cur.execute('''INSERT INTO nodes (
         name, group_name, enabled, approval_status, conn_type, node_uuid, fingerprint, is_source, is_local, direct_host,
         ssh_host, ssh_port, ssh_user, ssh_key_filename, ssh_password,
-        remote_cdp_port, local_bind_port, cookie_count, auto_tunnel, status
-    ) VALUES (?, ?, 1, 1, ?, '', '', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 1, 'stopped')''',
+        remote_cdp_port, local_bind_port, cookie_count, auto_tunnel, status, client_type, api_enabled
+    ) VALUES (?, ?, 1, 1, ?, '', '', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 1, 'stopped', ?, ?)''',
     (
         data['name'], grp_name, conn_type,
         1 if data.get('is_source') else 0, is_local,
@@ -341,7 +360,9 @@ def create_node(data: dict, user: dict = Depends(verify_token)):
         "" if is_local else data.get('ssh_key_filename', ''),
         "" if is_local else data.get('ssh_password', ''),
         9222 if is_local else data.get('remote_cdp_port', 9222),
-        data['local_bind_port']
+        data['local_bind_port'],
+        client_type,
+        api_enabled,
     ))
     conn.commit()
     conn.close()
@@ -359,14 +380,23 @@ async def update_node(node_id: int, data: dict, user: dict = Depends(verify_toke
         raise HTTPException(status_code=404, detail="节点不存在")
 
     orig_node = dict(orig)
+    is_android = (orig_node.get("client_type") or "").lower() == "android"
+    req_api = data.get("api_enabled", orig_node.get("api_enabled", 1))
+    api_enabled_val = 0 if req_api in (0, False, "0") else 1
+    if is_android:
+        if "api_enabled" in data and api_enabled_val == 1:
+            conn.close()
+            raise HTTPException(status_code=403, detail="Android 移动节点自动识别并默认禁用第三方 API 接入，不可修改")
+        api_enabled_val = 0
+
     grp_name = (data.get('group_name') or '默认分组').strip()
     name = (data.get('name') or orig_node['name']).strip()
     l_port = int(data.get('local_bind_port') or orig_node['local_bind_port'])
 
     if orig_node["conn_type"] in ("reverse", "public_wss", "wss_direct"):
         cur.execute("""
-            UPDATE nodes SET name=?, group_name=?, local_bind_port=? WHERE id=?
-        """, (name, grp_name, l_port, node_id))
+            UPDATE nodes SET name=?, group_name=?, local_bind_port=?, api_enabled=? WHERE id=?
+        """, (name, grp_name, l_port, api_enabled_val, node_id))
     else:
         is_local = 1 if data.get('is_local') else 0
         direct_h = (data.get('direct_host') or '127.0.0.1').strip()
@@ -374,7 +404,7 @@ async def update_node(node_id: int, data: dict, user: dict = Depends(verify_toke
 
         cur.execute('''UPDATE nodes SET 
             name=?, group_name=?, is_local=?, direct_host=?, conn_type=?, ssh_host=?, ssh_port=?, ssh_user=?, 
-            ssh_key_filename=?, ssh_password=?, remote_cdp_port=?, local_bind_port=?
+            ssh_key_filename=?, ssh_password=?, remote_cdp_port=?, local_bind_port=?, api_enabled=?
             WHERE id=?''',
         (
             name, grp_name, is_local,
@@ -387,6 +417,7 @@ async def update_node(node_id: int, data: dict, user: dict = Depends(verify_toke
             "" if is_local else data.get('ssh_password', ''),
             9222 if is_local else data.get('remote_cdp_port', 9222),
             l_port,
+            api_enabled_val,
             node_id
         ))
 
@@ -667,11 +698,12 @@ async def http_auto_register_node(
     preferred_bind_port = rec_port or remote_cdp_val
     wss_endpoint_val = rec_ep if is_public_wss else ""
     edge_secret_val = (data.edge_wss_secret or "").strip() if is_public_wss else ""
+    client_type_val = _detect_client_type(request.headers, {"client_type": data.client_type})
 
     conn = get_db_connection()
     conn.row_factory = sqlite3.Row
     cur = conn.cursor()
-    cur.execute("SELECT id, conn_type, approval_status, enabled, local_bind_port FROM nodes WHERE node_uuid=?", (data.node_uuid,))
+    cur.execute("SELECT id, conn_type, approval_status, enabled, local_bind_port, api_enabled FROM nodes WHERE node_uuid=?", (data.node_uuid,))
     existing = cur.fetchone()
 
     node_enabled = 1
@@ -681,6 +713,7 @@ async def http_auto_register_node(
         prev_conn_type = existing["conn_type"]
         appr = existing["approval_status"] if approval_status == 0 else 1
         node_enabled = existing["enabled"] if "enabled" in existing.keys() else 1
+        api_enabled_val = 0 if client_type_val == "android" else (existing["api_enabled"] if "api_enabled" in existing.keys() and existing["api_enabled"] is not None else 1)
         allocated_port = _get_available_bind_port(
             cur,
             preferred_bind_port,
@@ -691,26 +724,30 @@ async def http_auto_register_node(
         cur.execute("""
             UPDATE nodes SET conn_type=?, is_local=?, direct_host=?, remote_cdp_port=?, local_bind_port=?, name=?, group_name=?,
                 approval_status=?, status=?, fingerprint=?, network_mode=?, recommended_endpoint=?,
-                wss_endpoint=?, edge_wss_secret=?, ipv4_reachable=?, ipv6_reachable=?
+                wss_endpoint=?, edge_wss_secret=?, ipv4_reachable=?, ipv6_reachable=?, client_type=?, api_enabled=?
             WHERE id=?
         """, (
             conn_type_val, is_local_val, direct_ip, remote_cdp_val, allocated_port, node_name, grp_name,
-            appr, final_status, fp, net_mode, rec_ep, wss_endpoint_val, edge_secret_val, v4_ok, v6_ok, node_id
+            appr, final_status, fp, net_mode, rec_ep, wss_endpoint_val, edge_secret_val, v4_ok, v6_ok,
+            client_type_val, api_enabled_val, node_id
         ))
         approval_status = appr
     else:
+        api_enabled_val = 0 if client_type_val == "android" else 1
         allocated_port = _get_available_bind_port(cur, preferred_bind_port)
         cur.execute("""
             INSERT INTO nodes (
                 name, group_name, enabled, approval_status, conn_type, node_uuid, fingerprint,
                 is_source, is_local, direct_host, ssh_host, ssh_port, ssh_user,
                 ssh_key_filename, ssh_password, remote_cdp_port, local_bind_port, status,
-                network_mode, recommended_endpoint, wss_endpoint, edge_wss_secret, ipv4_reachable, ipv6_reachable
-            ) VALUES (?, ?, 1, ?, ?, ?, ?, 0, ?, ?, '', 22, '', '', '', ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                network_mode, recommended_endpoint, wss_endpoint, edge_wss_secret, ipv4_reachable, ipv6_reachable,
+                client_type, api_enabled
+            ) VALUES (?, ?, 1, ?, ?, ?, ?, 0, ?, ?, '', 22, '', '', '', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             node_name, grp_name, approval_status, conn_type_val, data.node_uuid, fp,
             is_local_val, direct_ip, remote_cdp_val, allocated_port, status,
-            net_mode, rec_ep, wss_endpoint_val, edge_secret_val, v4_ok, v6_ok
+            net_mode, rec_ep, wss_endpoint_val, edge_secret_val, v4_ok, v6_ok,
+            client_type_val, api_enabled_val
         ))
         node_id = cur.lastrowid
 
@@ -878,6 +915,7 @@ async def reverse_tunnel_endpoint(
     )
     session_ticket = handshake_data.get("session_ticket")
     forced_reverse = handshake_data.get("reverse_tunnel")
+    client_type_val = _detect_client_type(websocket.headers, handshake_data)
 
     # 收到节点 IP/端口且未强制 reverse_tunnel=True 时，主动执行 TCP 三次握手确定网络类型
     if (pub_v4 or pub_v6) and forced_reverse is not True:
@@ -961,7 +999,7 @@ async def reverse_tunnel_endpoint(
             reason = "tofu_pending_admin_approval"
 
     try:
-        cur.execute("SELECT id, conn_type, local_bind_port, enabled FROM nodes WHERE node_uuid=?", (node_uuid,))
+        cur.execute("SELECT id, conn_type, local_bind_port, enabled, api_enabled FROM nodes WHERE node_uuid=?", (node_uuid,))
         existing_row = cur.fetchone()
 
         prev_conn_type = None
@@ -975,6 +1013,7 @@ async def reverse_tunnel_endpoint(
                 current_bind_port=existing_row["local_bind_port"],
             )
             is_currently_enabled = existing_row["enabled"] if "enabled" in existing_row.keys() else 1
+            api_enabled_val = 0 if client_type_val == "android" else (existing_row["api_enabled"] if "api_enabled" in existing_row.keys() and existing_row["api_enabled"] is not None else 1)
             final_status = "disabled" if is_currently_enabled == 0 else status
 
             cur.execute("""
@@ -983,19 +1022,22 @@ async def reverse_tunnel_endpoint(
                     wss_endpoint='', edge_wss_secret='',
                     remote_cdp_port=?, local_bind_port=?,
                     status=?, approval_status=?, name=?, group_name=?, fingerprint=?,
-                    network_mode=?, recommended_endpoint=?, ipv4_reachable=?, ipv6_reachable=?
+                    network_mode=?, recommended_endpoint=?, ipv4_reachable=?, ipv6_reachable=?,
+                    client_type=?, api_enabled=?
                 WHERE id=?
-            """, (cdp_port, allocated_port, final_status, approved, node_name, node_group, node_fp, net_mode, rec_endpoint, v4_ok_int, v6_ok_int, node_id))
+            """, (cdp_port, allocated_port, final_status, approved, node_name, node_group, node_fp, net_mode, rec_endpoint, v4_ok_int, v6_ok_int, client_type_val, api_enabled_val, node_id))
         else:
+            api_enabled_val = 0 if client_type_val == "android" else 1
             allocated_port = _get_available_bind_port(cur, reported_port)
             cur.execute("""
                 INSERT INTO nodes (
                     name, group_name, enabled, approval_status, conn_type, node_uuid, fingerprint,
                     is_source, is_local, direct_host, ssh_host, ssh_port, ssh_user,
                     ssh_key_filename, ssh_password, remote_cdp_port, local_bind_port, status,
-                    network_mode, recommended_endpoint, wss_endpoint, edge_wss_secret, ipv4_reachable, ipv6_reachable
-                ) VALUES (?, ?, 1, ?, 'reverse', ?, ?, 0, 1, 'reverse-nat4', '', 22, '', '', '', ?, ?, ?, ?, ?, '', '', ?, ?)
-            """, (node_name, node_group, approved, node_uuid, node_fp, cdp_port, allocated_port, status, net_mode, rec_endpoint, v4_ok_int, v6_ok_int))
+                    network_mode, recommended_endpoint, wss_endpoint, edge_wss_secret, ipv4_reachable, ipv6_reachable,
+                    client_type, api_enabled
+                ) VALUES (?, ?, 1, ?, 'reverse', ?, ?, 0, 1, 'reverse-nat4', '', 22, '', '', '', ?, ?, ?, ?, ?, '', '', ?, ?, ?, ?)
+            """, (node_name, node_group, approved, node_uuid, node_fp, cdp_port, allocated_port, status, net_mode, rec_endpoint, v4_ok_int, v6_ok_int, client_type_val, api_enabled_val))
             node_id = cur.lastrowid
 
         conn.commit()
@@ -1032,6 +1074,8 @@ async def reverse_tunnel_endpoint(
         "ipv6_reachable": bool(v6_ok_int),
         "recommended_endpoint": rec_endpoint or None,
         "probe_results": detection.get("probe_results"),
+        "client_type": client_type_val,
+        "api_enabled": bool(api_enabled_val),
     }
 
     if approved == 1:
@@ -1309,4 +1353,33 @@ async def toggle_node_enabled(node_id: int, user: dict = Depends(verify_token)):
         "message": msg,
         "enabled": new_val,
         "status": updated_node.get("status")
+    }
+
+
+@router.post("/api/nodes/{node_id}/toggle-api", summary="切换节点第三方 API 接入权限 (Android 默认锁定禁用)")
+def toggle_node_api_access(node_id: int, user: dict = Depends(verify_token)):
+    conn = get_db_connection()
+    conn.row_factory = sqlite3.Row
+    cur = conn.cursor()
+    cur.execute("SELECT id, name, client_type, api_enabled FROM nodes WHERE id=?", (node_id,))
+    row = cur.fetchone()
+    if not row:
+        conn.close()
+        raise HTTPException(status_code=404, detail="节点不存在")
+
+    node = dict(row)
+    if (node.get("client_type") or "").lower() == "android":
+        conn.close()
+        raise HTTPException(status_code=403, detail="Android 移动节点已自动锁定禁用第三方 API 接入，不可修改")
+
+    curr = 1 if node.get("api_enabled", 1) != 0 else 0
+    new_val = 0 if curr == 1 else 1
+    cur.execute("UPDATE nodes SET api_enabled=? WHERE id=?", (new_val, node_id))
+    conn.commit()
+    conn.close()
+
+    action_txt = "允许第三方 API 接入" if new_val == 1 else "已禁止第三方 API 接入（将从 /api/v1/nodes 隐藏）"
+    return {
+        "message": f"节点 [{node['name']}] {action_txt}",
+        "api_enabled": new_val,
     }

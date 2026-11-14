@@ -76,6 +76,9 @@ def external_list_nodes(
 
     nodes_result = []
     for r in rows:
+        if r.get("api_enabled", 1) == 0 or (r.get("client_type") or "").lower() == "android":
+            continue
+
         node_id = r["id"]
         is_enabled = bool(r.get("enabled", 1))
         conn_type_raw = r.get("conn_type", "direct")
@@ -185,6 +188,8 @@ async def external_get_cookies(node_id: int, auth: dict = Depends(verify_agent_a
     if not row:
         raise HTTPException(status_code=404, detail="目标节点不存在")
     node = dict(row)
+    if node.get("api_enabled", 1) == 0 or (node.get("client_type") or "").lower() == "android":
+        raise HTTPException(status_code=403, detail="该节点已禁用第三方 API 接入")
 
     try:
         c_type = node.get('conn_type')
@@ -217,6 +222,8 @@ async def external_inject_cookies(
     if not row:
         raise HTTPException(status_code=404, detail="目标节点不存在")
     node = dict(row)
+    if node.get("api_enabled", 1) == 0 or (node.get("client_type") or "").lower() == "android":
+        raise HTTPException(status_code=403, detail="该节点已禁用第三方 API 接入")
 
     cookies = payload.get("cookies", [])
     if not isinstance(cookies, list):

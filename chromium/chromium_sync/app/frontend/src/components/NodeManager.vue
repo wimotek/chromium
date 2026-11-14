@@ -54,7 +54,9 @@ const nodeForm = reactive({
   ssh_key_filename: '',
   ssh_password: '',
   remote_cdp_port: 9222,
-  local_bind_port: 9222
+  local_bind_port: 9222,
+  client_type: 'desktop',
+  api_enabled: true
 })
 
 const currentHubUrl = computed(() => {
@@ -242,7 +244,9 @@ const openCreateModal = () => {
     ssh_key_filename: '',
     ssh_password: '',
     remote_cdp_port: 9222,
-    local_bind_port: 9222 + nodes.value.length
+    local_bind_port: 9222 + nodes.value.length,
+    client_type: 'desktop',
+    api_enabled: true
   })
   showNodeModal.value = true
 }
@@ -252,6 +256,7 @@ const isWssManagedNode = (connType) => ['reverse', 'public_wss', 'wss_direct'].i
 const openEditModal = (node) => {
   isEditMode.value = true
   editingNodeId.value = node.id
+  const isAndroid = (node.client_type || '').toLowerCase() === 'android'
   Object.assign(nodeForm, {
     name: node.name,
     group_name: node.group_name || '默认分组',
@@ -266,7 +271,9 @@ const openEditModal = (node) => {
     ssh_key_filename: node.ssh_key_filename || '',
     ssh_password: node.ssh_password || '',
     remote_cdp_port: node.remote_cdp_port || 9222,
-    local_bind_port: node.local_bind_port || 9222
+    local_bind_port: node.local_bind_port || 9222,
+    client_type: node.client_type || 'desktop',
+    api_enabled: isAndroid ? false : (node.api_enabled !== 0)
   })
   showNodeModal.value = true
 }
@@ -274,12 +281,20 @@ const openEditModal = (node) => {
 const submitNodeForm = async () => {
   const url = isEditMode.value ? `/api/nodes/${editingNodeId.value}` : '/api/nodes'
   const method = isEditMode.value ? 'PUT' : 'POST'
+  const payload = {
+    ...nodeForm,
+    api_enabled: (nodeForm.client_type || '').toLowerCase() === 'android' ? 0 : (nodeForm.api_enabled ? 1 : 0)
+  }
   const res = await props.api(url, {
     method,
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(nodeForm)
+    body: JSON.stringify(payload)
   })
   const data = await res.json()
+  if (!res.ok) {
+    props.showToast(data.detail || '保存失败', 'error')
+    return
+  }
   showNodeModal.value = false
   props.showToast(data.message, 'success')
   loadBaseData()
@@ -290,6 +305,21 @@ const toggleNodeEnabled = async (node) => {
   const data = await res.json()
   props.showToast(data.message, 'success')
   loadBaseData()
+}
+
+const toggleNodeApi = async (node) => {
+  if ((node.client_type || '').toLowerCase() === 'android') {
+    props.showToast('Android 移动节点自动识别并锁定禁用第三方 API 接入，不可修改', 'warning')
+    return
+  }
+  const res = await props.api(`/api/nodes/${node.id}/toggle-api`, { method: 'POST' })
+  const data = await res.json()
+  if (res.ok) {
+    props.showToast(data.message, 'success')
+    loadBaseData()
+  } else {
+    props.showToast(data.detail || '操作失败', 'error')
+  }
 }
 
 const viewCookieDetails = async (node) => {
@@ -529,6 +559,7 @@ onUnmounted(() => {
             <td>
               <div class="cell-main-name">
                 {{ node.name }}
+                <span v-if="(node.client_type || '').toLowerCase() === 'android'" style="font-size:10px; background:#065f46; color:#a7f3d0; padding:1px 6px; border-radius:4px; margin-left:4px;">📱 Android</span>
                 <span v-if="node.enabled === 0" style="font-size:10px; color:#f87171; margin-left:4px;">[已禁用]</span>
               </div>
               <div class="cell-sub-desc">
@@ -579,6 +610,24 @@ onUnmounted(() => {
 
             <td style="text-align: right;">
               <div class="btn-group-row">
+                <button
+                  v-if="(node.client_type || '').toLowerCase() === 'android'"
+                  disabled
+                  class="btn-micro"
+                  style="background:#334155; color:#94a3b8; cursor:not-allowed;"
+                  title="Android 节点自动识别并锁定禁用第三方 API 接入（不在 /api/v1/nodes 展示），不可修改"
+                >
+                  🔒 API禁
+                </button>
+                <button
+                  v-else
+                  @click="toggleNodeApi(node)"
+                  class="btn-micro"
+                  :style="{ background: node.api_enabled === 0 ? '#991b1b' : '#0f766e', color: '#fff' }"
+                  :title="node.api_enabled === 0 ? '已禁用第三方 API（点击恢复允许）' : '允许第三方 API（点击禁用并从 /api/v1/nodes 隐藏）'"
+                >
+                  {{ node.api_enabled === 0 ? '🚫 API禁' : '🔌 API开' }}
+                </button>
                 <button 
                   @click="toggleNodeEnabled(node)" 
                   :class="['btn-micro', node.enabled === 0 ? 'btn-resume-node' : 'btn-pause-node']"
@@ -858,6 +907,20 @@ onUnmounted(() => {
                 <input v-model="nodeForm.local_bind_port" type="number" required placeholder="19222" class="cdp-input font-cyan-mono" style="width:100% !important;">
               </div>
             </div>
+          </div>
+
+          <div style="background:#09122a; border:1px solid #1e3a8a; border-radius:6px; padding:10px 12px; margin-top:10px;">
+            <label style="display:flex; align-items:center; gap:8px; cursor:pointer; font-size:12px; color:#e2e8f0;">
+              <input
+                type="checkbox"
+                v-model="nodeForm.api_enabled"
+                :disabled="(nodeForm.client_type || '').toLowerCase() === 'android'"
+              >
+              <span>允许第三方 API 接入（开启后才会在 <code>/api/v1/nodes</code> 列表展示并允许外部 CDP/Cookie API 调用）</span>
+            </label>
+            <p v-if="(nodeForm.client_type || '').toLowerCase() === 'android'" style="font-size:11px; color:#fbbf24; margin:4px 0 0 22px;">
+              🔒 检测到该节点为 Android 移动端：默认禁止第三方 API 接入且不可修改，仅用于安全同步 Cookie。
+            </p>
           </div>
 
           <div style="display:flex; justify-content:flex-end; gap:8px; margin-top:16px;">

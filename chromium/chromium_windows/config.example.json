@@ -1,0 +1,52 @@
+{
+  "hub": {
+    "hub_url": "https://hub.yourdomain.com:8443",
+    "join_token": "",
+    "node_name": "",
+    "group_name": "Windows节点",
+    "reverse_tunnel": "auto",
+    "cdp_port": 9222,
+    "edge_wss_port": 9443,
+    "edge_wss_external_port": 9443,
+    "public_host": "",
+    "public_ipv4": "",
+    "public_ipv6": "",
+    "heartbeat_seconds": 60
+  },
+  "browser": {
+    "browser_choice": "auto",
+    "custom_browser_path": "",
+    "profile_mode": "isolated",
+    "custom_profile_dir": "",
+    "homepage": "about:blank",
+    "extra_args": "",
+    "launch_browser_on_start": true,
+    "auto_connect_on_launch": false
+  },
+  "cookie_guard": {
+    "mode": "whitelist",
+    "whitelist_domains": [
+      "example.com"
+    ],
+    "blacklist_domains": [
+      "localhost",
+      "127.0.0.1",
+      "alipay.com",
+      "paypal.com",
+      "stripe.com",
+      "mail.google.com",
+      "mail.qq.com",
+      "mail.163.com",
+      "icbc.com.cn",
+      "cmbchina.com",
+      "ccb.com",
+      "boc.cn",
+      "abchina.com",
+      "doubleclick.net",
+      "google-analytics.com"
+    ],
+    "blocked_cookie_names": [],
+    "exclude_expired": true,
+    "protect_inject": false
+  }
+}

@@ -1,0 +1,97 @@
+name: Build & Release Android Edge Node
+
+on:
+  push:
+    branches:
+      - main
+      - master
+    paths:
+      - "chromium/chromium_android/**"
+      - ".github/workflows/build-android-node.yml"
+    tags:
+      - "android-v*"
+  workflow_dispatch:
+    inputs:
+      create_release:
+        description: "Publish APK to GitHub Release"
+        required: true
+        type: boolean
+        default: true
+      release_tag:
+        description: "Release tag when triggered manually (e.g. android-v1.0.0)"
+        required: false
+        type: string
+        default: "android-v1.0.0"
+
+permissions:
+  contents: write
+
+jobs:
+  build-android:
+    name: Build Android APK
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: "temurin"
+          java-version: "17"
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Setup Gradle 8.7
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.7"
+
+      - name: Build Android Release APK
+        working-directory: chromium/chromium_android
+        run: gradle assembleRelease --no-daemon
+
+      - name: Package release assets & SHA256SUMS
+        run: |
+          mkdir -p release_assets_android
+          cp chromium/chromium_android/app/build/outputs/apk/release/app-release.apk \
+            release_assets_android/WimotekEdgeNode-android.apk
+          cp chromium/chromium_android/README.md release_assets_android/README.md
+          (cd release_assets_android && sha256sum WimotekEdgeNode-android.apk > SHA256SUMS.txt)
+          ls -lh release_assets_android/
+          cat release_assets_android/SHA256SUMS.txt
+
+      - name: Upload workflow APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: WimotekEdgeNode-android
+          path: release_assets_android/*
+          retention-days: 30
+
+      - name: Determine release tag
+        id: rel_meta
+        run: |
+          if [[ "${{ github.ref }}" == refs/tags/* ]]; then
+            echo "tag=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
+            echo "should_release=true" >> "$GITHUB_OUTPUT"
+          elif [[ "${{ github.event_name }}" == "workflow_dispatch" && "${{ inputs.create_release }}" == "true" ]]; then
+            TAG="${{ inputs.release_tag }}"
+            echo "tag=${TAG:-android-v1.0.0}" >> "$GITHUB_OUTPUT"
+            echo "should_release=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=" >> "$GITHUB_OUTPUT"
+            echo "should_release=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Publish GitHub Release
+        if: steps.rel_meta.outputs.should_release == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.rel_meta.outputs.tag }}
+          name: "Wimotek Android Edge Node ${{ steps.rel_meta.outputs.tag }}"
+          generate_release_notes: true
+          files: |
+            release_assets_android/WimotekEdgeNode-android.apk
+            release_assets_android/SHA256SUMS.txt

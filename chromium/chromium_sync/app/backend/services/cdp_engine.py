@@ -69,6 +69,10 @@ def filter_cookies_by_domains(cookies: List[dict], include_domains: List[str], e
     clean_inc = [inc.lower().lstrip('.') for inc in include_domains if inc.strip()]
     clean_exc = [exc.lower().lstrip('.') for exc in exclude_domains if exc.strip()]
 
+    # 二选一规则：黑名单有内容时自动禁用白名单
+    if clean_exc:
+        clean_inc = []
+
     expired_dropped = 0
     blacklist_dropped = 0
     now_ts = time.time()
