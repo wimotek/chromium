@@ -34,7 +34,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # ==============================================================================
 # Stage 2: 轻量生产运行层 (dumb-init + Root-Init-Drop gosu -> UID/GID 1000)
-# 构建上下文为 chromium_kasmvnc/ (CI 构建前由 GitHub Actions 复制 edge_node_client.py)
+# 构建上下文为 chromium_kasmvnc/ (CI 构建前由 GitHub Actions 复制 common/edge_node_client.py 与 common/desktop/)
 # ==============================================================================
 FROM debian:bookworm-slim
 
@@ -70,6 +70,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     gosu \
     chromium \
     openbox \
+    tint2 \
+    xterm \
+    autocutsel \
+    xclip \
+    librsvg2-common \
+    x11-xserver-utils \
     socat \
     numlockx \
     locales \
@@ -100,11 +106,22 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         /usr/share/info/* \
         /tmp/*
 
+# 定制化 Openbox (Wimotek-Dark) + tint2 底部工具栏 + 快捷脚本
+COPY desktop/openbox/ /etc/xdg/openbox/
+COPY desktop/themes/Wimotek-Dark/ /usr/share/themes/Wimotek-Dark/
+COPY desktop/tint2/tint2rc /etc/xdg/tint2/tint2rc
+COPY desktop/applications/ /usr/share/applications/
+COPY desktop/icons/ /usr/share/icons/wimotek/
+COPY --chmod=755 desktop/bin/ /usr/local/bin/
+
 RUN groupadd -g "${PGID}" kasm-user \
     && useradd -m -u "${PUID}" -g "${PGID}" -s /bin/bash kasm-user \
     && usermod -aG ssl-cert kasm-user \
     && mkdir -p /data /certs /etc/ssl/app /tmp/crashpad /tmp/.X11-unix \
-        /home/kasm-user/.vnc /home/kasm-user/.config /home/kasm-user/.cache/openbox /home/kasm-user/.cache/fontconfig /etc/kasmvnc \
+        /home/kasm-user/.vnc /home/kasm-user/.config/openbox /home/kasm-user/.config/tint2 \
+        /home/kasm-user/.cache/openbox /home/kasm-user/.cache/fontconfig /etc/kasmvnc \
+    && cp /etc/xdg/openbox/rc.xml /etc/xdg/openbox/menu.xml /home/kasm-user/.config/openbox/ \
+    && cp /etc/xdg/tint2/tint2rc /home/kasm-user/.config/tint2/tint2rc \
     && chown -R "${PUID}:${PGID}" /data /etc/ssl/app /tmp/crashpad /home/kasm-user /etc/kasmvnc \
     && chmod 1777 /tmp /tmp/.X11-unix /tmp/crashpad
 

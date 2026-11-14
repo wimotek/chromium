@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=重启 Chromium
+GenericName=Restart Browser
+Comment=安全重启 Chromium 主进程（保留 /data 会话）
+Exec=/usr/local/bin/restart-chromium
+Icon=/usr/share/icons/wimotek/restart.svg
+Terminal=false
+Categories=System;

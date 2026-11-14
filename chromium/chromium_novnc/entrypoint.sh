@@ -95,10 +95,13 @@ if [ ! -d "/data" ] || ! touch /data/.rw_probe 2>/tmp/.rw_err; then
 fi
 rm -f /data/.rw_probe /tmp/.rw_err 2>/dev/null || true
 
-if ! mkdir -p "$HOME/.vnc" "$HOME/.config" "$HOME/.cache/openbox" "$HOME/.cache/fontconfig" /etc/ssl/app /tmp/crashpad; then
+if ! mkdir -p "$HOME/.vnc" "$HOME/.config/openbox" "$HOME/.config/tint2" "$HOME/.cache/openbox" "$HOME/.cache/fontconfig" /etc/ssl/app /tmp/crashpad; then
     echo "[WARN] 容器内部缓存目录创建异常，请检查宿主机 Docker 存储盘空间 (df -h / df -i / docker system df)："
     df -h "$HOME" /tmp /dev/shm 2>/dev/null || true
 fi
+[ -f "$HOME/.config/openbox/rc.xml" ] || cp /etc/xdg/openbox/rc.xml "$HOME/.config/openbox/rc.xml" 2>/dev/null || true
+[ -f "$HOME/.config/openbox/menu.xml" ] || cp /etc/xdg/openbox/menu.xml "$HOME/.config/openbox/menu.xml" 2>/dev/null || true
+[ -f "$HOME/.config/tint2/tint2rc" ] || cp /etc/xdg/tint2/tint2rc "$HOME/.config/tint2/tint2rc" 2>/dev/null || true
 rm -f /tmp/.X0-lock /tmp/.X11-unix/X0 /data/SingletonLock /data/SingletonCookie /data/SingletonSocket 2>/dev/null || true
 
 RESOLUTION=${RESOLUTION:-1920x1080}
@@ -140,8 +143,9 @@ if [ -n "$VNC_PASSWORD" ]; then
     AUTH_FLAG="-SecurityTypes VncAuth -PasswordFile $HOME/.vnc/passwd"
 fi
 
-# 2. 启动 TigerVNC Standalone Server
-Xvnc :0 -geometry "$RESOLUTION" -depth 24 $AUTH_FLAG &
+# 2. 启动 TigerVNC Standalone Server (显式开启剪贴板同步，关闭 SendPrimary 防止划选误覆盖本地剪贴板)
+Xvnc :0 -geometry "$RESOLUTION" -depth 24 $AUTH_FLAG \
+    -AcceptCutText=1 -SendCutText=1 -SendPrimary=0 -SetPrimary=1 &
 
 for i in $(seq 1 30); do
     if [ -e /tmp/.X11-unix/X0 ]; then
@@ -150,13 +154,26 @@ for i in $(seq 1 30); do
     sleep 0.1
 done
 
-# 3. 开启小键盘数字键
+# 3. 桌面背景、Num Lock 与 X11 剪贴板守护同步 (vncconfig + autocutsel)
+if command -v xsetroot >/dev/null 2>&1; then
+    DISPLAY=:0 xsetroot -solid "#0b1120" >/dev/null 2>&1 || true
+fi
 if command -v numlockx >/dev/null 2>&1; then
     DISPLAY=:0 numlockx on || true
 fi
+if command -v vncconfig >/dev/null 2>&1; then
+    DISPLAY=:0 vncconfig -nowin >/dev/null 2>&1 &
+fi
+if command -v autocutsel >/dev/null 2>&1; then
+    DISPLAY=:0 autocutsel -fork >/dev/null 2>&1 &
+fi
 
-# 4. 启动窗口管理器 Openbox
+# 4. 启动定制化 Openbox 窗口管理器与 tint2 底部工具栏
 openbox &
+sleep 0.4
+if command -v tint2 >/dev/null 2>&1; then
+    tint2 >/dev/null 2>&1 &
+fi
 
 # 5. 双端口启动 HTTP:6080 与 HTTPS:6443
 /usr/share/novnc/utils/novnc_proxy --vnc 127.0.0.1:5900 --listen 6080 --web /usr/share/novnc &

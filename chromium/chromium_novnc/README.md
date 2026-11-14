@@ -14,7 +14,7 @@
 * **Multi-stage 构建与镜像瘦身**：
   * `py-builder` / `builder` 阶段隔离构建 `/opt/venv`（节点端轻量代理 `edge_node_client.py` 仅依赖 `httpx` + `websockets`，剔除节点未使用的 `wimotek-edge-agent` 与 `pip` 缓存）；
   * 分阶段安装 `tzdata` 并仅提取 `/etc/localtime` 与 `/etc/timezone` 两个时区文件进入运行层，免除整包 `/usr/share/zoneinfo` 体积；
-  * 运行时剔除 `tini`、`curl`、`wget`、`procps`、`net-tools`、`autocutsel` 等冗余工具，并清理 `apt` 缓存、`/var/log`、`/usr/share/doc`、`/usr/share/man` 与 noVNC 测试文档，压缩镜像体积与攻击面。
+  * 运行时剔除 `tini`、`curl`、`wget`、`procps`、`net-tools` 等冗余工具，并清理 `apt` 缓存、`/var/log`、`/usr/share/doc`、`/usr/share/man` 与 noVNC 测试文档，压缩镜像体积与攻击面。
 * **`dumb-init` (PID 1) 信号转发与 Python 原生 `HEALTHCHECK`**：
   * `ENTRYPOINT ["/usr/bin/dumb-init", "--", "/entrypoint.sh"]` 自动回收 Chromium 崩溃产生的僵尸进程并转发 `SIGTERM`/`SIGINT`；
   * 无需依赖 `curl`，容器每 30 秒通过内置 Python 校验 `http://127.0.0.1:9222/json/version`（CDP）与 VNC 端口可用性（`6080` / `6901`）。
@@ -22,8 +22,12 @@
   * Chromium CDP `9222` 严格仅监听容器内部 `127.0.0.1:9222`（绝不直接暴露到公网）；默认不启动 `socat` 转发，仅在显式设置 `CDP_FORWARD_PORT`（或 `ENABLE_CDP_FORWARD=true`）时才启用 `socat` 将指定端口（默认 `9223`）转发至 `127.0.0.1:9222`；
   * 节点内置双栈 TLS + `X-Edge-Auth` 密钥鉴权 WSS 服务端（默认 `EDGE_WSS_PORT=9443`），启动后上报公网 IPv4 / IPv6 与 `9443` 端口给 Hub (`POST /api/nodes/detect-mode`)，由 Hub 调用 `wimotek-edge-agent` 执行并发 TCP 三次握手（完全兼容 Oracle / 云主机的 1:1 NAT 内网网卡）；
   * 握手可达走 `public_wss`（Hub 主动入站 `wss://<节点IP>:9443/ws`），不可达则自动关闭入站监听并回落为 `reverse`（节点出站连 `wss://<Hub>/api/nodes/reverse-tunnel`）。
-* **原生 UTF-8 剪贴板 & Num Lock ON & 自愈防黑屏**：
-  * noVNC 版采用 `tigervnc-standalone-server` (Xvnc) 原生 Extended Clipboard，KasmVNC 版基于现代 WebSocket 流媒体协议；启动自动开启 `numlockx on`，进程异常 1~3 秒内自愈拉起。
+* **HTTPS 无感双向剪贴板 & UTF-8 支持**：
+  * **noVNC 节点**升级至 **noVNC v1.5.0**（支持 RFB `ExtendedClipboard` UTF-8 中文传输），内置 `clipboard-sync.js` 自动桥接浏览器 `navigator.clipboard`（HTTPS 下窗口聚焦、点击画布或 `Ctrl+V` / macOS `Cmd+V` 自动将本地剪贴板推送到远程；远程 `Ctrl+C` 复制自动回写本地剪贴板），后端配合 `vncconfig -nowin` + `autocutsel` 及 `-SendPrimary=0` 防止鼠标划选误覆盖本地剪贴板；
+  * **KasmVNC 节点**采用标准 `data_loss_prevention.clipboard` 配置（禁用 `primary_clipboard_enabled` 防误触）+ `autocutsel` 同步；若处于纯 HTTP 非安全上下文，可通过底部工具栏「剪贴板助手」或 noVNC 侧边栏手动同步。
+* **定制化 Openbox (`Wimotek-Dark`) + `tint2` 快捷工具栏**：
+  * **底部 `36px` 工具栏 (`tint2`)**：左侧一键快捷按钮（新建 Chromium 窗口、无痕窗口、UTF-8 终端、剪贴板助手、安全重启 Chromium），中部实时任务栏（点击切换/最小化、中键关闭），右侧托盘与时钟；
+  * **Openbox 增强交互**：定制深色主题与中文字体支持、双语桌面右键菜单、自动最大化兼容工作区、支持 `Win+← / Win+→` 左右半屏分屏、`Win+D` 显示桌面、`Alt+F11` 全屏、`Ctrl+Alt+T` 终端、`Ctrl+Alt+N` 新窗口与 `Alt+左/右键拖拽` 移动缩放。
 
 ---
 
@@ -42,15 +46,17 @@
 
 ## 🔨 镜像构建方式
 
-`chromium_novnc` 与 `chromium_kasmvnc` 构建前（如 GitHub Actions 流水线）需将共用 `common/edge_node_client.py` 复制到对应引擎目录后直接执行本地构建：
+`chromium_novnc` 与 `chromium_kasmvnc` 构建前（如 GitHub Actions 流水线）需将共用 `common/edge_node_client.py` 与定制桌面配置 `common/desktop/` 复制到对应引擎目录后直接执行本地构建：
 
 ```bash
 # 构建 noVNC 节点镜像
 cp common/edge_node_client.py chromium_novnc/edge_node_client.py
+rm -rf chromium_novnc/desktop && cp -r common/desktop chromium_novnc/desktop
 docker build -t wimotek/chromium:novnc ./chromium_novnc
 
 # 构建 KasmVNC 节点镜像 (支持 amd64 / arm64)
 cp common/edge_node_client.py chromium_kasmvnc/edge_node_client.py
+rm -rf chromium_kasmvnc/desktop && cp -r common/desktop chromium_kasmvnc/desktop
 docker build -t wimotek/chromium:kasmvnc ./chromium_kasmvnc
 ```
 

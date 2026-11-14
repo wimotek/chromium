@@ -87,10 +87,13 @@ if [ ! -d "/data" ] || ! touch /data/.rw_probe 2>/tmp/.rw_err; then
 fi
 rm -f /data/.rw_probe /tmp/.rw_err 2>/dev/null || true
 
-if ! mkdir -p "$HOME/.vnc" "$HOME/.config" "$HOME/.cache/openbox" "$HOME/.cache/fontconfig" /etc/ssl/app /tmp/crashpad; then
+if ! mkdir -p "$HOME/.vnc" "$HOME/.config/openbox" "$HOME/.config/tint2" "$HOME/.cache/openbox" "$HOME/.cache/fontconfig" /etc/ssl/app /tmp/crashpad; then
     echo "[WARN] 容器内部缓存目录创建异常，请检查宿主机 Docker 存储盘空间 (df -h / df -i / docker system df)："
     df -h "$HOME" /tmp /dev/shm 2>/dev/null || true
 fi
+[ -f "$HOME/.config/openbox/rc.xml" ] || cp /etc/xdg/openbox/rc.xml "$HOME/.config/openbox/rc.xml" 2>/dev/null || true
+[ -f "$HOME/.config/openbox/menu.xml" ] || cp /etc/xdg/openbox/menu.xml "$HOME/.config/openbox/menu.xml" 2>/dev/null || true
+[ -f "$HOME/.config/tint2/tint2rc" ] || cp /etc/xdg/tint2/tint2rc "$HOME/.config/tint2/tint2rc" 2>/dev/null || true
 rm -f /tmp/.X0-lock /tmp/.X11-unix/X0 /data/SingletonLock /data/SingletonCookie /data/SingletonSocket 2>/dev/null || true
 
 RESOLUTION=${RESOLUTION:-1920x1080}
@@ -124,7 +127,7 @@ cleanup() {
 }
 trap cleanup TERM INT
 
-# 1. 动态生成 KasmVNC 运行时 YAML 配置
+# 1. 动态生成 KasmVNC 运行时 YAML 配置 (使用 KasmVNC 1.3.3 标准 data_loss_prevention.clipboard 架构)
 cat <<EOF > "$HOME/.vnc/kasmvnc.yaml"
 network:
   websocket_port: 6901
@@ -132,10 +135,15 @@ network:
     require_ssl: true
     pem_certificate: "$FINAL_CERT"
     pem_key: "$FINAL_KEY"
-client:
+data_loss_prevention:
   clipboard:
-    allow_server_to_client: true
-    allow_client_to_server: true
+    server_to_client:
+      enabled: true
+      size: unlimited
+      primary_clipboard_enabled: false
+    client_to_server:
+      enabled: true
+      size: unlimited
 EOF
 
 # 2. 密码配置 (支持免密启动)
@@ -172,13 +180,23 @@ for i in $(seq 1 30); do
     sleep 0.1
 done
 
-# 4. 强制开启 Num Lock (小键盘 ON)
+# 4. 桌面背景、Num Lock 与 X11 剪贴板守护同步 (autocutsel)
+if command -v xsetroot >/dev/null 2>&1; then
+    DISPLAY=:0 xsetroot -solid "#0b1120" >/dev/null 2>&1 || true
+fi
 if command -v numlockx >/dev/null 2>&1; then
     DISPLAY=:0 numlockx on || true
 fi
+if command -v autocutsel >/dev/null 2>&1; then
+    DISPLAY=:0 autocutsel -fork >/dev/null 2>&1 &
+fi
 
-# 5. 启动轻量窗口管理器 Openbox
+# 5. 启动定制化 Openbox 窗口管理器与 tint2 底部工具栏
 openbox &
+sleep 0.4
+if command -v tint2 >/dev/null 2>&1; then
+    tint2 >/dev/null 2>&1 &
+fi
 
 # 6. CDP 安全隔离：Chromium 原生仅绑定 127.0.0.1:9222，绝不直接暴露到公网；外部由 edge_node_client 的 WSS (默认 9443) 鉴权代理
 # 仅当显式设置 CDP_FORWARD_PORT 或 ENABLE_CDP_FORWARD=true 时，才使用 socat 将变量端口（默认 9223）转发至 127.0.0.1:9222

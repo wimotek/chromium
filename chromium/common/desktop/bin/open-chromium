@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+exec chromium \
+  --no-sandbox \
+  --test-type \
+  --disable-gpu \
+  --password-store=basic \
+  --ignore-certificate-errors \
+  --no-first-run \
+  --no-default-browser-check \
+  --user-data-dir=/data \
+  --new-window \
+  "$@" >/dev/null 2>&1 &

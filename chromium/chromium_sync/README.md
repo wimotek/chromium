@@ -81,14 +81,16 @@ HUB_EXTERNAL_PORT=3000 docker compose up -d --build
 
 ## 🚀 节点端构建与快速部署
 
-本地手动构建节点镜像前，请先将共用 `common/edge_node_client.py` 复制到目标节点目录（GitHub Actions 会自动执行此步骤）：
+本地手动构建节点镜像前，请先将共用 `common/edge_node_client.py` 与 `common/desktop/` 复制到目标节点目录（GitHub Actions 会自动执行此步骤）：
 
 ```bash
 cd chromium
 cp common/edge_node_client.py chromium_novnc/edge_node_client.py
+rm -rf chromium_novnc/desktop && cp -r common/desktop chromium_novnc/desktop
 docker build -t wimotek/chromium:novnc ./chromium_novnc
 
 cp common/edge_node_client.py chromium_kasmvnc/edge_node_client.py
+rm -rf chromium_kasmvnc/desktop && cp -r common/desktop chromium_kasmvnc/desktop
 docker build -t wimotek/chromium:kasmvnc ./chromium_kasmvnc
 ```
 

@@ -13,7 +13,7 @@
 | **Docker 节点 (KasmVNC 版)** | [`chromium_kasmvnc/`](./chromium_kasmvnc/) | Docker + KasmVNC 流媒体 (`6901`) + 加密 WSS (`9443`) / 反向穿透 | [查看 Docker 节点文档（含 KasmVNC）](./chromium_novnc/README.md) |
 | **Windows 桌面客户端** | [`chromium_windows/`](./chromium_windows/) | PySide6 Fluent GUI + 复用本机 Edge/Chrome (`9222`) + 本地 Cookie 防火墙 | [查看 Windows 客户端文档](./chromium_windows/README.md) |
 | **Android 移动客户端** | [`chromium_android/`](./chromium_android/) | Kotlin Compose + 内置工作浏览器 + WSS 反向长连（自动禁用第三方 API） | [查看 Android 客户端文档](./chromium_android/README.md) |
-| **通用边缘接入脚本** | [`common/`](./common/) | Docker 节点共用的轻量 WSS / 反向穿透守护脚本 (`edge_node_client.py`) | [查看脚本源码](./common/edge_node_client.py) |
+| **通用边缘与桌面配置** | [`common/`](./common/) | Docker 节点共用的轻量 WSS / 反向穿透脚本 (`edge_node_client.py`) 与定制 Openbox/tint2 桌面配置 (`desktop/`) | [查看脚本源码](./common/edge_node_client.py) |
 
 ---
 

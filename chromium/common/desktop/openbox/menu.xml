@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<openbox_menu xmlns="http://openbox.org/3.4/menu">
+  <menu id="root-menu" label="Wimotek 工作台">
+    <item label="🌐 新建 Chromium 窗口 (Ctrl+Alt+N)">
+      <action name="Execute">
+        <command>/usr/local/bin/open-chromium</command>
+      </action>
+    </item>
+    <item label="🕵️ 新建无痕窗口 (Ctrl+Alt+I)">
+      <action name="Execute">
+        <command>/usr/local/bin/open-chromium --incognito</command>
+      </action>
+    </item>
+    <item label="💻 打开终端 Terminal (Ctrl+Alt+T)">
+      <action name="Execute">
+        <command>/usr/local/bin/open-terminal</command>
+      </action>
+    </item>
+    <item label="📋 剪贴板查看 / 手动同步">
+      <action name="Execute">
+        <command>/usr/local/bin/show-clipboard</command>
+      </action>
+    </item>
+    <separator/>
+    <menu id="client-list-combined-menu"/>
+    <item label="🖥️ 显示桌面 / 最小化全部 (Win+D)">
+      <action name="ToggleShowDesktop"/>
+    </item>
+    <separator/>
+    <item label="🔄 重启 Chromium 进程">
+      <action name="Execute">
+        <command>/usr/local/bin/restart-chromium</command>
+      </action>
+    </item>
+    <item label="⚙️ 重载 Openbox 与工具栏">
+      <action name="Execute">
+        <command>sh -c "openbox --reconfigure &amp;&amp; (pkill -x tint2 || true) &amp;&amp; tint2 &gt;/dev/null 2&gt;&amp;1 &amp;"</command>
+      </action>
+    </item>
+  </menu>
+</openbox_menu>

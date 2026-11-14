@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+exec xterm \
+  -u8 \
+  -fa "WenQuanYi Zen Hei" \
+  -fs 11 \
+  -bg "#0f172a" \
+  -fg "#e2e8f0" \
+  -cr "#38bdf8" \
+  -sb -rightbar -sl 2000 \
+  -geometry 100x28 \
+  -title "Wimotek Terminal" \
+  "$@" >/dev/null 2>&1 &

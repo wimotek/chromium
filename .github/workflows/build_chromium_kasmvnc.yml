@@ -29,6 +29,7 @@ jobs:
       - name: Prepare common client
         run: 
           cp chromium/common/edge_node_client.py chromium/chromium_kasmvnc/edge_node_client.py
+          cp -r chromium/common/desktop chromium/chromium_kasmvnc/desktop
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3

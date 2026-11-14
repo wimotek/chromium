@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=新建浏览器窗口
+GenericName=New Chromium Window
+Comment=打开新的 Chromium 窗口 (Ctrl+Alt+N)
+Exec=/usr/local/bin/open-chromium
+Icon=/usr/share/icons/wimotek/chrome.svg
+Terminal=false
+Categories=Network;WebBrowser;
