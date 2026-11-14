@@ -79,6 +79,9 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "exclude_expired": True,
         "protect_inject": False,
     },
+    "ui": {
+        "close_to_tray": True,
+    },
 }
 
 
@@ -92,7 +95,7 @@ def load_config(path: Optional[Path] = None) -> Dict[str, Any]:
     if cfg_path.exists():
         try:
             loaded = json.loads(cfg_path.read_text(encoding="utf-8"))
-            for section in ("hub", "browser", "cookie_guard"):
+            for section in ("hub", "browser", "cookie_guard", "ui"):
                 if isinstance(loaded.get(section), dict):
                     cfg[section].update(loaded[section])
             # 兼容旧版只填写了 public_ipv4 的配置
@@ -159,7 +162,7 @@ def _run_gui(config_path: Optional[Path] = None):
 
     try:
         from PySide6.QtCore import QObject, Qt, QTimer, Signal
-        from PySide6.QtGui import QColor, QFont, QIcon, QTextCharFormat, QTextCursor
+        from PySide6.QtGui import QAction, QColor, QFont, QIcon, QTextCharFormat, QTextCursor
         from PySide6.QtWidgets import (
             QAbstractItemView,
             QApplication,
@@ -170,7 +173,10 @@ def _run_gui(config_path: Optional[Path] = None):
             QHBoxLayout,
             QHeaderView,
             QLabel,
+            QMenu,
             QSizePolicy,
+            QStyle,
+            QSystemTrayIcon,
             QTableWidget,
             QTableWidgetItem,
             QVBoxLayout,
@@ -377,6 +383,11 @@ def _run_gui(config_path: Optional[Path] = None):
             self._inventory_dialog: Optional[CookieInventoryDialog] = None
             self._cached_rows: List[Dict[str, Any]] = []
             self._cached_stats: Any = None
+            self._loading_ui: bool = False
+            self._force_quit: bool = False
+            self._tray_hint_shown: bool = False
+            self.tray_icon: Optional[QSystemTrayIcon] = None
+            self.tray_menu: Optional[QMenu] = None
             self.status_state = {
                 "cdp": "未检测",
                 "hub": "未接入",
@@ -386,6 +397,7 @@ def _run_gui(config_path: Optional[Path] = None):
 
             self._init_window()
             self._build_pages()
+            self._init_tray()
             self._connect_signals()
             self._load_vars_from_config()
             self._load_initial_logs()
@@ -548,6 +560,25 @@ def _run_gui(config_path: Optional[Path] = None):
             cfg_hint.setTextColor(QColor("#64748b"), QColor("#64748b"))
             lay_hub.addWidget(cfg_hint)
             v.addWidget(card_hub)
+
+            # 窗口关闭与系统托盘设置卡片
+            tray_card = CardWidget(self.page_hub.container)
+            tray_lay = QVBoxLayout(tray_card)
+            tray_lay.setContentsMargins(18, 12, 18, 12)
+            tray_lay.setSpacing(6)
+            tray_row = QHBoxLayout()
+            tray_row.addWidget(StrongBodyLabel("关闭主窗口时最小化到桌面右下角系统托盘", tray_card))
+            tray_row.addStretch()
+            self.sw_close_to_tray = SwitchButton(tray_card)
+            tray_row.addWidget(self.sw_close_to_tray)
+            tray_lay.addLayout(tray_row)
+            tray_hint = CaptionLabel(
+                "开启后点击窗口右上角“×”将隐藏到右下角托盘继续保持 Hub 与 CDP 在线；右键托盘图标可恢复窗口或彻底退出。",
+                tray_card,
+            )
+            tray_hint.setTextColor(QColor("#94a3b8"), QColor("#94a3b8"))
+            tray_lay.addWidget(tray_hint)
+            v.addWidget(tray_card)
 
             # 实时运行跟踪日志卡片（首页直出，无需切换即可跟踪全部状态）
             log_preview_card = CardWidget(self.page_hub.container)
@@ -815,12 +846,87 @@ def _run_gui(config_path: Optional[Path] = None):
             l_lay.addWidget(self.txt_logs)
             v.addWidget(log_card, 1)
 
+        def _init_tray(self):
+            if not QSystemTrayIcon.isSystemTrayAvailable():
+                return
+            icon_path = _resolve_asset_path("app_icon.ico") or _resolve_asset_path("app_icon.png")
+            if icon_path is not None:
+                tray_qicon = QIcon(str(icon_path))
+            else:
+                tray_qicon = self.style().standardIcon(QStyle.SP_ComputerIcon)
+
+            self.tray_icon = QSystemTrayIcon(tray_qicon, self)
+            self.tray_icon.setToolTip(f"Wimotek Edge CDP Node v{APP_VERSION}")
+
+            self.tray_menu = QMenu(self)
+            self._act_tray_show = QAction("显示主窗口", self)
+            self._act_tray_cookies = QAction("查看本机 Cookie 清单", self)
+            self._act_tray_start = QAction("启动并接入 Hub", self)
+            self._act_tray_stop = QAction("停止 Hub 接入", self)
+            self._act_tray_quit = QAction("退出程序", self)
+
+            self._act_tray_show.triggered.connect(self._restore_from_tray)
+            self._act_tray_cookies.triggered.connect(self._open_inventory_from_tray)
+            self._act_tray_start.triggered.connect(self.start_all)
+            self._act_tray_stop.triggered.connect(self.stop_all)
+            self._act_tray_quit.triggered.connect(self._quit_application)
+
+            self.tray_menu.addAction(self._act_tray_show)
+            self.tray_menu.addAction(self._act_tray_cookies)
+            self.tray_menu.addSeparator()
+            self.tray_menu.addAction(self._act_tray_start)
+            self.tray_menu.addAction(self._act_tray_stop)
+            self.tray_menu.addSeparator()
+            self.tray_menu.addAction(self._act_tray_quit)
+
+            self.tray_icon.setContextMenu(self.tray_menu)
+            self.tray_icon.activated.connect(self._on_tray_activated)
+            self.tray_icon.show()
+
+        def _on_tray_activated(self, reason):
+            if reason in (QSystemTrayIcon.Trigger, QSystemTrayIcon.DoubleClick):
+                if self.isVisible() and not self.isMinimized():
+                    self.activateWindow()
+                    self.raise_()
+                else:
+                    self._restore_from_tray()
+
+        def _restore_from_tray(self):
+            self.showNormal()
+            self.raise_()
+            self.activateWindow()
+
+        def _open_inventory_from_tray(self):
+            self._restore_from_tray()
+            self.open_cookie_inventory()
+
+        def _quit_application(self):
+            self._force_quit = True
+            self._log_event("INFO", "用户从系统托盘退出客户端...")
+            if self.agent:
+                self.agent.request_stop()
+            if self.tray_icon is not None:
+                self.tray_icon.hide()
+            QApplication.quit()
+
+        def _on_close_to_tray_toggled(self, checked: bool):
+            if self._loading_ui:
+                return
+            try:
+                self.config.setdefault("ui", {})["close_to_tray"] = bool(checked)
+                save_config(self.config, self.config_path)
+                state_txt = "最小化到系统托盘（后台运行）" if checked else "直接退出程序"
+                self._log_event("INFO", f"窗口关闭行为已更新：{state_txt}")
+            except Exception:
+                pass
+
         def _connect_signals(self):
             self.btn_start.clicked.connect(self.start_all)
             self.btn_stop.clicked.connect(self.stop_all)
             self.btn_launch_only.clicked.connect(self.launch_browser_only)
             self.btn_cookie_inventory.clicked.connect(self.open_cookie_inventory)
             self.btn_save_hub.clicked.connect(self.save_ui_config)
+            self.sw_close_to_tray.checkedChanged.connect(self._on_close_to_tray_toggled)
 
             self.bridge.log_received.connect(self._append_log)
             self.bridge.status_received.connect(self._apply_status_patch)
@@ -830,44 +936,51 @@ def _run_gui(config_path: Optional[Path] = None):
             self.bridge.inventory_scanned.connect(self._on_inventory_scanned)
 
         def _load_vars_from_config(self):
-            h = self.config["hub"]
-            self.in_hub_url.setText(h.get("hub_url", ""))
-            self.in_join_token.setText(h.get("join_token", ""))
-            self.in_node_name.setText(h.get("node_name", ""))
-            self.in_group_name.setText(h.get("group_name", "Windows节点"))
+            self._loading_ui = True
+            try:
+                h = self.config["hub"]
+                self.in_hub_url.setText(h.get("hub_url", ""))
+                self.in_join_token.setText(h.get("join_token", ""))
+                self.in_node_name.setText(h.get("node_name", ""))
+                self.in_group_name.setText(h.get("group_name", "Windows节点"))
 
-            rev = str(h.get("reverse_tunnel", "auto")).lower()
-            rev_idx = 0 if rev == "auto" else (1 if rev == "true" else 2)
-            self.cmb_reverse_mode.setCurrentIndex(rev_idx)
+                rev = str(h.get("reverse_tunnel", "auto")).lower()
+                rev_idx = 0 if rev == "auto" else (1 if rev == "true" else 2)
+                self.cmb_reverse_mode.setCurrentIndex(rev_idx)
 
-            self.in_cdp_port.setText(str(h.get("cdp_port", 9222)))
-            self.in_wss_port.setText(str(h.get("edge_wss_port", 9443)))
-            self.in_ext_wss_port.setText(str(h.get("edge_wss_external_port", 9443)))
-            self.in_pub_host.setText(h.get("public_host") or h.get("public_ipv4") or "")
-            self.in_pub_v6.setText(h.get("public_ipv6", ""))
+                self.in_cdp_port.setText(str(h.get("cdp_port", 9222)))
+                self.in_wss_port.setText(str(h.get("edge_wss_port", 9443)))
+                self.in_ext_wss_port.setText(str(h.get("edge_wss_external_port", 9443)))
+                self.in_pub_host.setText(h.get("public_host") or h.get("public_ipv4") or "")
+                self.in_pub_v6.setText(h.get("public_ipv6", ""))
 
-            b = self.config["browser"]
-            br_map = {"auto": 0, "edge": 1, "chrome": 2, "custom": 3}
-            self.cmb_browser_choice.setCurrentIndex(br_map.get(b.get("browser_choice", "auto"), 0))
-            self.in_custom_browser.setText(b.get("custom_browser_path", ""))
-            self.cmb_profile_mode.setCurrentIndex(1 if b.get("profile_mode") == "system_default" else 0)
-            self.in_custom_profile.setText(b.get("custom_profile_dir", ""))
-            self.in_homepage.setText(b.get("homepage", "about:blank"))
-            self.in_extra_args.setText(b.get("extra_args", ""))
-            self.sw_launch_browser.setChecked(bool(b.get("launch_browser_on_start", True)))
-            self.sw_auto_connect.setChecked(bool(b.get("auto_connect_on_launch", False)))
+                b = self.config["browser"]
+                br_map = {"auto": 0, "edge": 1, "chrome": 2, "custom": 3}
+                self.cmb_browser_choice.setCurrentIndex(br_map.get(b.get("browser_choice", "auto"), 0))
+                self.in_custom_browser.setText(b.get("custom_browser_path", ""))
+                self.cmb_profile_mode.setCurrentIndex(1 if b.get("profile_mode") == "system_default" else 0)
+                self.in_custom_profile.setText(b.get("custom_profile_dir", ""))
+                self.in_homepage.setText(b.get("homepage", "about:blank"))
+                self.in_extra_args.setText(b.get("extra_args", ""))
+                self.sw_launch_browser.setChecked(bool(b.get("launch_browser_on_start", True)))
+                self.sw_auto_connect.setChecked(bool(b.get("auto_connect_on_launch", False)))
 
-            g = self.config["cookie_guard"]
-            mode = g.get("mode", "whitelist")
-            if mode in self.rb_modes:
-                self.rb_modes[mode].setChecked(True)
-            else:
-                self.rb_modes["whitelist"].setChecked(True)
-            self.sw_exclude_expired.setChecked(bool(g.get("exclude_expired", True)))
-            self.sw_protect_inject.setChecked(bool(g.get("protect_inject", False)))
-            self.in_blocked_names.setText(", ".join(g.get("blocked_cookie_names", [])))
-            self.txt_whitelist.setPlainText("\n".join(g.get("whitelist_domains", [])))
-            self.txt_blacklist.setPlainText("\n".join(g.get("blacklist_domains", [])))
+                g = self.config["cookie_guard"]
+                mode = g.get("mode", "whitelist")
+                if mode in self.rb_modes:
+                    self.rb_modes[mode].setChecked(True)
+                else:
+                    self.rb_modes["whitelist"].setChecked(True)
+                self.sw_exclude_expired.setChecked(bool(g.get("exclude_expired", True)))
+                self.sw_protect_inject.setChecked(bool(g.get("protect_inject", False)))
+                self.in_blocked_names.setText(", ".join(g.get("blocked_cookie_names", [])))
+                self.txt_whitelist.setPlainText("\n".join(g.get("whitelist_domains", [])))
+                self.txt_blacklist.setPlainText("\n".join(g.get("blacklist_domains", [])))
+
+                ui_cfg = self.config.get("ui", {})
+                self.sw_close_to_tray.setChecked(bool(ui_cfg.get("close_to_tray", True)))
+            finally:
+                self._loading_ui = False
 
         def _collect_config_from_vars(self) -> Dict[str, Any]:
             cfg = copy.deepcopy(self.config)
@@ -918,6 +1031,8 @@ def _run_gui(config_path: Optional[Path] = None):
                 "exclude_expired": bool(self.sw_exclude_expired.isChecked()),
                 "protect_inject": bool(self.sw_protect_inject.isChecked()),
             })
+
+            cfg.setdefault("ui", {})["close_to_tray"] = bool(self.sw_close_to_tray.isChecked())
             return cfg
 
         def _toast(self, kind: str, title: str, content: str):
@@ -1183,6 +1298,7 @@ def _run_gui(config_path: Optional[Path] = None):
 
             if self._inventory_dialog is not None and self._inventory_dialog.isVisible():
                 self._inventory_dialog.set_data(rows, stats, mode)
+            self._update_tray_tooltip()
 
         def _poll_cdp_health(self):
             raw_port = self.in_cdp_port.text().strip()
@@ -1217,6 +1333,7 @@ def _run_gui(config_path: Optional[Path] = None):
                     self.scan_cookie_inventory(open_dialog=False, force_log=True)
                 elif prev is True:
                     self._log_event("WARNING", f"本地调试浏览器 CDP 127.0.0.1:{port} 已离线或关闭")
+            self._update_tray_tooltip()
 
         def _apply_status_patch(self, patch: Dict[str, Any]):
             if "hub_status" in patch or "hub_mode" in patch:
@@ -1236,14 +1353,17 @@ def _run_gui(config_path: Optional[Path] = None):
                 self.badge_hub.setStyleSheet(
                     f"QLabel {{ background-color: {bg}; color: {fg}; border-radius: 6px; padding: 5px 12px; font-weight: 600; font-size: 12px; }}"
                 )
+                self._update_tray_tooltip()
 
         def _on_agent_stopped(self):
             self.btn_start.setEnabled(True)
             self.btn_stop.setEnabled(False)
+            self.status_state["hub"] = "已停止"
             self.badge_hub.setText("Hub: 已停止")
             self.badge_hub.setStyleSheet(
                 "QLabel { background-color: #334155; color: #f8fafc; border-radius: 6px; padding: 5px 12px; font-weight: 600; font-size: 12px; }"
             )
+            self._update_tray_tooltip()
 
         def _log_event(self, level: str, message: str):
             disk_lvl = "INFO" if level == "GUARD" else level
@@ -1335,14 +1455,48 @@ def _run_gui(config_path: Optional[Path] = None):
             if sys.platform == "win32":
                 os.startfile(str(log_dir))
 
+        def _update_tray_tooltip(self):
+            if self.tray_icon is None:
+                return
+            cdp_txt = "就绪" if self._last_cdp_ok else "未启动"
+            hub_txt = self.status_state.get("hub", "未接入")
+            cookie_txt = (
+                f"{self._cached_stats.total}(放行{self._cached_stats.allowed})"
+                if self._cached_stats is not None
+                else "待检测"
+            )
+            self.tray_icon.setToolTip(
+                f"Wimotek Edge CDP Node v{APP_VERSION}\n"
+                f"CDP: {cdp_txt} | Hub: {hub_txt} | Cookie: {cookie_txt}"
+            )
+
         def closeEvent(self, event):
+            tray_available = self.tray_icon is not None and QSystemTrayIcon.isSystemTrayAvailable()
+            if not self._force_quit and self.sw_close_to_tray.isChecked() and tray_available:
+                event.ignore()
+                self.hide()
+                self._log_event("INFO", "主窗口已最小化到桌面右下角系统托盘（右键托盘图标可恢复或退出）")
+                if not self._tray_hint_shown:
+                    self._tray_hint_shown = True
+                    self.tray_icon.showMessage(
+                        "Wimotek Edge CDP Node",
+                        "已最小化到桌面右下角系统托盘并在后台继续运行，点击托盘图标可恢复窗口。",
+                        QSystemTrayIcon.Information,
+                        3000,
+                    )
+                return
+
             if self.agent:
                 self.agent.request_stop()
+            if self.tray_icon is not None:
+                self.tray_icon.hide()
             super().closeEvent(event)
+            QApplication.quit()
 
     # Windows 高分屏缩放自动适配 + Fluent 暗色主题
     QApplication.setHighDpiScaleFactorRoundingPolicy(Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
     app = QApplication(sys.argv)
+    app.setQuitOnLastWindowClosed(False)
     icon_file = _resolve_asset_path("app_icon.ico") or _resolve_asset_path("app_icon.png")
     if icon_file is not None:
         app.setWindowIcon(QIcon(str(icon_file)))
