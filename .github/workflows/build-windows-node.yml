@@ -141,10 +141,12 @@ jobs:
           }
           & $iscc "/DMyAppVersion=$ver" "chromium/chromium_windows/installer.iss"
 
-          Get-ChildItem release_assets -File | ForEach-Object {
+          $files = Get-ChildItem release_assets -File | Where-Object { $_.Name -ne "SHA256SUMS.txt" }
+          $hashes = $files | ForEach-Object {
             $hash = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower()
             "$hash  $($_.Name)"
-          } | Out-File -FilePath release_assets/SHA256SUMS.txt -Encoding utf8
+          }
+          $hashes | Out-File -FilePath release_assets/SHA256SUMS.txt -Encoding utf8
 
           Get-ChildItem release_assets -File | Select-Object Name, @{Name="MB";Expression={[math]::Round($_.Length/1MB,2)}}
           Get-Content release_assets/SHA256SUMS.txt
