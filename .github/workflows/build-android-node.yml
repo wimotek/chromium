@@ -59,9 +59,48 @@ jobs:
         with:
           gradle-version: "8.7"
 
+      - name: Determine release version & tag
+        id: rel_meta
+        run: |
+          if [[ "${{ github.ref }}" == refs/tags/* ]]; then
+            TAG="${{ github.ref_name }}"
+            VER="${TAG#android-v}"
+            [[ "$VER" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || VER="1.0.0"
+            SHOULD="true"
+          elif [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            TAG="${{ inputs.release_tag }}"
+            TAG="${TAG:-android-v1.0.0}"
+            VER="${TAG#android-v}"
+            [[ "$VER" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || VER="1.0.0"
+            if [[ "${{ inputs.create_release }}" == "true" ]]; then
+              SHOULD="true"
+            else
+              SHOULD="false"
+            fi
+          elif [[ "${{ github.event_name }}" == "push" ]]; then
+            LATEST_TAG="$(git ls-remote --tags --refs origin 'android-v*' | sed -E 's|.*refs/tags/||' | grep -E '^android-v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n 1 || true)"
+            if [[ -z "$LATEST_TAG" ]]; then
+              VER="1.0.0"
+            else
+              BASE="${LATEST_TAG#android-v}"
+              IFS='.' read -r MAJ MIN PAT <<< "$BASE"
+              VER="${MAJ}.${MIN}.$((PAT + 1))"
+            fi
+            TAG="android-v${VER}"
+            SHOULD="true"
+          else
+            VER="1.0.0"
+            TAG=""
+            SHOULD="false"
+          fi
+          echo "Resolved release tag=$TAG, app_version=$VER, version_code=${{ github.run_number }}, should_release=$SHOULD"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "app_version=$VER" >> "$GITHUB_OUTPUT"
+          echo "should_release=$SHOULD" >> "$GITHUB_OUTPUT"
+
       - name: Build Android Release APK
         working-directory: chromium/chromium_android
-        run: gradle assembleRelease --no-daemon
+        run: gradle assembleRelease --no-daemon -PappVersionCode=${{ github.run_number }} -PappVersionName=${{ steps.rel_meta.outputs.app_version }}
 
       - name: Package release assets & SHA256SUMS
         run: |
@@ -80,21 +119,6 @@ jobs:
           path: release_assets_android/*
           retention-days: 30
 
-      - name: Determine release tag
-        id: rel_meta
-        run: |
-          if [[ "${{ github.ref }}" == refs/tags/* ]]; then
-            echo "tag=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
-            echo "should_release=true" >> "$GITHUB_OUTPUT"
-          elif [[ "${{ github.event_name }}" == "workflow_dispatch" && "${{ inputs.create_release }}" == "true" ]]; then
-            TAG="${{ inputs.release_tag }}"
-            echo "tag=${TAG:-android-v1.0.0}" >> "$GITHUB_OUTPUT"
-            echo "should_release=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "tag=" >> "$GITHUB_OUTPUT"
-            echo "should_release=false" >> "$GITHUB_OUTPUT"
-          fi
-
       - name: Publish GitHub Release
         if: steps.rel_meta.outputs.should_release == 'true'
         uses: softprops/action-gh-release@v2
@@ -102,6 +126,7 @@ jobs:
           tag_name: ${{ steps.rel_meta.outputs.tag }}
           name: "Wimotek Android Edge Node ${{ steps.rel_meta.outputs.tag }}"
           generate_release_notes: true
+          fail_on_unmatched_files: true
           files: |
             release_assets_android/WimotekEdgeNode-android.apk
             release_assets_android/SHA256SUMS.txt

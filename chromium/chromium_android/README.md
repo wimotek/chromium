@@ -31,8 +31,8 @@
 ## 构建与 GitHub Actions 发布
 
 仓库已配置 `.github/workflows/build-android-node.yml`（运行于 `ubuntu-latest` + JDK 17 + Gradle 8.7）：
-- 推送代码到 `chromium/chromium_android/**` 会自动构建 APK 并上传 Workflow Artifact。
-- 推送 `android-v*` 标签（例如 `git tag android-v1.0.0 && git push origin android-v1.0.0`）或在 Actions 页面手动点击 `Run workflow` 即可自动编译 `WimotekEdgeNode-android.apk` 并发布到 **GitHub Release**。
+- 推送代码到 `chromium/chromium_android/**` 会自动读取现有 `android-v*` 标签将补丁号 +1（例如 `android-v1.0.0` -> `android-v1.0.1`），并将递增后的 `versionName` 与 `versionCode` 编入 APK 后发布新 **GitHub Release**。
+- 推送 `android-v*` 标签（例如 `git tag android-v1.0.0 && git push origin android-v1.0.0`）或在 Actions 页面手动点击 `Run workflow` 即可发布对应版本号的 **GitHub Release**。
 
 本地构建命令（需 Android SDK 34 + JDK 17 + Gradle 8.7）：
 ```bash

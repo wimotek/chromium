@@ -116,8 +116,8 @@ pyinstaller --noconfirm --clean --onefile --windowed `
 ## GitHub Actions 自动编译与发布 Release
 
 仓库已配置自动化工作流 `.github/workflows/build-windows-node.yml`（运行于 `windows-latest`）：
-- **触发自动构建产物**：提交改动到 `chromium/chromium_windows/**` 时自动在 Actions 生成并上传 `WimotekEdgeNode-win64-portable.zip` 构建产物。
-- **触发自动发布 Release**：推送以 `win-v` 开头的版本标签即可自动编译 EXE、生成 `SHA256SUMS.txt` 并发布到 GitHub Release：
+- **提交即自动递增版本号发布 Release**：提交改动到 `chromium/chromium_windows/**` 时，Actions 会读取仓库现有 `win-v*` 标签并自动将补丁号 +1（例如 `win-v1.1.0` -> `win-v1.1.1`），同步写入安装包版本号并发布新 Release。
+- **推送版本标签发布正式版**：推送以 `win-v` 开头的版本标签即可自动编译 EXE、生成 `SHA256SUMS.txt` 并发布对应版本 GitHub Release：
   ```bash
   git tag win-v1.0.0
   git push origin win-v1.0.0

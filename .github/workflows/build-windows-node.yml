@@ -106,6 +106,45 @@ jobs:
             --exclude-module qfluentwidgets `
             chromium/chromium_windows/main.py
 
+      - name: Determine release version & tag
+        id: rel_meta
+        shell: pwsh
+        run: |
+          if ("${{ github.ref }}".StartsWith("refs/tags/")) {
+            $tag = "${{ github.ref_name }}"
+            $ver = if ($tag -match '^win-v(\d+\.\d+\.\d+)$') { $matches[1] } else { "1.1.0" }
+            $should = "true"
+          } elseif ("${{ github.event_name }}" -eq "workflow_dispatch") {
+            $tag = "${{ inputs.release_tag }}".Trim()
+            if (-not $tag) { $tag = "win-v1.1.0" }
+            $ver = if ($tag -match '^win-v(\d+\.\d+\.\d+)$') { $matches[1] } else { "1.1.0" }
+            $should = if ("${{ inputs.create_release }}" -eq "true") { "true" } else { "false" }
+          } elseif ("${{ github.event_name }}" -eq "push") {
+            $tags = git ls-remote --tags --refs origin "win-v*" 2>$null
+            $best = $null
+            foreach ($line in $tags) {
+              if ($line -match 'refs/tags/win-v(\d+)\.(\d+)\.(\d+)$') {
+                $v = [version]::new([int]$matches[1], [int]$matches[2], [int]$matches[3])
+                if ($null -eq $best -or $v -gt $best) { $best = $v }
+              }
+            }
+            if ($null -eq $best) {
+              $ver = "1.1.0"
+            } else {
+              $ver = "$($best.Major).$($best.Minor).$($best.Build + 1)"
+            }
+            $tag = "win-v$ver"
+            $should = "true"
+          } else {
+            $ver = "1.1.0"
+            $tag = ""
+            $should = "false"
+          }
+          Write-Host "Resolved release tag=$tag, app_version=$ver, should_release=$should"
+          "tag=$tag" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "app_version=$ver" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "should_release=$should" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
       - name: Stage multi-file portable package & build Inno Setup installer
         shell: pwsh
         run: |
@@ -133,12 +172,8 @@ jobs:
             $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
           }
 
-          $ver = "1.1.0"
-          if ("${{ github.ref }}".StartsWith("refs/tags/win-v")) {
-            $ver = "${{ github.ref_name }}".Substring(5)
-          } elseif ("${{ inputs.release_tag }}".StartsWith("win-v")) {
-            $ver = "${{ inputs.release_tag }}".Substring(5)
-          }
+          $ver = "${{ steps.rel_meta.outputs.app_version }}"
+          if (-not $ver) { $ver = "1.1.0" }
           & $iscc "/DMyAppVersion=$ver" "chromium/chromium_windows/installer.iss"
 
           $files = Get-ChildItem release_assets -File | Where-Object { $_.Name -ne "SHA256SUMS.txt" }
@@ -158,24 +193,6 @@ jobs:
           path: release_assets/*
           retention-days: 30
 
-      - name: Determine release tag
-        id: rel_meta
-        shell: pwsh
-        run: |
-          if ("${{ github.ref }}".StartsWith("refs/tags/")) {
-            $tag = "${{ github.ref_name }}"
-            $should = "true"
-          } elseif ("${{ github.event_name }}" -eq "workflow_dispatch" -and "${{ inputs.create_release }}" -eq "true") {
-            $tag = "${{ inputs.release_tag }}".Trim()
-            if (-not $tag) { $tag = "win-v1.1.0" }
-            $should = "true"
-          } else {
-            $tag = ""
-            $should = "false"
-          }
-          "tag=$tag" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
-          "should_release=$should" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
-
       - name: Publish GitHub Release
         if: steps.rel_meta.outputs.should_release == 'true'
         uses: softprops/action-gh-release@v2
@@ -183,6 +200,7 @@ jobs:
           tag_name: ${{ steps.rel_meta.outputs.tag }}
           name: "Wimotek Windows Edge CDP Node ${{ steps.rel_meta.outputs.tag }}"
           generate_release_notes: true
+          fail_on_unmatched_files: true
           files: |
             release_assets/WimotekEdgeNode-Setup-win64.exe
             release_assets/WimotekEdgeNode-win64-portable.zip
