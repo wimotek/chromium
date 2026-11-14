@@ -191,3 +191,98 @@ class CookieGuard:
             stats.allowed_domains[dom or "unknown"] = stats.allowed_domains.get(dom or "unknown", 0) + 1
 
         return allowed_list, stats
+
+    def inspect_cookies(self, cookies: List[dict]) -> Tuple[List[Dict[str, Any]], FilterStats]:
+        """逐条评估本地 Cookie 放行/拦截原因（返回脱敏预览与明细清单，绝不泄露完整明文到日志）"""
+        rows: List[Dict[str, Any]] = []
+        stats = FilterStats(total=len(cookies))
+        now_ts = time.time()
+
+        for c in cookies:
+            dom = str(c.get("domain") or "").lower().lstrip(".")
+            name = str(c.get("name") or "")
+            raw_val = str(c.get("value") or "")
+            if len(raw_val) > 10:
+                masked = f"{raw_val[:4]}...{raw_val[-3:]}"
+            elif raw_val:
+                masked = "***"
+            else:
+                masked = "(空)"
+
+            exp = c.get("expires")
+            is_expired = (
+                self.config.exclude_expired
+                and exp is not None
+                and isinstance(exp, (int, float))
+                and exp > 0
+                and exp <= now_ts
+            )
+
+            allowed_flag = False
+            if is_expired:
+                verdict = "已过期剔除"
+                stats.expired_dropped += 1
+            elif self.config.mode == "block_export":
+                verdict = "拦截(禁止导出)"
+                stats.blocked_by_policy += 1
+                stats.blocked_domains[dom or "unknown"] = stats.blocked_domains.get(dom or "unknown", 0) + 1
+            elif self.config.blocked_cookie_names and any(
+                match_name_rule(name, r) for r in self.config.blocked_cookie_names
+            ):
+                verdict = "拦截(名称屏蔽)"
+                stats.blocked_by_policy += 1
+                stats.blocked_domains[dom or "unknown"] = stats.blocked_domains.get(dom or "unknown", 0) + 1
+            elif self.config.mode == "whitelist":
+                if not self.config.whitelist_domains:
+                    verdict = "拦截(白名单为空)"
+                    stats.blocked_by_policy += 1
+                    stats.blocked_domains[dom or "unknown"] = stats.blocked_domains.get(dom or "unknown", 0) + 1
+                elif not any(match_domain_rule(dom, r) for r in self.config.whitelist_domains):
+                    verdict = "拦截(非白名单)"
+                    stats.blocked_by_policy += 1
+                    stats.blocked_domains[dom or "unknown"] = stats.blocked_domains.get(dom or "unknown", 0) + 1
+                else:
+                    verdict = "放行"
+                    allowed_flag = True
+                    stats.allowed += 1
+                    stats.allowed_domains[dom or "unknown"] = stats.allowed_domains.get(dom or "unknown", 0) + 1
+            elif self.config.mode == "blacklist":
+                if self.config.blacklist_domains and any(
+                    match_domain_rule(dom, r) for r in self.config.blacklist_domains
+                ):
+                    verdict = "拦截(命中黑名单)"
+                    stats.blocked_by_policy += 1
+                    stats.blocked_domains[dom or "unknown"] = stats.blocked_domains.get(dom or "unknown", 0) + 1
+                else:
+                    verdict = "放行"
+                    allowed_flag = True
+                    stats.allowed += 1
+                    stats.allowed_domains[dom or "unknown"] = stats.allowed_domains.get(dom or "unknown", 0) + 1
+            else:
+                verdict = "放行"
+                allowed_flag = True
+                stats.allowed += 1
+                stats.allowed_domains[dom or "unknown"] = stats.allowed_domains.get(dom or "unknown", 0) + 1
+
+            if exp is not None and isinstance(exp, (int, float)) and exp > 0:
+                exp_str = time.strftime("%Y-%m-%d %H:%M", time.localtime(exp))
+            else:
+                exp_str = "会话级(关闭失效)"
+
+            flags = []
+            if c.get("httpOnly"):
+                flags.append("HttpOnly")
+            if c.get("secure"):
+                flags.append("Secure")
+
+            rows.append({
+                "domain": c.get("domain") or dom or "-",
+                "name": name,
+                "verdict": verdict,
+                "allowed": allowed_flag,
+                "value_masked": masked,
+                "flags": ", ".join(flags) if flags else "-",
+                "expires_str": exp_str,
+            })
+
+        return rows, stats

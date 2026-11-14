@@ -43,12 +43,59 @@ def get_app_data_dir() -> Path:
     return d
 
 
+def get_log_file_path() -> Path:
+    log_dir = get_app_data_dir() / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    return log_dir / "agent.log"
+
+
+def read_recent_logs(max_lines: int = 300) -> List[Tuple[str, str]]:
+    log_file = get_log_file_path()
+    if not log_file.exists():
+        return []
+    try:
+        lines = log_file.read_text(encoding="utf-8", errors="replace").splitlines()
+        out: List[Tuple[str, str]] = []
+        for ln in lines[-max_lines:]:
+            lvl = "INFO"
+            if "[GUARD]" in ln:
+                lvl = "GUARD"
+            elif "[ERROR]" in ln:
+                lvl = "ERROR"
+            elif "[WARNING]" in ln or "[WARN]" in ln:
+                lvl = "WARNING"
+            out.append((lvl, ln))
+        return out
+    except Exception:
+        return []
+
+
+def clear_log_file() -> None:
+    log_file = get_log_file_path()
+    try:
+        if log_file.exists():
+            log_file.write_text("", encoding="utf-8")
+    except Exception:
+        pass
+
+
+def append_disk_log(level: str, message: str) -> str:
+    ts = time.strftime("%Y-%m-%d %H:%M:%S")
+    lvl = level.upper()
+    line = f"{ts} [{lvl}] {message}"
+    try:
+        log_file = get_log_file_path()
+        with log_file.open("a", encoding="utf-8") as f:
+            f.write(line + "\n")
+    except Exception:
+        pass
+    return line
+
+
 def build_agent_logger(
     log_callback: Optional[Callable[[str, str], None]] = None,
 ) -> logging.Logger:
-    log_dir = get_app_data_dir() / "logs"
-    log_dir.mkdir(parents=True, exist_ok=True)
-    log_file = log_dir / "agent.log"
+    log_file = get_log_file_path()
 
     logger = logging.getLogger("WimotekWinEdge")
     logger.setLevel(logging.INFO)
@@ -316,13 +363,21 @@ async def send_cdp_json_command(ws, method: str, params: Optional[dict] = None, 
     return {}
 
 
+def _ws_connect_local(ws_url: str, **kwargs):
+    """连接本机 127.0.0.1 CDP WebSocket，显式绕过系统代理环境变量"""
+    try:
+        return websockets.connect(ws_url, proxy=None, **kwargs)
+    except TypeError:
+        return websockets.connect(ws_url, **kwargs)
+
+
 async def extract_raw_local_cookies(http_client: httpx.AsyncClient, cdp_port: int) -> List[dict]:
     base = f"http://127.0.0.1:{int(cdp_port)}"
     try:
         list_res = await http_client.get(f"{base}/json/list", timeout=3.0)
         pages = [t for t in list_res.json() if t.get("type") == "page" and "webSocketDebuggerUrl" in t]
         if pages:
-            async with websockets.connect(pages[0]["webSocketDebuggerUrl"], open_timeout=5.0) as page_ws:
+            async with _ws_connect_local(pages[0]["webSocketDebuggerUrl"], open_timeout=5.0) as page_ws:
                 await send_cdp_json_command(page_ws, "Network.enable", req_id=201)
                 res_page = await send_cdp_json_command(page_ws, "Network.getAllCookies", req_id=202)
                 cookies_p = res_page.get("cookies", [])
@@ -331,16 +386,25 @@ async def extract_raw_local_cookies(http_client: httpx.AsyncClient, cdp_port: in
     except Exception:
         pass
 
-    ver_res = await http_client.get(f"{base}/json/version", timeout=3.0)
-    ws_url = ver_res.json()["webSocketDebuggerUrl"]
-    async with websockets.connect(ws_url, open_timeout=5.0) as ws:
+    try:
+        ver_res = await http_client.get(f"{base}/json/version", timeout=3.0)
+        ws_url = ver_res.json()["webSocketDebuggerUrl"]
+    except httpx.ConnectError as exc:
+        raise ConnectionRefusedError(
+            f"无法连接本地浏览器 CDP 127.0.0.1:{int(cdp_port)}，请确认调试浏览器已启动且保持独立 Profile 模式"
+        ) from exc
+
+    async with _ws_connect_local(ws_url, open_timeout=5.0) as ws:
+        try:
+            res_storage = await send_cdp_json_command(ws, "Storage.getCookies", req_id=103)
+            cookies_s = res_storage.get("cookies", [])
+            if cookies_s:
+                return cookies_s
+        except Exception:
+            pass
         await send_cdp_json_command(ws, "Network.enable", req_id=101)
         res_all = await send_cdp_json_command(ws, "Network.getAllCookies", req_id=102)
-        cookies = res_all.get("cookies", [])
-        if cookies:
-            return cookies
-        res_storage = await send_cdp_json_command(ws, "Storage.getCookies", req_id=103)
-        return res_storage.get("cookies", [])
+        return res_all.get("cookies", [])
 
 
 class WinEdgeAgent:
@@ -425,11 +489,16 @@ class WinEdgeAgent:
                 top_doms = ", ".join(
                     f"{k}({v})" for k, v in sorted(stats.allowed_domains.items(), key=lambda x: -x[1])[:5]
                 )
-                self.logger.info(
-                    f"[GUARD] fetch_cookies | 模式={self.cookie_guard.config.mode} | 原始={stats.total} | "
-                    f"放行={stats.allowed} | 本地拦截={stats.blocked_by_policy} | 过期剔除={stats.expired_dropped}"
-                    + (f" | 放行域={top_doms}" if top_doms else "")
-                )
+                if self.cookie_guard.config.mode == "whitelist" and not self.cookie_guard.config.whitelist_domains:
+                    self.logger.warning(
+                        f"[GUARD] 当前为严格白名单模式且白名单为空，已拦截全部 {stats.total} 条本机 Cookie（Hub 同步与探测显示为 0）"
+                    )
+                else:
+                    self.logger.info(
+                        f"[GUARD] fetch_cookies | 模式={self.cookie_guard.config.mode} | 原始={stats.total} | "
+                        f"放行={stats.allowed} | 本地拦截={stats.blocked_by_policy} | 过期剔除={stats.expired_dropped}"
+                        + (f" | 放行域={top_doms}" if top_doms else "")
+                    )
                 self._emit_status(
                     last_guard=f"放行 {stats.allowed} / 拦截 {stats.blocked_by_policy} ({self.cookie_guard.config.mode})"
                 )
@@ -461,7 +530,7 @@ class WinEdgeAgent:
                     target_ws = ver_res.json()["webSocketDebuggerUrl"]
 
                 if allowed_inject:
-                    async with websockets.connect(target_ws, open_timeout=8.0) as cdp_ws:
+                    async with _ws_connect_local(target_ws, open_timeout=8.0) as cdp_ws:
                         await send_cdp_json_command(cdp_ws, "Network.enable", req_id=301)
                         await send_cdp_json_command(cdp_ws, "Network.setCookies", {"cookies": allowed_inject}, req_id=302)
                 self.logger.info(f"同步注入 Cookie 完成: 写入 {len(allowed_inject)} 条")
@@ -485,11 +554,11 @@ class WinEdgeAgent:
 
     async def _bridge_cdp_ws_stream(self, tunnel_ws, stream_id: str, inbound_queue: asyncio.Queue, cdp_port: int):
         try:
-            async with httpx.AsyncClient(timeout=3.0) as client:
+            async with httpx.AsyncClient(timeout=3.0, trust_env=False) as client:
                 ver_res = await client.get(f"http://127.0.0.1:{int(cdp_port)}/json/version")
                 local_ws_url = ver_res.json()["webSocketDebuggerUrl"]
 
-            async with websockets.connect(local_ws_url, open_timeout=5.0, max_size=100 * 1024 * 1024) as cdp_ws:
+            async with _ws_connect_local(local_ws_url, open_timeout=5.0, max_size=100 * 1024 * 1024) as cdp_ws:
                 async def _cdp_to_hub():
                     async for msg in cdp_ws:
                         await tunnel_ws.send(json.dumps({
@@ -575,7 +644,7 @@ class WinEdgeAgent:
             self._emit_status(hub_status="connected", hub_mode="public_wss")
             ws_streams: Dict[str, asyncio.Queue] = {}
             try:
-                async with httpx.AsyncClient(timeout=4.0) as http_client:
+                async with httpx.AsyncClient(timeout=4.0, trust_env=False) as http_client:
                     async for msg_text in websocket:
                         activity["last_inbound"] = time.monotonic()
                         if msg_text == "pong" or '"type":"pong"' in msg_text:
@@ -644,7 +713,7 @@ class WinEdgeAgent:
 
         # 等待本地浏览器 CDP 就绪
         self._emit_status(hub_status="probing", cdp_status="waiting")
-        async with httpx.AsyncClient(timeout=2.0) as client:
+        async with httpx.AsyncClient(timeout=2.0, trust_env=False) as client:
             cdp_ok = False
             for _ in range(15):
                 if self._stop_event.is_set():
@@ -865,7 +934,7 @@ class WinEdgeAgent:
 
                     hb_task = asyncio.create_task(_hb_loop())
                     try:
-                        async with httpx.AsyncClient(timeout=4.0) as http_client:
+                        async with httpx.AsyncClient(timeout=4.0, trust_env=False) as http_client:
                             async for msg_text in ws:
                                 if self._stop_event.is_set():
                                     break

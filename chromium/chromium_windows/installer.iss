@@ -18,6 +18,8 @@ Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
 DisableProgramGroupPage=yes
+SetupIconFile=assets\app_icon.ico
+UninstallDisplayIcon={app}\WimotekEdgeNode.exe
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"

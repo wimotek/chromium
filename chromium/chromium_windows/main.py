@@ -16,6 +16,7 @@ import os
 from pathlib import Path
 import sys
 import threading
+import time
 from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
@@ -34,8 +35,12 @@ from cookie_guard import (
 )
 from win_edge_agent import (
     WinEdgeAgent,
+    append_disk_log,
+    clear_log_file,
     extract_raw_local_cookies,
     get_app_data_dir,
+    get_log_file_path,
+    read_recent_logs,
 )
 
 
@@ -133,18 +138,41 @@ def run_headless(config_path: Optional[Path] = None):
         browser_mgr.stop()
 
 
+def _resolve_asset_path(filename: str) -> Optional[Path]:
+    candidates = []
+    if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
+        candidates.append(Path(getattr(sys, "_MEIPASS")) / "assets" / filename)
+    candidates.append(Path(__file__).resolve().parent / "assets" / filename)
+    for p in candidates:
+        if p.is_file():
+            return p
+    return None
+
+
 def _run_gui(config_path: Optional[Path] = None):
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("Wimotek.EdgeCDPNode.Desktop")
+        except Exception:
+            pass
+
     try:
         from PySide6.QtCore import QObject, Qt, QTimer, Signal
-        from PySide6.QtGui import QColor, QFont, QTextCharFormat, QTextCursor
+        from PySide6.QtGui import QColor, QFont, QIcon, QTextCharFormat, QTextCursor
         from PySide6.QtWidgets import (
+            QAbstractItemView,
             QApplication,
             QButtonGroup,
+            QDialog,
             QFileDialog,
             QFormLayout,
             QHBoxLayout,
+            QHeaderView,
             QLabel,
             QSizePolicy,
+            QTableWidget,
+            QTableWidgetItem,
             QVBoxLayout,
             QWidget,
         )
@@ -197,6 +225,128 @@ def _run_gui(config_path: Optional[Path] = None):
         cdp_checked = Signal(int, bool)
         agent_stopped = Signal()
         preview_finished = Signal(str, str)
+        inventory_scanned = Signal(list, object, str, bool)
+
+    class CookieInventoryDialog(QDialog):
+        def __init__(self, parent, rescan_callback):
+            super().__init__(parent)
+            self._rescan_callback = rescan_callback
+            self._rows: List[Dict[str, Any]] = []
+            self._stats: Any = None
+
+            self.setWindowTitle("本机浏览器 Cookie 清单与防火墙审计明细")
+            self.resize(960, 580)
+            self.setMinimumSize(780, 460)
+            self.setStyleSheet(
+                "QDialog { background-color: #111827; color: #f8fafc; }"
+                "QTableWidget { background-color: #0f172a; color: #e2e8f0; gridline-color: #1e293b; "
+                "border: 1px solid #334155; border-radius: 6px; selection-background-color: #1d4ed8; }"
+                "QHeaderView::section { background-color: #1e293b; color: #cbd5e1; padding: 6px 8px; "
+                "border: none; border-bottom: 1px solid #334155; font-weight: 600; }"
+            )
+
+            lay = QVBoxLayout(self)
+            lay.setContentsMargins(18, 16, 18, 16)
+            lay.setSpacing(12)
+
+            self.lbl_summary = StrongBodyLabel("正在读取本机浏览器 Cookie...", self)
+            lay.addWidget(self.lbl_summary)
+
+            bar = QHBoxLayout()
+            bar.setSpacing(10)
+            self.in_search = LineEdit(self)
+            self.in_search.setPlaceholderText("按域名或 Cookie 名称过滤...")
+            self.in_search.textChanged.connect(self._render_table)
+
+            self.cmb_filter = ComboBox(self)
+            self.cmb_filter.addItems(["全部", "仅放行", "仅拦截"])
+            self.cmb_filter.currentTextChanged.connect(self._render_table)
+
+            self.btn_rescan = PrimaryPushButton(_icon("SYNC"), "刷新扫描", self)
+            self.btn_rescan.clicked.connect(self._on_rescan)
+
+            bar.addWidget(self.in_search, 1)
+            bar.addWidget(self.cmb_filter)
+            bar.addWidget(self.btn_rescan)
+            lay.addLayout(bar)
+
+            self.table = QTableWidget(0, 6, self)
+            self.table.setHorizontalHeaderLabels(["域名", "Cookie 名称", "防火墙状态", "脱敏值", "属性", "有效期"])
+            self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+            self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
+            self.table.setAlternatingRowColors(False)
+            self.table.verticalHeader().setVisible(False)
+            hdr = self.table.horizontalHeader()
+            hdr.setSectionResizeMode(0, QHeaderView.Stretch)
+            hdr.setSectionResizeMode(1, QHeaderView.Interactive)
+            hdr.setSectionResizeMode(2, QHeaderView.ResizeToContents)
+            hdr.setSectionResizeMode(3, QHeaderView.ResizeToContents)
+            hdr.setSectionResizeMode(4, QHeaderView.ResizeToContents)
+            hdr.setSectionResizeMode(5, QHeaderView.ResizeToContents)
+            self.table.setColumnWidth(1, 180)
+            lay.addWidget(self.table, 1)
+
+            foot = QHBoxLayout()
+            hint = CaptionLabel("安全提示：本地仅展示脱敏预览值，日志不记录明文；状态为“拦截”的条目不会同步至 Hub。", self)
+            hint.setTextColor(QColor("#94a3b8"), QColor("#94a3b8"))
+            btn_close = PushButton("关闭", self)
+            btn_close.clicked.connect(self.close)
+            foot.addWidget(hint)
+            foot.addStretch()
+            foot.addWidget(btn_close)
+            lay.addLayout(foot)
+
+        def _on_rescan(self):
+            self.btn_rescan.setEnabled(False)
+            self.lbl_summary.setText("正在重新扫描本机浏览器 CDP Cookie...")
+            self._rescan_callback()
+
+        def set_scan_error(self, err_msg: str):
+            self.btn_rescan.setEnabled(True)
+            self.lbl_summary.setText(f"扫描失败：{err_msg}")
+
+        def set_data(self, rows: List[Dict[str, Any]], stats: Any, mode: str):
+            self.btn_rescan.setEnabled(True)
+            self._rows = rows
+            self._stats = stats
+            self.lbl_summary.setText(
+                f"当前策略：{mode}   |   总计：{stats.total} 条   |   "
+                f"放行：{stats.allowed} 条   |   拦截：{stats.blocked_by_policy} 条   |   过期剔除：{stats.expired_dropped} 条"
+            )
+            self._render_table()
+
+        def _render_table(self, *_unused):
+            kw = self.in_search.text().strip().lower()
+            flt = self.cmb_filter.currentText()
+            filtered = []
+            for r in self._rows:
+                if flt == "仅放行" and not r["allowed"]:
+                    continue
+                if flt == "仅拦截" and r["allowed"]:
+                    continue
+                if kw and kw not in r["domain"].lower() and kw not in r["name"].lower() and kw not in r["verdict"].lower():
+                    continue
+                filtered.append(r)
+
+            self.table.setRowCount(len(filtered))
+            for idx, r in enumerate(filtered):
+                items = [
+                    QTableWidgetItem(str(r["domain"])),
+                    QTableWidgetItem(str(r["name"])),
+                    QTableWidgetItem(str(r["verdict"])),
+                    QTableWidgetItem(str(r["value_masked"])),
+                    QTableWidgetItem(str(r["flags"])),
+                    QTableWidgetItem(str(r["expires_str"])),
+                ]
+                verdict_item = items[2]
+                if r["allowed"]:
+                    verdict_item.setForeground(QColor("#34d399"))
+                elif "过期" in r["verdict"]:
+                    verdict_item.setForeground(QColor("#fbbf24"))
+                else:
+                    verdict_item.setForeground(QColor("#f87171"))
+                for col, it in enumerate(items):
+                    self.table.setItem(idx, col, it)
 
     class _PageScrollArea(ScrollArea):
         def __init__(self, object_name: str, parent=None):
@@ -222,6 +372,11 @@ def _run_gui(config_path: Optional[Path] = None):
             self.agent_thread: Optional[threading.Thread] = None
             self.bridge = _AgentBridge()
             self.log_buffer: List[Tuple[str, str]] = []
+            self._last_cdp_ok: Optional[bool] = None
+            self._last_cookie_sig: Optional[Tuple[int, int, int]] = None
+            self._inventory_dialog: Optional[CookieInventoryDialog] = None
+            self._cached_rows: List[Dict[str, Any]] = []
+            self._cached_stats: Any = None
             self.status_state = {
                 "cdp": "未检测",
                 "hub": "未接入",
@@ -233,11 +388,17 @@ def _run_gui(config_path: Optional[Path] = None):
             self._build_pages()
             self._connect_signals()
             self._load_vars_from_config()
+            self._load_initial_logs()
             self._refresh_browser_probe()
 
             self.cdp_timer = QTimer(self)
             self.cdp_timer.timeout.connect(self._poll_cdp_health)
             self.cdp_timer.start(4000)
+
+            self.cookie_timer = QTimer(self)
+            self.cookie_timer.timeout.connect(self._poll_cookie_inventory_if_ready)
+            self.cookie_timer.start(15000)
+
             QTimer.singleShot(400, self._poll_cdp_health)
 
             if self.config["browser"].get("auto_connect_on_launch"):
@@ -247,6 +408,9 @@ def _run_gui(config_path: Optional[Path] = None):
             self.resize(1040, 760)
             self.setMinimumSize(880, 640)
             self.setWindowTitle(f"Wimotek Edge CDP Node v{APP_VERSION} · Windows")
+            icon_path = _resolve_asset_path("app_icon.ico") or _resolve_asset_path("app_icon.png")
+            if icon_path is not None:
+                self.setWindowIcon(QIcon(str(icon_path)))
             desktop = QApplication.primaryScreen().availableGeometry()
             self.move(
                 max(0, desktop.center().x() - self.width() // 2),
@@ -293,9 +457,11 @@ def _run_gui(config_path: Optional[Path] = None):
             self.badge_cdp = _make_badge("CDP 9222: 检测中", "#334155")
             self.badge_hub = _make_badge("Hub: 未接入", "#334155")
             self.badge_guard = _make_badge(f"Cookie 保护: {self.status_state['guard']}", "#0f766e", "#ccfbf1")
+            self.badge_cookies = _make_badge("本机 Cookie: 待检测", "#334155")
             badge_row.addWidget(self.badge_cdp)
             badge_row.addWidget(self.badge_hub)
             badge_row.addWidget(self.badge_guard)
+            badge_row.addWidget(self.badge_cookies)
             badge_row.addStretch()
             hero_lay.addLayout(badge_row)
 
@@ -305,11 +471,13 @@ def _run_gui(config_path: Optional[Path] = None):
             self.btn_stop = PushButton(_icon("CLOSE", FIF.PAUSE), "停止运行", hero)
             self.btn_stop.setEnabled(False)
             self.btn_launch_only = PushButton(_icon("GLOBE"), "仅拉起调试浏览器", hero)
+            self.btn_cookie_inventory = PushButton(_icon("SEARCH"), "本机 Cookie 清单", hero)
             self.btn_save_hub = PushButton(_icon("SAVE"), "保存配置", hero)
 
             ctrl_row.addWidget(self.btn_start)
             ctrl_row.addWidget(self.btn_stop)
             ctrl_row.addWidget(self.btn_launch_only)
+            ctrl_row.addWidget(self.btn_cookie_inventory)
             ctrl_row.addStretch()
             ctrl_row.addWidget(self.btn_save_hub)
             hero_lay.addLayout(ctrl_row)
@@ -380,7 +548,35 @@ def _run_gui(config_path: Optional[Path] = None):
             cfg_hint.setTextColor(QColor("#64748b"), QColor("#64748b"))
             lay_hub.addWidget(cfg_hint)
             v.addWidget(card_hub)
-            v.addStretch()
+
+            # 实时运行跟踪日志卡片（首页直出，无需切换即可跟踪全部状态）
+            log_preview_card = CardWidget(self.page_hub.container)
+            lp_lay = QVBoxLayout(log_preview_card)
+            lp_lay.setContentsMargins(18, 14, 18, 14)
+            lp_lay.setSpacing(8)
+
+            lp_hdr = QHBoxLayout()
+            lp_hdr.addWidget(StrongBodyLabel("实时运行跟踪日志", log_preview_card))
+            lp_path = CaptionLabel(f"持久化路径：{get_log_file_path()}", log_preview_card)
+            lp_path.setTextColor(QColor("#64748b"), QColor("#64748b"))
+            lp_hdr.addSpacing(10)
+            lp_hdr.addWidget(lp_path)
+            lp_hdr.addStretch()
+            btn_hub_clear_log = PushButton(_icon("DELETE"), "清空", log_preview_card)
+            btn_hub_clear_log.clicked.connect(self._clear_logs)
+            btn_hub_full_log = PushButton(_icon("DOCUMENT", FIF.INFO), "完整日志审计", log_preview_card)
+            btn_hub_full_log.clicked.connect(lambda: self.switchTo(self.page_logs))
+            lp_hdr.addWidget(btn_hub_clear_log)
+            lp_hdr.addWidget(btn_hub_full_log)
+            lp_lay.addLayout(lp_hdr)
+
+            self.txt_hub_logs = PlainTextEdit(log_preview_card)
+            self.txt_hub_logs.setReadOnly(True)
+            self.txt_hub_logs.setFont(QFont("Consolas", 9))
+            self.txt_hub_logs.setMinimumHeight(180)
+            self.txt_hub_logs.setMaximumHeight(240)
+            lp_lay.addWidget(self.txt_hub_logs)
+            v.addWidget(log_preview_card)
 
         def _build_browser_page(self):
             v = self.page_browser.vbox
@@ -491,7 +687,7 @@ def _run_gui(config_path: Optional[Path] = None):
             self.guard_btn_group = QButtonGroup(mode_card)
             self.rb_modes: Dict[str, RadioButton] = {}
             mode_defs = [
-                ("whitelist", "严格白名单（最安全推荐）：仅放行下方白名单域名，其余网银 / 邮箱 / 内网会话全部本地拦截"),
+                ("whitelist", "严格白名单（推荐）：仅放行下方白名单域名（注意：白名单为空时会拦截全部 Cookie，Hub 显示 0 条）"),
                 ("blacklist", "黑名单排除：放行除黑名单域名与敏感 Cookie 名以外的域名"),
                 ("all", "本地全量放行：允许本地所有有效 Cookie 参与 Hub 同步（建议配合独立 BrowserProfile）"),
                 ("block_export", "禁止导出（纯远程 CDP）：不允许 Hub 读取本地 Cookie，仅保留远程调试能力"),
@@ -555,6 +751,8 @@ def _run_gui(config_path: Optional[Path] = None):
             act_row = QHBoxLayout()
             btn_reset_bl = PushButton(_icon("SYNC"), "恢复默认敏感黑名单", bottom_card)
             btn_reset_bl.clicked.connect(self._reset_default_blacklist)
+            btn_inventory = PushButton(_icon("DOCUMENT", FIF.SEARCH), "查看本机 Cookie 清单", bottom_card)
+            btn_inventory.clicked.connect(self.open_cookie_inventory)
             btn_preview = PushButton(_icon("SEARCH"), "试算本地 Cookie 过滤结果", bottom_card)
             btn_preview.clicked.connect(self.preview_cookie_guard)
             btn_apply = PrimaryPushButton(_icon("SAVE"), "应用并热更新策略", bottom_card)
@@ -562,6 +760,7 @@ def _run_gui(config_path: Optional[Path] = None):
 
             act_row.addWidget(btn_reset_bl)
             act_row.addStretch()
+            act_row.addWidget(btn_inventory)
             act_row.addWidget(btn_preview)
             act_row.addWidget(btn_apply)
             b_lay.addLayout(act_row)
@@ -574,21 +773,36 @@ def _run_gui(config_path: Optional[Path] = None):
             bar = CardWidget(self.page_logs.container)
             b_lay = QHBoxLayout(bar)
             b_lay.setContentsMargins(14, 10, 14, 10)
-            b_lay.addWidget(BodyLabel("日志级别过滤:", bar))
+            b_lay.setSpacing(8)
+            b_lay.addWidget(BodyLabel("级别:", bar))
             self.cmb_log_filter = ComboBox(bar)
             self.cmb_log_filter.addItems(["ALL", "GUARD", "INFO", "WARNING", "ERROR"])
             self.cmb_log_filter.currentTextChanged.connect(self._rerender_logs)
 
-            btn_clear = PushButton(_icon("DELETE"), "清空显示", bar)
+            self.in_log_search = LineEdit(bar)
+            self.in_log_search.setPlaceholderText("搜索日志关键字...")
+            self.in_log_search.textChanged.connect(self._rerender_logs)
+
+            btn_reload = PushButton(_icon("SYNC"), "刷新", bar)
+            btn_reload.clicked.connect(self._reload_disk_logs)
+            btn_export = PushButton(_icon("SAVE"), "导出", bar)
+            btn_export.clicked.connect(self._export_logs)
+            btn_clear = PushButton(_icon("DELETE"), "清空", bar)
             btn_clear.clicked.connect(self._clear_logs)
-            btn_dir = PushButton(_icon("FOLDER"), "打开日志目录", bar)
+            btn_dir = PushButton(_icon("FOLDER"), "目录", bar)
             btn_dir.clicked.connect(self._open_log_dir)
 
             b_lay.addWidget(self.cmb_log_filter)
-            b_lay.addStretch()
+            b_lay.addWidget(self.in_log_search, 1)
+            b_lay.addWidget(btn_reload)
+            b_lay.addWidget(btn_export)
             b_lay.addWidget(btn_clear)
             b_lay.addWidget(btn_dir)
             v.addWidget(bar)
+
+            log_hint = CaptionLabel(f"持久化日志文件：{get_log_file_path()}（自动轮转保留，重启客户端后可追溯历史）", self.page_logs.container)
+            log_hint.setTextColor(QColor("#64748b"), QColor("#64748b"))
+            v.addWidget(log_hint)
 
             log_card = CardWidget(self.page_logs.container)
             l_lay = QVBoxLayout(log_card)
@@ -605,6 +819,7 @@ def _run_gui(config_path: Optional[Path] = None):
             self.btn_start.clicked.connect(self.start_all)
             self.btn_stop.clicked.connect(self.stop_all)
             self.btn_launch_only.clicked.connect(self.launch_browser_only)
+            self.btn_cookie_inventory.clicked.connect(self.open_cookie_inventory)
             self.btn_save_hub.clicked.connect(self.save_ui_config)
 
             self.bridge.log_received.connect(self._append_log)
@@ -612,6 +827,7 @@ def _run_gui(config_path: Optional[Path] = None):
             self.bridge.cdp_checked.connect(self._apply_cdp_status)
             self.bridge.agent_stopped.connect(self._on_agent_stopped)
             self.bridge.preview_finished.connect(self._on_preview_finished)
+            self.bridge.inventory_scanned.connect(self._on_inventory_scanned)
 
         def _load_vars_from_config(self):
             h = self.config["hub"]
@@ -729,11 +945,13 @@ def _run_gui(config_path: Optional[Path] = None):
                 self.badge_guard.setText(f"Cookie 保护: {mode}")
                 if self.agent is not None:
                     self.agent.update_cookie_guard(self.config["cookie_guard"])
-                    msg = "配置已保存并热更新至 Cookie 防火墙"
+                    msg = f"配置已保存并热更新至 Cookie 防火墙 (策略={mode})"
                 else:
-                    msg = "配置已保存到本地 config.json"
-                self._append_log("INFO", msg)
+                    msg = f"配置已保存到本地 config.json (策略={mode})"
+                self._log_event("INFO", msg)
                 self._toast("success", "保存成功", msg)
+                if self._last_cdp_ok:
+                    self.scan_cookie_inventory(open_dialog=False, force_log=True)
             except Exception as e:
                 self._toast("error", "配置无效", str(e))
 
@@ -742,6 +960,7 @@ def _run_gui(config_path: Optional[Path] = None):
             e_txt = f"Microsoft Edge: {'已就绪' if det['edge'] else '未发现'}"
             c_txt = f"Google Chrome: {'已就绪' if det['chrome'] else '未发现'}"
             self.lbl_detected_browsers.setText(f"{e_txt}   |   {c_txt}")
+            self._log_event("INFO", f"浏览器探测 | {e_txt} | {c_txt}")
 
         def _browse_browser_exe(self):
             p, _ = QFileDialog.getOpenFileName(
@@ -776,10 +995,11 @@ def _run_gui(config_path: Optional[Path] = None):
                     extra_args=b["extra_args"],
                 )
                 msg = f"已启动 {label} (CDP 127.0.0.1:{cdp_port})" if cmd else f"{label} 已在运行中"
-                self._append_log("INFO", msg)
+                self._log_event("INFO", msg)
                 self._toast("success", "浏览器就绪", msg)
+                QTimer.singleShot(1200, self._poll_cdp_health)
             except Exception as e:
-                self._append_log("ERROR", f"启动浏览器失败: {e}")
+                self._log_event("ERROR", f"启动浏览器失败: {e}")
                 self._toast("error", "启动浏览器失败", str(e))
 
         def start_all(self):
@@ -800,6 +1020,7 @@ def _run_gui(config_path: Optional[Path] = None):
             if self.agent_thread and self.agent_thread.is_alive():
                 return
 
+            self._log_event("INFO", f"正在接入 Hub 网关: {self.config['hub']['hub_url']}")
             self.btn_start.setEnabled(False)
             self.btn_stop.setEnabled(True)
             self.badge_hub.setText("Hub: 连接探测中...")
@@ -821,7 +1042,8 @@ def _run_gui(config_path: Optional[Path] = None):
                 try:
                     loop.run_until_complete(self.agent.run())
                 except Exception as exc:
-                    self.bridge.log_received.emit("ERROR", f"代理异常退出: {exc}")
+                    line = append_disk_log("ERROR", f"代理异常退出: {exc}")
+                    self.bridge.log_received.emit("ERROR", line)
                 finally:
                     loop.close()
                     self.bridge.agent_stopped.emit()
@@ -832,7 +1054,7 @@ def _run_gui(config_path: Optional[Path] = None):
         def stop_all(self):
             if self.agent:
                 self.agent.request_stop()
-            self._append_log("INFO", "正在停止 Hub WSS 接入...")
+            self._log_event("INFO", "正在停止 Hub WSS 接入...")
             self.btn_stop.setEnabled(False)
 
         def preview_cookie_guard(self):
@@ -846,7 +1068,7 @@ def _run_gui(config_path: Optional[Path] = None):
 
             def _worker():
                 async def _run():
-                    async with httpx.AsyncClient(timeout=4.0) as client:
+                    async with httpx.AsyncClient(timeout=4.0, trust_env=False) as client:
                         raw = await extract_raw_local_cookies(client, cdp_port)
                     _, stats = guard.filter_for_export(raw)
                     top_allow = ", ".join(
@@ -859,7 +1081,10 @@ def _run_gui(config_path: Optional[Path] = None):
                         f"模式={guard.config.mode} | 总计={stats.total} | 放行={stats.allowed} | "
                         f"本地拦截={stats.blocked_by_policy} | 过期={stats.expired_dropped}"
                     )
-                    log_line = f"[GUARD] 试算预览 | {summary} | 放行Top=[{top_allow}] | 拦截Top=[{top_block}]"
+                    log_line = append_disk_log(
+                        "INFO",
+                        f"[GUARD] 试算预览 | {summary} | 放行Top=[{top_allow}] | 拦截Top=[{top_block}]",
+                    )
                     self.bridge.log_received.emit("GUARD", log_line)
                     self.bridge.preview_finished.emit("success", summary)
 
@@ -867,13 +1092,97 @@ def _run_gui(config_path: Optional[Path] = None):
                     asyncio.run(_run())
                 except Exception as exc:
                     err = f"试算失败（请确认浏览器 CDP 127.0.0.1:{cdp_port} 已启动）: {exc}"
-                    self.bridge.log_received.emit("ERROR", err)
+                    line = append_disk_log("ERROR", err)
+                    self.bridge.log_received.emit("ERROR", line)
                     self.bridge.preview_finished.emit("error", err)
 
             threading.Thread(target=_worker, daemon=True).start()
 
         def _on_preview_finished(self, kind: str, msg: str):
             self._toast(kind, "Cookie 防火墙试算结果" if kind == "success" else "试算失败", msg)
+
+        def open_cookie_inventory(self):
+            if self._inventory_dialog is None:
+                self._inventory_dialog = CookieInventoryDialog(
+                    self,
+                    rescan_callback=lambda: self.scan_cookie_inventory(open_dialog=False, force_log=True),
+                )
+            if self._cached_stats is not None:
+                mode = self.config.get("cookie_guard", {}).get("mode", "whitelist")
+                self._inventory_dialog.set_data(self._cached_rows, self._cached_stats, mode)
+            self._inventory_dialog.btn_rescan.setEnabled(False)
+            self._inventory_dialog.lbl_summary.setText("正在扫描本机浏览器 CDP Cookie...")
+            self._inventory_dialog.show()
+            self._inventory_dialog.raise_()
+            self._inventory_dialog.activateWindow()
+            self.scan_cookie_inventory(open_dialog=False, force_log=True)
+
+        def _poll_cookie_inventory_if_ready(self):
+            if self._last_cdp_ok:
+                self.scan_cookie_inventory(open_dialog=False, force_log=False)
+
+        def scan_cookie_inventory(self, open_dialog: bool = False, force_log: bool = False):
+            try:
+                cfg = self._collect_config_from_vars()
+                guard = CookieGuard(CookieGuardConfig.from_dict(cfg["cookie_guard"]))
+                cdp_port = int(cfg["hub"]["cdp_port"])
+            except Exception as e:
+                if open_dialog:
+                    self._toast("error", "参数错误", str(e))
+                return
+
+            def _worker():
+                try:
+                    async def _run():
+                        async with httpx.AsyncClient(timeout=4.0, trust_env=False) as client:
+                            return await extract_raw_local_cookies(client, cdp_port)
+
+                    raw = asyncio.run(_run())
+                    rows, stats = guard.inspect_cookies(raw)
+                    self.bridge.inventory_scanned.emit(rows, stats, "", force_log or open_dialog)
+                except Exception as exc:
+                    err = f"无法读取 CDP 127.0.0.1:{cdp_port} Cookie（请先点击“仅拉起调试浏览器”）: {exc}"
+                    self.bridge.inventory_scanned.emit([], None, err, force_log or open_dialog)
+
+            threading.Thread(target=_worker, daemon=True).start()
+
+        def _on_inventory_scanned(self, rows: List[Dict[str, Any]], stats: Any, err_msg: str, force_log: bool):
+            if err_msg or stats is None:
+                self.badge_cookies.setText("本机 Cookie: 未连接")
+                self.badge_cookies.setStyleSheet(
+                    "QLabel { background-color: #334155; color: #e2e8f0; border-radius: 6px; padding: 5px 12px; font-weight: 600; font-size: 12px; }"
+                )
+                if self._inventory_dialog is not None and self._inventory_dialog.isVisible():
+                    self._inventory_dialog.set_scan_error(err_msg)
+                if force_log and err_msg:
+                    self._log_event("WARNING", err_msg)
+                return
+
+            self._cached_rows = rows
+            self._cached_stats = stats
+            mode = self.config.get("cookie_guard", {}).get("mode", "whitelist")
+            self.badge_cookies.setText(f"本机 Cookie: {stats.total} 条 (放行 {stats.allowed})")
+            if stats.allowed > 0:
+                bg, fg = "#065f46", "#d1fae5"
+            elif stats.total > 0:
+                bg, fg = "#92400e", "#fef3c7"
+            else:
+                bg, fg = "#334155", "#e2e8f0"
+            self.badge_cookies.setStyleSheet(
+                f"QLabel {{ background-color: {bg}; color: {fg}; border-radius: 6px; padding: 5px 12px; font-weight: 600; font-size: 12px; }}"
+            )
+
+            sig = (stats.total, stats.allowed, stats.blocked_by_policy)
+            if force_log or sig != self._last_cookie_sig:
+                self._last_cookie_sig = sig
+                self._log_event(
+                    "GUARD",
+                    f"[GUARD] 本机 Cookie 清单扫描 | 策略={mode} | 总计={stats.total} | 放行={stats.allowed} | "
+                    f"拦截={stats.blocked_by_policy} | 过期={stats.expired_dropped}",
+                )
+
+            if self._inventory_dialog is not None and self._inventory_dialog.isVisible():
+                self._inventory_dialog.set_data(rows, stats, mode)
 
         def _poll_cdp_health(self):
             raw_port = self.in_cdp_port.text().strip()
@@ -889,12 +1198,25 @@ def _run_gui(config_path: Optional[Path] = None):
             threading.Thread(target=_chk, daemon=True).start()
 
         def _apply_cdp_status(self, port: int, ok: bool):
+            prev = self._last_cdp_ok
+            self._last_cdp_ok = ok
             bg = "#065f46" if ok else "#334155"
             fg = "#d1fae5" if ok else "#e2e8f0"
             self.badge_cdp.setText(f"CDP {port}: {'就绪' if ok else '未启动'}")
             self.badge_cdp.setStyleSheet(
                 f"QLabel {{ background-color: {bg}; color: {fg}; border-radius: 6px; padding: 5px 12px; font-weight: 600; font-size: 12px; }}"
             )
+            if not ok:
+                self.badge_cookies.setText("本机 Cookie: 等待浏览器")
+                self.badge_cookies.setStyleSheet(
+                    "QLabel { background-color: #334155; color: #e2e8f0; border-radius: 6px; padding: 5px 12px; font-weight: 600; font-size: 12px; }"
+                )
+            if prev is None or prev != ok:
+                if ok:
+                    self._log_event("INFO", f"本地调试浏览器 CDP 127.0.0.1:{port} 已就绪，正在扫描本机 Cookie 数量...")
+                    self.scan_cookie_inventory(open_dialog=False, force_log=True)
+                elif prev is True:
+                    self._log_event("WARNING", f"本地调试浏览器 CDP 127.0.0.1:{port} 已离线或关闭")
 
         def _apply_status_patch(self, patch: Dict[str, Any]):
             if "hub_status" in patch or "hub_mode" in patch:
@@ -923,16 +1245,34 @@ def _run_gui(config_path: Optional[Path] = None):
                 "QLabel { background-color: #334155; color: #f8fafc; border-radius: 6px; padding: 5px 12px; font-weight: 600; font-size: 12px; }"
             )
 
+        def _log_event(self, level: str, message: str):
+            disk_lvl = "INFO" if level == "GUARD" else level
+            line = append_disk_log(disk_lvl, message)
+            self._append_log(level, line)
+
+        def _load_initial_logs(self):
+            history = read_recent_logs(250)
+            for lvl, ln in history:
+                self.log_buffer.append((lvl, ln))
+            self._rerender_logs()
+            self._log_event("INFO", f"桌面客户端已启动 (v{APP_VERSION})，配置目录: {get_app_data_dir()}")
+
         def _append_log(self, level: str, msg: str):
             tag = "GUARD" if "[GUARD]" in msg else level
             self.log_buffer.append((tag, msg))
             if len(self.log_buffer) > 1500:
                 self.log_buffer = self.log_buffer[-1200:]
             flt = self.cmb_log_filter.currentText()
-            if flt in ("ALL", tag):
-                self._insert_formatted_log(tag, msg)
+            kw = self.in_log_search.text().strip().lower() if hasattr(self, "in_log_search") else ""
+            if flt in ("ALL", tag) and (not kw or kw in msg.lower()):
+                self._insert_formatted_log(self.txt_logs, tag, msg)
+            if hasattr(self, "txt_hub_logs"):
+                if self.txt_hub_logs.document().blockCount() > 260:
+                    self._rerender_hub_logs()
+                else:
+                    self._insert_formatted_log(self.txt_hub_logs, tag, msg)
 
-        def _insert_formatted_log(self, tag: str, msg: str):
+        def _insert_formatted_log(self, editor, tag: str, msg: str):
             color_map = {
                 "GUARD": "#2dd4bf",
                 "WARNING": "#fbbf24",
@@ -941,22 +1281,53 @@ def _run_gui(config_path: Optional[Path] = None):
             }
             fmt = QTextCharFormat()
             fmt.setForeground(QColor(color_map.get(tag, "#cbd5e1")))
-            cursor = self.txt_logs.textCursor()
+            cursor = editor.textCursor()
             cursor.movePosition(QTextCursor.End)
             cursor.insertText(msg + "\n", fmt)
-            self.txt_logs.setTextCursor(cursor)
-            self.txt_logs.ensureCursorVisible()
+            editor.setTextCursor(cursor)
+            editor.ensureCursorVisible()
+
+        def _rerender_hub_logs(self):
+            if not hasattr(self, "txt_hub_logs"):
+                return
+            self.txt_hub_logs.clear()
+            for tag, msg in self.log_buffer[-160:]:
+                self._insert_formatted_log(self.txt_hub_logs, tag, msg)
 
         def _rerender_logs(self, *_unused):
             flt = self.cmb_log_filter.currentText()
+            kw = self.in_log_search.text().strip().lower() if hasattr(self, "in_log_search") else ""
             self.txt_logs.clear()
             for tag, msg in self.log_buffer:
-                if flt in ("ALL", tag):
-                    self._insert_formatted_log(tag, msg)
+                if flt in ("ALL", tag) and (not kw or kw in msg.lower()):
+                    self._insert_formatted_log(self.txt_logs, tag, msg)
+            self._rerender_hub_logs()
+
+        def _reload_disk_logs(self):
+            self.log_buffer = read_recent_logs(400)
+            self._rerender_logs()
+            self._toast("info", "已刷新", f"已从 {get_log_file_path().name} 载入最近 {len(self.log_buffer)} 条日志")
+
+        def _export_logs(self):
+            default_name = f"wimotek-edge-log-{time.strftime('%Y%m%d-%H%M%S')}.log"
+            save_path, _ = QFileDialog.getSaveFileName(
+                self, "导出运行日志", default_name, "Log Files (*.log *.txt);;All Files (*)"
+            )
+            if save_path:
+                try:
+                    content = "\n".join(msg for _, msg in self.log_buffer)
+                    Path(save_path).write_text(content + ("\n" if content else ""), encoding="utf-8")
+                    self._toast("success", "导出成功", f"已导出 {len(self.log_buffer)} 条日志")
+                except Exception as e:
+                    self._toast("error", "导出失败", str(e))
 
         def _clear_logs(self):
             self.log_buffer.clear()
             self.txt_logs.clear()
+            if hasattr(self, "txt_hub_logs"):
+                self.txt_hub_logs.clear()
+            clear_log_file()
+            self._toast("info", "已清空", "已清空界面显示与磁盘日志文件")
 
         def _open_log_dir(self):
             log_dir = get_app_data_dir() / "logs"
@@ -972,6 +1343,9 @@ def _run_gui(config_path: Optional[Path] = None):
     # Windows 高分屏缩放自动适配 + Fluent 暗色主题
     QApplication.setHighDpiScaleFactorRoundingPolicy(Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
     app = QApplication(sys.argv)
+    icon_file = _resolve_asset_path("app_icon.ico") or _resolve_asset_path("app_icon.png")
+    if icon_file is not None:
+        app.setWindowIcon(QIcon(str(icon_file)))
     setTheme(Theme.DARK)
     setThemeColor("#0078D4")
 

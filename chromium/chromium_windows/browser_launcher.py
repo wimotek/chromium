@@ -100,7 +100,7 @@ def resolve_browser_executable(browser_choice: str, custom_path: str = "") -> Tu
 async def check_local_cdp_ready(cdp_port: int = 9222, timeout: float = 1.5) -> Optional[dict]:
     url = f"http://127.0.0.1:{int(cdp_port)}/json/version"
     try:
-        async with httpx.AsyncClient(timeout=timeout) as client:
+        async with httpx.AsyncClient(timeout=timeout, trust_env=False) as client:
             res = await client.get(url)
             if res.status_code == 200:
                 return res.json()
@@ -139,6 +139,7 @@ class BrowserProcessManager:
             f"--remote-debugging-port={int(cdp_port)}",
             "--remote-debugging-address=127.0.0.1",
             "--remote-allow-origins=*",
+            "--disable-features=msEdgeStartupBoost",
             "--no-first-run",
             "--no-default-browser-check",
         ]
