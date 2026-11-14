@@ -40,7 +40,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         [shutil.rmtree('/opt/novnc/' + d, ignore_errors=True) for d in ('docs', 'tests', 'snap', '.github')]; \
         os.remove('/tmp/novnc.tar.gz')" \
     && cp /tmp/clipboard-sync.js /opt/novnc/app/clipboard-sync.js \
-    && python3 /tmp/patch_novnc.py \
+    && NOVNC_VER="${NOVNC_VER}" python3 /tmp/patch_novnc.py \
     && rm -f /tmp/clipboard-sync.js /tmp/patch_novnc.py \
     && rm -rf /var/lib/apt/lists/* /var/cache/apt/* /root/.cache
 
