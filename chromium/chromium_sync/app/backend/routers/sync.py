@@ -7,7 +7,11 @@ from pydantic import BaseModel
 from config import DB_PATH
 from core.database import get_setting, set_setting, get_db_connection
 from core.security import verify_token
-from services.sync_service import reschedule_all_policies, execute_policy_task
+from services.sync_service import (
+    reschedule_all_policies,
+    execute_policy_task,
+    execute_global_cleanup,
+)
 
 router = APIRouter(tags=["同步中心与多策略"])
 
@@ -115,13 +119,25 @@ async def run_policy_immediately(policy_id: int, user: dict = Depends(verify_tok
     await execute_policy_task(policy_id)
     return {"message": "该策略已完成即时同步"}
 
-# 全局 Cookie 过滤策略 (白名单/黑名单/差量检测)
+# 全局 Cookie 过滤与删除清理策略 (白名单/黑名单/差量检测/删除清理)
 @router.get("/api/cookie-policy")
 def get_cookie_policy(user: dict = Depends(verify_token)):
+    try:
+        within_days = max(0, int(get_setting("sync_cleanup_expiring_within_days", "0") or 0))
+    except Exception:
+        within_days = 0
     return {
         "sync_diff_enabled": get_setting("sync_diff_enabled", "1") == "1",
         "sync_include_domains": get_setting("sync_include_domains", ""),
-        "sync_exclude_domains": get_setting("sync_exclude_domains", "doubleclick.net,google-analytics.com")
+        "sync_exclude_domains": get_setting("sync_exclude_domains", "doubleclick.net,google-analytics.com"),
+        "sync_cleanup_enabled": get_setting("sync_cleanup_enabled", "0") == "1",
+        "sync_cleanup_expired": get_setting("sync_cleanup_expired", "1") == "1",
+        "sync_cleanup_domains": get_setting("sync_cleanup_domains", ""),
+        "sync_cleanup_keywords": get_setting("sync_cleanup_keywords", ""),
+        "sync_cleanup_keyword_scope": get_setting("sync_cleanup_keyword_scope", "name_domain") or "name_domain",
+        "sync_cleanup_expires_before": get_setting("sync_cleanup_expires_before", ""),
+        "sync_cleanup_expiring_within_days": within_days,
+        "sync_cleanup_session_only": get_setting("sync_cleanup_session_only", "0") == "1",
     }
 
 @router.post("/api/cookie-policy")
@@ -129,10 +145,57 @@ def save_cookie_policy(data: dict, user: dict = Depends(verify_token)):
     if "sync_diff_enabled" in data:
         set_setting("sync_diff_enabled", "1" if data["sync_diff_enabled"] else "0")
     if "sync_include_domains" in data:
-        set_setting("sync_include_domains", data["sync_include_domains"].strip())
+        set_setting("sync_include_domains", str(data["sync_include_domains"]).strip())
     if "sync_exclude_domains" in data:
-        set_setting("sync_exclude_domains", data["sync_exclude_domains"].strip())
-    return {"message": "全局 Cookie 过滤与差量同步策略已保存"}
+        set_setting("sync_exclude_domains", str(data["sync_exclude_domains"]).strip())
+    if "sync_cleanup_enabled" in data:
+        set_setting("sync_cleanup_enabled", "1" if data["sync_cleanup_enabled"] else "0")
+    if "sync_cleanup_expired" in data:
+        set_setting("sync_cleanup_expired", "1" if data["sync_cleanup_expired"] else "0")
+    if "sync_cleanup_domains" in data:
+        set_setting("sync_cleanup_domains", str(data["sync_cleanup_domains"]).strip())
+    if "sync_cleanup_keywords" in data:
+        set_setting("sync_cleanup_keywords", str(data["sync_cleanup_keywords"]).strip())
+    if "sync_cleanup_keyword_scope" in data:
+        scope = str(data["sync_cleanup_keyword_scope"]).strip()
+        if scope not in ("name", "name_domain", "all"):
+            scope = "name_domain"
+        set_setting("sync_cleanup_keyword_scope", scope)
+    if "sync_cleanup_expires_before" in data:
+        set_setting("sync_cleanup_expires_before", str(data["sync_cleanup_expires_before"]).strip())
+    if "sync_cleanup_expiring_within_days" in data:
+        try:
+            days_val = max(0, int(data["sync_cleanup_expiring_within_days"] or 0))
+        except Exception:
+            days_val = 0
+        set_setting("sync_cleanup_expiring_within_days", str(days_val))
+    if "sync_cleanup_session_only" in data:
+        set_setting("sync_cleanup_session_only", "1" if data["sync_cleanup_session_only"] else "0")
+    return {"message": "全局 Cookie 过滤、删除清理与差量同步策略已保存"}
+
+@router.post("/api/cookie-policy/cleanup-now")
+async def trigger_global_cookie_cleanup(data: dict, user: dict = Depends(verify_token)):
+    dry_run = bool(data.get("dry_run", False))
+    override_rules = None
+    if any(k.startswith("sync_cleanup_") for k in data.keys()):
+        try:
+            within_days = max(0, int(data.get("sync_cleanup_expiring_within_days") or 0))
+        except Exception:
+            within_days = 0
+        scope = str(data.get("sync_cleanup_keyword_scope") or "name_domain")
+        if scope not in ("name", "name_domain", "all"):
+            scope = "name_domain"
+        override_rules = {
+            "enabled": True,
+            "expired": bool(data.get("sync_cleanup_expired", True)),
+            "domains": str(data.get("sync_cleanup_domains") or ""),
+            "keywords": str(data.get("sync_cleanup_keywords") or ""),
+            "keyword_scope": scope,
+            "expires_before": str(data.get("sync_cleanup_expires_before") or ""),
+            "expiring_within_days": within_days,
+            "session_only": bool(data.get("sync_cleanup_session_only", False)),
+        }
+    return await execute_global_cleanup(dry_run=dry_run, override_rules=override_rules)
 
 # 结构化审计流水：严格显示最近 20 条
 @router.get("/api/sync/logs")

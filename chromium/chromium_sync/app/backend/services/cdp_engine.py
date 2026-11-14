@@ -1,6 +1,8 @@
 import json
 import inspect
 import asyncio
+from datetime import datetime
+import fnmatch
 import time
 from typing import List, Dict, Optional
 from urllib.parse import urlparse, urlunparse
@@ -61,8 +63,154 @@ def normalize_cookie_for_cdp(c: dict) -> dict:
 
     return param
 
-def filter_cookies_by_domains(cookies: List[dict], include_domains: List[str], exclude_domains: List[str]) -> tuple[List[dict], int, int]:
-    if not include_domains and not exclude_domains:
+def parse_rule_terms(raw) -> List[str]:
+    if not raw:
+        return []
+    if isinstance(raw, list):
+        items = [str(x).strip() for x in raw]
+    else:
+        text = str(raw).replace("\r", "\n").replace(";", "\n").replace(",", "\n")
+        items = [line.strip() for line in text.split("\n")]
+    out: List[str] = []
+    seen = set()
+    for it in items:
+        if not it:
+            continue
+        low = it.lower()
+        if low not in seen:
+            seen.add(low)
+            out.append(low)
+    return out
+
+
+def match_domain_pattern(cookie_domain: str, pattern: str) -> bool:
+    dom = (cookie_domain or "").strip().lower().lstrip(".")
+    pat = (pattern or "").strip().lower()
+    if not dom or not pat:
+        return False
+    if pat.startswith("*."):
+        base = pat[2:].lstrip(".")
+        return dom == base or dom.endswith("." + base)
+    if "*" in pat:
+        return fnmatch.fnmatch(dom, pat)
+    clean_p = pat.lstrip(".")
+    return dom == clean_p or dom.endswith("." + clean_p)
+
+
+def match_keyword_pattern(text: str, kw: str) -> bool:
+    t = (text or "").lower()
+    k = (kw or "").strip().lower()
+    if not t or not k:
+        return False
+    if "*" in k:
+        return fnmatch.fnmatch(t, k)
+    return k in t
+
+
+def parse_cutoff_timestamp(date_str: str) -> Optional[float]:
+    raw = (date_str or "").strip()
+    if not raw:
+        return None
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M", "%Y-%m-%d"):
+        try:
+            dt = datetime.strptime(raw, fmt)
+            return dt.timestamp()
+        except ValueError:
+            continue
+    return None
+
+
+def should_cleanup_cookie(
+    cookie: dict,
+    cleanup_rules: Optional[dict] = None,
+    exclude_domains: Optional[List[str]] = None,
+    now_ts: Optional[float] = None,
+) -> tuple[bool, str]:
+    now = now_ts if now_ts is not None else time.time()
+    exp = cookie.get("expires")
+    is_valid_exp = exp is not None and isinstance(exp, (int, float)) and exp > 0
+    dom = (cookie.get("domain") or "").lower().lstrip(".")
+    name = str(cookie.get("name") or "")
+    val = str(cookie.get("value") or "")
+
+    clean_exc = [exc.lower().lstrip(".") for exc in (exclude_domains or []) if exc.strip()]
+    if clean_exc and any(exc in dom or match_domain_pattern(dom, exc) for exc in clean_exc):
+        return True, "blacklist_domain"
+
+    rules = cleanup_rules or {}
+    if not rules.get("enabled"):
+        if is_valid_exp and exp <= now:
+            return True, "expired"
+        return False, ""
+
+    if rules.get("expired", True) and is_valid_exp and exp <= now:
+        return True, "expired"
+
+    for pat in parse_rule_terms(rules.get("domains")):
+        if match_domain_pattern(dom, pat):
+            return True, "cleanup_domain"
+
+    if rules.get("session_only") and not is_valid_exp:
+        return True, "session_only"
+
+    cutoff_ts = parse_cutoff_timestamp(rules.get("expires_before", ""))
+    if cutoff_ts is not None and is_valid_exp and exp < cutoff_ts:
+        return True, "expires_before"
+
+    within_days = rules.get("expiring_within_days") or 0
+    try:
+        within_days = int(within_days)
+    except Exception:
+        within_days = 0
+    if within_days > 0 and is_valid_exp and exp <= (now + within_days * 86400):
+        return True, "expiring_soon"
+
+    kws = parse_rule_terms(rules.get("keywords"))
+    if kws:
+        scope = str(rules.get("keyword_scope") or "name_domain")
+        fields = [name]
+        if scope in ("name_domain", "all"):
+            fields.append(dom)
+        if scope == "all":
+            fields.append(val)
+        for kw in kws:
+            if any(match_keyword_pattern(f, kw) for f in fields):
+                return True, "keyword"
+
+    return False, ""
+
+
+def build_cleanup_targets(
+    cookies: List[dict],
+    exclude_domains: Optional[List[str]] = None,
+    cleanup_rules: Optional[dict] = None,
+) -> tuple[List[dict], Dict[str, int]]:
+    now_ts = time.time()
+    targets: List[dict] = []
+    reasons: Dict[str, int] = {}
+    for c in cookies:
+        hit, reason = should_cleanup_cookie(c, cleanup_rules=cleanup_rules, exclude_domains=exclude_domains, now_ts=now_ts)
+        if hit:
+            reasons[reason] = reasons.get(reason, 0) + 1
+            item = {
+                "name": c.get("name"),
+                "domain": c.get("domain"),
+                "path": c.get("path", "/"),
+            }
+            if not item["domain"] and c.get("url"):
+                item["url"] = c["url"]
+            targets.append(item)
+    return targets, reasons
+
+
+def filter_cookies_by_domains(
+    cookies: List[dict],
+    include_domains: List[str],
+    exclude_domains: List[str],
+    cleanup_rules: Optional[dict] = None,
+) -> tuple[List[dict], int, int]:
+    cleanup_active = bool(cleanup_rules and cleanup_rules.get("enabled"))
+    if not include_domains and not exclude_domains and not cleanup_active:
         return cookies, 0, 0
 
     filtered = []
@@ -87,6 +235,11 @@ def filter_cookies_by_domains(cookies: List[dict], include_domains: List[str], e
         if clean_exc and any(exc in domain for exc in clean_exc):
             blacklist_dropped += 1
             continue
+        if cleanup_active:
+            hit, _ = should_cleanup_cookie(c, cleanup_rules=cleanup_rules, exclude_domains=None, now_ts=now_ts)
+            if hit:
+                blacklist_dropped += 1
+                continue
         if clean_inc and not any(inc in domain for inc in clean_inc):
             continue
 
@@ -286,50 +439,74 @@ async def inject_cookies_native(local_port: int, cookies: List[dict], target_hos
         await asyncio.sleep(0.3)
         return success_count
 
-async def purge_stale_cookies_on_node(local_port: int, target_host: str = "127.0.0.1", exclude_domains: List[str] = None, node_id: Optional[int] = None) -> int:
-    """清理过期与黑名单 Cookies"""
+async def purge_stale_cookies_on_node(
+    local_port: int,
+    target_host: str = "127.0.0.1",
+    exclude_domains: List[str] = None,
+    node_id: Optional[int] = None,
+    cleanup_rules: Optional[dict] = None,
+    pre_fetched_cookies: Optional[List[dict]] = None,
+) -> int:
+    """清理过期、黑名单与命中全局删除策略的 Cookies"""
     from services.tunnel_manager import tunnel_mgr
+
+    targets_payload: List[dict] = []
+    if pre_fetched_cookies is not None:
+        targets_payload, _ = build_cleanup_targets(
+            pre_fetched_cookies,
+            exclude_domains=exclude_domains or [],
+            cleanup_rules=cleanup_rules,
+        )
+
     is_reverse = (target_host in ["reverse-nat4", "reverse", "public-wss", "wss-direct"]) or (node_id and tunnel_mgr.get_reverse_session(node_id))
     if is_reverse:
         session = tunnel_mgr.get_reverse_session(node_id) if node_id else None
         if session and not session.is_closed:
             try:
-                res = await session.send_command("purge_cookies", {"exclude_domains": exclude_domains or []})
-                return res.get("purged_count", 0)
+                res = await session.send_command(
+                    "purge_cookies",
+                    {
+                        "exclude_domains": exclude_domains or [],
+                        "cleanup_rules": cleanup_rules or {},
+                        "targets": targets_payload,
+                    },
+                    timeout=12.0,
+                )
+                return int(res.get("purged_count", 0))
             except Exception:
                 return 0
         return 0
 
     try:
-        raw_cookies = await fetch_cookies_native(local_port, target_host)
-        now_ts = time.time()
-        clean_exc = [exc.lower().lstrip('.') for exc in (exclude_domains or []) if exc.strip()]
-
-        to_delete = []
-        for c in raw_cookies:
-            exp = c.get('expires')
-            is_expired = (exp is not None and isinstance(exp, (int, float)) and exp > 0 and exp <= now_ts)
-            domain = (c.get('domain') or '').lower().lstrip('.')
-            is_blacklisted = bool(clean_exc and any(exc in domain for exc in clean_exc))
-
-            if is_expired or is_blacklisted:
-                to_delete.append({
-                    "name": c.get("name"),
-                    "domain": c.get("domain"),
-                    "path": c.get("path", "/")
-                })
+        raw_cookies = pre_fetched_cookies if pre_fetched_cookies is not None else await fetch_cookies_native(local_port, target_host)
+        to_delete, _ = build_cleanup_targets(
+            raw_cookies,
+            exclude_domains=exclude_domains or [],
+            cleanup_rules=cleanup_rules,
+        )
 
         if not to_delete:
             return 0
 
         host, ws_url = await resolve_cdp_endpoint(local_port, target_host, prefer_page=True)
         async with websockets.connect(ws_url, open_timeout=8.0) as ws:
+            await ws.send(json.dumps({"id": 7999, "method": "Network.enable"}))
+            try:
+                await asyncio.wait_for(ws.recv(), timeout=2.0)
+            except Exception:
+                pass
             for i, d in enumerate(to_delete):
                 await ws.send(json.dumps({
                     "id": 8000 + i,
                     "method": "Network.deleteCookies",
                     "params": d
                 }))
+            # 等待浏览器确认删除指令，避免 WebSocket 过早断开丢失写入
+            for _ in range(len(to_delete)):
+                try:
+                    await asyncio.wait_for(ws.recv(), timeout=1.5)
+                except Exception:
+                    break
         return len(to_delete)
     except Exception:
         return 0

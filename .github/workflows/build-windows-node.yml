@@ -18,10 +18,10 @@ on:
         type: boolean
         default: true
       release_tag:
-        description: "Release tag when triggered manually (e.g. win-v1.1.0)"
+        description: "Release tag when triggered manually (e.g. win-v1.2.0)"
         required: false
         type: string
-        default: "win-v1.1.0"
+        default: "win-v1.2.0"
 
 permissions:
   contents: write
@@ -49,12 +49,63 @@ jobs:
           pip install -r chromium/chromium_windows/requirements.txt
           pip install pyinstaller
 
+      - name: Determine release version & tag
+        id: rel_meta
+        shell: pwsh
+        run: |
+          if ("${{ github.ref }}".StartsWith("refs/tags/")) {
+            $tag = "${{ github.ref_name }}"
+            $ver = if ($tag -match '^win-v(\d+\.\d+\.\d+)$') { $matches[1] } else { "1.2.0" }
+            $should = "true"
+          } elseif ("${{ github.event_name }}" -eq "workflow_dispatch") {
+            $tag = "${{ inputs.release_tag }}".Trim()
+            if (-not $tag) { $tag = "win-v1.2.0" }
+            $ver = if ($tag -match '^win-v(\d+\.\d+\.\d+)$') { $matches[1] } else { "1.2.0" }
+            $should = if ("${{ inputs.create_release }}" -eq "true") { "true" } else { "false" }
+          } elseif ("${{ github.event_name }}" -eq "push") {
+            $tags = git ls-remote --tags --refs origin "win-v*" 2>$null
+            $best = $null
+            foreach ($line in $tags) {
+              if ($line -match 'refs/tags/win-v(\d+)\.(\d+)\.(\d+)$') {
+                $v = [version]::new([int]$matches[1], [int]$matches[2], [int]$matches[3])
+                if ($null -eq $best -or $v -gt $best) { $best = $v }
+              }
+            }
+            $floorVer = [version]::new(1, 2, 0)
+            if ($null -eq $best -or $best -lt $floorVer) {
+              $ver = "1.2.0"
+            } else {
+              $ver = "$($best.Major).$($best.Minor).$($best.Build + 1)"
+            }
+            $tag = "win-v$ver"
+            $should = "true"
+          } else {
+            $ver = "1.2.0"
+            $tag = ""
+            $should = "false"
+          }
+          Write-Host "Resolved release tag=$tag, app_version=$ver, should_release=$should"
+          "tag=$tag" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "app_version=$ver" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "should_release=$should" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+      - name: Stamp APP_VERSION into Windows client source
+        shell: pwsh
+        run: |
+          $ver = "${{ steps.rel_meta.outputs.app_version }}"
+          if (-not $ver) { $ver = "1.2.0" }
+          $mainPath = "chromium/chromium_windows/main.py"
+          $content = Get-Content $mainPath -Raw -Encoding utf8
+          $updated = [regex]::Replace($content, 'APP_VERSION\s*=\s*"[^"]+"', "APP_VERSION = `"$ver`"")
+          Set-Content -Path $mainPath -Value $updated -Encoding utf8 -NoNewline
+          Write-Host "Stamped APP_VERSION=$ver into $mainPath"
+
       - name: Run unit & import sanity checks
         shell: pwsh
         run: |
           python -B -m py_compile chromium/chromium_windows/*.py
           $env:PYTHONPATH = "chromium/chromium_windows"
-          python -c "import PySide6.QtWidgets, qfluentwidgets, cookie_guard, browser_launcher, win_edge_agent, main; print('Imports OK')"
+          python -c "import PySide6.QtWidgets, qfluentwidgets, cookie_guard, browser_launcher, win_edge_agent, main; print('Imports OK, version=', main.APP_VERSION)"
 
       - name: Build OneDir GUI, OneFile GUI, and Lightweight CLI
         shell: pwsh
@@ -76,6 +127,8 @@ jobs:
           # 1. 多文件目录版 (启动最快、用于绿色 ZIP 与安装包)
           pyinstaller --noconfirm --clean --onedir --windowed `
             --name WimotekEdgeNode `
+            --icon chromium/chromium_windows/assets/app_icon.ico `
+            --add-data "chromium/chromium_windows/assets;assets" `
             --paths chromium/chromium_windows `
             --collect-all qfluentwidgets `
             --hidden-import=cryptography `
@@ -87,6 +140,8 @@ jobs:
           # 2. 单文件便携版 GUI EXE
           pyinstaller --noconfirm --clean --onefile --windowed `
             --name WimotekEdgeNode-onefile `
+            --icon chromium/chromium_windows/assets/app_icon.ico `
+            --add-data "chromium/chromium_windows/assets;assets" `
             --paths chromium/chromium_windows `
             --collect-all qfluentwidgets `
             --hidden-import=cryptography `
@@ -98,6 +153,7 @@ jobs:
           # 3. 轻量无界面 CLI EXE (排除 PySide6/Qt，约 12~15 MB)
           pyinstaller --noconfirm --clean --onefile --console `
             --name WimotekEdgeNode-cli `
+            --icon chromium/chromium_windows/assets/app_icon.ico `
             --paths chromium/chromium_windows `
             --hidden-import=cryptography `
             --hidden-import=websockets `
@@ -105,45 +161,6 @@ jobs:
             --exclude-module PySide6 `
             --exclude-module qfluentwidgets `
             chromium/chromium_windows/main.py
-
-      - name: Determine release version & tag
-        id: rel_meta
-        shell: pwsh
-        run: |
-          if ("${{ github.ref }}".StartsWith("refs/tags/")) {
-            $tag = "${{ github.ref_name }}"
-            $ver = if ($tag -match '^win-v(\d+\.\d+\.\d+)$') { $matches[1] } else { "1.1.0" }
-            $should = "true"
-          } elseif ("${{ github.event_name }}" -eq "workflow_dispatch") {
-            $tag = "${{ inputs.release_tag }}".Trim()
-            if (-not $tag) { $tag = "win-v1.1.0" }
-            $ver = if ($tag -match '^win-v(\d+\.\d+\.\d+)$') { $matches[1] } else { "1.1.0" }
-            $should = if ("${{ inputs.create_release }}" -eq "true") { "true" } else { "false" }
-          } elseif ("${{ github.event_name }}" -eq "push") {
-            $tags = git ls-remote --tags --refs origin "win-v*" 2>$null
-            $best = $null
-            foreach ($line in $tags) {
-              if ($line -match 'refs/tags/win-v(\d+)\.(\d+)\.(\d+)$') {
-                $v = [version]::new([int]$matches[1], [int]$matches[2], [int]$matches[3])
-                if ($null -eq $best -or $v -gt $best) { $best = $v }
-              }
-            }
-            if ($null -eq $best) {
-              $ver = "1.1.0"
-            } else {
-              $ver = "$($best.Major).$($best.Minor).$($best.Build + 1)"
-            }
-            $tag = "win-v$ver"
-            $should = "true"
-          } else {
-            $ver = "1.1.0"
-            $tag = ""
-            $should = "false"
-          }
-          Write-Host "Resolved release tag=$tag, app_version=$ver, should_release=$should"
-          "tag=$tag" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
-          "app_version=$ver" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
-          "should_release=$should" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
 
       - name: Stage multi-file portable package & build Inno Setup installer
         shell: pwsh
@@ -173,7 +190,7 @@ jobs:
           }
 
           $ver = "${{ steps.rel_meta.outputs.app_version }}"
-          if (-not $ver) { $ver = "1.1.0" }
+          if (-not $ver) { $ver = "1.2.0" }
           & $iscc "/DMyAppVersion=$ver" "chromium/chromium_windows/installer.iss"
 
           $files = Get-ChildItem release_assets -File | Where-Object { $_.Name -ne "SHA256SUMS.txt" }

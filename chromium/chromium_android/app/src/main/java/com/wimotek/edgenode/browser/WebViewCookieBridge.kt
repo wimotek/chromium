@@ -83,4 +83,49 @@ object WebViewCookieBridge {
         runCatching { cm.flush() }
         return injected
     }
+
+    /**
+     * 按 Hub 下发的目标列表或清理规则清理 Android WebView Cookie
+     */
+    fun purgeCookies(targets: List<CookieItem>, excludeDomains: List<String>, store: NodeConfigStore, guardCfg: CookieGuardConfig): Int {
+        val cm = CookieManager.getInstance()
+        val toExpire = LinkedHashMap<String, CookieItem>()
+
+        for (t in targets) {
+            if (t.name.isNotBlank() && t.domain.isNotBlank()) {
+                toExpire["${t.name}@${t.domain}@${t.path}"] = t
+            }
+        }
+
+        if (excludeDomains.isNotEmpty()) {
+            val cleanExc = excludeDomains.map { it.trim().trimStart('.').lowercase(Locale.ROOT) }.filter { it.isNotEmpty() }
+            if (cleanExc.isNotEmpty()) {
+                val local = extractAllLocalCookies(store, guardCfg)
+                for (c in local) {
+                    val dom = c.domain.trim().trimStart('.').lowercase(Locale.ROOT)
+                    if (cleanExc.any { exc -> dom == exc || dom.endsWith(".$exc") || dom.contains(exc) }) {
+                        toExpire["${c.name}@${c.domain}@${c.path}"] = c
+                    }
+                }
+            }
+        }
+
+        var purged = 0
+        for (c in toExpire.values) {
+            val cleanDom = c.domain.trim().trimStart('.').lowercase(Locale.ROOT)
+            if (cleanDom.isEmpty()) continue
+            val path = c.path.ifBlank { "/" }
+            val domainAttr = if (c.domain.startsWith(".")) c.domain else cleanDom
+            for (scheme in listOf("https", "http")) {
+                val url = "$scheme://$cleanDom$path"
+                val expiredHeader = "${c.name}=; Domain=$domainAttr; Path=$path; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT"
+                runCatching { cm.setCookie(url, expiredHeader) }
+            }
+            purged++
+        }
+        if (purged > 0) {
+            runCatching { cm.flush() }
+        }
+        return purged
+    }
 }

@@ -29,8 +29,18 @@ const showCookiePolicyModal = ref(false)
 const cookiePolicy = reactive({
   sync_diff_enabled: true,
   sync_include_domains: '',
-  sync_exclude_domains: 'doubleclick.net,google-analytics.com'
+  sync_exclude_domains: 'doubleclick.net,google-analytics.com',
+  sync_cleanup_enabled: false,
+  sync_cleanup_expired: true,
+  sync_cleanup_domains: '',
+  sync_cleanup_keywords: '',
+  sync_cleanup_keyword_scope: 'name_domain',
+  sync_cleanup_expires_before: '',
+  sync_cleanup_expiring_within_days: 0,
+  sync_cleanup_session_only: false
 })
+const cleanupBusy = ref(false)
+const cleanupSummary = ref(null)
 
 const isBlacklistActive = computed(() => {
   return Boolean(cookiePolicy.sync_exclude_domains && cookiePolicy.sync_exclude_domains.trim().length > 0)
@@ -47,10 +57,48 @@ const saveCookiePolicy = async () => {
     body: JSON.stringify(cookiePolicy)
   })
   if (res.ok) {
-    props.showToast('全局 Cookie 过滤与差量策略已保存生效', 'success')
+    props.showToast('全局 Cookie 过滤、删除清理与差量策略已保存生效', 'success')
     showCookiePolicyModal.value = false
   } else {
     props.showToast('保存策略失败', 'error')
+  }
+}
+
+const reasonLabelMap = {
+  expired: '已过期',
+  blacklist_domain: '命中黑名单',
+  cleanup_domain: '命中删除域名',
+  keyword: '命中关键词',
+  expires_before: '早于截止日期',
+  expiring_soon: '即将过期',
+  session_only: '会话级Cookie'
+}
+
+const runGlobalCleanup = async (dryRun) => {
+  cleanupBusy.value = true
+  try {
+    const res = await props.api('/api/cookie-policy/cleanup-now', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        dry_run: dryRun,
+        ...cookiePolicy
+      })
+    })
+    if (res.ok) {
+      const data = await res.json()
+      cleanupSummary.value = data
+      if (dryRun) {
+        props.showToast(`试算完成：覆盖 ${data.node_count} 个在线节点，共命中 ${data.matched_total} 条待清理 Cookie`, 'info')
+      } else {
+        props.showToast(`全网清理完成：实删 ${data.purged_total} 条 Cookie`, 'success')
+        await loadAllData()
+      }
+    } else {
+      props.showToast('执行全网清理请求失败', 'error')
+    }
+  } finally {
+    cleanupBusy.value = false
   }
 }
 
@@ -473,6 +521,83 @@ onUnmounted(() => {
             <label class="block-label">域名黑名单 (Exclude Domains，填有内容时自动禁用白名单)</label>
             <input v-model="cookiePolicy.sync_exclude_domains" placeholder="例如: doubleclick.net, google-analytics.com (留空则可启用上方白名单)" class="sync-input font-cyan-mono" style="width:100% !important;">
             <p style="font-size:11px; color:#64748b; margin:2px 0 0 0;">全局自动剔除广告、数据统计类垃圾凭据；留空即可切换为上方白名单模式。</p>
+          </div>
+
+          <!-- 新增：全局 Cookie 删除与清理策略 -->
+          <div style="background:#130b1c; border:1px solid #6b21a8; border-radius:8px; padding:12px 14px; width:100%; box-sizing:border-box; display:flex; flex-direction:column; gap:10px;">
+            <div style="display:flex; align-items:center; justify-content:space-between; gap:8px; flex-wrap:wrap;">
+              <div style="display:flex; align-items:center; gap:8px;">
+                <input type="checkbox" v-model="cookiePolicy.sync_cleanup_enabled" id="cleanup_toggle_modal" class="check-box-blue">
+                <label for="cleanup_toggle_modal" style="font-size:12px; color:#e879f9; font-weight:bold; cursor:pointer;">
+                  🧹 启用同步时全局 Cookie 删除策略（按域名 / 日期 / 关键词自动清理）
+                </label>
+              </div>
+              <span style="font-size:11px; color:#94a3b8;">同步前先剔除再通知各节点彻底删除</span>
+            </div>
+
+            <div style="display:flex; gap:18px; flex-wrap:wrap; font-size:12px; color:#cbd5e1;">
+              <label style="display:flex; align-items:center; gap:6px; cursor:pointer;">
+                <input type="checkbox" v-model="cookiePolicy.sync_cleanup_expired" class="check-box-blue">
+                <span>清理已过期 Cookie</span>
+              </label>
+              <label style="display:flex; align-items:center; gap:6px; cursor:pointer;">
+                <input type="checkbox" v-model="cookiePolicy.sync_cleanup_session_only" class="check-box-blue">
+                <span>清理会话级 Cookie（无有效期）</span>
+              </label>
+            </div>
+
+            <div class="form-block">
+              <label class="block-label" style="color:#d8b4fe;">按域名删除 (Cleanup Domains，逗号或换行分隔，支持 *.domain.com / *ads*)</label>
+              <input v-model="cookiePolicy.sync_cleanup_domains" placeholder="例如: doubleclick.net, *.tracking.com, *adservice*" class="sync-input font-cyan-mono" style="width:100% !important;">
+            </div>
+
+            <div class="row-flex-gap">
+              <div class="form-block" style="flex:2;">
+                <label class="block-label" style="color:#d8b4fe;">按关键词删除 (Keywords，逗号分隔，支持 *utm* 通配)</label>
+                <input v-model="cookiePolicy.sync_cleanup_keywords" placeholder="例如: _ga, _gid, utm_, track" class="sync-input font-cyan-mono" style="width:100% !important;">
+              </div>
+              <div class="form-block" style="flex:1;">
+                <label class="block-label" style="color:#d8b4fe;">关键词匹配范围</label>
+                <select v-model="cookiePolicy.sync_cleanup_keyword_scope" class="sync-input" style="width:100% !important;">
+                  <option value="name">仅 Cookie 名称</option>
+                  <option value="name_domain">Cookie 名称 + 域名</option>
+                  <option value="all">名称 + 域名 + 值</option>
+                </select>
+              </div>
+            </div>
+
+            <div class="row-flex-gap">
+              <div class="form-block" style="flex:1;">
+                <label class="block-label" style="color:#d8b4fe;">按日期删除（到期时间早于此日期）</label>
+                <input type="date" v-model="cookiePolicy.sync_cleanup_expires_before" class="sync-input font-cyan-mono" style="width:100% !important;">
+              </div>
+              <div class="form-block" style="flex:1;">
+                <label class="block-label" style="color:#d8b4fe;">清理 N 天内即将过期 (0=关闭)</label>
+                <input type="number" min="0" v-model.number="cookiePolicy.sync_cleanup_expiring_within_days" class="sync-input font-cyan-mono" style="width:100% !important;">
+              </div>
+            </div>
+
+            <div style="display:flex; align-items:center; justify-content:space-between; gap:8px; flex-wrap:wrap; padding-top:4px;">
+              <div style="display:flex; gap:8px;">
+                <button type="button" :disabled="cleanupBusy" @click="runGlobalCleanup(true)" class="btn-sub-action">
+                  {{ cleanupBusy ? '计算中...' : '🔍 试算待清理数' }}
+                </button>
+                <button type="button" :disabled="cleanupBusy" @click="runGlobalCleanup(false)" class="btn-cleanup-danger">
+                  {{ cleanupBusy ? '清理中...' : '🧹 立即全网清理' }}
+                </button>
+              </div>
+              <span v-if="cleanupSummary" style="font-size:11px; color:#f0abfc;">
+                {{ cleanupSummary.dry_run ? '试算' : '实删' }}结果：在线 {{ cleanupSummary.node_count }} 节点 · 命中 {{ cleanupSummary.matched_total }} 条
+                <template v-if="!cleanupSummary.dry_run"> · 已删除 {{ cleanupSummary.purged_total }} 条</template>
+              </span>
+            </div>
+
+            <div v-if="cleanupSummary && Object.keys(cleanupSummary.reasons || {}).length > 0" style="font-size:11px; color:#cbd5e1; background:#090d1b; border:1px solid #3b0764; border-radius:6px; padding:6px 10px;">
+              命中明细：
+              <span v-for="(cnt, key) in cleanupSummary.reasons" :key="key" style="margin-right:10px; color:#e9d5ff;">
+                {{ reasonLabelMap[key] || key }}: <b>{{ cnt }}</b>
+              </span>
+            </div>
           </div>
 
           <div style="display:flex; justify-content:flex-end; gap:8px; margin-top:8px;">
@@ -1259,10 +1384,28 @@ onUnmounted(() => {
   border-radius: 12px;
   padding: 20px 24px;
   box-shadow: 0 20px 40px rgba(0, 0, 0, 0.8);
+  max-height: 90vh;
+  overflow-y: auto;
+}
+
+.btn-cleanup-danger {
+  background: linear-gradient(90deg, #9333ea 0%, #dc2626 100%);
+  color: #ffffff;
+  border: none;
+  border-radius: 6px;
+  padding: 4px 14px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+  height: 33px;
+}
+.btn-cleanup-danger:hover {
+  opacity: 0.9;
 }
 
 .modal-policy-size {
-  width: 760px;
+  width: 780px;
   max-width: 95vw;
 }
 

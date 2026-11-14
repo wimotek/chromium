@@ -278,12 +278,38 @@ class EdgeAgentService : Service() {
             }
 
             "purge_cookies" -> {
+                val payload = msg.optJSONObject("payload") ?: JSONObject()
+                val targetsArr = payload.optJSONArray("targets") ?: JSONArray()
+                val targets = ArrayList<CookieItem>()
+                for (i in 0 until targetsArr.length()) {
+                    val obj = targetsArr.optJSONObject(i) ?: continue
+                    val name = obj.optString("name", "")
+                    val dom = obj.optString("domain", "")
+                    val path = obj.optString("path", "/")
+                    if (name.isNotBlank() && dom.isNotBlank()) {
+                        targets.add(CookieItem(name = name, value = "", domain = dom, path = path))
+                    }
+                }
+                val excArr = payload.optJSONArray("exclude_domains") ?: JSONArray()
+                val excludeDomains = ArrayList<String>()
+                for (i in 0 until excArr.length()) {
+                    excArr.optString(i)?.takeIf { it.isNotBlank() }?.let(excludeDomains::add)
+                }
+                val guardCfg = store.loadCookieGuardConfig()
+                val purgedCount = if (guardCfg.mode == "block_export") {
+                    0
+                } else {
+                    WebViewCookieBridge.purgeCookies(targets, excludeDomains, store, guardCfg)
+                }
                 val resp = JSONObject().apply {
                     put("req_id", reqId)
                     put("status", "ok")
-                    put("purged_count", 0)
+                    put("purged_count", purgedCount)
                 }
                 ws.send(resp.toString())
+                if (purgedCount > 0) {
+                    AgentStateBus.log("GUARD", "purge_cookies | 已按 Hub 清理策略删除 $purgedCount 条 WebView Cookie")
+                }
             }
 
             "ping" -> {

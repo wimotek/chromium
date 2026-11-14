@@ -182,7 +182,15 @@ def init_db_and_jwt():
         'tofu_timeout_notify_minutes': '10',  # 待审挂起超 10 分钟自动预警
         'sync_diff_enabled': '1',
         'sync_include_domains': '',
-        'sync_exclude_domains': 'doubleclick.net,google-analytics.com'
+        'sync_exclude_domains': 'doubleclick.net,google-analytics.com',
+        'sync_cleanup_enabled': '0',
+        'sync_cleanup_expired': '1',
+        'sync_cleanup_domains': '',
+        'sync_cleanup_keywords': '',
+        'sync_cleanup_keyword_scope': 'name_domain',
+        'sync_cleanup_expires_before': '',
+        'sync_cleanup_expiring_within_days': '0',
+        'sync_cleanup_session_only': '0',
     }
 
     for k, v in defaults.items():

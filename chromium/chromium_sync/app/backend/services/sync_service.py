@@ -19,6 +19,7 @@ from services.cdp_engine import (
     compute_cookie_diff,
     smart_merge_cookies,
     purge_stale_cookies_on_node,
+    build_cleanup_targets,
 )
 from services.notification import dispatch_notification
 
@@ -190,6 +191,133 @@ def _resolve_node_target_host(node: dict) -> str:
     return node.get("direct_host", "127.0.0.1") if node.get("is_local") else "127.0.0.1"
 
 
+def get_global_cleanup_rules() -> dict:
+    try:
+        within_days = int(get_setting("sync_cleanup_expiring_within_days", "0") or 0)
+    except Exception:
+        within_days = 0
+    return {
+        "enabled": get_setting("sync_cleanup_enabled", "0") == "1",
+        "expired": get_setting("sync_cleanup_expired", "1") == "1",
+        "domains": get_setting("sync_cleanup_domains", ""),
+        "keywords": get_setting("sync_cleanup_keywords", ""),
+        "keyword_scope": get_setting("sync_cleanup_keyword_scope", "name_domain") or "name_domain",
+        "expires_before": get_setting("sync_cleanup_expires_before", ""),
+        "expiring_within_days": max(0, within_days),
+        "session_only": get_setting("sync_cleanup_session_only", "0") == "1",
+    }
+
+
+async def execute_global_cleanup(dry_run: bool = False, override_rules: Optional[dict] = None) -> dict:
+    """对所有在线活跃节点执行全局 Cookie 清理（或 dry_run 试算预览）"""
+    conn = get_db_connection()
+    conn.row_factory = sqlite3.Row
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM nodes WHERE enabled=1 AND approval_status=1 AND status='connected'")
+    active_nodes = [dict(r) for r in cur.fetchall()]
+    conn.close()
+
+    exclude_domains = [d.strip() for d in get_setting("sync_exclude_domains", "doubleclick.net,google-analytics.com").split(",") if d.strip()]
+    cleanup_rules = dict(get_global_cleanup_rules())
+    if override_rules:
+        cleanup_rules.update(override_rules)
+    # 立即清理 / 试算场景下强制开启规则评估
+    cleanup_rules["enabled"] = True
+
+    if not active_nodes:
+        return {
+            "dry_run": dry_run,
+            "node_count": 0,
+            "matched_total": 0,
+            "purged_total": 0,
+            "reasons": {},
+            "nodes": [],
+        }
+
+    start_ts = time.time()
+    sync_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    node_reports = []
+    reason_totals: Dict[str, int] = {}
+    matched_total = 0
+    purged_total = 0
+    log_lines = [f"🧹 {'试算预览' if dry_run else '执行'}全网 Cookie 清理 (覆盖 {len(active_nodes)} 个在线节点)"]
+
+    for n in active_nodes:
+        t_host = _resolve_node_target_host(n)
+        try:
+            raw_c = await fetch_cookies_native(n["local_bind_port"], target_host=t_host, node_id=n["id"])
+        except Exception as exc:
+            node_reports.append({"id": n["id"], "name": n["name"], "matched": 0, "purged": 0, "error": str(exc)})
+            log_lines.append(f"• 节点 [{n['name']}] 读取失败: {exc}")
+            continue
+
+        targets, reasons = build_cleanup_targets(raw_c, exclude_domains=exclude_domains, cleanup_rules=cleanup_rules)
+        matched_cnt = len(targets)
+        matched_total += matched_cnt
+        for rk, rv in reasons.items():
+            reason_totals[rk] = reason_totals.get(rk, 0) + rv
+
+        purged_cnt = 0
+        if not dry_run:
+            purged_cnt = await purge_stale_cookies_on_node(
+                n["local_bind_port"],
+                t_host,
+                exclude_domains=exclude_domains,
+                node_id=n["id"],
+                cleanup_rules=cleanup_rules,
+                pre_fetched_cookies=raw_c,
+            )
+            purged_total += purged_cnt
+            c_cnt, _ = await probe_node_cookies(n["local_bind_port"], t_host, node_id=n["id"])
+            conn = get_db_connection()
+            cur = conn.cursor()
+            cur.execute("UPDATE nodes SET cookie_count=?, last_sync=? WHERE id=?", (c_cnt, sync_time, n["id"]))
+            conn.commit()
+            conn.close()
+            log_lines.append(f"-> 节点 [{n['name']}] 命中 {matched_cnt} 条 / 实删 {purged_cnt} 条，剩余 {c_cnt} 条")
+
+        node_reports.append({
+            "id": n["id"],
+            "name": n["name"],
+            "total_cookies": len(raw_c),
+            "matched": matched_cnt,
+            "purged": purged_cnt,
+            "reasons": reasons,
+        })
+
+    if not dry_run:
+        duration_str = f"{time.time() - start_ts:.2f}s"
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("""
+            INSERT INTO sync_logs (timestamp, source_node, target_nodes, cookie_count, duration, status, details)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, (
+            sync_time,
+            "🧹 全局清理引擎",
+            f"全网在线节点 ({len(active_nodes)} 个)",
+            purged_total,
+            duration_str,
+            "SUCCESS",
+            "\n".join(log_lines),
+        ))
+        cur.execute("""
+            DELETE FROM sync_logs 
+            WHERE id NOT IN (SELECT id FROM (SELECT id FROM sync_logs ORDER BY id DESC LIMIT 20))
+        """)
+        conn.commit()
+        conn.close()
+
+    return {
+        "dry_run": dry_run,
+        "node_count": len(active_nodes),
+        "matched_total": matched_total,
+        "purged_total": purged_total,
+        "reasons": reason_totals,
+        "nodes": node_reports,
+    }
+
+
 async def execute_policy_task(policy_id: int):
     """
     多策略执行引擎：
@@ -242,6 +370,7 @@ async def execute_policy_task(policy_id: int):
         diff_enabled = (get_setting("sync_diff_enabled", "1") == "1")
         include_domains = [d.strip() for d in get_setting("sync_include_domains", "").split(",") if d.strip()]
         exclude_domains = [d.strip() for d in get_setting("sync_exclude_domains", "doubleclick.net,google-analytics.com").split(",") if d.strip()]
+        cleanup_rules = get_global_cleanup_rules()
 
         source_node_desc = ""
         target_nodes_desc = ""
@@ -289,10 +418,12 @@ async def execute_policy_task(policy_id: int):
                     for idx, res in enumerate(fetched_results):
                         n = merge_pool_nodes[idx]
                         if isinstance(res, list):
-                            cleaned_c, bl_cnt, exp_cnt = filter_cookies_by_domains(res, include_domains, exclude_domains)
+                            cleaned_c, bl_cnt, exp_cnt = filter_cookies_by_domains(
+                                res, include_domains, exclude_domains, cleanup_rules=cleanup_rules
+                            )
                             valid_cookie_lists.append(cleaned_c)
                             total_dropped += (bl_cnt + exp_cnt)
-                            node_in_memory_data.append({"node": n, "cookies": cleaned_c})
+                            node_in_memory_data.append({"node": n, "cookies": cleaned_c, "raw_cookies": res})
                         else:
                             log_detail.append(f"• 节点 [{n['name']}] 握手异常，自动跳过")
 
@@ -322,15 +453,25 @@ async def execute_policy_task(policy_id: int):
                                 "cookie_count": cookie_count_metric
                             })
                     else:
-                        log_detail.append(f"✨ 黄金凭据池聚拢完成: 共 {cookie_count_metric} 条最新 Cookies (发现 {total_diff_count} 项增量需对齐)")
+                        log_detail.append(f"✨ 黄金凭据池聚拢完成: 共 {cookie_count_metric} 条最新 Cookies (发现 {total_diff_count} 项增量需对齐, 过滤/待清理 {total_dropped} 项)")
 
                         for item in node_in_memory_data:
                             n = item["node"]
                             match_inject = next((x for x in nodes_to_inject if x["node"]["id"] == n["id"]), None)
                             t_host = _resolve_node_target_host(n)
+                            should_purge = bool(match_inject or cleanup_rules.get("enabled") or total_dropped > 0)
+                            purged_cnt = 0
+                            if should_purge:
+                                purged_cnt = await purge_stale_cookies_on_node(
+                                    n['local_bind_port'],
+                                    t_host,
+                                    exclude_domains,
+                                    node_id=n['id'],
+                                    cleanup_rules=cleanup_rules,
+                                    pre_fetched_cookies=item.get("raw_cookies"),
+                                )
 
                             if match_inject:
-                                purged_cnt = await purge_stale_cookies_on_node(n['local_bind_port'], t_host, exclude_domains, node_id=n['id'])
                                 diff_c = match_inject["diff_cookies"]
                                 skipped = match_inject["skipped"]
                                 await inject_cookies_native(n['local_bind_port'], diff_c, t_host, node_id=n['id'])
@@ -342,8 +483,16 @@ async def execute_policy_task(policy_id: int):
                                 conn.commit()
                                 conn.close()
 
-                                purge_info = f"，清除 {purged_cnt} 垃圾" if purged_cnt > 0 else ""
+                                purge_info = f"，清理 {purged_cnt} 条" if purged_cnt > 0 else ""
                                 log_detail.append(f"-> 节点 [{n['name']}] 差量写入 {len(diff_c)} 项 (跳过 {skipped} 项{purge_info})，现存 {c_cnt} 条")
+                            elif purged_cnt > 0:
+                                c_cnt, _ = await probe_node_cookies(n['local_bind_port'], t_host, node_id=n['id'])
+                                conn = get_db_connection()
+                                cur = conn.cursor()
+                                cur.execute("UPDATE nodes SET cookie_count=?, last_sync=? WHERE id=?", (c_cnt, sync_time, n['id']))
+                                conn.commit()
+                                conn.close()
+                                log_detail.append(f"-> 节点 [{n['name']}] 已按全局删除策略清理 {purged_cnt} 条 Cookie，现存 {c_cnt} 条")
                             else:
                                 log_detail.append(f"-> 节点 [{n['name']}] 凭据已对齐，跳过写入 (现存 {len(item['cookies'])} 条)")
 
@@ -368,7 +517,22 @@ async def execute_policy_task(policy_id: int):
                         for n in src_active_nodes
                     ]
                     fetched_results = await asyncio.gather(*fetch_tasks, return_exceptions=True)
-                    valid_lists = [filter_cookies_by_domains(r, include_domains, exclude_domains)[0] for r in fetched_results if isinstance(r, list)]
+                    valid_lists = [
+                        filter_cookies_by_domains(r, include_domains, exclude_domains, cleanup_rules=cleanup_rules)[0]
+                        for r in fetched_results if isinstance(r, list)
+                    ]
+
+                    if cleanup_rules.get("enabled"):
+                        for idx, sn in enumerate(src_active_nodes):
+                            raw_sn = fetched_results[idx] if idx < len(fetched_results) and isinstance(fetched_results[idx], list) else None
+                            await purge_stale_cookies_on_node(
+                                sn['local_bind_port'],
+                                _resolve_node_target_host(sn),
+                                exclude_domains,
+                                node_id=sn['id'],
+                                cleanup_rules=cleanup_rules,
+                                pre_fetched_cookies=raw_sn,
+                            )
 
                     group_cookies, _ = smart_merge_cookies(valid_lists, max_per_domain=50)
                     cookie_count_metric = len(group_cookies)
@@ -382,14 +546,37 @@ async def execute_policy_task(policy_id: int):
                         for target in dest_nodes:
                             t_host = _resolve_node_target_host(target)
                             curr_c = await fetch_cookies_native(target['local_bind_port'], t_host, node_id=target['id'])
+                            purged_cnt = 0
+                            if cleanup_rules.get("enabled"):
+                                purged_cnt = await purge_stale_cookies_on_node(
+                                    target['local_bind_port'],
+                                    t_host,
+                                    exclude_domains,
+                                    node_id=target['id'],
+                                    cleanup_rules=cleanup_rules,
+                                    pre_fetched_cookies=curr_c,
+                                )
                             diff_c, skipped = compute_cookie_diff(curr_c, group_cookies)
 
                             if diff_c:
                                 injected_any = True
-                                await purge_stale_cookies_on_node(target['local_bind_port'], t_host, exclude_domains, node_id=target['id'])
+                                if not cleanup_rules.get("enabled"):
+                                    purged_cnt = await purge_stale_cookies_on_node(
+                                        target['local_bind_port'],
+                                        t_host,
+                                        exclude_domains,
+                                        node_id=target['id'],
+                                        cleanup_rules=cleanup_rules,
+                                        pre_fetched_cookies=curr_c,
+                                    )
                                 await inject_cookies_native(target['local_bind_port'], diff_c, t_host, node_id=target['id'])
                                 t_cnt, _ = await probe_node_cookies(target['local_bind_port'], t_host, node_id=target['id'])
-                                log_detail.append(f"-> 目标节点 [{target['name']}] 差量写入 {len(diff_c)} 项，现存: {t_cnt}")
+                                purge_info = f"（清理 {purged_cnt} 条）" if purged_cnt > 0 else ""
+                                log_detail.append(f"-> 目标节点 [{target['name']}] 差量写入 {len(diff_c)} 项{purge_info}，现存: {t_cnt}")
+                            elif purged_cnt > 0:
+                                injected_any = True
+                                t_cnt, _ = await probe_node_cookies(target['local_bind_port'], t_host, node_id=target['id'])
+                                log_detail.append(f"-> 目标节点 [{target['name']}] 已全局清理 {purged_cnt} 条，现存: {t_cnt}")
                             else:
                                 log_detail.append(f"-> 目标节点 [{target['name']}] 数据完全一致，跳过写入")
 
@@ -410,7 +597,21 @@ async def execute_policy_task(policy_id: int):
                     src_host = _resolve_node_target_host(source)
 
                     raw_c = await fetch_cookies_native(source['local_bind_port'], src_host, node_id=source['id'])
-                    cookies, _, _ = filter_cookies_by_domains(raw_c, include_domains, exclude_domains)
+                    if cleanup_rules.get("enabled"):
+                        src_purged = await purge_stale_cookies_on_node(
+                            source['local_bind_port'],
+                            src_host,
+                            exclude_domains,
+                            node_id=source['id'],
+                            cleanup_rules=cleanup_rules,
+                            pre_fetched_cookies=raw_c,
+                        )
+                        if src_purged > 0:
+                            log_detail.append(f"-> 源节点 [{source['name']}] 已按全局删除策略清理 {src_purged} 条 Cookie")
+
+                    cookies, _, _ = filter_cookies_by_domains(
+                        raw_c, include_domains, exclude_domains, cleanup_rules=cleanup_rules
+                    )
                     cookie_count_metric = len(cookies)
 
                     dest_nodes = [n for n in scope_targets if n["id"] != source["id"]]
@@ -422,11 +623,29 @@ async def execute_policy_task(policy_id: int):
                         for target in dest_nodes:
                             tgt_host = _resolve_node_target_host(target)
                             curr_c = await fetch_cookies_native(target['local_bind_port'], tgt_host, node_id=target['id'])
+                            purged_cnt = 0
+                            if cleanup_rules.get("enabled"):
+                                purged_cnt = await purge_stale_cookies_on_node(
+                                    target['local_bind_port'],
+                                    tgt_host,
+                                    exclude_domains,
+                                    node_id=target['id'],
+                                    cleanup_rules=cleanup_rules,
+                                    pre_fetched_cookies=curr_c,
+                                )
                             diff_c, skipped = compute_cookie_diff(curr_c, cookies)
 
                             if diff_c:
                                 injected_any = True
-                                await purge_stale_cookies_on_node(target['local_bind_port'], tgt_host, exclude_domains, node_id=target['id'])
+                                if not cleanup_rules.get("enabled"):
+                                    purged_cnt = await purge_stale_cookies_on_node(
+                                        target['local_bind_port'],
+                                        tgt_host,
+                                        exclude_domains,
+                                        node_id=target['id'],
+                                        cleanup_rules=cleanup_rules,
+                                        pre_fetched_cookies=curr_c,
+                                    )
 
                                 if ChromiumSync is not None and target.get('conn_type') == 'ssh':
                                     sync_res = await run_chromium_sync_instance(source, target, include_domains, exclude_domains, diff_enabled)
@@ -435,7 +654,12 @@ async def execute_policy_task(policy_id: int):
                                 else:
                                     await inject_cookies_native(target['local_bind_port'], diff_c, tgt_host, node_id=target['id'])
                                     target_count, _ = await probe_node_cookies(target['local_bind_port'], tgt_host, node_id=target['id'])
-                                    log_detail.append(f"-> 目标节点 [{target['name']}] 差量写入 {len(diff_c)} 项，现存: {target_count}")
+                                    purge_info = f"（清理 {purged_cnt} 条）" if purged_cnt > 0 else ""
+                                    log_detail.append(f"-> 目标节点 [{target['name']}] 差量写入 {len(diff_c)} 项{purge_info}，现存: {target_count}")
+                            elif purged_cnt > 0:
+                                injected_any = True
+                                target_count, _ = await probe_node_cookies(target['local_bind_port'], tgt_host, node_id=target['id'])
+                                log_detail.append(f"-> 目标节点 [{target['name']}] 已全局清理 {purged_cnt} 条，现存: {target_count}")
                             else:
                                 log_detail.append(f"-> 目标节点 [{target['name']}] 数据一致，跳过写入")
 

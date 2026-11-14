@@ -44,7 +44,7 @@ from win_edge_agent import (
 )
 
 
-APP_VERSION = "1.1.0"
+APP_VERSION = "1.2.0"
 
 DEFAULT_CONFIG: Dict[str, Any] = {
     "hub": {
@@ -422,7 +422,13 @@ def _run_gui(config_path: Optional[Path] = None):
             self.setWindowTitle(f"Wimotek Edge CDP Node v{APP_VERSION} · Windows")
             icon_path = _resolve_asset_path("app_icon.ico") or _resolve_asset_path("app_icon.png")
             if icon_path is not None:
-                self.setWindowIcon(QIcon(str(icon_path)))
+                win_qicon = QIcon(str(icon_path))
+                self.setWindowIcon(win_qicon)
+                try:
+                    if hasattr(self, "titleBar") and hasattr(self.titleBar, "setIcon"):
+                        self.titleBar.setIcon(win_qicon)
+                except Exception:
+                    pass
             desktop = QApplication.primaryScreen().availableGeometry()
             self.move(
                 max(0, desktop.center().x() - self.width() // 2),

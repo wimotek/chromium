@@ -16,6 +16,8 @@ import sys
 sys.stdout.reconfigure(line_buffering=True)
 sys.stderr.reconfigure(line_buffering=True)
 
+from datetime import datetime
+import fnmatch
 import json
 import ssl
 import time
@@ -426,12 +428,31 @@ async def execute_http_auto_register(
     async with httpx.AsyncClient(verify=False, timeout=8.0) as client:
         try:
             res = await client.post(api_url, json=payload, headers=headers)
-            print(f"✅ [WSS Direct Register] 登记响应: {res.status_code}", flush=True)
             if res.status_code == 200:
                 body = res.json()
+                hub_conn_type = body.get("conn_type")
+                hub_appr = body.get("approval_status")
+                hub_nid = body.get("node_id")
+                hub_ep = body.get("recommended_endpoint")
+                print(
+                    f"✅ [WSS Direct Register] 登记响应: 200 (node_id={hub_nid}, conn_type={hub_conn_type}, approval_status={hub_appr}, endpoint={hub_ep})",
+                    flush=True,
+                )
+                if hub_conn_type != "public_wss":
+                    print(
+                        f"⚠️ [WSS Direct Register] Hub 返回 conn_type={hub_conn_type} (预期 public_wss)，"
+                        f"请检查 Hub (chromium_sync) 是否已同步更新代码并重新构建镜像！",
+                        flush=True,
+                    )
+                elif hub_appr == 0:
+                    print(
+                        "⏳ [WSS Direct Register] 节点处于 Hub TOFU 待审批隔离区，请前往后台「待审批隔离区」批准或检查 JOIN_TOKEN！",
+                        flush=True,
+                    )
                 if body.get("session_ticket"):
                     save_session_ticket(data_dir, body["session_ticket"])
                 return body
+            print(f"⚠️ [WSS Direct Register] 登记异常响应: {res.status_code} {res.text[:200]}", flush=True)
         except Exception as e:
             print(f"❌ [WSS Direct Register] 登记受阻: {e}", flush=True)
     return None
@@ -492,6 +513,118 @@ async def extract_all_cookies(http_client: httpx.AsyncClient) -> List[dict]:
         print(f"⚠️ [CDP 探针] 策略 2 (Version 端点) 未捕获到 Cookie: {e}", flush=True)
 
     return []
+
+
+def _parse_cleanup_terms(raw: Any) -> List[str]:
+    if not raw:
+        return []
+    if isinstance(raw, list):
+        items = [str(x).strip() for x in raw]
+    else:
+        text = str(raw).replace("\r", "\n").replace(";", "\n").replace(",", "\n")
+        items = [line.strip() for line in text.split("\n")]
+    return list(dict.fromkeys(x.lower() for x in items if x))
+
+
+def _match_cleanup_domain(dom: str, pat: str) -> bool:
+    d = (dom or "").strip().lower().lstrip(".")
+    p = (pat or "").strip().lower()
+    if not d or not p:
+        return False
+    if p.startswith("*."):
+        base = p[2:].lstrip(".")
+        return d == base or d.endswith("." + base)
+    if "*" in p:
+        return fnmatch.fnmatch(d, p)
+    cp = p.lstrip(".")
+    return d == cp or d.endswith("." + cp)
+
+
+def _match_cleanup_kw(text: str, kw: str) -> bool:
+    t = (text or "").lower()
+    k = (kw or "").strip().lower()
+    if not t or not k:
+        return False
+    return fnmatch.fnmatch(t, k) if "*" in k else (k in t)
+
+
+def _select_cleanup_targets(
+    raw_cookies: List[dict],
+    exclude_domains: List[str],
+    cleanup_rules: Dict[str, Any],
+    explicit_targets: List[dict],
+) -> List[dict]:
+    now = time.time()
+    cutoff_ts: Optional[float] = None
+    cutoff_raw = str(cleanup_rules.get("expires_before") or "").strip()
+    if cutoff_raw:
+        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M", "%Y-%m-%d"):
+            try:
+                cutoff_ts = datetime.strptime(cutoff_raw, fmt).timestamp()
+                break
+            except ValueError:
+                continue
+
+    try:
+        within_days = max(0, int(cleanup_rules.get("expiring_within_days") or 0))
+    except Exception:
+        within_days = 0
+
+    clean_exc = _parse_cleanup_terms(exclude_domains)
+    cleanup_enabled = bool(cleanup_rules.get("enabled"))
+    cleanup_doms = _parse_cleanup_terms(cleanup_rules.get("domains")) if cleanup_enabled else []
+    cleanup_kws = _parse_cleanup_terms(cleanup_rules.get("keywords")) if cleanup_enabled else []
+    kw_scope = str(cleanup_rules.get("keyword_scope") or "name_domain")
+
+    selected: Dict[Tuple[str, str, str], dict] = {}
+    for t in explicit_targets or []:
+        name = str(t.get("name") or "")
+        dom = str(t.get("domain") or "")
+        path = str(t.get("path") or "/")
+        if name and (dom or t.get("url")):
+            item = {"name": name, "path": path}
+            if dom:
+                item["domain"] = dom
+            else:
+                item["url"] = str(t.get("url"))
+            selected[(name, dom, path)] = item
+
+    for c in raw_cookies:
+        name = str(c.get("name") or "")
+        dom = str(c.get("domain") or "")
+        low_dom = dom.lower().lstrip(".")
+        path = str(c.get("path") or "/")
+        val = str(c.get("value") or "")
+        exp = c.get("expires")
+        has_exp = exp is not None and isinstance(exp, (int, float)) and exp > 0
+
+        hit = False
+        if clean_exc and any(exc in low_dom or _match_cleanup_domain(low_dom, exc) for exc in clean_exc):
+            hit = True
+        elif has_exp and exp <= now and cleanup_rules.get("expired", True):
+            hit = True
+        elif cleanup_enabled:
+            if cleanup_doms and any(_match_cleanup_domain(low_dom, pat) for pat in cleanup_doms):
+                hit = True
+            elif cleanup_rules.get("session_only") and not has_exp:
+                hit = True
+            elif cutoff_ts is not None and has_exp and exp < cutoff_ts:
+                hit = True
+            elif within_days > 0 and has_exp and exp <= (now + within_days * 86400):
+                hit = True
+            elif cleanup_kws:
+                fields = [name]
+                if kw_scope in ("name_domain", "all"):
+                    fields.append(low_dom)
+                if kw_scope == "all":
+                    fields.append(val)
+                if any(_match_cleanup_kw(f, kw) for kw in cleanup_kws for f in fields):
+                    hit = True
+
+        if hit and name and dom:
+            selected[(name, dom, path)] = {"name": name, "domain": dom, "path": path}
+
+    return list(selected.values())
 
 
 async def bridge_cdp_ws_stream(tunnel_ws, stream_id: str, inbound_queue: asyncio.Queue):
@@ -621,7 +754,39 @@ async def handle_cdp_command(
             await ws.send(json.dumps({"req_id": req_id, "status": "error", "message": str(e)}))
 
     elif action == "purge_cookies":
-        await ws.send(json.dumps({"req_id": req_id, "status": "ok", "purged_count": 0}))
+        try:
+            exclude_domains = payload.get("exclude_domains") or []
+            cleanup_rules = payload.get("cleanup_rules") or {}
+            explicit_targets = payload.get("targets") or []
+
+            raw_cookies = await extract_all_cookies(http_client)
+            to_delete = _select_cleanup_targets(
+                raw_cookies, exclude_domains, cleanup_rules, explicit_targets
+            )
+            deleted_cnt = 0
+            if to_delete:
+                local_base = await get_local_cdp_base()
+                target_ws = None
+                try:
+                    list_res = await http_client.get(f"{local_base}/json/list", timeout=3.0)
+                    page_targets = [t for t in list_res.json() if t.get("type") == "page" and "webSocketDebuggerUrl" in t]
+                    if page_targets:
+                        target_ws = page_targets[0]["webSocketDebuggerUrl"]
+                except Exception:
+                    pass
+                if not target_ws:
+                    ver_res = await http_client.get(f"{local_base}/json/version", timeout=3.0)
+                    target_ws = ver_res.json()["webSocketDebuggerUrl"]
+
+                async with websockets.connect(target_ws, open_timeout=8.0) as cdp_ws:
+                    await send_cdp_json_command(cdp_ws, "Network.enable", req_id=401)
+                    for idx, item in enumerate(to_delete):
+                        await send_cdp_json_command(cdp_ws, "Network.deleteCookies", item, req_id=500 + idx)
+                        deleted_cnt += 1
+                print(f"🧹 [CDP] 已执行全局清理策略: 删除 {deleted_cnt} 条 Cookie", flush=True)
+            await ws.send(json.dumps({"req_id": req_id, "status": "ok", "purged_count": deleted_cnt}))
+        except Exception as e:
+            await ws.send(json.dumps({"req_id": req_id, "status": "error", "message": str(e)}))
 
     elif action == "get_version":
         try:
