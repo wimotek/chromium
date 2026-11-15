@@ -84,6 +84,12 @@ export XDG_CACHE_HOME=/home/appuser/.cache
 export DISPLAY=:0
 export NO_AT_BRIDGE=1
 export PYTHONUNBUFFERED=1
+if command -v fcitx5 >/dev/null 2>&1; then
+    export GTK_IM_MODULE=fcitx
+    export QT_IM_MODULE=fcitx
+    export XMODIFIERS=@im=fcitx
+    export SDL_IM_MODULE=fcitx
+fi
 
 if [ ! -d "/data" ] || ! touch /data/.rw_probe 2>/tmp/.rw_err; then
     ERR_MSG="$(cat /tmp/.rw_err 2>/dev/null || true)"
@@ -95,19 +101,33 @@ if [ ! -d "/data" ] || ! touch /data/.rw_probe 2>/tmp/.rw_err; then
 fi
 rm -f /data/.rw_probe /tmp/.rw_err 2>/dev/null || true
 
-if ! mkdir -p "$HOME/.vnc" "$HOME/.config/openbox" "$HOME/.config/tint2" "$HOME/.cache/openbox" "$HOME/.cache/fontconfig" /etc/ssl/app /tmp/crashpad; then
+if ! mkdir -p "$HOME/.vnc" "$HOME/.config/openbox" "$HOME/.config/tint2" "$HOME/.config/fcitx5" "$HOME/.cache/openbox" "$HOME/.cache/fontconfig" /etc/ssl/app /tmp/crashpad; then
     echo "[WARN] 容器内部缓存目录创建异常，请检查宿主机 Docker 存储盘空间 (df -h / df -i / docker system df)："
     df -h "$HOME" /tmp /dev/shm 2>/dev/null || true
 fi
 [ -f "$HOME/.config/openbox/rc.xml" ] || cp /etc/xdg/openbox/rc.xml "$HOME/.config/openbox/rc.xml" 2>/dev/null || true
-[ -f "$HOME/.config/openbox/menu.xml" ] || cp /etc/xdg/openbox/menu.xml "$HOME/.config/openbox/menu.xml" 2>/dev/null || true
+if [ "${OPENBOX_LANG:-zh}" = "en" ] && [ -f /etc/xdg/openbox/menu.en.xml ]; then
+    cp /etc/xdg/openbox/menu.en.xml "$HOME/.config/openbox/menu.xml" 2>/dev/null || true
+else
+    [ -f "$HOME/.config/openbox/menu.xml" ] || cp /etc/xdg/openbox/menu.xml "$HOME/.config/openbox/menu.xml" 2>/dev/null || true
+fi
 [ -f "$HOME/.config/tint2/tint2rc" ] || cp /etc/xdg/tint2/tint2rc "$HOME/.config/tint2/tint2rc" 2>/dev/null || true
+if [ "${PANEL_POSITION:-bottom}" = "top" ] && [ -f "$HOME/.config/tint2/tint2rc" ]; then
+    sed -i 's/^panel_position = bottom /panel_position = top /' "$HOME/.config/tint2/tint2rc"
+    sed -i 's/^border_sides = T$/border_sides = B/' "$HOME/.config/tint2/tint2rc"
+fi
+[ -f "$HOME/.config/fcitx5/profile" ] || cp /etc/xdg/fcitx5/profile "$HOME/.config/fcitx5/profile" 2>/dev/null || true
+[ -f "$HOME/.config/fcitx5/config" ] || cp /etc/xdg/fcitx5/config "$HOME/.config/fcitx5/config" 2>/dev/null || true
 rm -f /tmp/.X0-lock /tmp/.X11-unix/X0 /data/SingletonLock /data/SingletonCookie /data/SingletonSocket 2>/dev/null || true
 
 RESOLUTION=${RESOLUTION:-1920x1080}
 WIDTH=$(echo "$RESOLUTION" | cut -d'x' -f1)
 HEIGHT=$(echo "$RESOLUTION" | cut -d'x' -f2)
-CHROME_RES="${WIDTH},${HEIGHT}"
+CHROME_WIN_H=$((HEIGHT - 36))
+[ "$CHROME_WIN_H" -gt 200 ] 2>/dev/null || CHROME_WIN_H="$HEIGHT"
+CHROME_RES="${WIDTH},${CHROME_WIN_H}"
+CHROME_POS="0,0"
+[ "${PANEL_POSITION:-bottom}" = "top" ] && CHROME_POS="0,36"
 HOMEPAGE="${HOMEPAGE:-about:blank}"
 CHROME_ARGS="${CHROME_ARGS:-}"
 FINAL_PEM="/etc/ssl/app/novnc.pem"
@@ -154,7 +174,11 @@ for i in $(seq 1 30); do
     sleep 0.1
 done
 
-# 3. 桌面背景、Num Lock 与 X11 剪贴板守护同步 (vncconfig + autocutsel)
+# 3. 桌面背景、D-Bus 会话、Num Lock、fcitx5 输入法与 X11 剪贴板守护同步
+if command -v dbus-launch >/dev/null 2>&1; then
+    eval "$(dbus-launch --sh-syntax)" >/dev/null 2>&1 || true
+    export DBUS_SESSION_BUS_ADDRESS
+fi
 if command -v xsetroot >/dev/null 2>&1; then
     DISPLAY=:0 xsetroot -solid "#0b1120" >/dev/null 2>&1 || true
 fi
@@ -168,11 +192,40 @@ if command -v autocutsel >/dev/null 2>&1; then
     DISPLAY=:0 autocutsel -fork >/dev/null 2>&1 &
 fi
 
-# 4. 启动定制化 Openbox 窗口管理器与 tint2 底部工具栏
+# 4. 启动定制化 Openbox 窗口管理器、tint2 工具栏守护与 fcitx5 拼音输入法
 openbox &
-sleep 0.4
+if command -v xprop >/dev/null 2>&1; then
+    for i in $(seq 1 50); do
+        if DISPLAY=:0 xprop -root _NET_SUPPORTING_WM_CHECK >/dev/null 2>&1; then
+            break
+        fi
+        sleep 0.1
+    done
+else
+    sleep 1
+fi
+
 if command -v tint2 >/dev/null 2>&1; then
-    tint2 >/dev/null 2>&1 &
+    (
+        while true; do
+            DISPLAY=:0 tint2 -c "$HOME/.config/tint2/tint2rc" >>/tmp/tint2.log 2>&1 || true
+            sleep 2
+        done
+    ) &
+    if command -v xprop >/dev/null 2>&1; then
+        for i in $(seq 1 30); do
+            if DISPLAY=:0 xprop -name tint2 >/dev/null 2>&1; then
+                break
+            fi
+            sleep 0.1
+        done
+    else
+        sleep 0.8
+    fi
+fi
+
+if command -v fcitx5 >/dev/null 2>&1; then
+    DISPLAY=:0 fcitx5 -d >/tmp/fcitx5.log 2>&1 &
 fi
 
 # 5. 双端口启动 HTTP:6080 与 HTTPS:6443
@@ -274,7 +327,7 @@ while true; do
         --remote-debugging-port=9222 \
         --remote-allow-origins=* \
         --window-size="${CHROME_RES}" \
-        --window-position=0,0 \
+        --window-position="${CHROME_POS}" \
         --start-maximized \
         --user-data-dir=/data \
         $EXTRA_SHM_FLAG \

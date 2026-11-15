@@ -53,6 +53,7 @@ FROM debian:bookworm-slim
 ARG PUID=1000
 ARG PGID=1000
 ARG TZ=Asia/Shanghai
+ARG ENABLE_IME=false
 
 ENV DEBIAN_FRONTEND=noninteractive \
     TZ=${TZ} \
@@ -70,13 +71,19 @@ ENV DEBIAN_FRONTEND=noninteractive \
     XDG_CONFIG_HOME=/home/appuser/.config \
     XDG_CACHE_HOME=/home/appuser/.cache \
     PYTHONUNBUFFERED=1 \
-    PYTHONDONTWRITEBYTECODE=1
+    PYTHONDONTWRITEBYTECODE=1 \
+    OPENBOX_LANG=zh \
+    PANEL_POSITION=bottom
 
 # 仅提取分阶段构建产出的 2 个时区文件，不安装 tzdata 软件包
 COPY --from=py-builder /etc/localtime /etc/localtime
 COPY --from=py-builder /etc/timezone /etc/timezone
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN IME_PKGS=""; \
+    if [ "${ENABLE_IME}" = "true" ] || [ "${ENABLE_IME}" = "1" ]; then \
+        IME_PKGS="dbus-x11 fcitx5 fcitx5-pinyin fcitx5-frontend-gtk3"; \
+    fi; \
+    apt-get update && apt-get install -y --no-install-recommends \
     dumb-init \
     gosu \
     chromium \
@@ -90,6 +97,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     xterm \
     librsvg2-common \
     x11-xserver-utils \
+    x11-utils \
     websockify \
     socat \
     numlockx \
@@ -98,6 +106,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     openssl \
     ca-certificates \
     python3 \
+    $IME_PKGS \
     && echo "zh_CN.UTF-8 UTF-8" > /etc/locale.gen \
     && echo "en_US.UTF-8 UTF-8" >> /etc/locale.gen \
     && locale-gen \
@@ -115,10 +124,11 @@ COPY --from=py-builder /opt/novnc /usr/share/novnc
 RUN ln -f /usr/share/novnc/vnc.html /usr/share/novnc/index.html \
     && chmod 755 /usr/share/novnc/utils/novnc_proxy
 
-# 定制化 Openbox (Wimotek-Dark) + tint2 底部工具栏 + 快捷脚本
+# 定制化 Openbox (Wimotek-Dark) + tint2 工具栏 + fcitx5 拼音 + 快捷脚本
 COPY desktop/openbox/ /etc/xdg/openbox/
 COPY desktop/themes/Wimotek-Dark/ /usr/share/themes/Wimotek-Dark/
 COPY desktop/tint2/tint2rc /etc/xdg/tint2/tint2rc
+COPY desktop/fcitx5/ /etc/xdg/fcitx5/
 COPY desktop/applications/ /usr/share/applications/
 COPY desktop/icons/ /usr/share/icons/wimotek/
 COPY --chmod=755 desktop/bin/ /usr/local/bin/
@@ -126,10 +136,11 @@ COPY --chmod=755 desktop/bin/ /usr/local/bin/
 RUN groupadd -g "${PGID}" appuser \
     && useradd -m -u "${PUID}" -g "${PGID}" -s /bin/bash appuser \
     && mkdir -p /data /certs /etc/ssl/app /tmp/crashpad /tmp/.X11-unix \
-        /home/appuser/.vnc /home/appuser/.config/openbox /home/appuser/.config/tint2 \
+        /home/appuser/.vnc /home/appuser/.config/openbox /home/appuser/.config/tint2 /home/appuser/.config/fcitx5 \
         /home/appuser/.cache/openbox /home/appuser/.cache/fontconfig \
     && cp /etc/xdg/openbox/rc.xml /etc/xdg/openbox/menu.xml /home/appuser/.config/openbox/ \
     && cp /etc/xdg/tint2/tint2rc /home/appuser/.config/tint2/tint2rc \
+    && cp /etc/xdg/fcitx5/profile /etc/xdg/fcitx5/config /home/appuser/.config/fcitx5/ \
     && chown -R "${PUID}:${PGID}" /data /etc/ssl/app /tmp/crashpad /home/appuser \
     && chmod 1777 /tmp /tmp/.X11-unix /tmp/crashpad
 

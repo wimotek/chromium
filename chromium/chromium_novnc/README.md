@@ -25,9 +25,10 @@
 * **HTTPS 无感双向剪贴板 & UTF-8 支持**：
   * **noVNC 节点**升级至 **noVNC v1.5.0**（支持 RFB `ExtendedClipboard` UTF-8 中文传输），内置 `clipboard-sync.js` 自动桥接浏览器 `navigator.clipboard`（HTTPS 下窗口聚焦、点击画布或 `Ctrl+V` / macOS `Cmd+V` 自动将本地剪贴板推送到远程；远程 `Ctrl+C` 复制自动回写本地剪贴板），后端配合 `vncconfig -nowin` + `autocutsel` 及 `-SendPrimary=0` 防止鼠标划选误覆盖本地剪贴板；
   * **KasmVNC 节点**采用标准 `data_loss_prevention.clipboard` 配置（禁用 `primary_clipboard_enabled` 防误触）+ `autocutsel` 同步；若处于纯 HTTP 非安全上下文，可通过底部工具栏「剪贴板助手」或 noVNC 侧边栏手动同步。
-* **定制化 Openbox (`Wimotek-Dark`) + `tint2` 快捷工具栏**：
-  * **底部 `36px` 工具栏 (`tint2`)**：左侧一键快捷按钮（新建 Chromium 窗口、无痕窗口、UTF-8 终端、剪贴板助手、安全重启 Chromium），中部实时任务栏（点击切换/最小化、中键关闭），右侧托盘与时钟；
-  * **Openbox 增强交互**：定制深色主题与中文字体支持、双语桌面右键菜单、自动最大化兼容工作区、支持 `Win+← / Win+→` 左右半屏分屏、`Win+D` 显示桌面、`Alt+F11` 全屏、`Ctrl+Alt+T` 终端、`Ctrl+Alt+N` 新窗口与 `Alt+左/右键拖拽` 移动缩放。
+* **定制化 Openbox (`Wimotek-Dark`) + `tint2` 快捷工具栏 + `fcitx5` 拼音输入法**：
+  * **36px 工具栏 (`tint2`)**：默认位于底部（可通过右键菜单或 `PANEL_POSITION=top` 切换至顶部）；左侧一键快捷按钮（新建 Chromium 窗口、无痕窗口、UTF-8 终端、剪贴板助手、安全重启 Chromium），中部实时任务栏，右侧托盘与时钟；
+  * **中英文双切换**：① **输入法切换**：支持 `fcitx5` + `fcitx5-pinyin`（**KasmVNC 版默认内置，noVNC 版默认不安装以保持极简，可通过 `--build-arg ENABLE_IME=true` 开启**），开启后按 `Ctrl+Space` 或点击托盘图标切换中文拼音/英文输入；② **Openbox 菜单语言切换**：右键桌面菜单支持一键在中/英文之间切换（或通过 `OPENBOX_LANG=en` 指定）；
+  * **Openbox 增强交互**：`Wimotek-Dark` 为深色窗口标题栏与右键菜单主题；支持 `Win+← / Win+→` 左右半屏分屏、`Win+D` 显示桌面、`Alt+F11` 全屏、`Ctrl+Alt+T` 终端、`Ctrl+Alt+N` 新窗口与 `Alt+左/右键拖拽` 移动缩放。
 
 ---
 
@@ -60,8 +61,13 @@ rm -rf chromium_kasmvnc/desktop && cp -r common/desktop chromium_kasmvnc/desktop
 docker build -t wimotek/chromium:kasmvnc ./chromium_kasmvnc
 ```
 
-如需自定义构建 UID/GID（例如与宿主机非 1000 用户对齐）：
+如需自定义构建 UID/GID 或开启/关闭中文拼音输入法（`ENABLE_IME` 在 `chromium_novnc` 默认为 `false`、在 `chromium_kasmvnc` 默认为 `true`）：
 ```bash
+# 例：为 noVNC 版启用内置 fcitx5 中文拼音输入法
+docker build --build-arg ENABLE_IME=true \
+  -t wimotek/chromium:novnc ./chromium_novnc
+
+# 例：自定义宿主机 UID/GID
 docker build --build-arg PUID=$(id -u) --build-arg PGID=$(id -g) \
   -t wimotek/chromium:novnc ./chromium_novnc
 ```
@@ -153,4 +159,6 @@ docker run -d \
 | `EDGE_WSS_PORT` | `9443` | 节点容器内部监听的双栈鉴权加密 WSS 服务端口 |
 | `EDGE_WSS_EXTERNAL_PORT` | `EDGE_WSS_PORT` | 宿主机映射到公网的 WSS 端口（如 `-p 19443:9443` 时填 `19443`；兼容旧变量 `DIRECT_PORT`） |
 | `CDP_FORWARD_PORT` | *(空，不启用)* | 可选 `socat` 明文 CDP 转发端口；仅设置后才启动 `socat` 转发到 `127.0.0.1:9222`（填 `true` 默认使用 `9223`，或填自定义端口号；也支持 `ENABLE_CDP_FORWARD=true`） |
+| `OPENBOX_LANG` | `zh` | Openbox 桌面右键菜单默认语言（`zh` 中文 / `en` 英文，支持右键一键切换） |
+| `PANEL_POSITION` | `bottom` | `tint2` 快捷工具栏默认停靠位置（`bottom` 底部 / `top` 顶部，支持右键一键切换） |
 | `TZ` | `Asia/Shanghai` | 构建期 `--build-arg TZ=...` 与运行时默认时区（分阶段仅提取 `/etc/localtime` 与 `/etc/timezone`） |

@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+TARGET="${1:-}"
+CFG="$HOME/.config/openbox/menu.xml"
+
+if [ -z "$TARGET" ]; then
+    if grep -q "Wimotek Workspace" "$CFG" 2>/dev/null; then
+        TARGET="zh"
+    else
+        TARGET="en"
+    fi
+fi
+
+if [ "$TARGET" = "en" ] && [ -f /etc/xdg/openbox/menu.en.xml ]; then
+    cp /etc/xdg/openbox/menu.en.xml "$CFG"
+elif [ -f /etc/xdg/openbox/menu.zh.xml ]; then
+    cp /etc/xdg/openbox/menu.zh.xml "$CFG"
+fi
+
+openbox --reconfigure >/dev/null 2>&1 || true

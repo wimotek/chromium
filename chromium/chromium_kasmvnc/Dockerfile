@@ -41,6 +41,7 @@ FROM debian:bookworm-slim
 ARG PUID=1000
 ARG PGID=1000
 ARG TZ=Asia/Shanghai
+ARG ENABLE_IME=true
 
 ENV DEBIAN_FRONTEND=noninteractive \
     TZ=${TZ} \
@@ -58,14 +59,20 @@ ENV DEBIAN_FRONTEND=noninteractive \
     XDG_CONFIG_HOME=/home/kasm-user/.config \
     XDG_CACHE_HOME=/home/kasm-user/.cache \
     PYTHONUNBUFFERED=1 \
-    PYTHONDONTWRITEBYTECODE=1
+    PYTHONDONTWRITEBYTECODE=1 \
+    OPENBOX_LANG=zh \
+    PANEL_POSITION=bottom
 
 # 仅提取分阶段构建产出的 2 个时区文件，不安装 tzdata 软件包
 COPY --from=builder /etc/localtime /etc/localtime
 COPY --from=builder /etc/timezone /etc/timezone
 COPY --from=builder /tmp/kasmvnc.deb /tmp/kasmvnc.deb
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN IME_PKGS=""; \
+    if [ "${ENABLE_IME}" = "true" ] || [ "${ENABLE_IME}" = "1" ]; then \
+        IME_PKGS="dbus-x11 fcitx5 fcitx5-pinyin fcitx5-frontend-gtk3"; \
+    fi; \
+    apt-get update && apt-get install -y --no-install-recommends \
     dumb-init \
     gosu \
     chromium \
@@ -76,6 +83,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     xclip \
     librsvg2-common \
     x11-xserver-utils \
+    x11-utils \
+    $IME_PKGS \
     socat \
     numlockx \
     locales \
@@ -106,10 +115,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         /usr/share/info/* \
         /tmp/*
 
-# 定制化 Openbox (Wimotek-Dark) + tint2 底部工具栏 + 快捷脚本
+# 定制化 Openbox (Wimotek-Dark) + tint2 工具栏 + fcitx5 拼音 + 快捷脚本
 COPY desktop/openbox/ /etc/xdg/openbox/
 COPY desktop/themes/Wimotek-Dark/ /usr/share/themes/Wimotek-Dark/
 COPY desktop/tint2/tint2rc /etc/xdg/tint2/tint2rc
+COPY desktop/fcitx5/ /etc/xdg/fcitx5/
 COPY desktop/applications/ /usr/share/applications/
 COPY desktop/icons/ /usr/share/icons/wimotek/
 COPY --chmod=755 desktop/bin/ /usr/local/bin/
@@ -118,10 +128,11 @@ RUN groupadd -g "${PGID}" kasm-user \
     && useradd -m -u "${PUID}" -g "${PGID}" -s /bin/bash kasm-user \
     && usermod -aG ssl-cert kasm-user \
     && mkdir -p /data /certs /etc/ssl/app /tmp/crashpad /tmp/.X11-unix \
-        /home/kasm-user/.vnc /home/kasm-user/.config/openbox /home/kasm-user/.config/tint2 \
+        /home/kasm-user/.vnc /home/kasm-user/.config/openbox /home/kasm-user/.config/tint2 /home/kasm-user/.config/fcitx5 \
         /home/kasm-user/.cache/openbox /home/kasm-user/.cache/fontconfig /etc/kasmvnc \
     && cp /etc/xdg/openbox/rc.xml /etc/xdg/openbox/menu.xml /home/kasm-user/.config/openbox/ \
     && cp /etc/xdg/tint2/tint2rc /home/kasm-user/.config/tint2/tint2rc \
+    && cp /etc/xdg/fcitx5/profile /etc/xdg/fcitx5/config /home/kasm-user/.config/fcitx5/ \
     && chown -R "${PUID}:${PGID}" /data /etc/ssl/app /tmp/crashpad /home/kasm-user /etc/kasmvnc \
     && chmod 1777 /tmp /tmp/.X11-unix /tmp/crashpad
 
