@@ -14,7 +14,7 @@ import random
 import time
 import math
 from typing import Tuple, Dict, Any, Optional
-from core.db import get_db
+from core.cache import cache
 
 # 汉字数字映射表
 CN_NUMS = {
@@ -223,20 +223,15 @@ def _generate_hardened_svg(expr: str) -> str:
 
 def check_ip_rate_limit(ip: str) -> Tuple[bool, str]:
     """
-    检查指定 IP 是否因频繁验证失败而被熔断锁定
+    检查指定 IP 是否因频繁验证失败而被熔断锁定（优先走 Redis，故障/未启用自动回退 SQL kv_cache）
     """
     if not ip or ip in ('127.0.0.1', 'localhost', '::1'):
         return True, ""
 
-    now = time.time()
-    conn = get_db()
-    c = conn.cursor()
-    c.execute("SELECT fail_count, lock_until FROM ip_security_limits WHERE ip=?", (ip,))
-    row = c.fetchone()
-    conn.close()
-
-    if row:
-        lock_until = row["lock_until"] or 0
+    lock_data = cache.get_json(f"ip_lock:{ip}")
+    if isinstance(lock_data, dict):
+        lock_until = float(lock_data.get("lock_until") or 0)
+        now = time.time()
         if lock_until > now:
             remaining_mins = max(1, int(math.ceil((lock_until - now) / 60)))
             return False, f"安全熔断：检测到高频失败尝试，该IP已被临时锁定，请 {remaining_mins} 分钟后再试"
@@ -251,35 +246,16 @@ def record_ip_attempt_result(ip: str, success: bool):
     if not ip or ip in ('127.0.0.1', 'localhost', '::1'):
         return
 
-    now = time.time()
-    conn = get_db()
-    c = conn.cursor()
-    c.execute("SELECT fail_count, lock_until FROM ip_security_limits WHERE ip=?", (ip,))
-    row = c.fetchone()
+    fail_key = f"ip_fail:{ip}"
+    lock_key = f"ip_lock:{ip}"
 
     if success:
-        if row:
-            c.execute("DELETE FROM ip_security_limits WHERE ip=?", (ip,))
-            conn.commit()
-    else:
-        current_fails = (row["fail_count"] if row else 0) + 1
-        lock_until = 0
-        # 连续失败达 5 次，锁定 15 分钟 (900秒)
-        if current_fails >= 5:
-            lock_until = now + 900
-        
-        c.execute(
-            """INSERT INTO ip_security_limits (ip, fail_count, lock_until, last_attempt) 
-               VALUES (?, ?, ?, ?)
-               ON CONFLICT(ip) DO UPDATE SET 
-                 fail_count=excluded.fail_count,
-                 lock_until=excluded.lock_until,
-                 last_attempt=excluded.last_attempt""",
-            (ip, current_fails, lock_until, now)
-        )
-        conn.commit()
+        cache.delete(fail_key, lock_key)
+        return
 
-    conn.close()
+    current_fails = cache.incr_with_ttl(fail_key, ttl=900)
+    if current_fails >= 5:
+        cache.set_json(lock_key, {"lock_until": time.time() + 900}, ttl=900)
 
 
 def generate_math_captcha(client_ip: Optional[str] = None) -> dict:
@@ -291,16 +267,11 @@ def generate_math_captcha(client_ip: Optional[str] = None) -> dict:
     now = time.time()
     expire_at = now + 300  # 5分钟有效期
 
-    conn = get_db()
-    c = conn.cursor()
-    # 清理过期验证码
-    c.execute("DELETE FROM captchas WHERE expire_at < ?", (now,))
-    c.execute(
-        "INSERT INTO captchas (id, answer, expire_at, created_at) VALUES (?, ?, ?, ?)",
-        (cid, ans.upper(), expire_at, now)
+    cache.set_json(
+        f"captcha:{cid}",
+        {"answer": ans.upper(), "expire_at": expire_at, "created_at": now},
+        ttl=300,
     )
-    conn.commit()
-    conn.close()
 
     svg = _generate_hardened_svg(expr)
 
@@ -339,23 +310,14 @@ def verify_captcha(
     if not cid or not ans:
         return False, "请输入验证码计算结果或答案"
 
-    conn = get_db()
-    c = conn.cursor()
-    c.execute("SELECT answer, expire_at, created_at FROM captchas WHERE id=?", (cid,))
-    row = c.fetchone()
-
-    if not row:
-        conn.close()
+    # 阅后即焚，原子读取并销毁，防止验证码被并发重放
+    row = cache.pop_json(f"captcha:{cid}")
+    if not isinstance(row, dict):
         return False, "验证码已失效或已被使用，请点击图片刷新"
 
-    correct_ans = str(row["answer"]).strip().upper()
-    expire_at = row["expire_at"]
-    created_at = row["created_at"] or 0
-
-    # 阅后即焚，防止验证码被并发重放
-    c.execute("DELETE FROM captchas WHERE id=?", (cid,))
-    conn.commit()
-    conn.close()
+    correct_ans = str(row.get("answer", "")).strip().upper()
+    expire_at = float(row.get("expire_at") or 0)
+    created_at = float(row.get("created_at") or 0)
 
     now = time.time()
 
