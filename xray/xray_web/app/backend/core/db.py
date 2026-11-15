@@ -8,6 +8,7 @@ SQLAlchemy 2.0 统一数据库引擎抽象层（全面兼容 SQLite WAL 与 MySQ
 - 幂等建表与历史表结构平滑升级
 """
 import datetime
+import fcntl
 import hashlib
 import os
 import secrets
@@ -20,6 +21,7 @@ from typing import Optional
 from sqlalchemy import create_engine, event, func, inspect, select, text
 from sqlalchemy.dialects.mysql import insert as mysql_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import sessionmaker
 
 from config import Config
@@ -142,7 +144,8 @@ def random_order_expr():
 
 
 def upsert_system_setting(session, key: str, value: str):
-    dialect = session.bind.dialect.name.lower() if session.bind else current_dialect()
+    bind = session.get_bind()
+    dialect = bind.dialect.name.lower() if bind else current_dialect()
     if dialect == "mysql":
         stmt = mysql_insert(SystemSetting).values(key=key, value=value)
         stmt = stmt.on_duplicate_key_update(value=stmt.inserted.value)
@@ -153,7 +156,8 @@ def upsert_system_setting(session, key: str, value: str):
 
 
 def upsert_kv_cache(session, cache_key: str, cache_val: str, expire_at: float):
-    dialect = session.bind.dialect.name.lower() if session.bind else current_dialect()
+    bind = session.get_bind()
+    dialect = bind.dialect.name.lower() if bind else current_dialect()
     if dialect == "mysql":
         stmt = mysql_insert(KvCache).values(
             cache_key=cache_key, cache_val=cache_val, expire_at=expire_at
@@ -246,64 +250,119 @@ def _upgrade_legacy_columns(eng):
     ensure_cols("captchas", [("created_at", "FLOAT DEFAULT 0")])
 
 
+@contextmanager
+def _init_db_lock():
+    """跨 Granian 多 Worker 进程初始化排他锁，杜绝并发建表与初始种子竞争"""
+    lock_candidates = []
+    db_dir = os.path.dirname(os.path.abspath(Config.DB_PATH)) if Config.DB_PATH else ""
+    if db_dir:
+        lock_candidates.append(os.path.join(db_dir, ".init_db.lock"))
+    lock_candidates.append("/tmp/.xray_web_init_db.lock")
+
+    lock_fd = None
+    for path in lock_candidates:
+        try:
+            parent = os.path.dirname(path)
+            if parent:
+                os.makedirs(parent, exist_ok=True)
+            lock_fd = open(path, "a+")
+            fcntl.flock(lock_fd, fcntl.LOCK_EX)
+            break
+        except OSError:
+            if lock_fd is not None:
+                try:
+                    lock_fd.close()
+                except Exception:
+                    pass
+                lock_fd = None
+    try:
+        yield
+    finally:
+        if lock_fd is not None:
+            try:
+                fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            except Exception:
+                pass
+            try:
+                lock_fd.close()
+            except Exception:
+                pass
+
+
+def _safe_create_all(eng):
+    """幂等建表：先整体尝试，若遇跨节点/进程并发建表冲突则逐表安全兜底"""
+    try:
+        Base.metadata.create_all(eng, checkfirst=True)
+    except OperationalError as exc:
+        if "already exists" not in str(exc).lower():
+            raise
+        for table in Base.metadata.sorted_tables:
+            try:
+                table.create(eng, checkfirst=True)
+            except OperationalError as t_exc:
+                if "already exists" not in str(t_exc).lower():
+                    raise
+
+
 def init_db(force_reload: bool = False):
-    eng = get_engine(force_reload=force_reload)
-    Base.metadata.create_all(eng)
-    _upgrade_legacy_columns(eng)
+    with _init_db_lock():
+        eng = get_engine(force_reload=force_reload)
+        _safe_create_all(eng)
+        _upgrade_legacy_columns(eng)
 
-    with db_session() as s:
-        defaults = {
-            "tofu_enabled": "true",
-            "cluster_token": "ctk_" + secrets.token_hex(16),
-            "node_auto_approve": "true",
-            "crypto_key_lock_enforced": "true",
-            "referral_enabled": "true",
-            "referral_inviter_traffic_gb": "10",
-            "referral_inviter_days": "30",
-            "referral_invitee_traffic_gb": "5",
-            "referral_invitee_days": "30",
-            "referral_max_per_user": "50",
-        }
-        for k, v in defaults.items():
-            exists = s.get(SystemSetting, k)
-            if not exists:
-                s.add(SystemSetting(key=k, value=v))
+        with db_session() as s:
+            defaults = {
+                "tofu_enabled": "true",
+                "cluster_token": "ctk_" + secrets.token_hex(16),
+                "node_auto_approve": "true",
+                "crypto_key_lock_enforced": "true",
+                "referral_enabled": "true",
+                "referral_inviter_traffic_gb": "10",
+                "referral_inviter_days": "30",
+                "referral_invitee_traffic_gb": "5",
+                "referral_invitee_days": "30",
+                "referral_max_per_user": "50",
+            }
+            for k, v in defaults.items():
+                exists = s.get(SystemSetting, k)
+                if not exists:
+                    s.add(SystemSetting(key=k, value=v))
 
-        # 初始管理员账号
-        admin_exists = s.scalar(select(User.id).where(User.role == "admin").limit(1))
-        if not admin_exists:
-            admin_user = os.getenv("ADMIN_USERNAME") or "admin"
-            admin_pwd = os.getenv("ADMIN_PASSWORD") or secrets.token_urlsafe(12)
-            ten_years = (datetime.datetime.now() + datetime.timedelta(days=3650)).strftime("%Y-%m-%d %H:%M:%S")
-            s.add(
-                User(
-                    username=admin_user,
-                    password_hash=hash_pwd(admin_pwd),
-                    uuid=str(uuid.uuid4()),
-                    email=f"{admin_user}@system.local",
-                    traffic_limit_mb=1048576,
-                    used_mb=0.0,
-                    expire_date=ten_years,
-                    role="admin",
-                    status=1,
-                    is_verified=1,
-                    user_group="admin",
+            # 初始管理员账号
+            admin_exists = s.scalar(select(User.id).where(User.role == "admin").limit(1))
+            if not admin_exists:
+                admin_user = os.getenv("ADMIN_USERNAME") or "admin"
+                admin_pwd = os.getenv("ADMIN_PASSWORD") or secrets.token_urlsafe(12)
+                ten_years = (datetime.datetime.now() + datetime.timedelta(days=3650)).strftime("%Y-%m-%d %H:%M:%S")
+                s.add(
+                    User(
+                        username=admin_user,
+                        password_hash=hash_pwd(admin_pwd),
+                        uuid=str(uuid.uuid4()),
+                        email=f"{admin_user}@system.local",
+                        traffic_limit_mb=1048576,
+                        used_mb=0.0,
+                        expire_date=ten_years,
+                        role="admin",
+                        status=1,
+                        is_verified=1,
+                        user_group="admin",
+                    )
                 )
-            )
-            s.flush()
+                s.flush()
 
-        # 首次安装向导标记判定：若已有配置文件或老集群已有节点/多个用户，自动标记已完成，避免老系统升级被锁
-        setup_row = s.get(SystemSetting, "setup_completed")
-        if Config.SETUP_COMPLETED:
-            upsert_system_setting(s, "setup_completed", "true")
-        elif not setup_row:
-            nodes_cnt = s.scalar(select(func.count()).select_from(Node)) or 0
-            users_cnt = s.scalar(select(func.count()).select_from(User)) or 0
-            auto_skip = os.getenv("AUTO_SKIP_SETUP", "").lower() in ("1", "true", "yes")
-            if auto_skip or nodes_cnt > 0 or users_cnt > 1:
-                s.add(SystemSetting(key="setup_completed", value="true"))
-            else:
-                s.add(SystemSetting(key="setup_completed", value="false"))
+            # 首次安装向导标记判定：若已有配置文件或老集群已有节点/多个用户，自动标记已完成，避免老系统升级被锁
+            setup_row = s.get(SystemSetting, "setup_completed")
+            if Config.SETUP_COMPLETED:
+                upsert_system_setting(s, "setup_completed", "true")
+            elif not setup_row:
+                nodes_cnt = s.scalar(select(func.count()).select_from(Node)) or 0
+                users_cnt = s.scalar(select(func.count()).select_from(User)) or 0
+                auto_skip = os.getenv("AUTO_SKIP_SETUP", "").lower() in ("1", "true", "yes")
+                if auto_skip or nodes_cnt > 0 or users_cnt > 1:
+                    s.add(SystemSetting(key="setup_completed", value="true"))
+                else:
+                    s.add(SystemSetting(key="setup_completed", value="false"))
 
 
 def is_setup_required() -> bool:

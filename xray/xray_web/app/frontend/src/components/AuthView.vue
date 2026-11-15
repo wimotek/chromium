@@ -35,7 +35,10 @@
             <label>SECURITY CAPTCHA / 人机安全验证 (点击图片刷新)</label>
             <div class="captcha-group">
               <input v-model="loginCaptchaAns" type="text" class="cyber-input captcha-input" :placeholder="loginCaptcha.hint || '答案/计算结果'" @keyup.enter="handleAuth" />
-              <div class="captcha-svg-box" @click="refreshCaptcha('login')" v-html="loginCaptcha.svg" title="点击刷新验证码"></div>
+              <div class="captcha-svg-box" @click="refreshCaptcha('login')" title="点击刷新验证码">
+                <div v-if="loginCaptcha.svg" class="captcha-svg-inner" v-html="loginCaptcha.svg"></div>
+                <span v-else class="captcha-fallback">点击刷新验证码</span>
+              </div>
             </div>
           </div>
           <button class="btn-cyber-primary" :disabled="loading" style="width: 100%; margin-top: 6px;" @click="handleAuth">
@@ -61,7 +64,10 @@
             <label>SECURITY CAPTCHA / 人机安全验证</label>
             <div class="captcha-group">
               <input v-model="registerCaptchaAns" type="text" class="cyber-input captcha-input" :placeholder="registerCaptcha.hint || '答案/计算结果'" />
-              <div class="captcha-svg-box" @click="refreshCaptcha('register')" v-html="registerCaptcha.svg" title="点击刷新验证码"></div>
+              <div class="captcha-svg-box" @click="refreshCaptcha('register')" title="点击刷新验证码">
+                <div v-if="registerCaptcha.svg" class="captcha-svg-inner" v-html="registerCaptcha.svg"></div>
+                <span v-else class="captcha-fallback">点击刷新验证码</span>
+              </div>
             </div>
           </div>
           <div class="form-item">
@@ -100,7 +106,10 @@
             <label>SECURITY CAPTCHA / 人机安全验证</label>
             <div class="captcha-group">
               <input v-model="forgotCaptchaAns" type="text" class="cyber-input captcha-input" :placeholder="forgotCaptcha.hint || '答案/计算结果'" />
-              <div class="captcha-svg-box" @click="refreshCaptcha('forgot')" v-html="forgotCaptcha.svg" title="点击刷新验证码"></div>
+              <div class="captcha-svg-box" @click="refreshCaptcha('forgot')" title="点击刷新验证码">
+                <div v-if="forgotCaptcha.svg" class="captcha-svg-inner" v-html="forgotCaptcha.svg"></div>
+                <span v-else class="captcha-fallback">点击刷新验证码</span>
+              </div>
             </div>
           </div>
           <div class="form-item">
@@ -489,12 +498,26 @@ const handleAuth = async () => {
   display: flex;
   align-items: center;
   justify-content: center;
+  min-width: 149px;
+  min-height: 46px;
   background: #0b1120;
   border: 1px solid #334155;
   border-radius: 6px;
   padding: 2px;
   transition: all 0.2s;
   user-select: none;
+}
+
+.captcha-svg-inner {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.captcha-fallback {
+  font-size: 12px;
+  color: #38bdf8;
+  padding: 0 10px;
 }
 
 .captcha-svg-box:hover {
