@@ -1,10 +1,11 @@
+import json
 import os
-import time
-import threading
+import sqlite3
 from datetime import datetime
 from flask import Blueprint, request, jsonify, send_file
 from config import Config
-from core.db import get_setting, set_setting
+from core.db import get_setting, set_setting, is_setup_required, invalidate_nodes_cache, invalidate_users_cache
+from core.cache import cache
 from services.notify_service import send_smtp_email
 from core.cert_manager import get_cert_info, generate_self_signed_cert
 from core.backup_manager import (
@@ -14,7 +15,8 @@ from core.backup_manager import (
     prune_old_backups,
     restore_database_from_backup,
     delete_backup_file,
-    ensure_backup_dir
+    ensure_backup_dir,
+    is_valid_backup_filename
 )
 from routes import check_admin, resolve_public_endpoint
 
@@ -22,14 +24,18 @@ system_bp = Blueprint('system_bp', __name__)
 
 @system_bp.route('/api/system/info', methods=['GET'])
 def system_info():
+    setup_req = is_setup_required()
     _, public_port, public_url = resolve_public_endpoint(request)
     return jsonify({
         "code": 200,
         "data": {
+            "setup_required": setup_req,
             "mode": Config.APP_MODE,
             "web_port": Config.WEB_PORT,
             "public_port": public_port,
             "public_url": public_url,
+            "db_dialect": Config.db_dialect(),
+            "cache_backend": cache.status()["backend"],
             "system_notice": get_setting("system_notice", "").strip()
         }
     })
@@ -99,6 +105,9 @@ def admin_backup_restore():
 
     ok, msg = restore_database_from_backup(filename)
     if ok:
+        cache.delete_prefix("setting:")
+        invalidate_nodes_cache()
+        invalidate_users_cache()
         return jsonify({"code": 200, "msg": msg})
     return jsonify({"code": 500, "msg": msg})
 
@@ -125,15 +134,14 @@ def admin_backup_download():
         return jsonify({"code": 403, "msg": "无权限"}), 403
 
     filename = request.args.get("filename", "").strip()
-    safe_name = os.path.basename(filename)
-    if safe_name != filename or not (safe_name.startswith("xray_backup_") and safe_name.endswith(".db")):
+    if not is_valid_backup_filename(filename):
         return jsonify({"code": 400, "msg": "非法文件名"}), 400
 
-    target = os.path.join(BACKUP_DIR, safe_name)
+    target = os.path.join(BACKUP_DIR, filename)
     if not os.path.exists(target):
         return jsonify({"code": 404, "msg": "备份文件不存在"}), 404
 
-    return send_file(target, as_attachment=True, download_name=safe_name)
+    return send_file(target, as_attachment=True, download_name=filename)
 
 @system_bp.route('/api/admin/backup/upload', methods=['POST'])
 def admin_backup_upload():
@@ -146,38 +154,51 @@ def admin_backup_upload():
         return jsonify({"code": 400, "msg": "未检测到上传文件"})
 
     uploaded_file = request.files['file']
-    if uploaded_file.filename == '':
+    orig_name = (uploaded_file.filename or '').strip()
+    if not orig_name:
         return jsonify({"code": 400, "msg": "文件名为空"})
 
-    if not uploaded_file.filename.endswith(".db"):
-        return jsonify({"code": 400, "msg": "仅允许上传 SQLite .db 格式备份文件"})
+    lower_name = orig_name.lower()
+    if lower_name.endswith(".db") or lower_name.endswith(".sqlite"):
+        ext = "db"
+    elif lower_name.endswith(".json"):
+        ext = "json"
+    else:
+        return jsonify({"code": 400, "msg": "仅支持上传 SQLite (.db/.sqlite) 或通用逻辑快照 (.json) 备份文件"})
 
     ensure_backup_dir()
     timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
-    safe_filename = f"xray_backup_{timestamp_str}_uploaded.db"
+    safe_filename = f"xray_backup_{timestamp_str}_uploaded.{ext}"
     dest_path = os.path.join(BACKUP_DIR, safe_filename)
 
     try:
         uploaded_file.save(dest_path)
-        # 验证 SQLite 文件完整性
-        import sqlite3
-        conn = sqlite3.connect(dest_path)
-        cursor = conn.cursor()
-        cursor.execute("PRAGMA quick_check;")
-        res = cursor.fetchone()
-        conn.close()
-
-        if not res or res[0] != "ok":
-            os.remove(dest_path)
-            return jsonify({"code": 400, "msg": "上传的文件非合法或完整 SQLite 数据库文件"})
+        if ext == "db":
+            conn = sqlite3.connect(dest_path)
+            cursor = conn.cursor()
+            cursor.execute("PRAGMA quick_check;")
+            res = cursor.fetchone()
+            conn.close()
+            if not res or res[0] != "ok":
+                os.remove(dest_path)
+                return jsonify({"code": 400, "msg": "上传的文件非合法或完整 SQLite 数据库文件"})
+        else:
+            with open(dest_path, "r", encoding="utf-8") as f:
+                payload = json.load(f)
+            tables = payload.get("tables") if isinstance(payload, dict) else None
+            if not isinstance(tables, dict) or not isinstance(tables.get("users"), list) or not isinstance(tables.get("nodes"), list):
+                os.remove(dest_path)
+                return jsonify({"code": 400, "msg": "上传的 JSON 快照结构无效，缺少 users / nodes 核心表"})
 
         max_count = int(get_setting("backup_max_count", "7") or 7)
         prune_old_backups(max_keep=max_count)
         return jsonify({"code": 200, "msg": f"外部备份文件已成功导入: {safe_filename}，可直接在列表中点击一键还原！"})
     except Exception as e:
         if os.path.exists(dest_path):
-            try: os.remove(dest_path)
-            except Exception: pass
+            try:
+                os.remove(dest_path)
+            except Exception:
+                pass
         return jsonify({"code": 500, "msg": f"保存上传备份失败: {str(e)}"})
 
 # ----------------- 系统常规配置项 -----------------

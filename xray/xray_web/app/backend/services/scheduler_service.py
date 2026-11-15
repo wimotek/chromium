@@ -1,9 +1,17 @@
-import time
+# -*- coding: utf-8 -*-
 import datetime
+import fcntl
+import os
 import threading
-from core.db import get_db, get_setting, set_setting
+import time
+
+from sqlalchemy import select
+
 from core.backup_manager import create_database_backup, prune_old_backups
-from services.notify_service import notify_user
+from core.db import db_session, get_setting, invalidate_users_cache, set_setting
+from core.models import AuditLog, Node, NotifyLog, User
+from services.notify_service import notify_admin, notify_user
+
 
 def run_scheduled_check(force: bool = False) -> tuple[int, int, str]:
     enable = get_setting("task_notify_enable", "true").lower() == "true"
@@ -17,78 +25,109 @@ def run_scheduled_check(force: bool = False) -> tuple[int, int, str]:
     current_day = today.day
 
     traffic_sent, expire_sent = 0, 0
-    conn = get_db()
-    c = conn.cursor()
-    c.execute("SELECT * FROM users WHERE status=1 AND is_verified=1 AND role='user'")
-    users = [dict(u) for u in c.fetchall()]
+    did_reset = False
 
-    for u in users:
-        uname = u["username"]
+    with db_session() as s:
+        users = s.scalars(
+            select(User).where(User.status == 1, User.is_verified == 1, User.role == "user")
+        ).all()
 
-        # 1. 每月固定套餐重置保证 (每个用户当月仅重置一次)
-        if u.get("is_monthly") == 1:
-            reset_day = int(u.get("reset_day", 1) or 1)
-            if current_day >= reset_day or force:
-                monthly_warn_key = f"monthly_reset_{current_year_month}"
-                c.execute("SELECT id FROM notify_logs WHERE username=? AND warn_type=?", (uname, monthly_warn_key))
-                if not c.fetchone() or force:
-                    c.execute("UPDATE users SET used_mb=0 WHERE username=?", (uname,))
-                    c.execute(
-                        "INSERT INTO notify_logs (username, warn_type, sent_date) VALUES (?, ?, ?)",
-                        (uname, monthly_warn_key, datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+        for u_obj in users:
+            u = u_obj.to_dict()
+            uname = u["username"]
+
+            # 1. 每月固定套餐重置保证 (每个用户当月仅重置一次)
+            if u.get("is_monthly") == 1:
+                reset_day = int(u.get("reset_day", 1) or 1)
+                if current_day >= reset_day or force:
+                    monthly_warn_key = f"monthly_reset_{current_year_month}"
+                    exists = s.scalar(
+                        select(NotifyLog.id).where(
+                            NotifyLog.username == uname,
+                            NotifyLog.warn_type == monthly_warn_key,
+                        ).limit(1)
                     )
-                    conn.commit()
-                    title = "【流量已重置】您的每月固定流量套餐已刷新"
-                    content = f"您好 {uname}，今天是您的每月固定套餐重置日（每月 {reset_day} 号），已用流量已恢复满格！"
-                    notify_user(u, title, f"<h3>{title}</h3><p>{content}</p>", content)
-
-        # 2. 流量不足预警防骚扰
-        used_mb = u.get("used_mb", 0)
-        limit_mb = u.get("traffic_limit_mb", 1024)
-
-        if limit_mb > 0:
-            used_percent = round((used_mb / limit_mb) * 100, 1)
-            if used_percent >= traffic_threshold:
-                traffic_warn_key = (
-                    f"traffic_warn_{current_year_month}_{limit_mb}"
-                    if u.get("is_monthly") == 1
-                    else f"traffic_warn_{limit_mb}"
-                )
-                c.execute("SELECT id FROM notify_logs WHERE username=? AND warn_type=?", (uname, traffic_warn_key))
-                if not c.fetchone() or force:
-                    title = "【流量预警】您的节点可用流量已不足"
-                    content = f"您好 {uname}，当前已用流量已达 {round(used_mb, 1)}MB / {limit_mb}MB ({used_percent}%)。请及时充值续费。"
-                    ok, _ = notify_user(u, title, f"<h3>{title}</h3><p>{content}</p>", content)
-                    if ok:
-                        traffic_sent += 1
-                        c.execute(
-                            "INSERT INTO notify_logs (username, warn_type, sent_date) VALUES (?, ?, ?)",
-                            (uname, traffic_warn_key, datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+                    if not exists or force:
+                        u_obj.used_mb = 0.0
+                        s.add(
+                            NotifyLog(
+                                username=uname,
+                                warn_type=monthly_warn_key,
+                                sent_date=datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                            )
                         )
-                        conn.commit()
+                        s.commit()
+                        did_reset = True
+                        title = "【流量已重置】您的每月固定流量套餐已刷新"
+                        content = f"您好 {uname}，今天是您的每月固定套餐重置日（每月 {reset_day} 号），已用流量已恢复满格！"
+                        notify_user(u, title, f"<h3>{title}</h3><p>{content}</p>", content)
 
-        # 3. 套餐到期预警防骚扰
-        exp_str = u.get("expire_date", "").strip()
-        if exp_str and not exp_str.startswith("2099"):
-            try:
-                exp_date = datetime.datetime.strptime(exp_str[:10], "%Y-%m-%d").date()
-                days_left = (exp_date - today).days
-                if 0 <= days_left <= expire_threshold_days:
-                    expire_warn_key = f"expire_warn_{exp_str[:10]}_days_{days_left}"
-                    c.execute("SELECT id FROM notify_logs WHERE username=? AND warn_type=?", (uname, expire_warn_key))
-                    if not c.fetchone() or force:
-                        title = "【到期提醒】您的节点套餐即将到期"
-                        content = f"您好 {uname}，您的节点服务套餐将于 {exp_str} 到期 (仅剩 {days_left} 天)。到期后服务将自动暂停。"
+            # 2. 流量不足预警防骚扰
+            used_mb = u.get("used_mb", 0) or 0
+            limit_mb = u.get("traffic_limit_mb", 1024) or 0
+
+            if limit_mb > 0:
+                used_percent = round((used_mb / limit_mb) * 100, 1)
+                if used_percent >= traffic_threshold:
+                    traffic_warn_key = (
+                        f"traffic_warn_{current_year_month}_{limit_mb}"
+                        if u.get("is_monthly") == 1
+                        else f"traffic_warn_{limit_mb}"
+                    )
+                    exists = s.scalar(
+                        select(NotifyLog.id).where(
+                            NotifyLog.username == uname,
+                            NotifyLog.warn_type == traffic_warn_key,
+                        ).limit(1)
+                    )
+                    if not exists or force:
+                        title = "【流量预警】您的节点可用流量已不足"
+                        content = f"您好 {uname}，当前已用流量已达 {round(used_mb, 1)}MB / {limit_mb}MB ({used_percent}%)。请及时充值续费。"
                         ok, _ = notify_user(u, title, f"<h3>{title}</h3><p>{content}</p>", content)
                         if ok:
-                            expire_sent += 1
-                            c.execute(
-                                "INSERT INTO notify_logs (username, warn_type, sent_date) VALUES (?, ?, ?)",
-                                (uname, expire_warn_key, datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+                            traffic_sent += 1
+                            s.add(
+                                NotifyLog(
+                                    username=uname,
+                                    warn_type=traffic_warn_key,
+                                    sent_date=datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                )
                             )
-                            conn.commit()
-            except Exception:
-                pass
+                            s.commit()
+
+            # 3. 套餐到期预警防骚扰
+            exp_str = (u.get("expire_date") or "").strip()
+            if exp_str and not exp_str.startswith("2099"):
+                try:
+                    exp_date = datetime.datetime.strptime(exp_str[:10], "%Y-%m-%d").date()
+                    days_left = (exp_date - today).days
+                    if 0 <= days_left <= expire_threshold_days:
+                        expire_warn_key = f"expire_warn_{exp_str[:10]}_days_{days_left}"
+                        exists = s.scalar(
+                            select(NotifyLog.id).where(
+                                NotifyLog.username == uname,
+                                NotifyLog.warn_type == expire_warn_key,
+                            ).limit(1)
+                        )
+                        if not exists or force:
+                            title = "【到期提醒】您的节点套餐即将到期"
+                            content = f"您好 {uname}，您的节点服务套餐将于 {exp_str} 到期 (仅剩 {days_left} 天)。到期后服务将自动暂停。"
+                            ok, _ = notify_user(u, title, f"<h3>{title}</h3><p>{content}</p>", content)
+                            if ok:
+                                expire_sent += 1
+                                s.add(
+                                    NotifyLog(
+                                        username=uname,
+                                        warn_type=expire_warn_key,
+                                        sent_date=datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                    )
+                                )
+                                s.commit()
+                except Exception:
+                    pass
+
+    if did_reset:
+        invalidate_users_cache()
 
     # 4. 检查隔离区待审批节点超时告警
     try:
@@ -96,17 +135,15 @@ def run_scheduled_check(force: bool = False) -> tuple[int, int, str]:
     except Exception as e:
         print(f"[Pending Nodes Check Error] {e}", flush=True)
 
-    conn.close()
     set_setting("task_last_run", datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
     return traffic_sent, expire_sent, f"检测完毕，已推送 {traffic_sent} 条流量预警，{expire_sent} 条到期预警"
+
 
 def check_pending_nodes_timeout(force: bool = False):
     """
     检查隔离区待审批 (is_approved=0) 节点的等待时长
     若超过系统设定的超时阈值 (默认 10 分钟)，且未被批准，按管理员设置的通道 (邮件/微信) 发送告警通知
     """
-    from services.notify_service import notify_admin
-
     notify_enabled = get_setting("pending_node_notify_enable", "true").lower() == "true"
     if not notify_enabled and not force:
         return
@@ -114,65 +151,73 @@ def check_pending_nodes_timeout(force: bool = False):
     timeout_minutes = int(get_setting("pending_node_timeout_min", "10") or 10)
     now = datetime.datetime.now()
 
-    conn = get_db()
-    c = conn.cursor()
-    c.execute("SELECT * FROM nodes WHERE is_approved=0")
-    pending_nodes = [dict(r) for r in c.fetchall()]
+    with db_session() as s:
+        pending_nodes = s.scalars(select(Node).where(Node.is_approved == 0)).all()
 
-    for node in pending_nodes:
-        nid = node.get("node_id")
-        nip = node.get("ip") or "未知IP"
-        nname = node.get("name") or nid
-        nmode = "WSS反穿 (NAT4)" if node.get("net_mode") == "reverse_wss" else "公网直连 (Reality)"
-        
-        hb_str = node.get("last_heartbeat") or ""
-        if not hb_str:
-            continue
+        for node_obj in pending_nodes:
+            node = node_obj.to_dict()
+            nid = node.get("node_id")
+            nip = node.get("ip") or "未知IP"
+            nname = node.get("name") or nid
+            nmode = "WSS反穿 (NAT4)" if node.get("net_mode") == "reverse_wss" else "公网直连 (Reality)"
 
-        try:
-            hb_time = datetime.datetime.strptime(hb_str, "%Y-%m-%d %H:%M:%S")
-        except Exception:
-            continue
+            hb_str = node.get("last_heartbeat") or ""
+            if not hb_str:
+                continue
 
-        waiting_minutes = int((now - hb_time).total_seconds() / 60)
+            try:
+                hb_time = datetime.datetime.strptime(hb_str, "%Y-%m-%d %H:%M:%S")
+            except Exception:
+                continue
 
-        # 超过配置的超时时间 (例如 10 分钟)
-        if waiting_minutes >= timeout_minutes or force:
-            warn_key = f"pending_timeout_{nid}"
-            c.execute("SELECT id FROM notify_logs WHERE username='ADMIN' AND warn_type=?", (warn_key,))
-            if not c.fetchone() or force:
-                title = f"⚠️【待审批节点超时告警】节点 {nname} 滞留隔离区超 {waiting_minutes} 分钟！"
-                html_body = f"""
-                <div style="font-family: sans-serif; line-height: 1.6; color: #222;">
-                    <h3 style="color: #d97706;">⚠️ 节点待审批超时提醒</h3>
-                    <p>管理员您好，系统检测到有新的边缘节点已长时间在隔离区等待审核，请及时登入控制台处理：</p>
-                    <table style="border-collapse: collapse; width: 100%; max-width: 500px; margin: 15px 0;">
-                        <tr><td style="padding: 6px; border: 1px solid #ddd; background: #f8fafc;"><b>节点名称:</b></td><td style="padding: 6px; border: 1px solid #ddd;">{nname}</td></tr>
-                        <tr><td style="padding: 6px; border: 1px solid #ddd; background: #f8fafc;"><b>节点 ID:</b></td><td style="padding: 6px; border: 1px solid #ddd;"><code>{nid}</code></td></tr>
-                        <tr><td style="padding: 6px; border: 1px solid #ddd; background: #f8fafc;"><b>来源 IP:</b></td><td style="padding: 6px; border: 1px solid #ddd;">{nip}:{node.get('port', 443)}</td></tr>
-                        <tr><td style="padding: 6px; border: 1px solid #ddd; background: #f8fafc;"><b>网络模式:</b></td><td style="padding: 6px; border: 1px solid #ddd;">{nmode}</td></tr>
-                        <tr><td style="padding: 6px; border: 1px solid #ddd; background: #f8fafc;"><b>滞留等待时长:</b></td><td style="padding: 6px; border: 1px solid #ddd; color: #dc2626; font-weight: bold;">{waiting_minutes} 分钟 (阈值: {timeout_minutes}m)</td></tr>
-                    </table>
-                    <p style="color: #64748b; font-size: 13px;">请前往 <b>管理后台 -> 节点管理 -> 待审批隔离区</b> 点击「通过审批」以允许该节点接入业务。</p>
-                </div>
-                """
-                text_body = f"【待审批节点超时告警】\n节点: {nname}\nID: {nid}\n来源: {nip}:{node.get('port', 443)}\n模式: {nmode}\n滞留等待: {waiting_minutes}分钟 (超限 {timeout_minutes}m)\n请登录管理控制台进行审批！"
+            waiting_minutes = int((now - hb_time).total_seconds() / 60)
 
-                ok, log_msg = notify_admin(title, html_body, text_body)
-                if ok:
-                    c.execute(
-                        "INSERT INTO notify_logs (username, warn_type, sent_date) VALUES ('ADMIN', ?, ?)",
-                        (warn_key, datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
-                    )
-                    c.execute(
-                        "INSERT INTO audit_logs (level, event_type, node_id, ip, message) VALUES (?, ?, ?, ?, ?)",
-                        ("warn", "PENDING_NODE_TIMEOUT_ALERT", nid, nip, f"待审批节点滞留超限 ({waiting_minutes}m)，已向管理员发送通知: {log_msg}")
-                    )
-                    conn.commit()
-    conn.close()
+            if waiting_minutes >= timeout_minutes or force:
+                warn_key = f"pending_timeout_{nid}"
+                exists = s.scalar(
+                    select(NotifyLog.id).where(
+                        NotifyLog.username == "ADMIN",
+                        NotifyLog.warn_type == warn_key,
+                    ).limit(1)
+                )
+                if not exists or force:
+                    title = f"⚠️【待审批节点超时告警】节点 {nname} 滞留隔离区超 {waiting_minutes} 分钟！"
+                    html_body = f"""
+                    <div style="font-family: sans-serif; line-height: 1.6; color: #222;">
+                        <h3 style="color: #d97706;">⚠️ 节点待审批超时提醒</h3>
+                        <p>管理员您好，系统检测到有新的边缘节点已长时间在隔离区等待审核，请及时登入控制台处理：</p>
+                        <table style="border-collapse: collapse; width: 100%; max-width: 500px; margin: 15px 0;">
+                            <tr><td style="padding: 6px; border: 1px solid #ddd; background: #f8fafc;"><b>节点名称:</b></td><td style="padding: 6px; border: 1px solid #ddd;">{nname}</td></tr>
+                            <tr><td style="padding: 6px; border: 1px solid #ddd; background: #f8fafc;"><b>节点 ID:</b></td><td style="padding: 6px; border: 1px solid #ddd;"><code>{nid}</code></td></tr>
+                            <tr><td style="padding: 6px; border: 1px solid #ddd; background: #f8fafc;"><b>来源 IP:</b></td><td style="padding: 6px; border: 1px solid #ddd;">{nip}:{node.get('port', 443)}</td></tr>
+                            <tr><td style="padding: 6px; border: 1px solid #ddd; background: #f8fafc;"><b>网络模式:</b></td><td style="padding: 6px; border: 1px solid #ddd;">{nmode}</td></tr>
+                            <tr><td style="padding: 6px; border: 1px solid #ddd; background: #f8fafc;"><b>滞留等待时长:</b></td><td style="padding: 6px; border: 1px solid #ddd; color: #dc2626; font-weight: bold;">{waiting_minutes} 分钟 (阈值: {timeout_minutes}m)</td></tr>
+                        </table>
+                        <p style="color: #64748b; font-size: 13px;">请前往 <b>管理后台 -> 节点管理 -> 待审批隔离区</b> 点击「通过审批」以允许该节点接入业务。</p>
+                    </div>
+                    """
+                    text_body = f"【待审批节点超时告警】\n节点: {nname}\nID: {nid}\n来源: {nip}:{node.get('port', 443)}\n模式: {nmode}\n滞留等待: {waiting_minutes}分钟 (超限 {timeout_minutes}m)\n请登录管理控制台进行审批！"
 
-import os
-import fcntl
+                    ok, log_msg = notify_admin(title, html_body, text_body)
+                    if ok:
+                        s.add(
+                            NotifyLog(
+                                username="ADMIN",
+                                warn_type=warn_key,
+                                sent_date=datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                            )
+                        )
+                        s.add(
+                            AuditLog(
+                                level="warn",
+                                event_type="PENDING_NODE_TIMEOUT_ALERT",
+                                node_id=nid,
+                                ip=nip,
+                                message=f"待审批节点滞留超限 ({waiting_minutes}m)，已向管理员发送通知: {log_msg}",
+                            )
+                        )
+                        s.commit()
+
 
 def check_and_run_auto_backup():
     """定期自动数据库备份巡检"""
@@ -209,6 +254,7 @@ def check_and_run_auto_backup():
     except Exception as e:
         print(f"[Scheduler Backup Error] {e}", flush=True)
 
+
 def start_scheduler_thread():
     """多进程守护线程：使用 fcntl 文件锁进行 Leader 选举，确保多 Worker 场景下仅有单进程执行巡检"""
     lock_file = "/data/.scheduler.lock"
@@ -216,9 +262,7 @@ def start_scheduler_thread():
     def loop():
         try:
             os.makedirs("/data", exist_ok=True)
-            # 保持文件句柄常开持有锁
             lock_fd = open(lock_file, "a+")
-            # 尝试非阻塞获取排他锁
             fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
             print(f"[Scheduler Leader] 进程 (PID: {os.getpid()}) 成功获取全局调度锁，启动后台任务与数据库定期自动备份。", flush=True)
         except (IOError, BlockingIOError, PermissionError):
@@ -230,6 +274,8 @@ def start_scheduler_thread():
             try:
                 run_scheduled_check(force=False)
                 check_and_run_auto_backup()
+                from core.cache import cache
+                cache.cleanup_expired_sql()
             except Exception as e:
                 print(f"[Scheduler Loop Error] {e}", flush=True)
             time.sleep(900)

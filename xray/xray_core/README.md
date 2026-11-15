@@ -130,9 +130,65 @@ docker compose up -d
 ```
 或直接在 Web 控制面板后台为该节点切换模式，节点下次心跳将自动热切换拉起反穿隧道。
 
-### 方式 4：纯单机运行（不连 Hub 控制中心）
+### 方式 4：纯单机部署示例（不连 Hub 控制中心）
 
-若不配置 `PANEL_URL`，系统将自动进入单机独立模式，在终端日志及 `./data/client_info.txt` 输出开箱即用的客户端 `vless://` 直连链接。
+无需部署 `xray_web` 主控端，不填写 `PANEL_URL` 即可进入纯单机模式（自动生成 X25519 密钥对、`ShortId`、`config.json`，并将完整客户端配置与 `vless://` 导入链接输出到控制台日志及 `./data/client_info.txt`）。
+
+#### 1) Docker Run 单机一键启动
+
+```bash
+# 1. 创建并授权持久化数据目录 (非 root UID 10001 必需)
+mkdir -p ./data && chown -R 10001:10001 ./data
+
+# 2. 生成随机客户端 UUID 并启动纯单机 VLESS-REALITY 节点
+docker run -d \
+  --name xray-standalone \
+  --restart always \
+  --network host \
+  -e TZ="Asia/Shanghai" \
+  -e UUID="$(cat /proc/sys/kernel/random/uuid)" \
+  -e PORT=443 \
+  -e DEST="www.microsoft.com:443" \
+  -e SERVER_NAMES="www.microsoft.com,microsoft.com" \
+  -v $(pwd)/data:/data \
+  ghcr.io/wimotek/xray:latest
+```
+
+> **提示**：若宿主机系统无 `/proc/sys/kernel/random/uuid`，可替换为 `uuidgen` 或任意标准 UUIDv4；若未指定 `UUID`，默认使用 `11111111-2222-3333-4444-555555555555`（生产单机使用**强烈建议自定义随机 UUID**）。
+
+#### 2) Docker Compose 单机配置 (`docker-compose.yml`)
+
+```yaml
+services:
+  xray-standalone:
+    image: ghcr.io/wimotek/xray:latest
+    container_name: xray-standalone
+    restart: unless-stopped
+    network_mode: "host"
+    environment:
+      - TZ=Asia/Shanghai
+      # 不配置 PANEL_URL 即自动开启纯单机模式
+      - UUID=请替换为随机UUIDv4
+      - PORT=443
+      - DEST=www.microsoft.com:443
+      - SERVER_NAMES=www.microsoft.com,microsoft.com
+      # 若机器在 NAT 后或无法自动探测公网 IP，可手动指定对外连接地址：
+      # - SERVER_IP=你的公网IP或域名
+    volumes:
+      - ./data:/data
+```
+
+#### 3) 获取客户端导入链接与节点凭据
+
+启动数秒后，通过日志或持久化文件即可直接复制 `vless://` 链接导入 **v2rayN / Clash Verge / Sing-box / Shadowrocket**：
+
+```bash
+# 方式一：查看容器实时输出的配置信息与 vless:// 链接
+docker logs xray-standalone
+
+# 方式二：直接读取持久化目录生成的配置摘要
+cat ./data/client_info.txt
+```
 
 ---
 
@@ -141,6 +197,7 @@ docker compose up -d
 | 环境变量 | 默认值 | 作用说明 |
 | :--- | :--- | :--- |
 | `PANEL_URL` | *(空)* | Hub 控制中心访问地址（例：`https://hub.example.com:8443`）。若留空则为纯单机模式 |
+| `UUID` | `11111111-2222-3333-4444-555555555555` | 纯单机模式下使用的客户端连接 UUID（接入 Hub 后由主控用户列表下发接管） |
 | `CLUSTER_TOKEN` | *(空)* | 集群引导令牌或 Hub 签发的 40 字符单次 Join Token（首次连接用于 TOFU 认证）。也可用 `NODE_KEY` |
 | `NET_MODE` | `auto` | 网络模式：`auto`（上报双栈 IP 由 Hub 主动拨测裁决）、`direct`（强制公网直连 REALITY）、`reverse_wss`（强制反向隧道穿透） |
 | `EDGE_AGENT_REVERSE_TUNNEL` | *(空)* | 可选布尔覆写：`true` 强制反穿 |

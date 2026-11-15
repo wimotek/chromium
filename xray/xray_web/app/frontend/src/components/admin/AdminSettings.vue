@@ -58,8 +58,8 @@
             <div class="panel-title-wrap">
               <span class="panel-icon">⚡</span>
               <div>
-                <strong class="panel-title">SQLite 数据库自动化热备份策略与配额限制</strong>
-                <div class="panel-sub">基于 SQLite 原生 WAL 联机热备份机制，零锁表、零卡顿、原子级防损</div>
+                <strong class="panel-title">双引擎数据库自动化热备份策略与配额限制</strong>
+                <div class="panel-sub">SQLite 自动使用原生 WAL 无锁热备 (.db)；MySQL 自动导出事务级逻辑快照 (.json)</div>
               </div>
             </div>
             <label class="radio-label" style="margin: 0;">
@@ -102,9 +102,9 @@
           <div class="backup-actions-bar">
             <button class="btn-cyber-primary" @click="saveAllSettings">💾 保存备份策略</button>
             <div style="display: flex; gap: 10px;">
-              <input type="file" ref="fileUploadRef" accept=".db,.sqlite" style="display: none;" @change="handleUploadDbFile" />
+              <input type="file" ref="fileUploadRef" accept=".db,.sqlite,.json" style="display: none;" @change="handleUploadDbFile" />
               <button class="btn-cyber-action" :disabled="uploadingBackup" @click="$refs.fileUploadRef.click()">
-                {{ uploadingBackup ? '正在上传...' : '📤 上传外部 .db 文件导入' }}
+                {{ uploadingBackup ? '正在上传...' : '📤 上传 .db / .json 快照导入' }}
               </button>
               <button class="btn-cyber-success" :disabled="creatingBackup" @click="handleCreateBackupNow">
                 {{ creatingBackup ? '正在生成快照...' : '⚡ 立即创建热备份快照' }}
@@ -169,9 +169,9 @@
           </div>
 
           <div class="backup-tips-box">
-            <strong style="color: #fbbf24; display: block; margin-bottom: 4px;">🛡️ 数据库安全恢复机制说明：</strong>
-            <div>• <b>执行恢复前自动冷备：</b>系统在执行任何快照还原前，会自动将当前运行数据库备份为 <code>xray_web.db.pre_restore_safety_bak</code>，保障误操作可即刻回滚。</div>
-            <div>• <b>临时碎片清理与完整性自检：</b>还原期间自动清理 <code>-wal</code> 与 <code>-shm</code> 缓存碎片，并在替换后自动执行 SQLite <code>PRAGMA integrity_check</code>，确保数据零损坏！</div>
+            <strong style="color: #fbbf24; display: block; margin-bottom: 4px;">🛡️ 双引擎数据库安全恢复机制说明：</strong>
+            <div>• <b>SQLite 模式 (.db)：</b>还原前自动冷备 <code>.pre_restore_safety_bak</code>，自动清理 <code>-wal / -shm</code> 碎片，替换后自动执行 <code>PRAGMA integrity_check</code> 校验。</div>
+            <div>• <b>MySQL / 跨库逻辑快照 (.json)：</b>基于 SQLAlchemy 事务级全表导入，发生任何异常自动回滚，支持 SQLite 与 MySQL 之间迁移。</div>
           </div>
         </div>
       </div>
@@ -815,12 +815,13 @@ const executeRestore = async () => {
   }
 }
 
-// 上传外部 .db 文件
+// 上传外部 .db / .json 快照文件
 const handleUploadDbFile = async (e) => {
   const file = e.target.files?.[0]
   if (!file) return
-  if (!file.name.endsWith('.db')) {
-    ElMessage.warning('仅支持上传 SQLite .db 格式文件')
+  const lower = file.name.toLowerCase()
+  if (!lower.endsWith('.db') && !lower.endsWith('.sqlite') && !lower.endsWith('.json')) {
+    ElMessage.warning('仅支持上传 SQLite (.db/.sqlite) 或逻辑快照 (.json) 文件')
     return
   }
 

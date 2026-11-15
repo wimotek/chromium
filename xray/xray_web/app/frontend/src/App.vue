@@ -16,9 +16,15 @@
     </header>
 
     <main class="main-body">
+      <!-- 0. 首次运行安装向导 -->
+      <SetupWizard
+        v-if="setupRequired"
+        @completed="onSetupCompleted"
+      />
+
       <!-- 1. 未登录：认证模块 -->
       <AuthView
-        v-if="!currentUser.username"
+        v-else-if="!systemLoading && !currentUser.username"
         :systemNotice="systemNotice"
         :isPureAdmin="isPureAdmin"
         @login-success="onLoginSuccess"
@@ -105,6 +111,7 @@ import axios from 'axios'
 import { ElMessage } from 'element-plus'
 
 import QrModal from './components/common/QrModal.vue'
+import SetupWizard from './components/SetupWizard.vue'
 import AuthView from './components/AuthView.vue'
 import UserDashboard from './components/UserDashboard.vue'
 
@@ -113,6 +120,8 @@ import AdminNodes from './components/admin/AdminNodes.vue'
 import AdminCards from './components/admin/AdminCards.vue'
 import AdminSettings from './components/admin/AdminSettings.vue'
 
+const setupRequired = ref(false)
+const systemLoading = ref(true)
 const isPureAdmin = ref(false)
 const systemNotice = ref('')
 const activeTab = ref('users')
@@ -132,7 +141,34 @@ const adminCards = ref([])
 const adminUsers = ref([])
 const adminNodes = ref([])
 
+const fetchSystemInfo = async () => {
+  try {
+    const res = await axios.get('/api/system/info')
+    const d = res.data?.data || {}
+    setupRequired.value = Boolean(d.setup_required)
+    isPureAdmin.value = d.mode === 'admin'
+    systemNotice.value = d.system_notice || ''
+  } catch (_) {}
+}
+
+const onSetupCompleted = async () => {
+  setupRequired.value = false
+  localStorage.removeItem('xray_auth_session')
+  Object.assign(currentUser, { username: '', role: '' })
+  adminPassword.value = ''
+  await fetchSystemInfo()
+}
+
 onMounted(async () => {
+  await fetchSystemInfo()
+  if (setupRequired.value) {
+    localStorage.removeItem('xray_auth_session')
+    Object.assign(currentUser, { username: '', role: '' })
+    adminPassword.value = ''
+    systemLoading.value = false
+    return
+  }
+
   const savedSession = localStorage.getItem('xray_auth_session')
   if (savedSession) {
     try {
@@ -152,12 +188,7 @@ onMounted(async () => {
       localStorage.removeItem('xray_auth_session')
     }
   }
-
-  try {
-    const res = await axios.get('/api/system/info')
-    if (res.data.data.mode === 'admin') isPureAdmin.value = true
-    if (res.data.data.system_notice) systemNotice.value = res.data.data.system_notice
-  } catch (_) {}
+  systemLoading.value = false
 })
 
 const currentAdminComponent = computed(() => {

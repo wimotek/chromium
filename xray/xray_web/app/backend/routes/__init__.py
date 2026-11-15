@@ -9,17 +9,21 @@ BACKEND_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if BACKEND_DIR not in sys.path:
     sys.path.insert(0, BACKEND_DIR)
 
-from core.db import get_db, hash_pwd
+from sqlalchemy import or_, select
+from core.db import db_session, hash_pwd
+from core.models import User
 
 def check_admin(u: str, p: str) -> bool:
     if not u or not p:
         return False
-    conn = get_db()
-    c = conn.cursor()
-    c.execute("SELECT role FROM users WHERE (username=? OR email=?) AND password_hash=?", (u, u, hash_pwd(p)))
-    r = c.fetchone()
-    conn.close()
-    return bool(r and r['role'] == 'admin')
+    with db_session() as s:
+        role = s.scalar(
+            select(User.role).where(
+                or_(User.username == u, User.email == u),
+                User.password_hash == hash_pwd(p),
+            )
+        )
+        return role == "admin"
 
 # 核心：节点权限判定器 (判断某个用户是否有权限连接或看到该节点)
 def is_user_allowed_for_node(user: dict, node: dict) -> bool:
@@ -128,6 +132,7 @@ def resolve_public_endpoint(req=None) -> tuple[str, int, str]:
     2. 否则自动从 X-Forwarded-* / request.host 中提取用户实际访问的主机与映射端口 (如 -p 3000:8443 场景下的 3000)
     3. 若设置了 PUBLIC_PORT > 0，强制覆盖对外端口号
     """
+    Config.reload_if_changed()
     if Config.PUBLIC_URL:
         parsed = urllib.parse.urlsplit(Config.PUBLIC_URL)
         scheme = parsed.scheme or "https"

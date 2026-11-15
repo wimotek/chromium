@@ -6,6 +6,7 @@ import random
 import qrcode
 import qrcode.image.svg
 from flask import Flask, request, send_from_directory, abort, send_file
+from sqlalchemy import select
 from werkzeug.middleware.proxy_fix import ProxyFix
 
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -13,7 +14,8 @@ if CURRENT_DIR not in sys.path:
     sys.path.insert(0, CURRENT_DIR)
 
 from config import Config
-from core.db import init_db, get_db
+from core.db import init_db, db_session, get_cached_nodes
+from core.models import User
 from core.cert_manager import ensure_certificates
 from services.scheduler_service import start_scheduler_thread
 
@@ -25,6 +27,7 @@ from routes.node import node_bp
 from routes.admin import admin_bp
 from routes.card import card_bp
 from routes.system import system_bp
+from routes.setup import setup_bp
 
 app = Flask(__name__, static_folder='../frontend/dist', static_url_path='/')
 app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_port=1)
@@ -35,6 +38,7 @@ app.register_blueprint(node_bp)
 app.register_blueprint(admin_bp)
 app.register_blueprint(card_bp)
 app.register_blueprint(system_bp)
+app.register_blueprint(setup_bp)
 
 init_db()
 
@@ -70,19 +74,13 @@ def get_subscription():
     if not token:
         abort(400)
 
-    conn = get_db()
-    c = conn.cursor()
-    c.execute("SELECT * FROM users WHERE uuid=? AND status=1", (token,))
-    user_row = c.fetchone()
-    if not user_row:
-        conn.close()
+    with db_session() as s:
+        user_obj = s.scalar(select(User).where(User.uuid == token, User.status == 1))
+        user = user_obj.to_dict() if user_obj else None
+    if not user:
         abort(403)
 
-    user = dict(user_row)
-
-    c.execute("SELECT * FROM nodes ORDER BY id ASC")
-    all_nodes = [dict(n) for n in c.fetchall()]
-    conn.close()
+    all_nodes = get_cached_nodes()
 
     # 权限过滤器：仅提取启用的且用户被允许访问的节点
     allowed_nodes = [n for n in all_nodes if is_user_allowed_for_node(user, n)]

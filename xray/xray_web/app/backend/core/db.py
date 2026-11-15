@@ -1,252 +1,383 @@
-import os
-import sqlite3
-import hashlib
+# -*- coding: utf-8 -*-
+"""
+SQLAlchemy 2.0 统一数据库引擎抽象层（全面兼容 SQLite WAL 与 MySQL InnoDB）
+支持：
+- 多 Worker 进程热感知 /data/hub_config.json 变更并自动重建连接池
+- SQLite 自动启用 WAL + busy_timeout=30000 + temp_store=MEMORY
+- MySQL 自动启用连接池 (pool_pre_ping=True, pool_recycle=1800, utf8mb4)
+- 幂等建表与历史表结构平滑升级
+"""
 import datetime
-import uuid
+import hashlib
+import os
 import secrets
+import threading
 import time
+import uuid
 from contextlib import contextmanager
-from config import Config
+from typing import Optional
 
-def get_db():
-    os.makedirs(os.path.dirname(Config.DB_PATH), exist_ok=True)
-    conn = sqlite3.connect(Config.DB_PATH, timeout=30.0, check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-    # 高并发多进程必备：30 秒忙等锁超时，内存临时表，NORMAL 模式
-    conn.execute("PRAGMA busy_timeout=30000;")
-    conn.execute("PRAGMA synchronous=NORMAL;")
-    conn.execute("PRAGMA temp_store=MEMORY;")
-    return conn
+from sqlalchemy import create_engine, event, func, inspect, select, text
+from sqlalchemy.dialects.mysql import insert as mysql_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+from sqlalchemy.orm import sessionmaker
+
+from config import Config
+from core.models import (
+    Base,
+    KvCache,
+    Node,
+    SystemSetting,
+    User,
+)
+
+_engine_lock = threading.Lock()
+_engine = None
+_engine_url: str = ""
+_SessionLocal = None
+
+
+def hash_pwd(pwd: str) -> str:
+    return hashlib.sha256(pwd.encode("utf-8")).hexdigest()
+
+
+def _create_sqlalchemy_engine(db_url: str):
+    is_sqlite = db_url.lower().startswith("sqlite")
+    if is_sqlite:
+        if db_url.startswith("sqlite:///") and not db_url.startswith("sqlite:///:memory:"):
+            file_part = db_url[len("sqlite:///"):]
+            parent = os.path.dirname(file_part)
+            if parent:
+                os.makedirs(parent, exist_ok=True)
+        eng = create_engine(
+            db_url,
+            connect_args={"timeout": 30.0, "check_same_thread": False},
+            pool_pre_ping=True,
+            future=True,
+        )
+
+        @event.listens_for(eng, "connect")
+        def _set_sqlite_pragmas(dbapi_conn, _conn_record):
+            cur = dbapi_conn.cursor()
+            cur.execute("PRAGMA journal_mode=WAL;")
+            cur.execute("PRAGMA busy_timeout=30000;")
+            cur.execute("PRAGMA synchronous=NORMAL;")
+            cur.execute("PRAGMA temp_store=MEMORY;")
+            cur.close()
+
+        return eng
+
+    # MySQL / MariaDB 生产连接池
+    return create_engine(
+        db_url,
+        pool_pre_ping=True,
+        pool_recycle=1800,
+        pool_size=10,
+        max_overflow=20,
+        pool_timeout=30,
+        connect_args={"connect_timeout": 8},
+        future=True,
+    )
+
+
+def get_engine(force_reload: bool = False):
+    global _engine, _engine_url, _SessionLocal
+    Config.reload_if_changed()
+    target_url = Config.effective_database_url()
+
+    if not force_reload and _engine is not None and _engine_url == target_url:
+        return _engine
+
+    with _engine_lock:
+        Config.reload_if_changed()
+        target_url = Config.effective_database_url()
+        if not force_reload and _engine is not None and _engine_url == target_url:
+            return _engine
+        old_engine = _engine
+        _engine = _create_sqlalchemy_engine(target_url)
+        _engine_url = target_url
+        _SessionLocal = sessionmaker(
+            bind=_engine,
+            autocommit=False,
+            autoflush=False,
+            expire_on_commit=False,
+            future=True,
+        )
+        if old_engine is not None:
+            try:
+                old_engine.dispose()
+            except Exception:
+                pass
+        return _engine
+
+
+def reset_engine():
+    get_engine(force_reload=True)
+
 
 @contextmanager
 def db_session():
-    """事务上下文管理器：自动 commit，异常自动 rollback，确保连接即刻关闭释放锁"""
-    conn = get_db()
+    """统一事务会话管理器：自动 commit / rollback / close"""
+    get_engine()
+    session = _SessionLocal()
     try:
-        yield conn
-        conn.commit()
+        yield session
+        session.commit()
     except Exception:
-        conn.rollback()
+        session.rollback()
         raise
     finally:
-        conn.close()
+        session.close()
 
-def execute_with_retry(func, max_retries=5, initial_delay=0.05):
-    """数据库写锁冲突自愈重试器 (指数退避)"""
-    delay = initial_delay
-    for attempt in range(max_retries):
-        try:
-            return func()
-        except sqlite3.OperationalError as e:
-            if "locked" in str(e).lower() and attempt < max_retries - 1:
-                time.sleep(delay)
-                delay *= 2
-            else:
-                raise
 
-def hash_pwd(pwd: str) -> str:
-    return hashlib.sha256(pwd.encode('utf-8')).hexdigest()
+def current_dialect() -> str:
+    eng = get_engine()
+    return eng.dialect.name.lower()
 
-def init_db():
-    os.makedirs(os.path.dirname(Config.DB_PATH), exist_ok=True)
-    conn = sqlite3.connect(Config.DB_PATH, timeout=30.0)
-    # 核心：永久启用 WAL (Write-Ahead Logging) 模式，实现读写互不阻塞！
-    conn.execute("PRAGMA journal_mode=WAL;")
-    conn.execute("PRAGMA busy_timeout=30000;")
-    conn.execute("PRAGMA synchronous=NORMAL;")
-    conn.commit()
 
-    c = conn.cursor()
+def random_order_expr():
+    if current_dialect() == "mysql":
+        return func.rand()
+    return func.random()
 
-    # 1. 用户表
-    c.execute('''CREATE TABLE IF NOT EXISTS users (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        username TEXT UNIQUE NOT NULL,
-        password_hash TEXT NOT NULL,
-        uuid TEXT NOT NULL,
-        email TEXT UNIQUE NOT NULL,
-        traffic_limit_mb INTEGER DEFAULT 1024,
-        used_mb REAL DEFAULT 0,
-        expire_date TEXT NOT NULL,
-        role TEXT DEFAULT 'user',
-        status INTEGER DEFAULT 1,
-        is_verified INTEGER DEFAULT 0,
-        serverchan_key TEXT DEFAULT '',
-        notify_type TEXT DEFAULT 'email',
-        is_monthly INTEGER DEFAULT 0,
-        reset_day INTEGER DEFAULT 1,
-        user_group TEXT DEFAULT 'default'
-    )''')
 
-    # 2. 节点集群表 (新增 is_approved 隔离审批字段)
-    c.execute('''CREATE TABLE IF NOT EXISTS nodes (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        node_id TEXT UNIQUE NOT NULL,
-        node_key TEXT NOT NULL,
-        pending_key TEXT DEFAULT '',
-        name TEXT NOT NULL,
-        ip TEXT NOT NULL,
-        port INTEGER NOT NULL,
-        dest TEXT DEFAULT 'www.microsoft.com:443',
-        sni TEXT NOT NULL,
-        server_names TEXT DEFAULT '',
-        pbk TEXT NOT NULL,
-        sid TEXT NOT NULL,
-        status INTEGER DEFAULT 1,
-        last_heartbeat TEXT NOT NULL,
-        allow_all INTEGER DEFAULT 1,
-        allowed_groups TEXT DEFAULT '',
-        allowed_users TEXT DEFAULT '',
-        is_approved INTEGER DEFAULT 1
-    )''')
+def upsert_system_setting(session, key: str, value: str):
+    dialect = session.bind.dialect.name.lower() if session.bind else current_dialect()
+    if dialect == "mysql":
+        stmt = mysql_insert(SystemSetting).values(key=key, value=value)
+        stmt = stmt.on_duplicate_key_update(value=stmt.inserted.value)
+    else:
+        stmt = sqlite_insert(SystemSetting).values(key=key, value=value)
+        stmt = stmt.on_conflict_do_update(index_elements=["key"], set_={"value": stmt.inserted.value})
+    session.execute(stmt)
 
-    # 3. 卡密表
-    c.execute('''CREATE TABLE IF NOT EXISTS cards (
-        code TEXT PRIMARY KEY,
-        traffic_gb INTEGER NOT NULL,
-        days INTEGER NOT NULL,
-        is_used INTEGER DEFAULT 0,
-        used_by TEXT,
-        created_at TEXT NOT NULL,
-        used_at TEXT DEFAULT '',
-        is_monthly INTEGER DEFAULT 0
-    )''')
 
-    # 4. 系统设置表
-    c.execute('''CREATE TABLE IF NOT EXISTS verify_codes (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        email TEXT NOT NULL,
-        code TEXT NOT NULL,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    )''')
+def upsert_kv_cache(session, cache_key: str, cache_val: str, expire_at: float):
+    dialect = session.bind.dialect.name.lower() if session.bind else current_dialect()
+    if dialect == "mysql":
+        stmt = mysql_insert(KvCache).values(
+            cache_key=cache_key, cache_val=cache_val, expire_at=expire_at
+        )
+        stmt = stmt.on_duplicate_key_update(
+            cache_val=stmt.inserted.cache_val,
+            expire_at=stmt.inserted.expire_at,
+        )
+    else:
+        stmt = sqlite_insert(KvCache).values(
+            cache_key=cache_key, cache_val=cache_val, expire_at=expire_at
+        )
+        stmt = stmt.on_conflict_do_update(
+            index_elements=["cache_key"],
+            set_={
+                "cache_val": stmt.inserted.cache_val,
+                "expire_at": stmt.inserted.expire_at,
+            },
+        )
+    session.execute(stmt)
 
-    c.execute('''CREATE TABLE IF NOT EXISTS captchas (
-        id TEXT PRIMARY KEY,
-        answer TEXT NOT NULL,
-        expire_at REAL NOT NULL,
-        created_at REAL DEFAULT 0
-    )''')
+
+def test_database_connection(db_url: str) -> tuple[bool, str]:
+    """供首次安装向导验证 SQLite / MySQL 连通性"""
+    eng = None
     try:
-        c.execute("ALTER TABLE captchas ADD COLUMN created_at REAL DEFAULT 0")
-    except Exception:
-        pass
+        eng = _create_sqlalchemy_engine(db_url)
+        with eng.connect() as conn:
+            conn.execute(text("SELECT 1"))
+        return True, "数据库连接测试通过"
+    except Exception as exc:
+        return False, f"数据库连接失败: {exc}"
+    finally:
+        if eng is not None:
+            try:
+                eng.dispose()
+            except Exception:
+                pass
 
-    c.execute('''CREATE TABLE IF NOT EXISTS ip_security_limits (
-        ip TEXT PRIMARY KEY,
-        fail_count INTEGER DEFAULT 0,
-        lock_until REAL DEFAULT 0,
-        last_attempt REAL DEFAULT 0
-    )''')
 
-    c.execute('''CREATE TABLE IF NOT EXISTS system_settings (
-        key TEXT PRIMARY KEY,
-        value TEXT
-    )''')
+def _upgrade_legacy_columns(eng):
+    """兼容历史旧库平滑补全字段（幂等）"""
+    insp = inspect(eng)
+    dialect = eng.dialect.name.lower()
 
-    c.execute('''CREATE TABLE IF NOT EXISTS notify_logs (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        username TEXT NOT NULL,
-        warn_type TEXT NOT NULL,
-        sent_date TEXT NOT NULL
-    )''')
+    def ensure_cols(table_name: str, expected_cols: list[tuple[str, str]]):
+        if not insp.has_table(table_name):
+            return
+        existing = {col["name"] for col in insp.get_columns(table_name)}
+        with eng.begin() as conn:
+            for col_name, col_ddl in expected_cols:
+                if col_name not in existing:
+                    try:
+                        conn.execute(text(f"ALTER TABLE {table_name} ADD COLUMN {col_name} {col_ddl}"))
+                    except Exception:
+                        pass
 
-    # 5. 安全审计与通信流水表 (生产级无污染日志表)
-    c.execute('''CREATE TABLE IF NOT EXISTS audit_logs (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        level TEXT NOT NULL,
-        event_type TEXT NOT NULL,
-        node_id TEXT DEFAULT '',
-        node_name TEXT DEFAULT '',
-        ip TEXT DEFAULT '',
-        message TEXT NOT NULL,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    )''')
+    text_default = "" if dialect == "mysql" else " DEFAULT ''"
+    ensure_cols(
+        "nodes",
+        [
+            ("node_key", "VARCHAR(128) DEFAULT ''"),
+            ("pending_key", "VARCHAR(128) DEFAULT ''"),
+            ("dest", "VARCHAR(255) DEFAULT 'www.microsoft.com:443'"),
+            ("server_names", f"TEXT{text_default}"),
+            ("allow_all", "INTEGER DEFAULT 1"),
+            ("allowed_groups", f"TEXT{text_default}"),
+            ("allowed_users", f"TEXT{text_default}"),
+            ("is_approved", "INTEGER DEFAULT 1"),
+            ("node_public_key", "VARCHAR(255) DEFAULT ''"),
+            ("key_lock_status", "VARCHAR(32) DEFAULT 'unlocked'"),
+            ("last_challenge_nonce", "VARCHAR(128) DEFAULT ''"),
+            ("last_nonce_created_at", "FLOAT DEFAULT 0"),
+            ("net_mode", "VARCHAR(32) DEFAULT 'direct'"),
+            ("tunnel_uuid", "VARCHAR(64) DEFAULT ''"),
+            ("tunnel_status", "VARCHAR(64) DEFAULT 'disconnected'"),
+        ],
+    )
+    ensure_cols(
+        "users",
+        [
+            ("user_group", "VARCHAR(64) DEFAULT 'default'"),
+            ("referral_code", "VARCHAR(64) DEFAULT ''"),
+            ("invited_by", "VARCHAR(128) DEFAULT ''"),
+            ("referral_count", "INTEGER DEFAULT 0"),
+            ("referral_bonus_gb", "FLOAT DEFAULT 0"),
+            ("referral_bonus_days", "INTEGER DEFAULT 0"),
+        ],
+    )
+    ensure_cols("captchas", [("created_at", "FLOAT DEFAULT 0")])
 
-    def try_add_column(sql):
-        try:
-            c.execute(sql)
-            conn.commit()
-        except Exception:
-            pass
 
-    try_add_column("ALTER TABLE nodes ADD COLUMN node_key TEXT DEFAULT ''")
-    try_add_column("ALTER TABLE nodes ADD COLUMN pending_key TEXT DEFAULT ''")
-    try_add_column("ALTER TABLE nodes ADD COLUMN dest TEXT DEFAULT 'www.microsoft.com:443'")
-    try_add_column("ALTER TABLE nodes ADD COLUMN server_names TEXT DEFAULT ''")
-    try_add_column("ALTER TABLE nodes ADD COLUMN allow_all INTEGER DEFAULT 1")
-    try_add_column("ALTER TABLE nodes ADD COLUMN allowed_groups TEXT DEFAULT ''")
-    try_add_column("ALTER TABLE nodes ADD COLUMN allowed_users TEXT DEFAULT ''")
-    try_add_column("ALTER TABLE nodes ADD COLUMN is_approved INTEGER DEFAULT 1")
-    try_add_column("ALTER TABLE nodes ADD COLUMN node_public_key TEXT DEFAULT ''")
-    try_add_column("ALTER TABLE nodes ADD COLUMN key_lock_status TEXT DEFAULT 'unlocked'")
-    try_add_column("ALTER TABLE nodes ADD COLUMN last_challenge_nonce TEXT DEFAULT ''")
-    try_add_column("ALTER TABLE nodes ADD COLUMN last_nonce_created_at REAL DEFAULT 0")
-    try_add_column("ALTER TABLE nodes ADD COLUMN net_mode TEXT DEFAULT 'direct'")
-    try_add_column("ALTER TABLE nodes ADD COLUMN tunnel_uuid TEXT DEFAULT ''")
-    try_add_column("ALTER TABLE nodes ADD COLUMN tunnel_status TEXT DEFAULT 'disconnected'")
-    try_add_column("ALTER TABLE users ADD COLUMN user_group TEXT DEFAULT 'default'")
-    try_add_column("ALTER TABLE users ADD COLUMN referral_code TEXT DEFAULT ''")
-    try_add_column("ALTER TABLE users ADD COLUMN invited_by TEXT DEFAULT ''")
-    try_add_column("ALTER TABLE users ADD COLUMN referral_count INTEGER DEFAULT 0")
-    try_add_column("ALTER TABLE users ADD COLUMN referral_bonus_gb REAL DEFAULT 0")
-    try_add_column("ALTER TABLE users ADD COLUMN referral_bonus_days INTEGER DEFAULT 0")
+def init_db(force_reload: bool = False):
+    eng = get_engine(force_reload=force_reload)
+    Base.metadata.create_all(eng)
+    _upgrade_legacy_columns(eng)
 
-    # 初始化全局 TOFU 首次信任总开关、引导令牌 (Cluster Token) 与自动审批开关
-    c.execute("SELECT value FROM system_settings WHERE key='tofu_enabled'")
-    if not c.fetchone():
-        c.execute("INSERT INTO system_settings (key, value) VALUES ('tofu_enabled', 'true')")
+    with db_session() as s:
+        defaults = {
+            "tofu_enabled": "true",
+            "cluster_token": "ctk_" + secrets.token_hex(16),
+            "node_auto_approve": "true",
+            "crypto_key_lock_enforced": "true",
+            "referral_enabled": "true",
+            "referral_inviter_traffic_gb": "10",
+            "referral_inviter_days": "30",
+            "referral_invitee_traffic_gb": "5",
+            "referral_invitee_days": "30",
+            "referral_max_per_user": "50",
+        }
+        for k, v in defaults.items():
+            exists = s.get(SystemSetting, k)
+            if not exists:
+                s.add(SystemSetting(key=k, value=v))
 
-    c.execute("SELECT value FROM system_settings WHERE key='cluster_token'")
-    if not c.fetchone():
-        init_cluster_token = "ctk_" + secrets.token_hex(16)
-        c.execute("INSERT INTO system_settings (key, value) VALUES ('cluster_token', ?)", (init_cluster_token,))
+        # 初始管理员账号
+        admin_exists = s.scalar(select(User.id).where(User.role == "admin").limit(1))
+        if not admin_exists:
+            admin_user = os.getenv("ADMIN_USERNAME") or "admin"
+            admin_pwd = os.getenv("ADMIN_PASSWORD") or secrets.token_urlsafe(12)
+            ten_years = (datetime.datetime.now() + datetime.timedelta(days=3650)).strftime("%Y-%m-%d %H:%M:%S")
+            s.add(
+                User(
+                    username=admin_user,
+                    password_hash=hash_pwd(admin_pwd),
+                    uuid=str(uuid.uuid4()),
+                    email=f"{admin_user}@system.local",
+                    traffic_limit_mb=1048576,
+                    used_mb=0.0,
+                    expire_date=ten_years,
+                    role="admin",
+                    status=1,
+                    is_verified=1,
+                    user_group="admin",
+                )
+            )
+            s.flush()
 
-    c.execute("SELECT value FROM system_settings WHERE key='node_auto_approve'")
-    if not c.fetchone():
-        c.execute("INSERT INTO system_settings (key, value) VALUES ('node_auto_approve', 'true')")
+        # 首次安装向导标记判定：若已有配置文件或老集群已有节点/多个用户，自动标记已完成，避免老系统升级被锁
+        setup_row = s.get(SystemSetting, "setup_completed")
+        if Config.SETUP_COMPLETED:
+            upsert_system_setting(s, "setup_completed", "true")
+        elif not setup_row:
+            nodes_cnt = s.scalar(select(func.count()).select_from(Node)) or 0
+            users_cnt = s.scalar(select(func.count()).select_from(User)) or 0
+            auto_skip = os.getenv("AUTO_SKIP_SETUP", "").lower() in ("1", "true", "yes")
+            if auto_skip or nodes_cnt > 0 or users_cnt > 1:
+                s.add(SystemSetting(key="setup_completed", value="true"))
+            else:
+                s.add(SystemSetting(key="setup_completed", value="false"))
 
-    c.execute("SELECT value FROM system_settings WHERE key='crypto_key_lock_enforced'")
-    if not c.fetchone():
-        c.execute("INSERT INTO system_settings (key, value) VALUES ('crypto_key_lock_enforced', 'true')")
 
-    # 初始化新用户注册推荐奖励设置
-    def init_setting_if_missing(k, v):
-        c.execute("SELECT value FROM system_settings WHERE key=?", (k,))
-        if not c.fetchone():
-            c.execute("INSERT INTO system_settings (key, value) VALUES (?, ?)", (k, v))
+def is_setup_required() -> bool:
+    Config.reload_if_changed()
+    if Config.SETUP_COMPLETED:
+        return False
+    return get_setting("setup_completed", "false").lower() != "true"
 
-    init_setting_if_missing('referral_enabled', 'true')
-    init_setting_if_missing('referral_inviter_traffic_gb', '10')
-    init_setting_if_missing('referral_inviter_days', '30')
-    init_setting_if_missing('referral_invitee_traffic_gb', '5')
-    init_setting_if_missing('referral_invitee_days', '30')
-    init_setting_if_missing('referral_max_per_user', '50')
-
-    c.execute("SELECT id FROM users WHERE role='admin'")
-    if not c.fetchone():
-        admin_user = os.getenv("ADMIN_USERNAME") or "admin"
-        admin_pwd = os.getenv("ADMIN_PASSWORD") or secrets.token_urlsafe(12)
-        ten_years = (datetime.datetime.now() + datetime.timedelta(days=3650)).strftime("%Y-%m-%d %H:%M:%S")
-        c.execute("""
-            INSERT INTO users (username, password_hash, uuid, email, traffic_limit_mb, used_mb, expire_date, role, status, is_verified, user_group) 
-            VALUES (?, ?, ?, ?, 1048576, 0, ?, 'admin', 1, 1, 'admin')
-        """, (admin_user, hash_pwd(admin_pwd), str(uuid.uuid4()), f"{admin_user}@system.local", ten_years))
-        conn.commit()
-
-    conn.commit()
-    conn.close()
 
 def get_setting(key: str, default: str = "") -> str:
-    conn = get_db()
-    c = conn.cursor()
-    c.execute("SELECT value FROM system_settings WHERE key=?", (key,))
-    row = c.fetchone()
-    conn.close()
-    return row["value"] if row else default
+    from core.cache import cache
+
+    cache_key = f"setting:{key}"
+    cached = cache.get(cache_key)
+    if cached is not None:
+        return cached
+
+    with db_session() as s:
+        row = s.get(SystemSetting, key)
+        if row is not None and row.value is not None:
+            val = str(row.value)
+            cache.set(cache_key, val, ttl=300)
+            return val
+    return default
+
 
 def set_setting(key: str, value: str):
-    conn = get_db()
-    c = conn.cursor()
-    c.execute("INSERT OR REPLACE INTO system_settings (key, value) VALUES (?, ?)", (key, value))
-    conn.commit()
-    conn.close()
+    from core.cache import cache
+
+    with db_session() as s:
+        upsert_system_setting(s, key, str(value))
+    cache.set(f"setting:{key}", str(value), ttl=300)
+
+
+def get_cached_active_users() -> list[dict]:
+    from core.cache import cache
+
+    def _load():
+        with db_session() as s:
+            rows = s.execute(
+                select(User.username, User.email, User.uuid, User.user_group, User.role).where(
+                    User.status == 1, User.is_verified == 1
+                )
+            ).all()
+            return [
+                {
+                    "username": r.username,
+                    "email": r.email,
+                    "uuid": r.uuid,
+                    "user_group": r.user_group,
+                    "role": r.role,
+                }
+                for r in rows
+            ]
+
+    return cache.get_or_set_json("cluster:active_users", _load, ttl=30)
+
+
+def invalidate_users_cache():
+    from core.cache import cache
+    cache.delete("cluster:active_users")
+
+
+def get_cached_nodes() -> list[dict]:
+    from core.cache import cache
+
+    def _load():
+        with db_session() as s:
+            rows = s.scalars(select(Node).order_by(Node.id.asc())).all()
+            return [n.to_dict() for n in rows]
+
+    return cache.get_or_set_json("cluster:nodes", _load, ttl=30)
+
+
+def invalidate_nodes_cache():
+    from core.cache import cache
+    cache.delete("cluster:nodes")

@@ -25,9 +25,12 @@
 - 🔄 **聚合订阅地址自动透明分流**：
   - 用户只需导入一个聚合订阅地址（`/api/sub?token=用户UUID`）；
   - Hub 自动根据节点状态下发 REALITY 链接或 Hub 域名 WSS 链接。
-- 💳 **多种套餐计费、发卡 API 与数据库安全备份**：
-  - 支持固定流量包、每月固定重置卡（邮件/微信清零推送）、无限量/永久卡及第三方发卡网 API（兼容独角数卡）；
-  - 支持后台热备份下载、外部快照导入及恢复前自动冷备与 SQLite 完整性校验。
+- 🗄️ **SQLAlchemy 2.0 原生双数据库引擎（SQLite WAL + MySQL InnoDB）与首次运行安装向导**：
+  - **首次运行 Web 安装向导 (`SetupWizard`)**：全新部署首次打开面板时，无需手工翻日志查随机密码或反复改环境变量，通过 3 步可视化向导即可完成 **SQLite / MySQL 切换与连通性测试**、**Redis 加速开启与 PING 探测**、**对外入口 (`PUBLIC_URL`/`PUBLIC_PORT`/`APP_MODE`)** 及 **管理员初始账密与 `cluster_token` 初始化**；配置自动持久化至 `/data/hub_config.json` 并热同步至所有 Worker 进程，完成后自动锁定向导接口；
+  - **双数据库无缝切换**：全面基于 SQLAlchemy 2.0 ORM 重构，单机零配置默认使用 **SQLite (WAL)**，高并发集群可一键接入 **外置 MySQL / MariaDB (`PyMySQL` + `utf8mb4` + 连接池保活)**；
+  - **双引擎热备份与跨库迁移**：SQLite 模式支持原生 `.db` 在线无锁热备与 `PRAGMA integrity_check`；MySQL 模式支持 **事务级 JSON 逻辑快照 (`.json`)** 导出与一键还原（并兼容跨库导入迁移）。
+- 💳 **多种套餐计费、发卡 API**：
+  - 支持固定流量包、每月固定重置卡（邮件/微信清零推送）、无限量/永久卡及第三方发卡网 API（兼容独角数卡）。
 
 ---
 
@@ -140,14 +143,22 @@ chown -R 10001:10001 ./data
    docker compose up -d --build
    ```
 
-4. **登录主控面板**：
+4. **首次运行安装向导 & 登录主控面板**：
    - IPv4 访问：`https://<主控IPv4>:8443`
    - IPv6 访问：`https://[<主控IPv6>]:8443`
-   - 查看初始管理员账密：
-     ```bash
-     docker logs xray-web-master | grep "初始管理员凭据" -A 3
+   - **全新实例**：首次打开页面将自动进入 **3 步可视化安装向导**，支持直接在线配置数据库引擎（SQLite / MySQL 连通测试）、可选 Redis（PING 测试）、对外入口 URL/端口、初始管理员账号密码、集群引导令牌 `cluster_token` 与 TOFU 策略（若需自动化静默跳过向导，可传入 `-e AUTO_SKIP_SETUP=true`）。
+   - **已有旧集群升级**：系统检测到已有节点或历史数据时自动跳过安装向导，原账密与业务零中断；
+   - **使用外置 MySQL（也可通过向导填写或提前在环境变量指定）**：
+     ```yaml
+     environment:
+       - DB_TYPE=mysql
+       - MYSQL_HOST=127.0.0.1
+       - MYSQL_PORT=3306
+       - MYSQL_USER=xray_web
+       - MYSQL_PASSWORD=your_strong_password
+       - MYSQL_DATABASE=xray_web
      ```
-   - 登录后台后，可在【系统发信与全局运维配置】中配置发件 SMTP 邮箱、节点通信密钥、备份恢复与系统公告。
+   - 登录后台后，可在【系统发信与全局运维配置】中配置发件 SMTP 邮箱、节点通信密钥、热备份策略与系统公告。
 
 ---
 
@@ -187,6 +198,15 @@ docker run -d \
 | `TZ` | 节点容器时区（支持运行时动态覆盖） | `Asia/Shanghai` |
 
 > **公网主机但 443 端口被封的场景**：若家宽虽有公网 IP 但运营商封锁 80/443 入站，请在节点启动参数中显式设置 `-e NET_MODE="reverse_wss"`，或在主控面板直接下发切换至反穿模式。
+
+---
+
+## ⚡ 可选 Redis 加速与 SQL Cache 自动回退机制
+
+主控内建统一缓存抽象层（`core/cache.py`，基于 SQLAlchemy 2.0 兼容 SQLite 与 MySQL），遵循 **“Redis 优先 + 熔断降级 + SQL Cache 自动回退”**：
+1. **零配置默认模式**：未配置 `REDIS_URL` / `REDIS_HOST` 时，自动使用当前主库（SQLite 或 MySQL）中的 `kv_cache` 共享表（多 Worker 进程同步，支持 TTL 过期与定时清理），单容器零外部依赖开箱即用；
+2. **开启 Redis 加速**：可通过首次安装向导开启或传入 `-e REDIS_URL="redis://[:密码@]主机:6379/0"`（或拆分 `REDIS_HOST` / `REDIS_PORT` / `REDIS_PASSWORD` / `REDIS_DB`），自动接管图形验证码、IP 防爆破限流、邮箱验证码、全局 `system_settings` 读取、`/api/node/sync` 活跃用户快照与 `/api/sub` 节点配置快照；
+3. **故障自动无感回退**：当 Redis 未启动、网络超时（默认 `REDIS_TIMEOUT=1.5s`）或运行中宕机时，熔断器立即触发冷却（默认 `REDIS_COOLDOWN_SECONDS=30s`），读写操作**自动无缝回退至 SQL `kv_cache`**（SQLite / MySQL 均采用 `FOR UPDATE` 行级/事务锁保证 OTP 原子核销与限流计数），确保面板与节点通信 100% 不中断；待 Redis 恢复并过冷却期后自动无感切回。
 
 ---
 
