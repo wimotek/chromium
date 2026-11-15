@@ -151,7 +151,7 @@ def upsert_system_setting(session, key: str, value: str):
         stmt = stmt.on_duplicate_key_update(value=stmt.inserted.value)
     else:
         stmt = sqlite_insert(SystemSetting).values(key=key, value=value)
-        stmt = stmt.on_conflict_do_update(index_elements=["key"], set_={"value": stmt.inserted.value})
+        stmt = stmt.on_conflict_do_update(index_elements=["key"], set_={"value": stmt.excluded.value})
     session.execute(stmt)
 
 
@@ -173,8 +173,8 @@ def upsert_kv_cache(session, cache_key: str, cache_val: str, expire_at: float):
         stmt = stmt.on_conflict_do_update(
             index_elements=["cache_key"],
             set_={
-                "cache_val": stmt.inserted.cache_val,
-                "expire_at": stmt.inserted.expire_at,
+                "cache_val": stmt.excluded.cache_val,
+                "expire_at": stmt.excluded.expire_at,
             },
         )
     session.execute(stmt)
@@ -380,12 +380,15 @@ def get_setting(key: str, default: str = "") -> str:
     if cached is not None:
         return cached
 
+    val = None
     with db_session() as s:
         row = s.get(SystemSetting, key)
         if row is not None and row.value is not None:
             val = str(row.value)
-            cache.set(cache_key, val, ttl=300)
-            return val
+
+    if val is not None:
+        cache.set(cache_key, val, ttl=300)
+        return val
     return default
 
 

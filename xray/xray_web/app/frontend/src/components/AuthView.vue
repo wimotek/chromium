@@ -184,7 +184,7 @@ onMounted(() => {
 const refreshCaptcha = async (type) => {
   try {
     const res = await axios.get('/api/auth/captcha')
-    if (res.data.code === 200) {
+    if (res.data?.code === 200 && res.data?.data) {
       if (type === 'login') {
         loginCaptcha.id = res.data.data.captcha_id
         loginCaptcha.svg = res.data.data.svg
@@ -201,8 +201,12 @@ const refreshCaptcha = async (type) => {
         forgotCaptcha.hint = res.data.data.hint || ''
         forgotCaptchaAns.value = ''
       }
+    } else {
+      ElMessage.error(res.data?.msg || '获取验证码失败')
     }
-  } catch (_) {}
+  } catch (err) {
+    ElMessage.error(err?.response?.data?.msg || '验证码接口请求失败，请检查服务状态')
+  }
 }
 
 const switchAuthMode = (mode) => {
