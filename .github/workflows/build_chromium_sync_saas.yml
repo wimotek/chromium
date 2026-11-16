@@ -7,7 +7,7 @@ on:
       - master
     paths:
       - "chromium/chromium_sync_saas/**"
-      - ".github/workflows/build-saas-hub.yml"
+      - ".github/workflows/build_chromium_sync_saas.yml"
     tags:
       - "saas-v*"
   workflow_dispatch:
@@ -27,6 +27,9 @@ permissions:
   contents: read
   packages: write
 
+env:
+  WORKING_DIR: ./chromium/chromium_sync_saas
+
 jobs:
   build-and-push-saas:
     name: Build & Push SaaS Binary Image (Docker Hub + GHCR)
@@ -38,12 +41,12 @@ jobs:
 
       - name: Pre-build syntax & script checks
         run: |
-          bash -n chromium/chromium_sync_saas/entrypoint.sh
+          bash -n ${{ env.WORKING_DIR }}/entrypoint.sh
           python3 -m py_compile \
-            chromium/chromium_sync_saas/app/backend/*.py \
-            chromium/chromium_sync_saas/app/backend/core/*.py \
-            chromium/chromium_sync_saas/app/backend/services/*.py \
-            chromium/chromium_sync_saas/app/backend/routers/*.py
+            ${{ env.WORKING_DIR }}/app/backend/*.py \
+            ${{ env.WORKING_DIR }}/app/backend/core/*.py \
+            ${{ env.WORKING_DIR }}/app/backend/services/*.py \
+            ${{ env.WORKING_DIR }}/app/backend/routers/*.py
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -51,31 +54,18 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Log in to GitHub Container Registry (GHCR)
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Log in to Docker Hub
-        id: dockerhub_login
-        if: ${{ secrets.DOCKERHUB_TOKEN != '' }}
-        uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME || 'wimotek' }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-
       - name: Prepare image tags and target platforms
         id: meta
         env:
-          DOCKERHUB_TOKEN_SET: ${{ secrets.DOCKERHUB_TOKEN != '' }}
+          DOCKERHUB_TOKEN_VAL: ${{ secrets.DOCKERHUB_TOKEN }}
+          DOCKERHUB_USER_VAL: ${{ secrets.DOCKERHUB_USERNAME }}
           INPUT_PLATFORMS: ${{ inputs.platforms }}
           INPUT_EXTRA_TAG: ${{ inputs.extra_tag }}
         run: |
           OWNER_LC="$(printf '%s' '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')"
           GHCR_REPO="ghcr.io/${OWNER_LC}/chromium"
-          DOCKERHUB_REPO="wimotek/chromium"
+          DOCKERHUB_USER="${DOCKERHUB_USER_VAL:-wimotek}"
+          DOCKERHUB_REPO="${DOCKERHUB_USER}/chromium"
           SHORT_SHA="${GITHUB_SHA::7}"
 
           PLATFORMS="${INPUT_PLATFORMS:-linux/amd64,linux/arm64}"
@@ -92,12 +82,14 @@ jobs:
             TAGS="${TAGS}"$'\n'"${GHCR_REPO}:${EXTRA_VER}"
           fi
 
-          if [[ "$DOCKERHUB_TOKEN_SET" == "true" ]]; then
+          if [[ -n "$DOCKERHUB_TOKEN_VAL" ]]; then
+            DOCKERHUB_ENABLED="true"
             TAGS="${TAGS}"$'\n'"${DOCKERHUB_REPO}:saas"
             if [[ -n "$EXTRA_VER" ]]; then
               TAGS="${TAGS}"$'\n'"${DOCKERHUB_REPO}:${EXTRA_VER}"
             fi
           else
+            DOCKERHUB_ENABLED="false"
             echo "::warning::未配置 DOCKERHUB_TOKEN Secret，本次仅推送 GHCR (${GHCR_REPO}:saas)；请在仓库 Secrets 中添加 DOCKERHUB_TOKEN（可选 DOCKERHUB_USERNAME，默认 wimotek）以同步推送 ${DOCKERHUB_REPO}:saas"
           fi
 
@@ -107,15 +99,31 @@ jobs:
             echo "EOF"
             echo "platforms=${PLATFORMS}"
             echo "ghcr_image=${GHCR_REPO}:saas"
-            echo "dockerhub_enabled=${DOCKERHUB_TOKEN_SET}"
+            echo "dockerhub_image=${DOCKERHUB_REPO}:saas"
+            echo "dockerhub_enabled=${DOCKERHUB_ENABLED}"
           } >> "$GITHUB_OUTPUT"
+
+      - name: Log in to GitHub Container Registry (GHCR)
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Log in to Docker Hub
+        id: dockerhub_login
+        if: steps.meta.outputs.dockerhub_enabled == 'true'
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME || 'wimotek' }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Build and push closed-source binary SaaS image
         id: push
         uses: docker/build-push-action@v6
         with:
-          context: chromium/chromium_sync_saas
-          file: chromium/chromium_sync_saas/Dockerfile
+          context: ${{ env.WORKING_DIR }}
+          file: ${{ env.WORKING_DIR }}/Dockerfile
           platforms: ${{ steps.meta.outputs.platforms }}
           push: true
           tags: ${{ steps.meta.outputs.tags }}
@@ -129,8 +137,8 @@ jobs:
       - name: Verify built linux/amd64 image contains only compiled binaries (no .py sources)
         uses: docker/build-push-action@v6
         with:
-          context: chromium/chromium_sync_saas
-          file: chromium/chromium_sync_saas/Dockerfile
+          context: ${{ env.WORKING_DIR }}
+          file: ${{ env.WORKING_DIR }}/Dockerfile
           platforms: linux/amd64
           load: true
           tags: saas-binary-verify:local
@@ -155,7 +163,7 @@ jobs:
             echo ""
             echo "- **GHCR**: \`${{ steps.meta.outputs.ghcr_image }}\`"
             if [[ "${{ steps.meta.outputs.dockerhub_enabled }}" == "true" ]]; then
-              echo "- **Docker Hub**: \`wimotek/chromium:saas\` (已推送)"
+              echo "- **Docker Hub**: \`${{ steps.meta.outputs.dockerhub_image }}\` (已推送)"
             else
               echo "- **Docker Hub**: 未推送（缺少 \`DOCKERHUB_TOKEN\` Secret）"
             fi
