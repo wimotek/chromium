@@ -1,11 +1,13 @@
 # ==============================================================================
-# 阶段 1：编译 Vue 3 前端静态资产 (原生构建平台，无 QEMU 模拟损耗)
+# 阶段 1：编译 Vue 3 前端静态资产 (原生 glibc 构建平台，避免 Alpine musl 原生包缺失)
 # ==============================================================================
-FROM --platform=$BUILDPLATFORM node:20-alpine AS frontend-builder
+FROM --platform=$BUILDPLATFORM node:20-slim AS frontend-builder
 WORKDIR /build
 
-COPY app/frontend/package*.json ./
-RUN npm install
+ENV NODE_OPTIONS="--max-old-space-size=2048"
+
+COPY app/frontend/package.json ./
+RUN npm install --no-audit --no-fund
 
 COPY app/frontend/ ./
 RUN npm run build
@@ -37,7 +39,7 @@ RUN --mount=type=bind,from=python-builder,source=/wheels,target=/wheels \
 COPY app/backend/ ./
 RUN python3 build_binary.py && \
     chmod 755 /build/backend/entrypoint.sh && \
-    python3 -c "import os, shutil, tempfile; d=tempfile.mkdtemp(); os.environ['DB_PATH']=os.path.join(d,'t.db'); os.environ['HUB_CONFIG_PATH']=os.path.join(d,'hub.json'); import app, config, core.cache, core.rate_limit, core.captcha, core.db, core.cert_init, routes; assert hasattr(app, 'app'); shutil.rmtree(d, ignore_errors=True)"
+    python3 -c "import os, shutil, tempfile; d=tempfile.mkdtemp(); os.environ['DATA_DIR']=d; os.environ['BACKUP_DIR']=os.path.join(d,'backups'); os.environ['DB_PATH']=os.path.join(d,'t.db'); os.environ['HUB_CONFIG_PATH']=os.path.join(d,'hub.json'); import app, config, core.cache, core.rate_limit, core.captcha, core.db, core.cert_init, routes; assert hasattr(app, 'app'); shutil.rmtree(d, ignore_errors=True); shutil.rmtree('/data', ignore_errors=True)"
 
 # ==============================================================================
 # 阶段 4：极致精简非 Root 闭源运行镜像 (零 .py 业务源码，零编译工具链残留)
