@@ -40,7 +40,7 @@ def collect_extensions() -> tuple[list[Extension], list[str]]:
             extensions.append(
                 Extension(
                     mod_name,
-                    [full_path],
+                    [rel_path],
                     extra_compile_args=["-O2", "-Wno-unused-function"],
                 )
             )
@@ -58,21 +58,35 @@ def main():
     nthreads = max(1, min(8, os.cpu_count() or 2))
     print(f"==> [Cython Build] 准备并行编译 {len(extensions)} 个核心模块 (threads={nthreads})...", flush=True)
 
-    ext_modules = cythonize(
-        extensions,
-        nthreads=nthreads,
-        compiler_directives={
-            "language_level": "3",
-            "binding": True,
-            "embedsignature": False,
-            "docstrings": False,
-            "annotation_typing": False,
-        },
-        quiet=False,
-    )
+    directives = {
+        "language_level": "3",
+        "binding": True,
+        "embedsignature": False,
+        "docstrings": False,
+        "annotation_typing": False,
+    }
+    try:
+        ext_modules = cythonize(
+            extensions,
+            nthreads=nthreads,
+            compiler_directives=directives,
+            quiet=False,
+        )
+    except (OSError, PermissionError) as e:
+        print(f"==> [Cython Build] 并行转译回退单进程 (原因: {e})", flush=True)
+        nthreads = 1
+        ext_modules = cythonize(
+            extensions,
+            nthreads=0,
+            compiler_directives=directives,
+            quiet=False,
+        )
 
-    sys.argv = [sys.argv[0], "build_ext", "--inplace", f"-j{nthreads}"]
-    setup(name="xray_web_hub", ext_modules=ext_modules)
+    setup(
+        name="xray_web_hub",
+        ext_modules=ext_modules,
+        script_args=["build_ext", "--inplace", f"--parallel={nthreads}"],
+    )
 
     # 1. 删除所有源码 .py、中间 .c、build 目录与 __pycache__
     for py_path in compiled_py_paths:
