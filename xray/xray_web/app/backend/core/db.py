@@ -69,14 +69,14 @@ def _create_sqlalchemy_engine(db_url: str):
 
         return eng
 
-    # MySQL / MariaDB 生产连接池
+    # MySQL / MariaDB 生产连接池（支持环境变量调优）
     return create_engine(
         db_url,
         pool_pre_ping=True,
         pool_recycle=1800,
-        pool_size=10,
-        max_overflow=20,
-        pool_timeout=30,
+        pool_size=max(5, Config.DB_POOL_SIZE),
+        max_overflow=max(10, Config.DB_MAX_OVERFLOW),
+        pool_timeout=max(5, Config.DB_POOL_TIMEOUT),
         connect_args={"connect_timeout": 8},
         future=True,
     )

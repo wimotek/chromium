@@ -161,6 +161,58 @@ const filteredAuditLogs = computed(() => {
   return list
 })
 
+const formatBytes = (bytes) => {
+  const num = Number(bytes || 0)
+  if (!Number.isFinite(num) || num <= 0) return '0 B'
+  const units = ['B', 'KB', 'MB', 'GB', 'TB']
+  let val = num
+  let idx = 0
+  while (val >= 1024 && idx < units.length - 1) {
+    val /= 1024
+    idx++
+  }
+  return `${val >= 100 || idx === 0 ? val.toFixed(0) : val.toFixed(2)} ${units[idx]}`
+}
+
+const clusterTraffic = computed(() => {
+  let cdpRx = 0
+  let cdpTx = 0
+  let netRx = 0
+  let netTx = 0
+  let activeStreams = 0
+  let onlineCount = 0
+  for (const n of trustedNodes.value) {
+    cdpRx += Number(n.cdp_rx_bytes || 0)
+    cdpTx += Number(n.cdp_tx_bytes || 0)
+    netRx += Number(n.net_rx_bytes || 0)
+    netTx += Number(n.net_tx_bytes || 0)
+    activeStreams += Number(n.active_cdp_streams || 0)
+    if (n.status === 'connected' && n.enabled !== 0) onlineCount++
+  }
+  return {
+    cdpRx,
+    cdpTx,
+    cdpTotal: cdpRx + cdpTx,
+    netRx,
+    netTx,
+    netTotal: netRx + netTx,
+    activeStreams,
+    onlineCount
+  }
+})
+
+const resetNodeTraffic = async (node) => {
+  if (!confirm(`确认清零节点 [${node.name}] 的 CDP 与容器网卡累计流量计数？`)) return
+  const res = await props.api(`/api/nodes/${node.id}/traffic/reset`, { method: 'POST' })
+  if (res.ok) {
+    const data = await res.json()
+    props.showToast(data.message || '流量统计已清零', 'success')
+    loadBaseData()
+  } else {
+    props.showToast('流量清零失败', 'error')
+  }
+}
+
 // 复制通用方法
 const copyText = async (text, desc) => {
   if (!text) return
@@ -479,6 +531,46 @@ onUnmounted(() => {
       </div>
     </div>
 
+    <!-- ==================== 1.5 集群双层实时流量与并发遥测条 ==================== -->
+    <div class="traffic-telemetry-grid">
+      <div class="telemetry-card">
+        <div class="telemetry-label">CDP 网关代理总流量 (计费基准)</div>
+        <div class="telemetry-value font-cyan-mono">{{ formatBytes(clusterTraffic.cdpTotal) }}</div>
+        <div class="telemetry-sub">
+          <span>↓ {{ formatBytes(clusterTraffic.cdpRx) }}</span>
+          <span>↑ {{ formatBytes(clusterTraffic.cdpTx) }}</span>
+        </div>
+      </div>
+
+      <div class="telemetry-card">
+        <div class="telemetry-label">边缘节点容器网卡流量 (/proc/net/dev)</div>
+        <div class="telemetry-value font-mono" style="color:#a78bfa;">{{ formatBytes(clusterTraffic.netTotal) }}</div>
+        <div class="telemetry-sub">
+          <span>↓ {{ formatBytes(clusterTraffic.netRx) }}</span>
+          <span>↑ {{ formatBytes(clusterTraffic.netTx) }}</span>
+        </div>
+      </div>
+
+      <div class="telemetry-card">
+        <div class="telemetry-label">活跃 CDP 会话 / 在线节点</div>
+        <div class="telemetry-value font-mono" style="color:#34d399;">
+          ⚡ {{ clusterTraffic.activeStreams }}
+          <span style="font-size:12px; color:#64748b; font-weight:normal;">/ {{ clusterTraffic.onlineCount }} 在线</span>
+        </div>
+        <div class="telemetry-sub">
+          <span>支持 WSS / 反向隧道 / 直连全链路计流</span>
+        </div>
+      </div>
+
+      <div class="telemetry-card">
+        <div class="telemetry-label">遥测同步周期</div>
+        <div class="telemetry-value font-mono" style="color:#cbd5e1; font-size:15px;">3s 轮询 · 15s 落盘</div>
+        <div class="telemetry-sub">
+          <span>计数器优先写 Redis · 自动回退 SQLite Cache</span>
+        </div>
+      </div>
+    </div>
+
     <!-- ==================== 2. 三大板块 Tab 导航 ==================== -->
     <div class="table-header-bar">
       <div style="display:flex; gap:12px; align-items:center; flex-wrap:wrap;">
@@ -540,14 +632,15 @@ onUnmounted(() => {
       <table class="cdp-fluid-table">
         <thead>
           <tr>
-            <th style="width: 12%;">所属分组</th>
-            <th style="width: 20%;">节点标识 (Node UUID)</th>
-            <th style="width: 10%;">准入状态</th>
-            <th style="width: 16%;">端点 / 映射端口</th>
-            <th style="width: 10%;">Cookie 存量</th>
-            <th style="width: 12%;">网络拓扑</th>
-            <th style="width: 8%;">角色</th>
-            <th style="width: 12%; text-align: right;">操作</th>
+            <th style="width: 10%;">所属分组</th>
+            <th style="width: 17%;">节点标识 (Node UUID)</th>
+            <th style="width: 9%;">准入状态</th>
+            <th style="width: 14%;">端点 / 映射端口</th>
+            <th style="width: 8%;">Cookie</th>
+            <th style="width: 16%;">实时流量 / 会话</th>
+            <th style="width: 9%;">网络拓扑</th>
+            <th style="width: 6%;">角色</th>
+            <th style="width: 11%; text-align: right;">操作</th>
           </tr>
         </thead>
         <tbody>
@@ -586,7 +679,28 @@ onUnmounted(() => {
 
             <td>
               <div class="cookie-badge" @click="viewCookieDetails(node)" style="cursor:pointer;" title="查看 Cookie 明细">
-                <span>🍪 {{ node.cookie_count || 0 }} 条</span>
+                <span>🍪 {{ node.cookie_count || 0 }}</span>
+              </div>
+            </td>
+
+            <td>
+              <div class="node-traffic-cell font-mono">
+                <div class="traffic-line">
+                  <span class="traffic-tag-cdp">CDP</span>
+                  <span>↓{{ formatBytes(node.cdp_rx_bytes) }} / ↑{{ formatBytes(node.cdp_tx_bytes) }}</span>
+                  <span v-if="node.active_cdp_streams > 0" class="badge-stream-active" title="当前活跃 CDP WebSocket 会话数">
+                    ⚡{{ node.active_cdp_streams }}
+                  </span>
+                </div>
+                <div class="traffic-line traffic-line-net">
+                  <span class="traffic-tag-net">NIC</span>
+                  <span>↓{{ formatBytes(node.net_rx_bytes) }} / ↑{{ formatBytes(node.net_tx_bytes) }}</span>
+                  <button
+                    @click.stop="resetNodeTraffic(node)"
+                    class="btn-traffic-reset"
+                    title="清零该节点累计流量统计"
+                  >↺</button>
+                </div>
               </div>
             </td>
 
@@ -649,7 +763,7 @@ onUnmounted(() => {
             </td>
           </tr>
           <tr v-if="filteredNodes.length === 0">
-            <td colspan="8" style="text-align:center; color:#64748b; padding:32px;">暂无已信任的正式节点</td>
+            <td colspan="9" style="text-align:center; color:#64748b; padding:32px;">暂无已信任的正式节点</td>
           </tr>
         </tbody>
       </table>
@@ -1381,5 +1495,98 @@ onUnmounted(() => {
 .btn-resume-node:hover {
   background-color: #047857 !important;
   color: #fff !important;
+}
+
+/* 双层流量统计遥测条 */
+.traffic-telemetry-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+  margin-bottom: 16px;
+}
+@media (max-width: 1100px) {
+  .traffic-telemetry-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+.telemetry-card {
+  background: #060b17;
+  border: 1px solid #172554;
+  border-radius: 8px;
+  padding: 10px 14px;
+}
+.telemetry-label {
+  font-size: 11px;
+  color: #94a3b8;
+  margin-bottom: 4px;
+}
+.telemetry-value {
+  font-size: 18px;
+  font-weight: 700;
+  color: #f8fafc;
+  line-height: 1.25;
+}
+.telemetry-sub {
+  display: flex;
+  gap: 12px;
+  margin-top: 4px;
+  font-size: 11px;
+  color: #64748b;
+  font-family: monospace;
+}
+
+.node-traffic-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-size: 11px;
+}
+.traffic-line {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  color: #e2e8f0;
+  white-space: nowrap;
+}
+.traffic-line-net {
+  color: #94a3b8;
+}
+.traffic-tag-cdp {
+  background: rgba(14, 165, 233, 0.2);
+  border: 1px solid #0284c7;
+  color: #38bdf8;
+  font-size: 9px;
+  padding: 0 4px;
+  border-radius: 3px;
+}
+.traffic-tag-net {
+  background: rgba(139, 92, 246, 0.18);
+  border: 1px solid #7c3aed;
+  color: #c4b5fd;
+  font-size: 9px;
+  padding: 0 4px;
+  border-radius: 3px;
+}
+.badge-stream-active {
+  background: rgba(16, 185, 129, 0.2);
+  border: 1px solid #059669;
+  color: #34d399;
+  font-size: 10px;
+  padding: 0 5px;
+  border-radius: 4px;
+}
+.btn-traffic-reset {
+  background: transparent;
+  border: 1px solid #334155;
+  color: #94a3b8;
+  border-radius: 4px;
+  font-size: 10px;
+  padding: 0 5px;
+  cursor: pointer;
+  line-height: 1.4;
+}
+.btn-traffic-reset:hover {
+  border-color: #f87171;
+  color: #f87171;
 }
 </style>

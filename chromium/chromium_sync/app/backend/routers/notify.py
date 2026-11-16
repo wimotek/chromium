@@ -1,7 +1,7 @@
 from typing import Optional
 from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
-from core.database import get_setting, set_setting
+from core.db import get_setting, set_setting
 from core.security import verify_token
 from services.notification import send_email_notification, send_serverchan_notification
 

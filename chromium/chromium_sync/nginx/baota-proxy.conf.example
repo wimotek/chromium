@@ -1,0 +1,62 @@
+# ==============================================================================
+# 外部 Nginx / 宝塔 / 1Panel 配置示例（推荐：前后端彻底分离）
+# 配合 Hub 单参数启动：HUB_SERVE_FRONTEND=false HUB_BIND_ADDR=127.0.0.1
+#
+# 步骤 1：从镜像拷贝出前端静态资产到宿主机（如 /www/wwwroot/hub.yourdomain.com）：
+#   docker cp cdp_sync_manager:/app/frontend/dist/. /www/wwwroot/hub.yourdomain.com/
+# 步骤 2：SSL 证书直接在 Nginx / 宝塔 / 1Panel 面板站点中配置，后端不碰证书，仅监听 127.0.0.1:8443 明文 HTTP/WS
+#
+# 可选（Nginx 边缘层防刷，推荐写入 http {} 全局块）：
+#   limit_req_zone  $binary_remote_addr zone=hub_api:10m rate=20r/s;
+#   limit_req_zone  $binary_remote_addr zone=hub_login:10m rate=10r/m;
+#   limit_conn_zone $binary_remote_addr zone=hub_ws_conn:10m;
+# ==============================================================================
+
+map $http_upgrade $connection_upgrade {
+    default upgrade;
+    ''      close;
+}
+
+server {
+    listen 443 ssl http2;
+    listen [::]:443 ssl http2;
+    server_name hub.yourdomain.com;
+
+    # TLS 证书由 Nginx / 宝塔 / 1Panel 管理
+    ssl_certificate     /www/server/panel/vhost/cert/hub.yourdomain.com/fullchain.pem;
+    ssl_certificate_key /www/server/panel/vhost/cert/hub.yourdomain.com/privkey.pem;
+
+    client_max_body_size 100m;
+
+    # 1. 前端静态资源由 Nginx 直接托管（docker cp 拷出的 /app/frontend/dist）
+    root /www/wwwroot/hub.yourdomain.com;
+    index index.html;
+
+    location /assets/ {
+        expires 30d;
+        add_header Cache-Control "public, immutable";
+        try_files $uri =404;
+    }
+
+    # 2. 后端 API、节点反向隧道 WebSocket 与 CDP 安全代理网关
+    location ~ ^/(api|cdp)/ {
+        proxy_pass http://127.0.0.1:8443;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection $connection_upgrade;
+        proxy_set_header Host $http_host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-Host $http_host;
+        proxy_set_header X-Forwarded-Port $server_port;
+        proxy_buffering off;
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+    }
+
+    # 3. Vue SPA 前端路由兜底
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+}

@@ -22,6 +22,7 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -42,24 +43,32 @@ import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.ArrowBack
 import androidx.compose.material.icons.rounded.ArrowForward
+import androidx.compose.material.icons.rounded.Bookmarks
 import androidx.compose.material.icons.rounded.CleaningServices
+import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.CloudDone
 import androidx.compose.material.icons.rounded.Computer
+import androidx.compose.material.icons.rounded.Delete
 import androidx.compose.material.icons.rounded.Language
 import androidx.compose.material.icons.rounded.Lock
 import androidx.compose.material.icons.rounded.PhoneAndroid
 import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Security
+import androidx.compose.material.icons.rounded.Star
+import androidx.compose.material.icons.rounded.StarBorder
 import androidx.compose.material.icons.rounded.Stop
+import androidx.compose.material.icons.rounded.Sync
 import androidx.compose.material.icons.rounded.Terminal
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -74,8 +83,10 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -95,10 +106,14 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import androidx.core.content.ContextCompat
 import com.wimotek.edgenode.agent.EdgeAgentService
 import com.wimotek.edgenode.browser.WebViewCookieBridge
 import com.wimotek.edgenode.data.AgentStateBus
+import com.wimotek.edgenode.data.BookmarkItem
+import com.wimotek.edgenode.data.BookmarkPendingOp
 import com.wimotek.edgenode.data.HubSettings
 import com.wimotek.edgenode.data.NodeConfigStore
 import com.wimotek.edgenode.guard.CookieGuard
@@ -154,6 +169,10 @@ fun WimotekAndroidApp(store: NodeConfigStore) {
     val hubStatus by AgentStateBus.hubStatus.collectAsState()
     val serviceRunning by AgentStateBus.serviceRunning.collectAsState()
 
+    LaunchedEffect(Unit) {
+        store.loadBookmarks()
+    }
+
     Scaffold(
         bottomBar = {
             NavigationBar(containerColor = Color(0xFF1E293B)) {
@@ -191,7 +210,7 @@ fun WimotekAndroidApp(store: NodeConfigStore) {
         ) {
             // 始终挂载 BrowserScreen 以保持页面登录态不因切换 Tab 而销毁
             Box(modifier = Modifier.fillMaxSize()) {
-                BrowserTab(store = store, visible = (selectedTab == 0))
+                BrowserTab(store = store, visible = (selectedTab == 0), serviceRunning = serviceRunning)
             }
             if (selectedTab == 1) {
                 HubConfigTab(
@@ -210,12 +229,15 @@ fun WimotekAndroidApp(store: NodeConfigStore) {
 
 @SuppressLint("SetJavaScriptEnabled")
 @Composable
-fun BrowserTab(store: NodeConfigStore, visible: Boolean) {
+fun BrowserTab(store: NodeConfigStore, visible: Boolean, serviceRunning: Boolean) {
     val context = LocalContext.current
     val focusManager = LocalFocusManager.current
     val initialHub = remember { store.loadHubSettings() }
+    val bookmarks by AgentStateBus.bookmarks.collectAsState()
     var desktopUa by remember { mutableStateOf(initialHub.desktopUaMode) }
     var urlInput by remember { mutableStateOf(store.getLastHomepage()) }
+    var pageTitle by remember { mutableStateOf("") }
+    var showBookmarksDialog by remember { mutableStateOf(false) }
     var progress by remember { mutableIntStateOf(100) }
     var canGoBack by remember { mutableStateOf(false) }
     var canGoForward by remember { mutableStateOf(false) }
@@ -237,6 +259,64 @@ fun BrowserTab(store: NodeConfigStore, visible: Boolean) {
         focusManager.clearFocus()
     }
 
+    fun upsertBookmarkAndSync(title: String, rawUrl: String, folder: String = "常用站点", pinned: Boolean = true) {
+        val clean = store.upsertLocalBookmark(
+            BookmarkItem(
+                title = title,
+                url = rawUrl,
+                folder = folder,
+                pinned = pinned,
+                sourceNode = "android"
+            )
+        )
+        if (serviceRunning) {
+            context.startService(
+                Intent(context, EdgeAgentService::class.java).apply {
+                    action = EdgeAgentService.ACTION_UPSERT_BOOKMARK
+                    putExtra(EdgeAgentService.EXTRA_TITLE, clean.title)
+                    putExtra(EdgeAgentService.EXTRA_URL, clean.url)
+                    putExtra(EdgeAgentService.EXTRA_FOLDER, clean.folder)
+                    putExtra(EdgeAgentService.EXTRA_PINNED, clean.pinned)
+                }
+            )
+        } else {
+            store.enqueuePendingBookmarkOp(
+                BookmarkPendingOp(
+                    op = "upsert",
+                    title = clean.title,
+                    url = clean.url,
+                    folder = clean.folder,
+                    pinned = clean.pinned
+                )
+            )
+        }
+    }
+
+    fun deleteBookmarkAndSync(rawUrl: String) {
+        val norm = store.normalizeBookmarkUrl(rawUrl)
+        store.deleteLocalBookmark(norm)
+        if (serviceRunning) {
+            context.startService(
+                Intent(context, EdgeAgentService::class.java).apply {
+                    action = EdgeAgentService.ACTION_DELETE_BOOKMARK
+                    putExtra(EdgeAgentService.EXTRA_URL, norm)
+                }
+            )
+        } else {
+            store.enqueuePendingBookmarkOp(BookmarkPendingOp(op = "delete", url = norm))
+        }
+    }
+
+    val isCurrentBookmarked = remember(urlInput, bookmarks) {
+        val norm = store.normalizeBookmarkUrl(urlInput)
+        norm.isNotEmpty() && bookmarks.any { it.url.equals(norm, ignoreCase = true) }
+    }
+
+    val quickChips = remember(bookmarks) {
+        val pinned = bookmarks.filter { it.pinned }
+        (if (pinned.isNotEmpty()) pinned else bookmarks).take(20)
+    }
+
     BackHandler(enabled = visible && canGoBack) {
         webViewRef?.goBack()
     }
@@ -252,10 +332,10 @@ fun BrowserTab(store: NodeConfigStore, visible: Boolean) {
                     verticalAlignment = Alignment.CenterVertically,
                     modifier = Modifier.fillMaxWidth()
                 ) {
-                    IconButton(onClick = { webViewRef?.goBack() }, enabled = canGoBack, modifier = Modifier.size(36.dp)) {
+                    IconButton(onClick = { webViewRef?.goBack() }, enabled = canGoBack, modifier = Modifier.size(34.dp)) {
                         Icon(Icons.Rounded.ArrowBack, contentDescription = "后退")
                     }
-                    IconButton(onClick = { webViewRef?.goForward() }, enabled = canGoForward, modifier = Modifier.size(36.dp)) {
+                    IconButton(onClick = { webViewRef?.goForward() }, enabled = canGoForward, modifier = Modifier.size(34.dp)) {
                         Icon(Icons.Rounded.ArrowForward, contentDescription = "前进")
                     }
                     OutlinedTextField(
@@ -269,7 +349,41 @@ fun BrowserTab(store: NodeConfigStore, visible: Boolean) {
                             .weight(1f)
                             .padding(horizontal = 4.dp)
                     )
-                    IconButton(onClick = { webViewRef?.reload() }, modifier = Modifier.size(36.dp)) {
+                    IconButton(
+                        onClick = {
+                            val currentUrl = store.normalizeBookmarkUrl(urlInput)
+                            if (currentUrl.isEmpty()) return@IconButton
+                            if (isCurrentBookmarked) {
+                                deleteBookmarkAndSync(currentUrl)
+                                Toast.makeText(context, "已从联动收藏夹移除", Toast.LENGTH_SHORT).show()
+                            } else {
+                                val title = pageTitle.ifBlank {
+                                    runCatching { Uri.parse(currentUrl).host }.getOrNull() ?: currentUrl
+                                }
+                                upsertBookmarkAndSync(title, currentUrl, "常用站点", true)
+                                Toast.makeText(
+                                    context,
+                                    if (serviceRunning) "已收藏并同步至 Hub" else "已本地收藏（接入 Hub 后自动同步）",
+                                    Toast.LENGTH_SHORT
+                                ).show()
+                            }
+                        },
+                        modifier = Modifier.size(34.dp)
+                    ) {
+                        Icon(
+                            imageVector = if (isCurrentBookmarked) Icons.Rounded.Star else Icons.Rounded.StarBorder,
+                            contentDescription = "收藏当前页",
+                            tint = if (isCurrentBookmarked) Color(0xFFFBBF24) else Color(0xFF94A3B8)
+                        )
+                    }
+                    IconButton(onClick = { showBookmarksDialog = true }, modifier = Modifier.size(34.dp)) {
+                        Icon(
+                            imageVector = Icons.Rounded.Bookmarks,
+                            contentDescription = "打开联动收藏夹",
+                            tint = Color(0xFF38BDF8)
+                        )
+                    }
+                    IconButton(onClick = { webViewRef?.reload() }, modifier = Modifier.size(34.dp)) {
                         Icon(Icons.Rounded.Refresh, contentDescription = "刷新")
                     }
                     IconButton(
@@ -289,7 +403,7 @@ fun BrowserTab(store: NodeConfigStore, visible: Boolean) {
                                 Toast.LENGTH_SHORT
                             ).show()
                         },
-                        modifier = Modifier.size(36.dp)
+                        modifier = Modifier.size(34.dp)
                     ) {
                         Icon(
                             imageVector = if (desktopUa) Icons.Rounded.Computer else Icons.Rounded.PhoneAndroid,
@@ -299,27 +413,25 @@ fun BrowserTab(store: NodeConfigStore, visible: Boolean) {
                     }
                 }
 
-                // 快捷站点导航条
+                // Hub 联动快捷站点导航条
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
                         .horizontalScroll(rememberScrollState())
                         .padding(top = 4.dp),
-                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    listOf(
-                        "GitHub" to "https://github.com/login",
-                        "X / Twitter" to "https://x.com",
-                        "淘宝" to "https://login.taobao.com",
-                        "京东" to "https://plogin.m.jd.com",
-                        "B站" to "https://passport.bilibili.com/login",
-                        "百度" to "https://www.baidu.com"
-                    ).forEach { (label, siteUrl) ->
+                    quickChips.forEach { bm ->
                         AssistChip(
-                            onClick = { normalizeAndLoad(siteUrl) },
-                            label = { Text(label, fontSize = 11.sp) }
+                            onClick = { normalizeAndLoad(bm.url) },
+                            label = { Text(bm.title, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis) }
                         )
                     }
+                    AssistChip(
+                        onClick = { showBookmarksDialog = true },
+                        label = { Text("📑 全部收藏(${bookmarks.size})", fontSize = 11.sp, color = Color(0xFF38BDF8)) }
+                    )
                 }
             }
         }
@@ -362,6 +474,11 @@ fun BrowserTab(store: NodeConfigStore, visible: Boolean) {
                         override fun onProgressChanged(view: WebView?, newProgress: Int) {
                             progress = newProgress
                         }
+
+                        override fun onReceivedTitle(view: WebView?, title: String?) {
+                            super.onReceivedTitle(view, title)
+                            if (!title.isNullOrBlank()) pageTitle = title
+                        }
                     }
 
                     webViewClient = object : WebViewClient() {
@@ -400,6 +517,7 @@ fun BrowserTab(store: NodeConfigStore, visible: Boolean) {
                                 store.recordVisitedUrl(it)
                                 store.saveLastHomepage(it)
                             }
+                            view?.title?.takeIf { it.isNotBlank() }?.let { pageTitle = it }
                             canGoBack = view?.canGoBack() ?: false
                             canGoForward = view?.canGoForward() ?: false
                             runCatching { CookieManager.getInstance().flush() }
@@ -414,6 +532,284 @@ fun BrowserTab(store: NodeConfigStore, visible: Boolean) {
                 wv.visibility = if (visible) View.VISIBLE else View.GONE
             }
         )
+    }
+
+    if (showBookmarksDialog) {
+        BookmarksManagerDialog(
+            bookmarks = bookmarks,
+            currentUrl = urlInput,
+            currentTitle = pageTitle,
+            serviceRunning = serviceRunning,
+            onDismiss = { showBookmarksDialog = false },
+            onOpenUrl = { targetUrl ->
+                showBookmarksDialog = false
+                normalizeAndLoad(targetUrl)
+            },
+            onUpsert = { t, u, f, p ->
+                upsertBookmarkAndSync(t, u, f, p)
+            },
+            onDelete = { u ->
+                deleteBookmarkAndSync(u)
+            },
+            onPullFromHub = {
+                if (serviceRunning) {
+                    context.startService(
+                        Intent(context, EdgeAgentService::class.java).apply {
+                            action = EdgeAgentService.ACTION_PULL_BOOKMARKS
+                        }
+                    )
+                    Toast.makeText(context, "已向 Hub 请求拉取最新收藏夹", Toast.LENGTH_SHORT).show()
+                } else {
+                    Toast.makeText(context, "请先在「Hub 接入」启动后台连接", Toast.LENGTH_SHORT).show()
+                }
+            }
+        )
+    }
+}
+
+@Composable
+fun BookmarksManagerDialog(
+    bookmarks: List<BookmarkItem>,
+    currentUrl: String,
+    currentTitle: String,
+    serviceRunning: Boolean,
+    onDismiss: () -> Unit,
+    onOpenUrl: (String) -> Unit,
+    onUpsert: (String, String, String, Boolean) -> Unit,
+    onDelete: (String) -> Unit,
+    onPullFromHub: () -> Unit
+) {
+    var searchQuery by remember { mutableStateOf("") }
+    var selectedFolder by remember { mutableStateOf("全部") }
+    var showAddForm by remember { mutableStateOf(false) }
+    var newTitle by remember(currentTitle, currentUrl) { mutableStateOf(currentTitle.ifBlank { currentUrl }) }
+    var newUrl by remember(currentUrl) { mutableStateOf(currentUrl) }
+    var newFolder by remember { mutableStateOf("常用站点") }
+    var newPinned by remember { mutableStateOf(true) }
+
+    val folders = remember(bookmarks) {
+        listOf("全部") + bookmarks.map { it.folder.ifBlank { "常用站点" } }.distinct()
+    }
+
+    val filtered = remember(bookmarks, searchQuery, selectedFolder) {
+        val q = searchQuery.trim().lowercase()
+        bookmarks.filter { b ->
+            val matchFolder = selectedFolder == "全部" || b.folder == selectedFolder
+            val matchQuery = q.isEmpty() ||
+                b.title.lowercase().contains(q) ||
+                b.url.lowercase().contains(q) ||
+                b.folder.lowercase().contains(q)
+            matchFolder && matchQuery
+        }
+    }
+
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(usePlatformDefaultWidth = false)
+    ) {
+        Surface(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(14.dp),
+            shape = RoundedCornerShape(16.dp),
+            color = Color(0xFF0F172A),
+            tonalElevation = 8.dp
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(14.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Column {
+                        Text("云端联动收藏夹", fontSize = 18.sp, fontWeight = FontWeight.Bold, color = Color(0xFFF8FAFC))
+                        Text(
+                            if (serviceRunning) "已连接 Hub · 收藏增删改实时同步全网节点" else "离线本地模式 · 联网后自动向 Hub 同步",
+                            fontSize = 11.sp,
+                            color = if (serviceRunning) Color(0xFF34D399) else Color(0xFFFBBF24)
+                        )
+                    }
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        IconButton(onClick = onPullFromHub) {
+                            Icon(Icons.Rounded.Sync, contentDescription = "从 Hub 同步", tint = Color(0xFF38BDF8))
+                        }
+                        IconButton(onClick = { showAddForm = !showAddForm }) {
+                            Icon(Icons.Rounded.Add, contentDescription = "添加收藏", tint = Color(0xFF2DD4BF))
+                        }
+                        IconButton(onClick = onDismiss) {
+                            Icon(Icons.Rounded.Close, contentDescription = "关闭", tint = Color(0xFF94A3B8))
+                        }
+                    }
+                }
+
+                if (showAddForm) {
+                    Card(
+                        colors = CardDefaults.cardColors(containerColor = Color(0xFF1E293B)),
+                        shape = RoundedCornerShape(12.dp)
+                    ) {
+                        Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Text("添加 / 更新联动收藏", fontWeight = FontWeight.SemiBold, fontSize = 13.sp, color = Color(0xFF38BDF8))
+                            OutlinedTextField(
+                                value = newTitle,
+                                onValueChange = { newTitle = it },
+                                label = { Text("站点标题", fontSize = 12.sp) },
+                                singleLine = true,
+                                modifier = Modifier.fillMaxWidth()
+                            )
+                            OutlinedTextField(
+                                value = newUrl,
+                                onValueChange = { newUrl = it },
+                                label = { Text("网址 URL", fontSize = 12.sp) },
+                                singleLine = true,
+                                modifier = Modifier.fillMaxWidth()
+                            )
+                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                                OutlinedTextField(
+                                    value = newFolder,
+                                    onValueChange = { newFolder = it },
+                                    label = { Text("分类文件夹", fontSize = 12.sp) },
+                                    singleLine = true,
+                                    modifier = Modifier.weight(1f)
+                                )
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Checkbox(checked = newPinned, onCheckedChange = { newPinned = it })
+                                    Text("置顶快捷栏", fontSize = 12.sp)
+                                }
+                            }
+                            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                                TextButton(onClick = { showAddForm = false }) { Text("收起") }
+                                Button(
+                                    onClick = {
+                                        if (newUrl.isNotBlank()) {
+                                            onUpsert(newTitle, newUrl, newFolder.ifBlank { "常用站点" }, newPinned)
+                                            showAddForm = false
+                                        }
+                                    }
+                                ) {
+                                    Text("保存并同步 Hub")
+                                }
+                            }
+                        }
+                    }
+                }
+
+                OutlinedTextField(
+                    value = searchQuery,
+                    onValueChange = { searchQuery = it },
+                    placeholder = { Text("搜索标题 / 域名 / 分类...", fontSize = 13.sp) },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    folders.forEach { folder ->
+                        FilterChip(
+                            selected = (selectedFolder == folder),
+                            onClick = { selectedFolder = folder },
+                            label = { Text(folder, fontSize = 11.sp) }
+                        )
+                    }
+                }
+
+                LazyColumn(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .weight(1f),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    if (filtered.isEmpty()) {
+                        item {
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(vertical = 32.dp),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text("暂无匹配收藏，点击右上角「+」添加当前网页或自定义网址", color = Color(0xFF64748B), fontSize = 13.sp)
+                            }
+                        }
+                    } else {
+                        items(filtered, key = { it.url }) { bm ->
+                            Card(
+                                colors = CardDefaults.cardColors(containerColor = Color(0xFF1E293B)),
+                                shape = RoundedCornerShape(10.dp),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clickable { onOpenUrl(bm.url) }
+                                        .padding(horizontal = 8.dp, vertical = 8.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    IconButton(
+                                        onClick = { onUpsert(bm.title, bm.url, bm.folder, !bm.pinned) },
+                                        modifier = Modifier.size(34.dp)
+                                    ) {
+                                        Icon(
+                                            imageVector = if (bm.pinned) Icons.Rounded.Star else Icons.Rounded.StarBorder,
+                                            contentDescription = "置顶",
+                                            tint = if (bm.pinned) Color(0xFFFBBF24) else Color(0xFF64748B)
+                                        )
+                                    }
+                                    Column(
+                                        modifier = Modifier
+                                            .weight(1f)
+                                            .padding(horizontal = 6.dp)
+                                    ) {
+                                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                            Text(
+                                                bm.title,
+                                                fontWeight = FontWeight.SemiBold,
+                                                fontSize = 14.sp,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis,
+                                                modifier = Modifier.weight(1f, fill = false)
+                                            )
+                                            Text(
+                                                bm.folder,
+                                                fontSize = 10.sp,
+                                                color = Color(0xFF38BDF8),
+                                                modifier = Modifier
+                                                    .background(Color(0xFF09122A), RoundedCornerShape(4.dp))
+                                                    .padding(horizontal = 5.dp, vertical = 1.dp)
+                                            )
+                                        }
+                                        Text(
+                                            bm.url,
+                                            fontSize = 11.sp,
+                                            color = Color(0xFF94A3B8),
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                    }
+                                    IconButton(
+                                        onClick = { onDelete(bm.url) },
+                                        modifier = Modifier.size(34.dp)
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Rounded.Delete,
+                                            contentDescription = "删除收藏",
+                                            tint = Color(0xFFF87171)
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 

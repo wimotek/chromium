@@ -1,4 +1,5 @@
 import os
+import secrets
 import bcrypt
 import jwt
 import ipaddress
@@ -8,15 +9,44 @@ from cryptography import x509
 from cryptography.x509.oid import NameOID
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
-from fastapi import HTTPException, Header as ReqHeader, Security
+from fastapi import HTTPException, Header as ReqHeader, Request, Security
 from fastapi.security.api_key import APIKeyHeader, APIKeyQuery
+import time
 from config import CERTS_DIR, DATA_DIR, SSL_CERT_FILE, SSL_KEY_FILE, logger
-from core.database import get_setting
+from core.cache import cache_mgr
+from core.db import get_setting
+from core.rate_limit import (
+    API_KEY_BLOCK_SECONDS,
+    API_KEY_FAIL_WINDOW_SEC,
+    API_KEY_MAX_FAILURES,
+    check_block,
+    clear_auth_failures,
+    get_client_ip,
+    record_auth_failure,
+)
 
 api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 api_key_query = APIKeyQuery(name="api_key", auto_error=False)
 
 CAPTCHA_STORE = {}
+
+
+def store_captcha(token: str, answer: int, ttl_seconds: int = 180):
+    payload = {"ans": int(answer), "exp": time.time() + ttl_seconds}
+    cache_mgr.set_json(f"auth:captcha:{token}", payload, ttl=ttl_seconds)
+
+
+def verify_and_pop_captcha(token: str, user_answer: str) -> bool:
+    if not token:
+        return False
+    key = f"auth:captcha:{token}"
+    cap = cache_mgr.get_json(key)
+    cache_mgr.delete(key)
+    if not cap:
+        return False
+    if time.time() > float(cap.get("exp", 0)):
+        return False
+    return str(cap.get("ans", "")) == (user_answer or "").strip()
 
 def hash_password(password: str) -> str:
     pwd_bytes = password.encode('utf-8')[:72]
@@ -106,22 +136,36 @@ def ensure_ssl_certificates():
         SSL_KEY_FILE = fallback_key
         return fallback_cert, fallback_key
 
-def verify_token(authorization: Optional[str] = ReqHeader(None)):
+def verify_api_key_value(presented: Optional[str], valid_key: Optional[str]) -> bool:
+    if not presented or not valid_key:
+        return False
+    return secrets.compare_digest(presented.strip(), valid_key.strip())
+
+
+def verify_token(request: Request, authorization: Optional[str] = ReqHeader(None)):
+    ip = get_client_ip(request)
+    check_block("jwt_auth", ip)
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="凭证无效")
     jwt_secret = get_setting('jwt_secret')
     try:
-        return jwt.decode(authorization.split(" ")[1], jwt_secret, algorithms=["HS256"])
+        payload = jwt.decode(authorization.split(" ")[1], jwt_secret, algorithms=["HS256"])
+        return payload
     except Exception:
+        record_auth_failure("jwt_auth", ip, max_failures=30, fail_window_sec=300, block_sec=300)
         raise HTTPException(status_code=401, detail="登录凭证失效")
 
+
 def verify_agent_access(
+    request: Request,
     header_key: Optional[str] = Security(api_key_header),
     query_key: Optional[str] = Security(api_key_query),
     authorization: Optional[str] = ReqHeader(None)
 ):
+    ip = get_client_ip(request)
+    check_block("api_key", ip)
     valid_key = get_setting('api_key')
-    if (header_key and header_key == valid_key) or (query_key and query_key == valid_key):
+    if verify_api_key_value(header_key, valid_key) or verify_api_key_value(query_key, valid_key):
         return {"sub": "external_agent"}
     if authorization and authorization.startswith("Bearer "):
         try:
@@ -129,4 +173,17 @@ def verify_agent_access(
             return jwt.decode(authorization.split(" ")[1], jwt_secret, algorithms=["HS256"])
         except Exception:
             pass
+    _, blk_sec = record_auth_failure(
+        "api_key",
+        ip,
+        max_failures=API_KEY_MAX_FAILURES,
+        fail_window_sec=API_KEY_FAIL_WINDOW_SEC,
+        block_sec=API_KEY_BLOCK_SECONDS,
+    )
+    if blk_sec > 0:
+        raise HTTPException(
+            status_code=429,
+            detail=f"无效 API-Key 尝试过多，已临时封禁 {blk_sec} 秒",
+            headers={"Retry-After": str(blk_sec)},
+        )
     raise HTTPException(status_code=403, detail="未授权调用: 请在 Header 提供 X-API-Key 或 ?api_key=")

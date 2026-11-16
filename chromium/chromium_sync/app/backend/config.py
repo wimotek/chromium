@@ -22,12 +22,25 @@ for candidate in CANDIDATE_DIST_DIRS:
         break
 
 # 持久化存储与证书路径
-DATA_DIR = "/data"
+DATA_DIR = os.getenv("DATA_DIR", "/data").strip() or "/data"
 KEYS_DIR = os.path.join(DATA_DIR, "keys")
 DB_PATH = os.path.join(DATA_DIR, "app.db")
+CACHE_DB_PATH = os.path.join(DATA_DIR, "cache.db")
+BOOTSTRAP_CONFIG_PATH = os.path.join(DATA_DIR, "bootstrap.json")
 CERTS_DIR = "/certs"
 SSL_CERT_FILE = os.path.join(CERTS_DIR, "fullchain.pem")
 SSL_KEY_FILE = os.path.join(CERTS_DIR, "privkey.pem")
+
+# 数据库与缓存配置 (可通过环境变量覆盖，也可由首次安装向导写入 bootstrap.json)
+SKIP_SETUP_WIZARD = os.getenv("SKIP_SETUP_WIZARD", "false").strip().lower() in {"1", "true", "yes", "on"}
+DEFAULT_DB_TYPE = (os.getenv("DB_TYPE") or "sqlite").strip().lower()
+DEFAULT_DATABASE_URL = (os.getenv("DATABASE_URL") or "").strip()
+DEFAULT_MYSQL_HOST = (os.getenv("MYSQL_HOST") or "127.0.0.1").strip()
+DEFAULT_MYSQL_PORT = int((os.getenv("MYSQL_PORT") or "3306").strip() or 3306)
+DEFAULT_MYSQL_USER = (os.getenv("MYSQL_USER") or "root").strip()
+DEFAULT_MYSQL_PASSWORD = os.getenv("MYSQL_PASSWORD") or ""
+DEFAULT_MYSQL_DATABASE = (os.getenv("MYSQL_DATABASE") or "chromium_sync").strip()
+DEFAULT_REDIS_URL = (os.getenv("REDIS_URL") or "").strip()
 
 try:
     os.makedirs(KEYS_DIR, exist_ok=True)
@@ -45,6 +58,7 @@ except OSError:
 # 若使用 Docker 端口映射 (如 -p 3000:8443)，可通过 HUB_EXTERNAL_PORT=3000 指定宿主机对外端口；
 # 未设置时也会自动从 HTTP Host / X-Forwarded-Host / X-Forwarded-Port 请求头自动识别。
 HUB_HOST = (os.getenv("HUB_HOST") or "::").strip()
+HUB_SERVE_FRONTEND = os.getenv("HUB_SERVE_FRONTEND", "true").strip().lower() not in {"0", "false", "no", "off"}
 _raw_hub_port = (os.getenv("HUB_PORT") or "8443").strip()
 try:
     HUB_PORT = int(_raw_hub_port)
@@ -67,6 +81,37 @@ if _raw_ext_port:
         logger.warning(f"⚠️ 无效的 HUB_EXTERNAL_PORT='{_raw_ext_port}'，将自动从请求头识别")
 
 HUB_PUBLIC_HOST = (os.getenv("HUB_PUBLIC_HOST") or "").strip()
+
+
+def apply_hub_network_overrides(public_host: str = None, external_port: int = None):
+    """从首次安装向导或 bootstrap.json 动态应用对外域名与映射端口（不覆盖显式环境变量）"""
+    global HUB_PUBLIC_HOST, HUB_EXTERNAL_PORT
+    if public_host is not None and not os.getenv("HUB_PUBLIC_HOST"):
+        HUB_PUBLIC_HOST = str(public_host).strip()
+    if external_port is not None and not (os.getenv("HUB_EXTERNAL_PORT") or os.getenv("EXTERNAL_PORT")):
+        try:
+            p = int(external_port)
+            HUB_EXTERNAL_PORT = p if 1 <= p <= 65535 else None
+        except (TypeError, ValueError):
+            pass
+
+
+def _init_network_from_bootstrap():
+    if os.path.exists(BOOTSTRAP_CONFIG_PATH):
+        try:
+            import json
+            with open(BOOTSTRAP_CONFIG_PATH, "r", encoding="utf-8") as f:
+                boot = json.load(f)
+            if isinstance(boot, dict):
+                apply_hub_network_overrides(
+                    public_host=boot.get("hub_public_host"),
+                    external_port=boot.get("hub_external_port"),
+                )
+        except Exception:
+            pass
+
+
+_init_network_from_bootstrap()
 
 
 def _parse_host_header(header_val: str):
@@ -96,7 +141,11 @@ def resolve_hub_access_info(request) -> dict:
     """
     headers = request.headers
     fwd_proto = (headers.get("x-forwarded-proto") or "").split(",")[0].strip().lower()
-    ws_scheme = "ws" if fwd_proto == "http" else "wss"
+    internal_ws_scheme = "wss" if HUB_SERVE_FRONTEND else "ws"
+    if fwd_proto in ("http", "https"):
+        ws_scheme = "ws" if fwd_proto == "http" else "wss"
+    else:
+        ws_scheme = internal_ws_scheme
 
     fwd_host = (headers.get("x-forwarded-host") or "").split(",")[0].strip()
     raw_host = fwd_host or (headers.get("host") or "").strip()
@@ -135,6 +184,8 @@ def resolve_hub_access_info(request) -> dict:
 
     return {
         "ws_scheme": ws_scheme,
+        "internal_ws_scheme": internal_ws_scheme,
+        "ssl_enabled": HUB_SERVE_FRONTEND,
         "public_netloc": public_netloc,
         "same_host_port": same_host_port,
         "internal_port": HUB_PORT,

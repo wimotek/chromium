@@ -31,6 +31,9 @@ def system_info():
         "data": {
             "setup_required": setup_req,
             "mode": Config.APP_MODE,
+            "separate_frontend": Config.SEPARATE_FRONTEND,
+            "ssl_enabled": Config.SSL_ENABLE,
+            "rate_limit_enabled": Config.RATE_LIMIT_ENABLE,
             "web_port": Config.WEB_PORT,
             "public_port": public_port,
             "public_url": public_url,
@@ -47,6 +50,19 @@ def admin_cert_info():
     data = request.json or {}
     if not check_admin(data.get('admin_user'), data.get('admin_pwd')):
         return jsonify({"code": 403, "msg": "无权限"})
+    if Config.SEPARATE_FRONTEND:
+        return jsonify({
+            "code": 200,
+            "data": {
+                "status": "nginx_managed",
+                "separate_frontend": True,
+                "is_self_signed": False,
+                "issuer": "已开启前后端分离（由前置 Nginx 托管 TLS 证书）",
+                "days_left": 0,
+                "cert_path": "Nginx 宿主机维护",
+                "key_path": "Nginx 宿主机维护",
+            }
+        })
     return jsonify({"code": 200, "data": get_cert_info()})
 
 @system_bp.route('/api/admin/cert/self_signed', methods=['POST'])
@@ -54,6 +70,11 @@ def admin_cert_self_signed():
     data = request.json or {}
     if not check_admin(data.get('admin_user'), data.get('admin_pwd')):
         return jsonify({"code": 403, "msg": "无权限"})
+    if Config.SEPARATE_FRONTEND:
+        return jsonify({
+            "code": 400,
+            "msg": "当前已开启 SEPARATE_FRONTEND=true（前后端分离模式），TLS 证书由 Nginx 负责，无需容器内自签"
+        }), 400
     generate_self_signed_cert()
     return jsonify({"code": 200, "msg": "已重新生成高兼容性 10 年期自签 TLS 证书"})
 

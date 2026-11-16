@@ -504,8 +504,12 @@
             </div>
 
             <!-- 证书状态横幅 -->
-            <div class="smtp-status-box" :class="certInfo.is_self_signed ? 'smtp-empty' : 'smtp-ready'" style="margin-bottom: 14px;">
-              <div v-if="certInfo.is_self_signed">
+            <div class="smtp-status-box" :class="(certInfo.status === 'valid' || certInfo.status === 'nginx_managed') ? 'smtp-ready' : 'smtp-empty'" style="margin-bottom: 14px;">
+              <div v-if="certInfo.status === 'nginx_managed'">
+                🌐 <b>前后端分离模式已开启（SEPARATE_FRONTEND=true）</b>
+                <div style="font-size: 11px; margin-top: 2px;">后端以纯 HTTP 运行，静态资源与 HTTPS/TLS 证书已完全交由前置 Nginx 托管。</div>
+              </div>
+              <div v-else-if="certInfo.is_self_signed">
                 🟢 <b>当前正在使用标准现代自签名证书 (10年期)</b>
                 <div style="font-size: 11px; margin-top: 2px;">已预置 digitalSignature 密钥用途与通配符 SAN，开机即用，零配置免维护。</div>
               </div>
@@ -519,12 +523,17 @@
             </div>
 
             <div style="display: flex; flex-direction: column; gap: 8px; font-size: 12px; color: #cbd5e1; margin-bottom: 16px;">
-              <div>• <b>公钥证书路径：</b><code>{{ certInfo.cert_path || '/app/certs/fullchain.pem' }}</code> (权限 0644)</div>
-              <div>• <b>私钥文件路径：</b><code>{{ certInfo.key_path || '/app/certs/privkey.pem' }}</code> (权限 0600)</div>
-              <div>• <b>剩余有效时长：</b><span class="text-emerald" style="font-weight: bold;">{{ certInfo.days_left }} 天</span></div>
+              <div>• <b>公钥证书路径：</b><code>{{ certInfo.cert_path || '/app/certs/fullchain.pem' }}</code><span v-if="certInfo.status !== 'nginx_managed'"> (权限 0644)</span></div>
+              <div>• <b>私钥文件路径：</b><code>{{ certInfo.key_path || '/app/certs/privkey.pem' }}</code><span v-if="certInfo.status !== 'nginx_managed'"> (权限 0600)</span></div>
+              <div v-if="certInfo.status !== 'nginx_managed'">• <b>剩余有效时长：</b><span class="text-emerald" style="font-weight: bold;">{{ certInfo.days_left }} 天</span></div>
             </div>
 
-            <button class="btn-cyber-primary" :disabled="regeneratingCert" @click="handleRegenerateSelfSigned">
+            <button
+              v-if="certInfo.status !== 'nginx_managed'"
+              class="btn-cyber-primary"
+              :disabled="regeneratingCert"
+              @click="handleRegenerateSelfSigned"
+            >
               {{ regeneratingCert ? '正在生成中...' : '🔄 重新生成 10 年期自签名证书' }}
             </button>
           </div>

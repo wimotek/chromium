@@ -181,6 +181,8 @@ onMounted(() => {
   refreshCaptcha(authMode.value)
 })
 
+const extractErrMsg = (err, fallback) => err?.response?.data?.msg || fallback
+
 const refreshCaptcha = async (type) => {
   try {
     const res = await axios.get('/api/auth/captcha')
@@ -253,8 +255,8 @@ const sendRegisterCode = async () => {
       ElMessage.error(res.data.msg)
       refreshCaptcha('register')
     }
-  } catch (_) {
-    ElMessage.error('验证码发送失败')
+  } catch (err) {
+    ElMessage.error(extractErrMsg(err, '验证码发送失败'))
     refreshCaptcha('register')
   } finally {
     sendingCode.value = false
@@ -280,8 +282,8 @@ const sendForgotCode = async () => {
       ElMessage.error(res.data.msg)
       refreshCaptcha('forgot')
     }
-  } catch (_) {
-    ElMessage.error('请求失败')
+  } catch (err) {
+    ElMessage.error(extractErrMsg(err, '验证码发送请求失败'))
     refreshCaptcha('forgot')
   } finally {
     sendingCode.value = false
@@ -306,8 +308,8 @@ const submitForgotPassword = async () => {
     } else {
       ElMessage.error(res.data.msg)
     }
-  } catch (_) {
-    ElMessage.error('重置失败')
+  } catch (err) {
+    ElMessage.error(extractErrMsg(err, '密码重置失败'))
   } finally {
     loading.value = false
   }
@@ -343,7 +345,8 @@ const handleAuth = async () => {
       if (authMode.value === 'login') refreshCaptcha('login')
       else refreshCaptcha('register')
     }
-  } catch (_) {
+  } catch (err) {
+    ElMessage.error(extractErrMsg(err, '认证请求失败，请稍后重试'))
     if (authMode.value === 'login') refreshCaptcha('login')
     else refreshCaptcha('register')
   } finally {

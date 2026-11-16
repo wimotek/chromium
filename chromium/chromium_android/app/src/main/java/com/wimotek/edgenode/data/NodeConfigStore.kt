@@ -8,6 +8,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import org.json.JSONArray
+import org.json.JSONObject
 import java.security.MessageDigest
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -28,6 +29,24 @@ data class LogEntry(
     val message: String
 )
 
+data class BookmarkItem(
+    val title: String,
+    val url: String,
+    val folder: String = "常用站点",
+    val pinned: Boolean = true,
+    val sortOrder: Int = 0,
+    val sourceNode: String = "local",
+    val updatedAt: String = ""
+)
+
+data class BookmarkPendingOp(
+    val op: String,
+    val title: String = "",
+    val url: String,
+    val folder: String = "常用站点",
+    val pinned: Boolean = true
+)
+
 object AgentStateBus {
     private val _hubStatus = MutableStateFlow("未接入")
     val hubStatus: StateFlow<String> = _hubStatus.asStateFlow()
@@ -40,6 +59,9 @@ object AgentStateBus {
 
     private val _logs = MutableStateFlow<List<LogEntry>>(emptyList())
     val logs: StateFlow<List<LogEntry>> = _logs.asStateFlow()
+
+    private val _bookmarks = MutableStateFlow<List<BookmarkItem>>(emptyList())
+    val bookmarks: StateFlow<List<BookmarkItem>> = _bookmarks.asStateFlow()
 
     private val timeFmt = SimpleDateFormat("HH:mm:ss", Locale.getDefault())
 
@@ -56,6 +78,10 @@ object AgentStateBus {
 
     fun setApiLocked(locked: Boolean) {
         _apiLockedDisabled.value = locked
+    }
+
+    fun setBookmarks(list: List<BookmarkItem>) {
+        _bookmarks.value = list
     }
 
     fun log(level: String, message: String) {
@@ -219,5 +245,182 @@ class NodeConfigStore(context: Context) {
             }
         }
         return out.toList()
+    }
+
+    fun normalizeBookmarkUrl(rawUrl: String): String {
+        val trimmed = rawUrl.trim()
+        if (trimmed.isEmpty()) return ""
+        return if (trimmed.startsWith("http://") || trimmed.startsWith("https://")) {
+            trimmed
+        } else {
+            "https://$trimmed"
+        }
+    }
+
+    @Synchronized
+    fun loadBookmarks(): List<BookmarkItem> {
+        if (!prefs.getBoolean("bookmarks_initialized", false)) {
+            val defaults = listOf(
+                BookmarkItem("GitHub", "https://github.com/login", "开发工具", true, 1, "preset"),
+                BookmarkItem("X / Twitter", "https://x.com", "常用站点", true, 2, "preset"),
+                BookmarkItem("淘宝", "https://login.taobao.com", "购物生活", true, 3, "preset"),
+                BookmarkItem("京东", "https://plogin.m.jd.com", "购物生活", true, 4, "preset"),
+                BookmarkItem("B站", "https://passport.bilibili.com/login", "常用站点", true, 5, "preset"),
+                BookmarkItem("百度", "https://www.baidu.com", "常用站点", true, 6, "preset")
+            )
+            saveBookmarks(defaults, syncBus = false)
+            prefs.edit().putBoolean("bookmarks_initialized", true).apply()
+            AgentStateBus.setBookmarks(defaults)
+            return defaults
+        }
+
+        val raw = prefs.getString("bookmarks_json", "[]") ?: "[]"
+        val out = ArrayList<BookmarkItem>()
+        runCatching {
+            val arr = JSONArray(raw)
+            for (i in 0 until arr.length()) {
+                val obj = arr.optJSONObject(i) ?: continue
+                val url = normalizeBookmarkUrl(obj.optString("url", ""))
+                if (url.isEmpty()) continue
+                val title = obj.optString("title", url).ifBlank { url }
+                val folder = obj.optString("folder", "常用站点").ifBlank { "常用站点" }
+                val pinned = obj.optBoolean("pinned", obj.optInt("pinned", 1) != 0)
+                out.add(
+                    BookmarkItem(
+                        title = title,
+                        url = url,
+                        folder = folder,
+                        pinned = pinned,
+                        sortOrder = obj.optInt("sort_order", i),
+                        sourceNode = obj.optString("source_node", "local"),
+                        updatedAt = obj.optString("updated_at", "")
+                    )
+                )
+            }
+        }
+        AgentStateBus.setBookmarks(out)
+        return out
+    }
+
+    @Synchronized
+    fun saveBookmarks(items: List<BookmarkItem>, syncBus: Boolean = true) {
+        val sorted = items.sortedWith(compareByDescending<BookmarkItem> { it.pinned }.thenBy { it.sortOrder })
+        val arr = JSONArray()
+        sorted.forEachIndexed { idx, b ->
+            arr.put(
+                JSONObject().apply {
+                    put("title", b.title)
+                    put("url", b.url)
+                    put("folder", b.folder)
+                    put("pinned", b.pinned)
+                    put("sort_order", if (b.sortOrder > 0) b.sortOrder else idx + 1)
+                    put("source_node", b.sourceNode)
+                    put("updated_at", b.updatedAt)
+                }
+            )
+        }
+        prefs.edit()
+            .putString("bookmarks_json", arr.toString())
+            .putBoolean("bookmarks_initialized", true)
+            .apply()
+        if (syncBus) {
+            AgentStateBus.setBookmarks(sorted)
+        }
+    }
+
+    @Synchronized
+    fun upsertLocalBookmark(item: BookmarkItem): BookmarkItem {
+        val normUrl = normalizeBookmarkUrl(item.url)
+        val clean = item.copy(
+            title = item.title.trim().ifBlank { normUrl },
+            url = normUrl,
+            folder = item.folder.trim().ifBlank { "常用站点" },
+            sourceNode = item.sourceNode.ifBlank { "android" }
+        )
+        val current = loadBookmarks().filterNot { it.url.equals(normUrl, ignoreCase = true) }.toMutableList()
+        current.add(0, clean)
+        saveBookmarks(current, syncBus = true)
+        return clean
+    }
+
+    @Synchronized
+    fun deleteLocalBookmark(url: String) {
+        val normUrl = normalizeBookmarkUrl(url)
+        val next = loadBookmarks().filterNot { it.url.equals(normUrl, ignoreCase = true) }
+        saveBookmarks(next, syncBus = true)
+    }
+
+    @Synchronized
+    fun enqueuePendingBookmarkOp(op: BookmarkPendingOp) {
+        val normUrl = normalizeBookmarkUrl(op.url)
+        if (normUrl.isEmpty()) return
+        val existing = getPendingBookmarkOps().filterNot { it.url.equals(normUrl, ignoreCase = true) }.toMutableList()
+        existing.add(op.copy(url = normUrl))
+        savePendingBookmarkOps(existing)
+    }
+
+    @Synchronized
+    fun getPendingBookmarkOps(): List<BookmarkPendingOp> {
+        val raw = prefs.getString("bookmark_pending_ops", "[]") ?: "[]"
+        val out = ArrayList<BookmarkPendingOp>()
+        runCatching {
+            val arr = JSONArray(raw)
+            for (i in 0 until arr.length()) {
+                val obj = arr.optJSONObject(i) ?: continue
+                val url = normalizeBookmarkUrl(obj.optString("url", ""))
+                if (url.isEmpty()) continue
+                out.add(
+                    BookmarkPendingOp(
+                        op = obj.optString("op", "upsert"),
+                        title = obj.optString("title", url),
+                        url = url,
+                        folder = obj.optString("folder", "常用站点"),
+                        pinned = obj.optBoolean("pinned", true)
+                    )
+                )
+            }
+        }
+        return out
+    }
+
+    @Synchronized
+    fun savePendingBookmarkOps(ops: List<BookmarkPendingOp>) {
+        val arr = JSONArray()
+        ops.forEach { op ->
+            arr.put(
+                JSONObject().apply {
+                    put("op", op.op)
+                    put("title", op.title)
+                    put("url", op.url)
+                    put("folder", op.folder)
+                    put("pinned", op.pinned)
+                }
+            )
+        }
+        prefs.edit().putString("bookmark_pending_ops", arr.toString()).apply()
+    }
+
+    @Synchronized
+    fun applyHubBookmarksSync(remote: List<BookmarkItem>) {
+        val pending = getPendingBookmarkOps()
+        val map = LinkedHashMap<String, BookmarkItem>()
+        remote.forEach { b ->
+            val u = normalizeBookmarkUrl(b.url)
+            if (u.isNotEmpty()) map[u] = b.copy(url = u)
+        }
+        pending.forEach { p ->
+            if (p.op == "delete") {
+                map.remove(p.url)
+            } else {
+                map[p.url] = BookmarkItem(
+                    title = p.title.ifBlank { p.url },
+                    url = p.url,
+                    folder = p.folder.ifBlank { "常用站点" },
+                    pinned = p.pinned,
+                    sourceNode = "android_pending"
+                )
+            }
+        }
+        saveBookmarks(map.values.toList(), syncBus = true)
     }
 }

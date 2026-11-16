@@ -9,13 +9,33 @@ BACKEND_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if BACKEND_DIR not in sys.path:
     sys.path.insert(0, BACKEND_DIR)
 
+from flask import has_request_context
 from sqlalchemy import or_, select
+from core.cache import cache
 from core.db import db_session, hash_pwd
 from core.models import User
+from core.rate_limit import ban_ip, check_ip_ban, get_client_ip, is_whitelisted_ip
 
 def check_admin(u: str, p: str) -> bool:
     if not u or not p:
         return False
+
+    ip = get_client_ip() if has_request_context() else ""
+    whitelisted = bool(ip and is_whitelisted_ip(ip))
+    if ip and not whitelisted:
+        banned, _, _ = check_ip_ban(ip)
+        if banned:
+            return False
+
+    fail_key = f"rl:admin_auth_fail:{ip}" if (ip and not whitelisted) else ""
+    if fail_key:
+        try:
+            fails = cache.get(fail_key)
+            if fails is not None and int(fails) >= 20:
+                return False
+        except Exception:
+            pass
+
     with db_session() as s:
         role = s.scalar(
             select(User.role).where(
@@ -23,7 +43,18 @@ def check_admin(u: str, p: str) -> bool:
                 User.password_hash == hash_pwd(p),
             )
         )
-        return role == "admin"
+    ok = role == "admin"
+    if fail_key:
+        try:
+            if ok:
+                cache.delete(fail_key)
+            else:
+                new_fails = int(cache.incr_with_ttl(fail_key, ttl=600))
+                if new_fails >= 20:
+                    ban_ip(ip, duration_seconds=1800, reason="后台管理接口高频鉴权失败")
+        except Exception:
+            pass
+    return ok
 
 # 核心：节点权限判定器 (判断某个用户是否有权限连接或看到该节点)
 def is_user_allowed_for_node(user: dict, node: dict) -> bool:

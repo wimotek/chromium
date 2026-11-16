@@ -4,8 +4,14 @@ import NodeManager from './components/NodeManager.vue'
 import SyncManager from './components/SyncManager.vue'
 import NotifyManager from './components/NotifyManager.vue'
 import SettingsManager from './components/SettingsManager.vue'
+import SetupWizard from './components/SetupWizard.vue'
 
 const token = ref(localStorage.getItem('token') || '')
+const setupChecked = ref(false)
+const setupRequired = ref(false)
+const setupDefaults = ref({})
+const runtimeBadge = reactive({ db_type: 'sqlite', cache_backend: 'sqlite_cache' })
+
 const activeNav = ref('nodes')
 const captchaSvg = ref('')
 const toastMsg = ref('')
@@ -69,34 +75,88 @@ const logout = () => {
 }
 
 const loadBaseInfo = async () => {
-  const [nRes, pRes, sRes] = await Promise.all([
+  const [nRes, pRes, sRes, rtRes] = await Promise.all([
     api('/api/nodes'),
     api('/api/profile'),
-    api('/api/notifications/settings')
+    api('/api/notifications/settings'),
+    api('/api/system/runtime-info')
   ])
-  nodes.value = await nRes.json()
-  Object.assign(profile, await pRes.json())
-  const sData = await sRes.json()
-  notifStatus.value.smtp_status = sData.smtp_status
-  notifStatus.value.serverchan_enabled = sData.serverchan_enabled
+  if (nRes.ok) nodes.value = await nRes.json()
+  if (pRes.ok) Object.assign(profile, await pRes.json())
+  if (sRes.ok) {
+    const sData = await sRes.json()
+    notifStatus.value.smtp_status = sData.smtp_status
+    notifStatus.value.serverchan_enabled = sData.serverchan_enabled
+  }
+  if (rtRes.ok) {
+    const rtData = await rtRes.json()
+    runtimeBadge.db_type = rtData.db?.db_type || 'sqlite'
+    runtimeBadge.cache_backend = rtData.cache?.active_backend || 'sqlite_cache'
+  }
+}
+
+const checkSetupAndBoot = async () => {
+  try {
+    const res = await fetch('/api/setup/status')
+    if (res.ok) {
+      const data = await res.json()
+      setupRequired.value = Boolean(data.setup_required)
+      setupDefaults.value = data.defaults || {}
+      runtimeBadge.db_type = data.db_type || 'sqlite'
+      runtimeBadge.cache_backend = data.cache_backend || 'sqlite_cache'
+    }
+  } catch (e) {
+    // 静默回退
+  } finally {
+    setupChecked.value = true
+  }
+
+  if (!setupRequired.value) {
+    if (!token.value) refreshCaptcha()
+    else loadBaseInfo()
+  }
+}
+
+const onSetupCompleted = (data) => {
+  setupRequired.value = false
+  runtimeBadge.db_type = data.db_type || 'sqlite'
+  runtimeBadge.cache_backend = data.cache_backend || 'sqlite_cache'
+  if (data.token) {
+    token.value = data.token
+    localStorage.setItem('token', data.token)
+    loadBaseInfo()
+  } else {
+    refreshCaptcha()
+  }
 }
 
 onMounted(() => {
-  if (!token.value) refreshCaptcha()
-  else loadBaseInfo()
+  checkSetupAndBoot()
 })
 </script>
 
 <template>
   <div class="cdp-app-viewport">
-    
     <!-- 全局操作 Toast 提示 -->
     <div v-if="toastMsg" class="global-toast-bar" :class="toastType === 'error' ? 'toast-err' : 'toast-ok'">
       {{ toastType === 'error' ? '❌' : '✅' }} {{ toastMsg }}
     </div>
 
+    <!-- 0. 初始化检测中 -->
+    <div v-if="!setupChecked" class="login-screen-center">
+      <div style="color:#38bdf8; font-size:13px; font-family:monospace;">⚡ 正在连接 CDP Hub 控制中枢...</div>
+    </div>
+
+    <!-- 0.5 首次安装向导 -->
+    <SetupWizard
+      v-else-if="setupRequired"
+      :defaults="setupDefaults"
+      :showToast="showToast"
+      @completed="onSetupCompleted"
+    />
+
     <!-- 1. 登录界面 (屏幕正中央垂直水平居中) -->
-    <div v-if="!token" class="login-screen-center">
+    <div v-else-if="!token" class="login-screen-center">
       <div class="login-card-navy">
         <div class="login-brand-line">
           <span class="bolt-symbol">⚡</span>
@@ -143,6 +203,9 @@ onMounted(() => {
         </div>
 
         <div class="header-right">
+          <span style="font-size:11px; color:#38bdf8; background:#09122a; border:1px solid #172554; padding:2px 8px; border-radius:4px; font-family:monospace;">
+            ORM:{{ runtimeBadge.db_type.toUpperCase() }} · {{ runtimeBadge.cache_backend === 'redis' ? '⚡Redis' : '💾SQLite Cache' }}
+          </span>
           <span class="badge-admin">SYSTEM ADMIN</span>
           <span class="username-label">{{ profile.username || 'admin' }}</span>
           <button @click="logout" class="btn-logout">退出</button>
@@ -151,7 +214,6 @@ onMounted(() => {
 
       <!-- 全屏流式主容器 -->
       <main class="main-fluid-canvas">
-        
         <!-- 4 个顶置横排大卡片导航 -->
         <div class="top-cards-row-4">
           <div @click="activeNav = 'nodes'" :class="['kpi-card', activeNav === 'nodes' ? 'kpi-card-active' : '']">
@@ -192,7 +254,7 @@ onMounted(() => {
               <div class="icon-avatar avatar-indigo">⚙️</div>
               <div class="kpi-info">
                 <div class="kpi-title">系统安全与外部 API</div>
-                <div class="kpi-desc">Agent 对外接口 Key、SSH 密钥金库与管理员密码设置</div>
+                <div class="kpi-desc">Agent 对外接口 Key、存储缓存监控与管理员设置</div>
               </div>
             </div>
             <div class="pill-badge">配置中心</div>
@@ -203,8 +265,7 @@ onMounted(() => {
         <NodeManager v-if="activeNav === 'nodes'" :api="api" :showToast="showToast" @update-nodes="loadBaseInfo" />
         <SyncManager v-if="activeNav === 'sync'" :api="api" :showToast="showToast" />
         <NotifyManager v-if="activeNav === 'notifications'" :api="api" :showToast="showToast" @update-status="loadBaseInfo" />
-        <SettingsManager v-if="activeNav === 'settings'" :api="api" :showToast="showToast" @logout="logout" />
-
+        <SettingsManager v-if="activeNav === 'settings'" :api="api" :showToast="showToast" @logout="logout" @runtime-updated="loadBaseInfo" />
       </main>
     </div>
   </div>

@@ -15,6 +15,7 @@ import time
 import math
 from typing import Tuple, Dict, Any, Optional
 from core.cache import cache
+from core.rate_limit import ban_ip, check_ip_ban, is_whitelisted_ip
 
 # 汉字数字映射表
 CN_NUMS = {
@@ -223,10 +224,14 @@ def _generate_hardened_svg(expr: str) -> str:
 
 def check_ip_rate_limit(ip: str) -> Tuple[bool, str]:
     """
-    检查指定 IP 是否因频繁验证失败而被熔断锁定（优先走 Redis，故障/未启用自动回退 SQL kv_cache）
+    检查指定 IP 是否因触发全域黑名单或频繁验证失败而被熔断锁定（优先走 Redis，故障/未启用自动回退 SQL kv_cache）
     """
-    if not ip or ip in ('127.0.0.1', 'localhost', '::1'):
+    if not ip or ip in ('127.0.0.1', 'localhost', '::1') or is_whitelisted_ip(ip):
         return True, ""
+
+    banned, ban_wait, ban_reason = check_ip_ban(ip)
+    if banned:
+        return False, f"安全熔断（{ban_reason}），该 IP 已被临时限制访问，请 {ban_wait} 秒后再试"
 
     lock_data = cache.get_json(f"ip_lock:{ip}")
     if isinstance(lock_data, dict):
@@ -241,9 +246,9 @@ def check_ip_rate_limit(ip: str) -> Tuple[bool, str]:
 
 def record_ip_attempt_result(ip: str, success: bool):
     """
-    记录 IP 验证成败：成功则清零计数，连续失败达到阈值（5次）则锁定 15 分钟
+    记录 IP 验证成败：成功则清零短期计数，连续失败达到阈值（5次）则阶梯锁定（15m -> 30m -> 60m 并加入全域黑名单）
     """
-    if not ip or ip in ('127.0.0.1', 'localhost', '::1'):
+    if not ip or ip in ('127.0.0.1', 'localhost', '::1') or is_whitelisted_ip(ip):
         return
 
     fail_key = f"ip_fail:{ip}"
@@ -255,7 +260,12 @@ def record_ip_attempt_result(ip: str, success: bool):
 
     current_fails = cache.incr_with_ttl(fail_key, ttl=900)
     if current_fails >= 5:
-        cache.set_json(lock_key, {"lock_until": time.time() + 900}, ttl=900)
+        strikes = cache.incr_with_ttl(f"ip_strike:{ip}", ttl=86400)
+        duration = min(3600, 900 * (2 ** max(0, strikes - 1)))
+        cache.set_json(lock_key, {"lock_until": time.time() + duration}, ttl=duration)
+        cache.delete(fail_key)
+        if strikes >= 2:
+            ban_ip(ip, duration_seconds=duration, reason="多次触发人机验证熔断")
 
 
 def generate_math_captcha(client_ip: Optional[str] = None) -> dict:
@@ -295,11 +305,12 @@ def verify_captcha(
     3. 人类反应时间窗口分析 (Timing Check: < 0.5s 判定为自动化机器)
     4. 验证码时效与精确答案匹配
     """
-    # 1. 蜜罐陷阱：隐藏字段一旦有任何输入，100% 为自动化爬虫
+    # 1. 蜜罐陷阱：隐藏字段一旦有任何输入，100% 为自动化爬虫，立即全域封禁 IP 30 分钟
     if honeypot_val and len(str(honeypot_val).strip()) > 0:
         if client_ip:
+            ban_ip(client_ip, duration_seconds=1800, reason="触发蜜罐诱饵")
             record_ip_attempt_result(client_ip, False)
-        return False, "安全防护：检测到非人类交互，操作被拒绝"
+        return False, "安全防护：检测到非人类交互，操作已被拦截封禁"
 
     # 2. IP 锁定检查
     if client_ip:

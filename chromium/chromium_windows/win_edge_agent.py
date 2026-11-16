@@ -520,6 +520,326 @@ def _select_local_cleanup_targets(
     return list(selected.values())
 
 
+HUB_BOOKMARK_ROOT_FOLDER = "☁️ Hub 联动收藏"
+
+
+def _chrome_webkit_now() -> str:
+    return str(int((time.time() + 11644473600) * 1_000_000))
+
+
+def _compute_chromium_bookmarks_checksum(roots: Dict[str, Any]) -> str:
+    md5 = hashlib.md5()
+
+    def _walk(node: Any):
+        if not isinstance(node, dict):
+            return
+        md5.update(str(node.get("id") or "").encode("utf-8"))
+        md5.update(str(node.get("name") or "").encode("utf-16le"))
+        if node.get("type") == "url":
+            md5.update(b"url")
+            md5.update(str(node.get("url") or "").encode("utf-8"))
+        else:
+            md5.update(b"folder")
+            for child in node.get("children") or []:
+                _walk(child)
+
+    for rk in ("bookmark_bar", "other", "synced"):
+        if rk in roots:
+            _walk(roots[rk])
+    return md5.hexdigest()
+
+
+def _max_chromium_bookmark_id(roots: Dict[str, Any]) -> int:
+    max_id = 10
+
+    def _scan(node: Any):
+        nonlocal max_id
+        if not isinstance(node, dict):
+            return
+        try:
+            nid = int(str(node.get("id") or "0"))
+            if nid > max_id:
+                max_id = nid
+        except Exception:
+            pass
+        for child in node.get("children") or []:
+            _scan(child)
+
+    for rk in ("bookmark_bar", "other", "synced"):
+        if rk in roots:
+            _scan(roots[rk])
+    return max_id
+
+
+def resolve_browser_profile_dir(config: Dict[str, Any], data_dir: Optional[Path] = None) -> Path:
+    base_dir = data_dir or get_app_data_dir()
+    b_cfg = (config or {}).get("browser") or {}
+    mode = str(b_cfg.get("profile_mode") or "isolated").strip().lower()
+    if mode == "system_default":
+        local_app = Path(os.getenv("LOCALAPPDATA") or os.getenv("APPDATA") or str(Path.home()))
+        choice = str(b_cfg.get("browser_choice") or "auto").strip().lower()
+        edge_dir = local_app / "Microsoft" / "Edge" / "User Data"
+        chrome_dir = local_app / "Google" / "Chrome" / "User Data"
+        if choice == "chrome":
+            return chrome_dir
+        if choice == "edge":
+            return edge_dir
+        return edge_dir if edge_dir.exists() else chrome_dir
+    custom = str(b_cfg.get("custom_profile_dir") or "").strip()
+    if custom:
+        return Path(custom)
+    return base_dir / "BrowserProfile"
+
+
+def normalize_bookmark_url(raw_url: str) -> str:
+    u = str(raw_url or "").strip()
+    if not u:
+        return ""
+    if not (u.startswith("http://") or u.startswith("https://")):
+        u = "https://" + u
+    return u[:1024]
+
+
+def load_local_bookmarks_cache(data_dir: Optional[Path] = None) -> List[Dict[str, Any]]:
+    d = data_dir or get_app_data_dir()
+    cache_file = d / "bookmarks.json"
+    if not cache_file.exists():
+        return []
+    try:
+        data = json.loads(cache_file.read_text(encoding="utf-8"))
+        return data if isinstance(data, list) else []
+    except Exception:
+        return []
+
+
+def save_local_bookmarks_cache(data_dir: Optional[Path], bookmarks: List[Dict[str, Any]]) -> None:
+    d = data_dir or get_app_data_dir()
+    d.mkdir(parents=True, exist_ok=True)
+    cache_file = d / "bookmarks.json"
+    cache_file.write_text(json.dumps(bookmarks, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def enqueue_pending_bookmark_op(data_dir: Optional[Path], op: Dict[str, Any]) -> None:
+    d = data_dir or get_app_data_dir()
+    d.mkdir(parents=True, exist_ok=True)
+    fp = d / "pending_bookmark_ops.json"
+    ops: List[Dict[str, Any]] = []
+    if fp.exists():
+        try:
+            loaded = json.loads(fp.read_text(encoding="utf-8"))
+            if isinstance(loaded, list):
+                ops = loaded
+        except Exception:
+            ops = []
+    target_url = normalize_bookmark_url(str(op.get("url") or (op.get("bookmark") or {}).get("url") or ""))
+    if not target_url:
+        return
+    ops = [
+        x for x in ops
+        if normalize_bookmark_url(str(x.get("url") or (x.get("bookmark") or {}).get("url") or "")) != target_url
+    ]
+    ops.append(op)
+    try:
+        fp.write_text(json.dumps(ops, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception:
+        pass
+
+
+def sync_hub_bookmarks_to_chromium(profile_dir: Path, bookmarks: List[Dict[str, Any]]) -> Tuple[int, str]:
+    """将 Hub 收藏写入 Edge/Chrome Profile Default/Bookmarks 并计算 MD5 checksum"""
+    bm_file = profile_dir / "Default" / "Bookmarks"
+    bm_file.parent.mkdir(parents=True, exist_ok=True)
+    now_wk = _chrome_webkit_now()
+
+    doc: Dict[str, Any] = {}
+    if bm_file.exists():
+        try:
+            doc = json.loads(bm_file.read_text(encoding="utf-8"))
+        except Exception:
+            doc = {}
+    if not isinstance(doc, dict):
+        doc = {}
+
+    roots = doc.setdefault("roots", {})
+    if not isinstance(roots, dict):
+        roots = {}
+        doc["roots"] = roots
+
+    for rkey, rname, rid in (("bookmark_bar", "书签栏", "1"), ("other", "其他书签", "2"), ("synced", "移动设备书签", "3")):
+        rnode = roots.get(rkey)
+        if not isinstance(rnode, dict):
+            roots[rkey] = {
+                "children": [],
+                "date_added": now_wk,
+                "date_last_used": "0",
+                "date_modified": now_wk,
+                "id": rid,
+                "name": rname,
+                "type": "folder",
+            }
+        elif not isinstance(rnode.get("children"), list):
+            rnode["children"] = []
+
+    bar_children = roots["bookmark_bar"]["children"]
+    preserved = [
+        c for c in bar_children
+        if not (isinstance(c, dict) and c.get("type") == "folder" and c.get("name") == HUB_BOOKMARK_ROOT_FOLDER)
+    ]
+
+    next_id = _max_chromium_bookmark_id(roots) + 1
+
+    def _alloc_id() -> str:
+        nonlocal next_id
+        val = str(next_id)
+        next_id += 1
+        return val
+
+    grouped: Dict[str, List[Dict[str, Any]]] = {}
+    for b in bookmarks or []:
+        if not isinstance(b, dict):
+            continue
+        url_val = str(b.get("url") or "").strip()
+        if not url_val:
+            continue
+        folder = str(b.get("folder") or "常用站点").strip() or "常用站点"
+        grouped.setdefault(folder, []).append(b)
+
+    folder_nodes: List[Dict[str, Any]] = []
+    for folder_name, items in grouped.items():
+        url_nodes = []
+        for b in items:
+            url_nodes.append({
+                "date_added": now_wk,
+                "date_last_used": "0",
+                "guid": str(uuid.uuid4()),
+                "id": _alloc_id(),
+                "name": str(b.get("title") or b.get("url") or "").strip()[:255],
+                "type": "url",
+                "url": str(b.get("url") or "").strip(),
+            })
+        folder_nodes.append({
+            "children": url_nodes,
+            "date_added": now_wk,
+            "date_last_used": "0",
+            "date_modified": now_wk,
+            "guid": str(uuid.uuid4()),
+            "id": _alloc_id(),
+            "name": folder_name,
+            "type": "folder",
+        })
+
+    hub_root_folder = {
+        "children": folder_nodes,
+        "date_added": now_wk,
+        "date_last_used": "0",
+        "date_modified": now_wk,
+        "guid": str(uuid.uuid4()),
+        "id": _alloc_id(),
+        "name": HUB_BOOKMARK_ROOT_FOLDER,
+        "type": "folder",
+    }
+
+    roots["bookmark_bar"]["children"] = [hub_root_folder] + preserved
+    roots["bookmark_bar"]["date_modified"] = now_wk
+    doc["version"] = 1
+    doc["checksum"] = _compute_chromium_bookmarks_checksum(roots)
+
+    tmp_file = bm_file.with_suffix(".tmp")
+    tmp_file.write_text(json.dumps(doc, ensure_ascii=False, indent=3), encoding="utf-8")
+    os.replace(tmp_file, bm_file)
+    return len(bookmarks or []), str(bm_file)
+
+
+def read_chromium_bookmarks(profile_dir: Path, data_dir: Optional[Path] = None) -> List[Dict[str, Any]]:
+    """读取 Edge/Chrome Default/Bookmarks 与本地缓存收藏，上传合并至 Hub"""
+    out: List[Dict[str, Any]] = []
+    seen_urls = set()
+
+    bm_file = profile_dir / "Default" / "Bookmarks"
+    if bm_file.exists():
+        try:
+            doc = json.loads(bm_file.read_text(encoding="utf-8"))
+            roots = doc.get("roots") or {}
+
+            def _walk(node: Any, folder_name: str):
+                if not isinstance(node, dict):
+                    return
+                ntype = node.get("type")
+                if ntype == "url":
+                    u = str(node.get("url") or "").strip()
+                    if u and (u.startswith("http://") or u.startswith("https://")) and u not in seen_urls:
+                        seen_urls.add(u)
+                        out.append({
+                            "title": str(node.get("name") or u).strip()[:255],
+                            "url": u,
+                            "folder": folder_name or "常用站点",
+                            "pinned": 0,
+                        })
+                elif ntype == "folder":
+                    cur_name = str(node.get("name") or "").strip()
+                    next_folder = folder_name if cur_name in ("", "书签栏", "其他书签", "移动设备书签", HUB_BOOKMARK_ROOT_FOLDER) else cur_name
+                    for child in node.get("children") or []:
+                        _walk(child, next_folder)
+
+            for rk, default_f in (("bookmark_bar", "常用站点"), ("other", "其他书签"), ("synced", "移动书签")):
+                if rk in roots:
+                    _walk(roots[rk], default_f)
+        except Exception:
+            pass
+
+    for c in load_local_bookmarks_cache(data_dir):
+        if isinstance(c, dict):
+            u = str(c.get("url") or "").strip()
+            if u and u not in seen_urls:
+                seen_urls.add(u)
+                out.append(c)
+    return out
+
+
+class _WinEdgeMetricsTracker:
+    """Windows 端代理流量计量器：精确累计隧道控制信令与 CDP 转发字节，避免混入本机其他程序流量"""
+
+    def __init__(self):
+        self.net_rx_total = 0
+        self.net_tx_total = 0
+        self.last_net_rx = 0
+        self.last_net_tx = 0
+        self.cdp_rx_total = 0
+        self.cdp_tx_total = 0
+        self.last_cdp_rx = 0
+        self.last_cdp_tx = 0
+        self.active_streams = 0
+
+    def record_net(self, rx_bytes: int = 0, tx_bytes: int = 0):
+        if rx_bytes > 0:
+            self.net_rx_total += int(rx_bytes)
+        if tx_bytes > 0:
+            self.net_tx_total += int(tx_bytes)
+
+    def sample_report(self):
+        cur_net_rx = self.net_rx_total
+        cur_net_tx = self.net_tx_total
+        cur_cdp_rx = self.cdp_rx_total
+        cur_cdp_tx = self.cdp_tx_total
+
+        payload = {
+            "type": "metrics_report",
+            "net_rx_delta": max(0, cur_net_rx - self.last_net_rx),
+            "net_tx_delta": max(0, cur_net_tx - self.last_net_tx),
+            "cdp_rx_delta": max(0, cur_cdp_rx - self.last_cdp_rx),
+            "cdp_tx_delta": max(0, cur_cdp_tx - self.last_cdp_tx),
+            "active_streams": self.active_streams,
+        }
+
+        def commit():
+            self.last_net_rx = cur_net_rx
+            self.last_net_tx = cur_net_tx
+            self.last_cdp_rx = cur_cdp_rx
+            self.last_cdp_tx = cur_cdp_tx
+
+        return payload, commit
+
+
 class WinEdgeAgent:
     """Windows 端 Hub WSS 接入生命周期控制器"""
 
@@ -534,7 +854,10 @@ class WinEdgeAgent:
         self.status_callback = status_callback
         self.data_dir = get_app_data_dir()
         self.cookie_guard = CookieGuard(CookieGuardConfig.from_dict(config.get("cookie_guard")))
+        self.metrics = _WinEdgeMetricsTracker()
         self._stop_event: Optional[asyncio.Event] = None
+        self._active_ws: Any = None
+        self._active_loop: Optional[asyncio.AbstractEventLoop] = None
 
     def update_cookie_guard(self, guard_cfg: Dict[str, Any]):
         self.cookie_guard = CookieGuard(CookieGuardConfig.from_dict(guard_cfg))
@@ -551,6 +874,121 @@ class WinEdgeAgent:
             except Exception:
                 pass
 
+    @staticmethod
+    def _payload_byte_len(data: Any) -> int:
+        if isinstance(data, bytes):
+            return len(data)
+        return len(str(data or "").encode("utf-8"))
+
+    async def _ws_send_json(self, ws, obj: Dict[str, Any]):
+        raw = json.dumps(obj, ensure_ascii=False)
+        await ws.send(raw)
+        self.metrics.record_net(tx_bytes=len(raw.encode("utf-8")))
+
+    def _pending_bm_ops_file(self) -> Path:
+        return self.data_dir / "pending_bookmark_ops.json"
+
+    def _load_pending_bm_ops(self) -> List[Dict[str, Any]]:
+        fp = self._pending_bm_ops_file()
+        if not fp.exists():
+            return []
+        try:
+            data = json.loads(fp.read_text(encoding="utf-8"))
+            return data if isinstance(data, list) else []
+        except Exception:
+            return []
+
+    def _save_pending_bm_ops(self, ops: List[Dict[str, Any]]):
+        fp = self._pending_bm_ops_file()
+        try:
+            fp.write_text(json.dumps(ops, ensure_ascii=False, indent=2), encoding="utf-8")
+        except Exception:
+            pass
+
+    def _enqueue_pending_bm_op(self, op: Dict[str, Any]):
+        enqueue_pending_bookmark_op(self.data_dir, op)
+
+    async def _flush_pending_bm_ops(self, ws):
+        ops = self._load_pending_bm_ops()
+        if not ops:
+            return
+        self._save_pending_bm_ops([])
+        for op in ops:
+            try:
+                await self._ws_send_json(ws, op)
+            except Exception:
+                self._enqueue_pending_bm_op(op)
+
+    def send_bookmark_upsert(self, title: str, url: str, folder: str = "常用站点", pinned: int = 1) -> bool:
+        norm_url = normalize_bookmark_url(url)
+        if not norm_url:
+            return False
+        item = {
+            "title": str(title or norm_url).strip()[:255],
+            "url": norm_url,
+            "folder": str(folder or "常用站点").strip() or "常用站点",
+            "pinned": 1 if pinned else 0,
+            "source_node": "windows",
+        }
+        items = [b for b in load_local_bookmarks_cache(self.data_dir) if b.get("url") != norm_url]
+        items.insert(0, item)
+        save_local_bookmarks_cache(self.data_dir, items)
+        if self.config.get("browser", {}).get("sync_bookmarks", True):
+            try:
+                sync_hub_bookmarks_to_chromium(resolve_browser_profile_dir(self.config, self.data_dir), items)
+            except Exception:
+                pass
+        msg = {"type": "bookmark_upsert", "bookmark": item}
+        if self._active_ws is not None and self._active_loop is not None and not self._active_loop.is_closed():
+            asyncio.run_coroutine_threadsafe(self._ws_send_json(self._active_ws, msg), self._active_loop)
+            return True
+        self._enqueue_pending_bm_op(msg)
+        return False
+
+    def send_bookmark_delete(self, url: str) -> bool:
+        norm_url = normalize_bookmark_url(url)
+        if not norm_url:
+            return False
+        items = [b for b in load_local_bookmarks_cache(self.data_dir) if b.get("url") != norm_url]
+        save_local_bookmarks_cache(self.data_dir, items)
+        if self.config.get("browser", {}).get("sync_bookmarks", True):
+            try:
+                sync_hub_bookmarks_to_chromium(resolve_browser_profile_dir(self.config, self.data_dir), items)
+            except Exception:
+                pass
+        msg = {"type": "bookmark_delete", "url": norm_url}
+        if self._active_ws is not None and self._active_loop is not None and not self._active_loop.is_closed():
+            asyncio.run_coroutine_threadsafe(self._ws_send_json(self._active_ws, msg), self._active_loop)
+            return True
+        self._enqueue_pending_bm_op(msg)
+        return False
+
+    def request_bookmarks_pull(self) -> bool:
+        if self._active_ws is not None and self._active_loop is not None and not self._active_loop.is_closed():
+            asyncio.run_coroutine_threadsafe(
+                self._ws_send_json(self._active_ws, {"type": "bookmarks_pull"}), self._active_loop
+            )
+            return True
+        return False
+
+    async def _metrics_reporter_loop(self, ws, interval_sec: int = 10):
+        step = max(5, int(interval_sec or 10))
+        while self._stop_event is None or not self._stop_event.is_set():
+            await asyncio.sleep(step)
+            payload, commit = self.metrics.sample_report()
+            try:
+                raw = json.dumps(payload)
+                await ws.send(raw)
+                commit()
+                self.metrics.record_net(tx_bytes=len(raw.encode("utf-8")))
+                self._emit_status(
+                    net_rx_total=self.metrics.net_rx_total,
+                    net_tx_total=self.metrics.net_tx_total,
+                    active_streams=self.metrics.active_streams,
+                )
+            except Exception:
+                break
+
     async def _handle_cdp_command(
         self,
         ws,
@@ -559,6 +997,7 @@ class WinEdgeAgent:
         ws_streams: Dict[str, asyncio.Queue],
         cdp_port: int,
     ):
+        self.metrics.record_net(rx_bytes=self._payload_byte_len(cmd_text))
         try:
             cmd = json.loads(cmd_text)
         except Exception:
@@ -573,6 +1012,23 @@ class WinEdgeAgent:
             self.logger.info(
                 f"Hub 网络回传: network_mode={cmd.get('network_mode')}, endpoint={cmd.get('recommended_endpoint')}"
             )
+            return
+
+        if msg_type == "bookmarks_sync":
+            bm_list = cmd.get("bookmarks") or []
+            pending_ops = self._load_pending_bm_ops()
+            if pending_ops:
+                await self._flush_pending_bm_ops(ws)
+                return
+            save_local_bookmarks_cache(self.data_dir, bm_list)
+            if self.config.get("browser", {}).get("sync_bookmarks", True):
+                try:
+                    prof_dir = resolve_browser_profile_dir(self.config, self.data_dir)
+                    cnt, bm_path = sync_hub_bookmarks_to_chromium(prof_dir, bm_list)
+                    self.logger.info(f"[Bookmarks] 已联动同步 {cnt} 条云端收藏 -> {bm_path}")
+                except Exception as e:
+                    self.logger.warning(f"[Bookmarks] 写入浏览器书签失败: {e}")
+            self._emit_status(bookmarks_count=len(bm_list))
             return
 
         if msg_type == "cdp_ws_open":
@@ -595,6 +1051,16 @@ class WinEdgeAgent:
                 await q.put(None)
             return
 
+        if action == "fetch_bookmarks":
+            try:
+                prof_dir = resolve_browser_profile_dir(self.config, self.data_dir)
+                items = read_chromium_bookmarks(prof_dir, self.data_dir)
+                self.logger.info(f"[Bookmarks] 已扫描 {len(items)} 条本机书签并回传 Hub")
+                await self._ws_send_json(ws, {"req_id": req_id, "status": "ok", "bookmarks": items})
+            except Exception as e:
+                await self._ws_send_json(ws, {"req_id": req_id, "status": "error", "message": str(e)})
+            return
+
         if action == "fetch_cookies":
             try:
                 raw_cookies = await extract_raw_local_cookies(http_client, cdp_port)
@@ -615,10 +1081,10 @@ class WinEdgeAgent:
                 self._emit_status(
                     last_guard=f"放行 {stats.allowed} / 拦截 {stats.blocked_by_policy} ({self.cookie_guard.config.mode})"
                 )
-                await ws.send(json.dumps({"req_id": req_id, "status": "ok", "cookies": filtered}))
+                await self._ws_send_json(ws, {"req_id": req_id, "status": "ok", "cookies": filtered})
             except Exception as e:
                 self.logger.error(f"提取本地 Cookie 失败: {e}")
-                await ws.send(json.dumps({"req_id": req_id, "status": "error", "message": str(e)}))
+                await self._ws_send_json(ws, {"req_id": req_id, "status": "error", "message": str(e)})
 
         elif action == "inject_cookies":
             to_inject = payload.get("cookies", [])
@@ -647,15 +1113,15 @@ class WinEdgeAgent:
                         await send_cdp_json_command(cdp_ws, "Network.enable", req_id=301)
                         await send_cdp_json_command(cdp_ws, "Network.setCookies", {"cookies": allowed_inject}, req_id=302)
                 self.logger.info(f"同步注入 Cookie 完成: 写入 {len(allowed_inject)} 条")
-                await ws.send(json.dumps({"req_id": req_id, "status": "ok", "injected_count": len(allowed_inject)}))
+                await self._ws_send_json(ws, {"req_id": req_id, "status": "ok", "injected_count": len(allowed_inject)})
             except Exception as e:
                 self.logger.error(f"写入本地 Cookie 失败: {e}")
-                await ws.send(json.dumps({"req_id": req_id, "status": "error", "message": str(e)}))
+                await self._ws_send_json(ws, {"req_id": req_id, "status": "error", "message": str(e)})
 
         elif action == "purge_cookies":
             if self.cookie_guard.config.mode == "block_export":
                 self.logger.info("[GUARD] 当前为 block_export 模式，跳过远端 Cookie 清理指令")
-                await ws.send(json.dumps({"req_id": req_id, "status": "ok", "purged_count": 0}))
+                await self._ws_send_json(ws, {"req_id": req_id, "status": "ok", "purged_count": 0})
                 return
             try:
                 exclude_domains = payload.get("exclude_domains") or []
@@ -687,22 +1153,23 @@ class WinEdgeAgent:
                             await send_cdp_json_command(cdp_ws, "Network.deleteCookies", item, req_id=500 + idx)
                             deleted_cnt += 1
                     self.logger.info(f"[GUARD] 已执行 Hub 全局清理策略: 删除 {deleted_cnt} 条本机 Cookie")
-                await ws.send(json.dumps({"req_id": req_id, "status": "ok", "purged_count": deleted_cnt}))
+                await self._ws_send_json(ws, {"req_id": req_id, "status": "ok", "purged_count": deleted_cnt})
             except Exception as e:
                 self.logger.error(f"清理本地 Cookie 失败: {e}")
-                await ws.send(json.dumps({"req_id": req_id, "status": "error", "message": str(e)}))
+                await self._ws_send_json(ws, {"req_id": req_id, "status": "error", "message": str(e)})
 
         elif action == "get_version":
             try:
                 ver_res = await http_client.get(f"http://127.0.0.1:{int(cdp_port)}/json/version", timeout=3.0)
-                await ws.send(json.dumps({"req_id": req_id, "status": "ok", "version": ver_res.json()}))
+                await self._ws_send_json(ws, {"req_id": req_id, "status": "ok", "version": ver_res.json()})
             except Exception as e:
-                await ws.send(json.dumps({"req_id": req_id, "status": "error", "message": str(e)}))
+                await self._ws_send_json(ws, {"req_id": req_id, "status": "error", "message": str(e)})
 
         elif msg_type == "ping" or action == "ping":
-            await ws.send(json.dumps({"type": "pong"}))
+            await self._ws_send_json(ws, {"type": "pong"})
 
     async def _bridge_cdp_ws_stream(self, tunnel_ws, stream_id: str, inbound_queue: asyncio.Queue, cdp_port: int):
+        self.metrics.active_streams += 1
         try:
             async with httpx.AsyncClient(timeout=3.0, trust_env=False) as client:
                 ver_res = await client.get(f"http://127.0.0.1:{int(cdp_port)}/json/version")
@@ -711,17 +1178,20 @@ class WinEdgeAgent:
             async with _ws_connect_local(local_ws_url, open_timeout=5.0, max_size=100 * 1024 * 1024) as cdp_ws:
                 async def _cdp_to_hub():
                     async for msg in cdp_ws:
-                        await tunnel_ws.send(json.dumps({
+                        text_data = msg if isinstance(msg, str) else msg.decode("utf-8", errors="replace")
+                        self.metrics.cdp_tx_total += len(text_data.encode("utf-8"))
+                        await self._ws_send_json(tunnel_ws, {
                             "type": "cdp_ws_frame",
                             "stream_id": stream_id,
-                            "data": msg if isinstance(msg, str) else msg.decode("utf-8", errors="replace"),
-                        }))
+                            "data": text_data,
+                        })
 
                 async def _hub_to_cdp():
                     while True:
                         payload = await inbound_queue.get()
                         if payload is None:
                             break
+                        self.metrics.cdp_rx_total += self._payload_byte_len(payload)
                         await cdp_ws.send(payload)
 
                 _, pending = await asyncio.wait(
@@ -732,12 +1202,13 @@ class WinEdgeAgent:
                     t.cancel()
         except Exception as e:
             try:
-                await tunnel_ws.send(json.dumps({"type": "cdp_ws_error", "stream_id": stream_id, "error": str(e)}))
+                await self._ws_send_json(tunnel_ws, {"type": "cdp_ws_error", "stream_id": stream_id, "error": str(e)})
             except Exception:
                 pass
         finally:
+            self.metrics.active_streams = max(0, self.metrics.active_streams - 1)
             try:
-                await tunnel_ws.send(json.dumps({"type": "cdp_ws_close", "stream_id": stream_id}))
+                await self._ws_send_json(tunnel_ws, {"type": "cdp_ws_close", "stream_id": stream_id})
             except Exception:
                 pass
 
@@ -792,7 +1263,11 @@ class WinEdgeAgent:
             activity["last_inbound"] = time.monotonic()
             self.logger.info(f"Hub 加密 WSS 直连已建立，桥接本地 127.0.0.1:{cdp_port}")
             self._emit_status(hub_status="connected", hub_mode="public_wss")
+            self._active_ws = websocket
+            self._active_loop = asyncio.get_running_loop()
             ws_streams: Dict[str, asyncio.Queue] = {}
+            reporter_task = asyncio.create_task(self._metrics_reporter_loop(websocket))
+            asyncio.create_task(self._flush_pending_bm_ops(websocket))
             try:
                 async with httpx.AsyncClient(timeout=4.0, trust_env=False) as http_client:
                     async for msg_text in websocket:
@@ -803,6 +1278,9 @@ class WinEdgeAgent:
             except Exception as e:
                 self.logger.info(f"Hub WSS 直连会话断开: {type(e).__name__}")
             finally:
+                reporter_task.cancel()
+                if self._active_ws is websocket:
+                    self._active_ws = None
                 for q in ws_streams.values():
                     await q.put(None)
                 ws_streams.clear()
@@ -1070,6 +1548,9 @@ class WinEdgeAgent:
                     else:
                         self.logger.info(f"反向 WSS 隧道已建立 -> {tunnel_url}")
                         self._emit_status(hub_status="connected", hub_mode="reverse")
+                        self._active_ws = ws
+                        self._active_loop = asyncio.get_running_loop()
+                        asyncio.create_task(self._flush_pending_bm_ops(ws))
 
                     backoff = 2
                     ws_streams: Dict[str, asyncio.Queue] = {}
@@ -1083,6 +1564,7 @@ class WinEdgeAgent:
                                 break
 
                     hb_task = asyncio.create_task(_hb_loop())
+                    reporter_task = asyncio.create_task(self._metrics_reporter_loop(ws))
                     try:
                         async with httpx.AsyncClient(timeout=4.0, trust_env=False) as http_client:
                             async for msg_text in ws:
@@ -1096,6 +1578,9 @@ class WinEdgeAgent:
                                         pass
                                     self.logger.info("TOFU 审批已通过，正式激活通信！")
                                     self._emit_status(hub_status="connected")
+                                    self._active_ws = ws
+                                    self._active_loop = asyncio.get_running_loop()
+                                    asyncio.create_task(self._flush_pending_bm_ops(ws))
                                     continue
                                 if msg_text == "pong" or '"type":"pong"' in msg_text:
                                     continue
@@ -1104,6 +1589,9 @@ class WinEdgeAgent:
                                 )
                     finally:
                         hb_task.cancel()
+                        reporter_task.cancel()
+                        if self._active_ws is ws:
+                            self._active_ws = None
                         for q in ws_streams.values():
                             await q.put(None)
                         ws_streams.clear()

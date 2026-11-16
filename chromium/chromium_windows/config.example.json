@@ -18,10 +18,12 @@
     "custom_browser_path": "",
     "profile_mode": "isolated",
     "custom_profile_dir": "",
+    "isolate_os_signin": true,
     "homepage": "about:blank",
     "extra_args": "",
     "launch_browser_on_start": true,
-    "auto_connect_on_launch": false
+    "auto_connect_on_launch": false,
+    "sync_bookmarks": true
   },
   "cookie_guard": {
     "mode": "whitelist",

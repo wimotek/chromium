@@ -8,16 +8,18 @@ import os
 import uvicorn
 import asyncio
 from contextlib import asynccontextmanager
-from fastapi import FastAPI
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi import FastAPI, Request
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from config import DIST_DIR, HUB_HOST, HUB_PORT, SSL_CERT_FILE, SSL_KEY_FILE
-from core.database import init_db_and_jwt, get_setting
+from config import DIST_DIR, HUB_HOST, HUB_PORT, HUB_SERVE_FRONTEND, SSL_CERT_FILE, SSL_KEY_FILE, logger
+from core.db import init_db_and_jwt, get_setting
+from core.rate_limit import RATE_LIMIT_GLOBAL_PER_MIN, check_rate_limit, get_client_ip, is_loopback_ip
 from core.security import ensure_ssl_certificates
 from services.tunnel_manager import tunnel_mgr, tunnel_watchdog_loop
+from services.traffic_service import flush_traffic_buffers, traffic_flush_loop
 # 核心修复：引入多策略调度器函数 reschedule_all_policies
-from services.sync_service import scheduler, reschedule_all_policies
+from services.sync_service import scheduler, reschedule_all_policies, set_main_event_loop
 
 # 引入子模块路由
 from routers.auth import router as auth_router
@@ -27,29 +29,32 @@ from routers.notify import router as notify_router
 from routers.keys import router as keys_router
 from routers.cdp_gateway import router as cdp_gateway_router
 from routers.api_v1 import router as api_v1_router
+from routers.setup import router as setup_router
+from routers.bookmarks import router as bookmarks_router
 
 # 1. 初始化数据库及默认配置
 init_db_and_jwt()
 
-# 2. 现代 Lifespan 上下文生命周期管理
-# 修改 app.py 的 lifespan
-from services.sync_service import scheduler, reschedule_all_policies, set_main_event_loop
 
+# 2. 现代 Lifespan 上下文生命周期管理
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # 核心：将 FastAPI 主事件循环注入同步服务
     set_main_event_loop(asyncio.get_running_loop())
-    
+
     # 启动 APScheduler 定时调度器，并自动加载所有已启用的策略任务
     scheduler.start()
     reschedule_all_policies()
-    
-    # 启动看门狗后台保活任务
+
+    # 启动看门狗后台保活任务与流量统计定时落盘协程
     watchdog_task = asyncio.create_task(tunnel_watchdog_loop())
+    traffic_task = asyncio.create_task(traffic_flush_loop())
     yield
     # 优雅停机
     try:
         watchdog_task.cancel()
+        traffic_task.cancel()
+        await flush_traffic_buffers()
         scheduler.shutdown(wait=False)
         for t in list(tunnel_mgr.tunnels.values()):
             try:
@@ -69,19 +74,53 @@ async def lifespan(app: FastAPI):
     except Exception:
         pass
 
-# 3. 创建 FastAPI 实例并挂载路由
+
+# 3. 创建 FastAPI 实例并挂载全局防刷中间件与路由
 app = FastAPI(title="CDP Cluster Hub", lifespan=lifespan)
 
+
+@app.middleware("http")
+async def global_antispam_middleware(request: Request, call_next):
+    path = request.url.path or ""
+    if path.startswith("/api/") or path.startswith("/cdp/"):
+        client_ip = get_client_ip(request)
+        if not (path == "/api/auth/status" and is_loopback_ip(client_ip)):
+            allowed, _, retry_after = check_rate_limit(
+                "global",
+                client_ip,
+                RATE_LIMIT_GLOBAL_PER_MIN,
+                60,
+            )
+            if not allowed:
+                return JSONResponse(
+                    status_code=429,
+                    content={"detail": f"全局请求频率过高，请 {retry_after} 秒后再试"},
+                    headers={"Retry-After": str(max(1, retry_after))},
+                )
+    response = await call_next(request)
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("X-Frame-Options", "SAMEORIGIN")
+    return response
+
+
 app.include_router(auth_router)
+app.include_router(setup_router)
 app.include_router(nodes_router)
 app.include_router(sync_router)
 app.include_router(notify_router)
 app.include_router(keys_router)
 app.include_router(cdp_gateway_router)
 app.include_router(api_v1_router)
+app.include_router(bookmarks_router)
 
-# 4. 静态资源与 SPA 路由托管
-if DIST_DIR:
+# 4. 静态资源与 SPA 路由托管（分离部署时设 HUB_SERVE_FRONTEND=false，仅运行纯后端 API/WSS）
+if not HUB_SERVE_FRONTEND:
+    logger.info("🧩 [Backend-Only] HUB_SERVE_FRONTEND=false，后端不托管前端静态资源（前端与 TLS 由 Nginx / 管理面板提供）")
+
+    @app.get("/")
+    async def backend_only_root():
+        return {"service": "chromium_sync_backend", "mode": "backend_only", "ssl_enabled": False}
+elif DIST_DIR:
     assets_dir = os.path.join(DIST_DIR, "assets")
     if os.path.exists(assets_dir):
         app.mount("/assets", StaticFiles(directory=assets_dir), name="assets")
@@ -174,16 +213,20 @@ if __name__ == "__main__":
     logging.getLogger("httpcore").setLevel(logging.WARNING)
 
     enable_access_log = os.getenv("UVICORN_ACCESS_LOG", "false").strip().lower() in {"1", "true", "yes", "on"}
-    cert_path, key_path = ensure_ssl_certificates()
     listen_sockets = _create_listen_sockets(HUB_HOST, HUB_PORT)
-    uv_config = uvicorn.Config(
-        app,
+    uv_kwargs = dict(
         host=HUB_HOST.strip("[]") or "0.0.0.0",
         port=HUB_PORT,
-        ssl_certfile=cert_path,
-        ssl_keyfile=key_path,
         proxy_headers=True,
         forwarded_allow_ips="*",
         access_log=enable_access_log,
     )
+    if HUB_SERVE_FRONTEND:
+        cert_path, key_path = ensure_ssl_certificates()
+        uv_kwargs["ssl_certfile"] = cert_path
+        uv_kwargs["ssl_keyfile"] = key_path
+    else:
+        logger.info("🔓 [Backend-Only] HUB_SERVE_FRONTEND=false，已关闭内置 TLS，以内部明文 HTTP/WS 运行（前端与 HTTPS 由 Nginx / 管理面板处理）")
+
+    uv_config = uvicorn.Config(app, **uv_kwargs)
     uvicorn.Server(uv_config).run(sockets=listen_sockets)

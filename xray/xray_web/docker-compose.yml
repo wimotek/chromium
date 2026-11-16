@@ -17,6 +17,15 @@ services:
       - WEB_PORT=8443
       # - PUBLIC_PORT=3000        # 可选：若经过端口映射/转发未透传 Host 端口，可显式声明对外端口
       # - PUBLIC_URL=https://panel.example.com:3000
+      # ==================== 单参数开启前后端分离 + TLS 交由 Nginx ====================
+      # 开启后后端仅监听纯 HTTP API（不托管静态资源、不加载证书），静态资产手动拷给 Nginx，HTTPS 证书由 Nginx 负责：
+      # - SEPARATE_FRONTEND=true
+      # ==================== 高并发性能调优（建议配合 MySQL + Redis） ====================
+      # - WEB_WORKERS=4
+      # - WEB_BLOCKING_THREADS=32
+      # - WEB_BACKLOG=2048
+      # - DB_POOL_SIZE=20
+      # - DB_MAX_OVERFLOW=30
       # ==================== 数据库引擎（SQLAlchemy 2.0 双库支持） ====================
       # 默认不配置时使用 SQLite (WAL) /data/xray_web.db；也可在首次运行 Web 安装向导中可视化切换 MySQL
       # - DB_TYPE=mysql
@@ -29,6 +38,10 @@ services:
       # - DATABASE_URL=mysql+pymysql://xray_web:your_strong_password@127.0.0.1:3306/xray_web?charset=utf8mb4
       # ==================== 可选 Redis 加速（未配置或故障自动回退 SQL Cache） ====================
       # - REDIS_URL=redis://127.0.0.1:6379/0
+      # ==================== 安全防刷与可信代理校验 ====================
+      # - RATE_LIMIT_ENABLE=true
+      # - TRUST_PROXY=auto              # auto(仅回环/内网可信代理) | always | never
+      # - RATE_LIMIT_WHITELIST=         # 逗号分隔白名单 IP（如运维监控节点 IP）
     volumes:
       - ./data:/data
       - ./data/backups:/data/backups

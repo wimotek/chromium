@@ -14,6 +14,8 @@ import com.wimotek.edgenode.MainActivity
 import com.wimotek.edgenode.R
 import com.wimotek.edgenode.browser.WebViewCookieBridge
 import com.wimotek.edgenode.data.AgentStateBus
+import com.wimotek.edgenode.data.BookmarkItem
+import com.wimotek.edgenode.data.BookmarkPendingOp
 import com.wimotek.edgenode.data.NodeConfigStore
 import com.wimotek.edgenode.guard.CookieGuard
 import com.wimotek.edgenode.guard.CookieItem
@@ -41,6 +43,13 @@ class EdgeAgentService : Service() {
         const val ACTION_START = "com.wimotek.edgenode.START"
         const val ACTION_STOP = "com.wimotek.edgenode.STOP"
         const val ACTION_RELOAD_GUARD = "com.wimotek.edgenode.RELOAD_GUARD"
+        const val ACTION_UPSERT_BOOKMARK = "com.wimotek.edgenode.UPSERT_BOOKMARK"
+        const val ACTION_DELETE_BOOKMARK = "com.wimotek.edgenode.DELETE_BOOKMARK"
+        const val ACTION_PULL_BOOKMARKS = "com.wimotek.edgenode.PULL_BOOKMARKS"
+        const val EXTRA_TITLE = "title"
+        const val EXTRA_URL = "url"
+        const val EXTRA_FOLDER = "folder"
+        const val EXTRA_PINNED = "pinned"
         private const val CHANNEL_ID = "wimotek_edge_channel"
         private const val NOTIF_ID = 1001
     }
@@ -76,6 +85,59 @@ class EdgeAgentService : Service() {
             ACTION_RELOAD_GUARD -> {
                 val guardCfg = store.loadCookieGuardConfig()
                 AgentStateBus.log("GUARD", "Cookie 隐私防火墙已热更新: mode=${guardCfg.mode}, wl=${guardCfg.whitelistDomains.size}, bl=${guardCfg.blacklistDomains.size}")
+                return START_STICKY
+            }
+            ACTION_UPSERT_BOOKMARK -> {
+                val url = store.normalizeBookmarkUrl(intent.getStringExtra(EXTRA_URL) ?: "")
+                val title = (intent.getStringExtra(EXTRA_TITLE) ?: url).ifBlank { url }
+                val folder = (intent.getStringExtra(EXTRA_FOLDER) ?: "常用站点").ifBlank { "常用站点" }
+                val pinned = intent.getBooleanExtra(EXTRA_PINNED, true)
+                if (url.isNotEmpty()) {
+                    val ws = activeWs
+                    val msg = JSONObject().apply {
+                        put("type", "bookmark_upsert")
+                        put("bookmark", JSONObject().apply {
+                            put("title", title)
+                            put("url", url)
+                            put("folder", folder)
+                            put("pinned", if (pinned) 1 else 0)
+                        })
+                    }
+                    val sent = ws?.send(msg.toString()) == true
+                    if (!sent) {
+                        store.enqueuePendingBookmarkOp(
+                            BookmarkPendingOp(op = "upsert", title = title, url = url, folder = folder, pinned = pinned)
+                        )
+                    } else {
+                        AgentStateBus.log("INFO", "已向 Hub 同步推送收藏: $title ($url)")
+                    }
+                }
+                return START_STICKY
+            }
+            ACTION_DELETE_BOOKMARK -> {
+                val url = store.normalizeBookmarkUrl(intent.getStringExtra(EXTRA_URL) ?: "")
+                if (url.isNotEmpty()) {
+                    val ws = activeWs
+                    val msg = JSONObject().apply {
+                        put("type", "bookmark_delete")
+                        put("url", url)
+                    }
+                    val sent = ws?.send(msg.toString()) == true
+                    if (!sent) {
+                        store.enqueuePendingBookmarkOp(BookmarkPendingOp(op = "delete", url = url))
+                    } else {
+                        AgentStateBus.log("INFO", "已通知 Hub 全局移除收藏: $url")
+                    }
+                }
+                return START_STICKY
+            }
+            ACTION_PULL_BOOKMARKS -> {
+                val ws = activeWs
+                if (ws != null) {
+                    flushPendingBookmarkOps(ws)
+                    ws.send(JSONObject().put("type", "bookmarks_pull").toString())
+                    AgentStateBus.log("INFO", "已向 Hub 请求拉取最新云端收藏夹")
+                }
                 return START_STICKY
             }
             else -> {
@@ -213,9 +275,35 @@ class EdgeAgentService : Service() {
             AgentStateBus.setHubStatus("已接入 (API已锁定禁用)")
             AgentStateBus.setApiLocked(!msg.optBoolean("api_enabled", false))
             backoffSeconds = 2L
-            AgentStateBus.log("INFO", "Hub 认证放行成功（Android 节点默认禁止第三方 API，仅参与安全 Cookie 同步）")
-            updateNotification("已接入 Hub · 安全 Cookie 同步中")
+            AgentStateBus.log("INFO", "Hub 认证放行成功（Android 节点默认禁止第三方 API，仅参与安全 Cookie 与收藏夹同步）")
+            updateNotification("已接入 Hub · 安全同步中")
             startHeartbeat(ws)
+            flushPendingBookmarkOps(ws)
+            return
+        }
+
+        if (msgType == "bookmarks_sync") {
+            val arr = msg.optJSONArray("bookmarks") ?: JSONArray()
+            val remote = ArrayList<BookmarkItem>()
+            for (i in 0 until arr.length()) {
+                val obj = arr.optJSONObject(i) ?: continue
+                val u = store.normalizeBookmarkUrl(obj.optString("url", ""))
+                if (u.isEmpty()) continue
+                remote.add(
+                    BookmarkItem(
+                        title = obj.optString("title", u).ifBlank { u },
+                        url = u,
+                        folder = obj.optString("folder", "常用站点").ifBlank { "常用站点" },
+                        pinned = obj.optBoolean("pinned", obj.optInt("pinned", 1) != 0),
+                        sortOrder = obj.optInt("sort_order", i),
+                        sourceNode = obj.optString("source_node", "hub"),
+                        updatedAt = obj.optString("updated_at", "")
+                    )
+                )
+            }
+            store.applyHubBookmarksSync(remote)
+            flushPendingBookmarkOps(ws)
+            AgentStateBus.log("INFO", "已同步 Hub 云端联动收藏夹 (${remote.size} 条)")
             return
         }
 
@@ -312,8 +400,59 @@ class EdgeAgentService : Service() {
                 }
             }
 
+            "fetch_bookmarks" -> {
+                val list = store.loadBookmarks()
+                val arr = JSONArray()
+                list.forEach { b ->
+                    arr.put(
+                        JSONObject().apply {
+                            put("title", b.title)
+                            put("url", b.url)
+                            put("folder", b.folder)
+                            put("pinned", if (b.pinned) 1 else 0)
+                            put("sort_order", b.sortOrder)
+                        }
+                    )
+                }
+                val resp = JSONObject().apply {
+                    put("req_id", reqId)
+                    put("status", "ok")
+                    put("bookmarks", arr)
+                }
+                ws.send(resp.toString())
+                AgentStateBus.log("INFO", "fetch_bookmarks | 已上报 ${list.size} 条收藏给 Hub")
+            }
+
             "ping" -> {
                 ws.send(JSONObject().put("type", "pong").toString())
+            }
+        }
+    }
+
+    private fun flushPendingBookmarkOps(ws: WebSocket) {
+        val pending = store.getPendingBookmarkOps()
+        if (pending.isEmpty()) return
+        store.savePendingBookmarkOps(emptyList())
+        pending.forEach { op ->
+            val payload = if (op.op == "delete") {
+                JSONObject().apply {
+                    put("type", "bookmark_delete")
+                    put("url", op.url)
+                }
+            } else {
+                JSONObject().apply {
+                    put("type", "bookmark_upsert")
+                    put("bookmark", JSONObject().apply {
+                        put("title", op.title)
+                        put("url", op.url)
+                        put("folder", op.folder)
+                        put("pinned", if (op.pinned) 1 else 0)
+                    })
+                }
+            }
+            val ok = runCatching { ws.send(payload.toString()) }.getOrDefault(false)
+            if (!ok) {
+                store.enqueuePendingBookmarkOp(op)
             }
         }
     }

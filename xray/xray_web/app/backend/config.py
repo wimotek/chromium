@@ -28,10 +28,27 @@ class Config:
     # 对外暴露端口/入口 URL（当使用 -p 3000:8443 端口映射或反向代理时自动识别，也可显式指定）
     PUBLIC_PORT = int(os.getenv("PUBLIC_PORT", "0") or 0)
     PUBLIC_URL = os.getenv("PUBLIC_URL", "").strip().rstrip("/")
-    # 强制启用原生 HTTPS TLS 加密
-    SSL_ENABLE = os.getenv("SSL_ENABLE", "true").strip().lower() in ("true", "1", "yes")
+    # 单参数开启前后端分离（设为 true 时：后端不托管静态资源、不加载 TLS 证书、仅监听纯 HTTP，前端静态资产与 HTTPS 证书全部交由 Nginx 负责）
+    SEPARATE_FRONTEND = os.getenv("SEPARATE_FRONTEND", "false").strip().lower() in ("true", "1", "yes")
+    # 原生 HTTPS TLS 开关（前后端分离开启时自动关闭后端内置 TLS）
+    SSL_ENABLE = (
+        False
+        if SEPARATE_FRONTEND
+        else os.getenv("SSL_ENABLE", "true").strip().lower() in ("true", "1", "yes")
+    )
 
     APP_MODE = os.getenv("APP_MODE", "all")
+
+    # 高并发调优与代理信任配置（SQLAlchemy 连接池、可信代理与防刷开关）
+    DB_POOL_SIZE = int(os.getenv("DB_POOL_SIZE", "20") or 20)
+    DB_MAX_OVERFLOW = int(os.getenv("DB_MAX_OVERFLOW", "30") or 30)
+    DB_POOL_TIMEOUT = int(os.getenv("DB_POOL_TIMEOUT", "30") or 30)
+    RATE_LIMIT_ENABLE = os.getenv("RATE_LIMIT_ENABLE", "true").strip().lower() in ("true", "1", "yes")
+    # 代理头信任策略：auto(默认仅信任本机/内网回环Nginx等代理，防止公网直连伪造X-Forwarded-For绕过限流) | always | never
+    TRUST_PROXY = os.getenv("TRUST_PROXY", "auto").strip().lower()
+    RATE_LIMIT_WHITELIST = [
+        ip.strip() for ip in os.getenv("RATE_LIMIT_WHITELIST", "").split(",") if ip.strip()
+    ]
 
     # Xray 节点监听端口
     SERVER_PORT = os.getenv("PORT", "443")

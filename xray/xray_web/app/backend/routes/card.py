@@ -7,6 +7,13 @@ from sqlalchemy import delete, func, select
 from config import Config
 from core.db import db_session, get_setting
 from core.models import Card
+from core.rate_limit import (
+    consume_rate_limit,
+    get_client_ip,
+    rate_limit,
+    rate_limit_response,
+    reset_rate_counter,
+)
 from routes import check_admin
 
 card_bp = Blueprint("card_bp", __name__)
@@ -106,6 +113,7 @@ def admin_delete_cards():
 
 
 @card_bp.route("/api/open/faka_generate", methods=["GET", "POST"])
+@rate_limit("faka_ip", limit=120, window_seconds=60, msg="发卡 API 请求过于频繁，请稍后再试")
 def open_faka_generate():
     is_enabled = get_setting("faka_api_enable", "true").lower() == "true"
     if not is_enabled:
@@ -118,9 +126,15 @@ def open_faka_generate():
     if req_token and req_token.startswith("Bearer "):
         req_token = req_token[7:].strip()
 
+    ip = get_client_ip()
     valid_token = get_setting("faka_api_token", Config.FAKA_API_TOKEN).strip()
     if not req_token or req_token.strip() != valid_token:
+        allowed_fail, _, _ = consume_rate_limit("faka_auth_fail", ip, limit=10, window_seconds=300)
+        if not allowed_fail:
+            return rate_limit_response("发卡 API 密钥错误次数过多，IP 已临时限流", retry_after=300)
         return jsonify({"code": 403, "msg": "Invalid API Token"}), 403
+
+    reset_rate_counter("faka_auth_fail", ip)
 
     gb_param = request.args.get("gb") or ((request.json or {}).get("gb") if request.is_json else None)
     days_param = request.args.get("days") or ((request.json or {}).get("days") if request.is_json else None)

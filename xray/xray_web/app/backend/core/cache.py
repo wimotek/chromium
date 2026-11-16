@@ -11,7 +11,7 @@ import threading
 import time
 from typing import Any, Callable, Optional
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, text
 
 from config import Config
 from core.db import db_session, upsert_kv_cache
@@ -144,18 +144,52 @@ class CacheManager:
         now = time.time()
         new_exp = (now + ttl) if ttl > 0 else 0.0
         with db_session() as s:
-            stmt = select(KvCache).where(KvCache.cache_key == key).with_for_update()
-            row = s.scalar(stmt)
-            if row and ((row.expire_at or 0.0) == 0.0 or float(row.expire_at) > now):
+            bind = s.get_bind()
+            dialect = bind.dialect.name.lower() if bind else "sqlite"
+            if dialect == "sqlite":
+                row_val = s.execute(
+                    text(
+                        "INSERT INTO kv_cache (cache_key, cache_val, expire_at) "
+                        "VALUES (:k, '1', :exp) "
+                        "ON CONFLICT(cache_key) DO UPDATE SET "
+                        "cache_val = CASE "
+                        "  WHEN (kv_cache.expire_at > 0 AND kv_cache.expire_at <= :now) "
+                        "    OR (kv_cache.expire_at = 0 AND :exp > 0) THEN '1' "
+                        "  ELSE CAST(CAST(kv_cache.cache_val AS INTEGER) + 1 AS TEXT) "
+                        "END, "
+                        "expire_at = CASE "
+                        "  WHEN (kv_cache.expire_at > 0 AND kv_cache.expire_at <= :now) "
+                        "    OR (kv_cache.expire_at = 0 AND :exp > 0) THEN :exp "
+                        "  ELSE kv_cache.expire_at "
+                        "END "
+                        "RETURNING cache_val"
+                    ),
+                    {"k": key, "exp": new_exp, "now": now},
+                ).scalar()
                 try:
-                    val = int(row.cache_val) + 1
-                except ValueError:
-                    val = 1
-                row.cache_val = str(val)
-            else:
-                val = 1
-                upsert_kv_cache(s, key, str(val), new_exp)
-            return val
+                    return max(1, int(row_val or 1))
+                except (TypeError, ValueError):
+                    return 1
+
+            # MySQL / MariaDB InnoDB 单语句原子递增
+            res = s.execute(
+                text(
+                    "INSERT INTO kv_cache (cache_key, cache_val, expire_at) "
+                    "VALUES (:k, '1', :exp) "
+                    "ON DUPLICATE KEY UPDATE "
+                    "cache_val = CAST(LAST_INSERT_ID("
+                    "  CASE WHEN (expire_at > 0 AND expire_at <= :now) OR (expire_at = 0 AND :exp > 0) "
+                    "  THEN 1 ELSE COALESCE(CAST(cache_val AS SIGNED), 0) + 1 END"
+                    ") AS CHAR), "
+                    "expire_at = CASE WHEN (expire_at > 0 AND expire_at <= :now) OR (expire_at = 0 AND :exp > 0) "
+                    "THEN :exp ELSE expire_at END"
+                ),
+                {"k": key, "exp": new_exp, "now": now},
+            )
+            if int(res.rowcount or 0) <= 1:
+                return 1
+            last_id = s.execute(text("SELECT LAST_INSERT_ID()")).scalar()
+            return max(1, int(last_id or 1))
 
     # -------------------- 统一公开接口 --------------------
 
@@ -269,14 +303,23 @@ class CacheManager:
         except Exception:
             return None
 
+    _INCR_TTL_LUA = (
+        "local v = redis.call('INCR', KEYS[1]) "
+        "local ttl = tonumber(ARGV[1]) "
+        "if ttl and ttl > 0 then "
+        "  if v == 1 or redis.call('TTL', KEYS[1]) == -1 then "
+        "    redis.call('EXPIRE', KEYS[1], ttl) "
+        "  end "
+        "end "
+        "return v"
+    )
+
     def incr_with_ttl(self, key: str, ttl: int) -> int:
         r = self._get_redis()
         if r is not None:
             try:
                 pkey = self._prefixed(key)
-                val = int(r.incr(pkey))
-                if val == 1 and ttl > 0:
-                    r.expire(pkey, ttl)
+                val = int(r.eval(self._INCR_TTL_LUA, 1, pkey, int(ttl or 0)))
                 self._mark_redis_ok()
                 return val
             except Exception as exc:

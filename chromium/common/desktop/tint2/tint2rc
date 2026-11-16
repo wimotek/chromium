@@ -6,13 +6,13 @@
 rounded = 0
 border_width = 1
 border_sides = T
-background_color = #0f172a 98
-border_color = #1e293b 100
+background_color = #0f172a 100
+border_color = #334155 100
 
 # Background 2: Inactive taskbar item
 rounded = 6
 border_width = 0
-background_color = #1e293b 45
+background_color = #1e293b 100
 border_color = #000000 0
 
 # Background 3: Active taskbar item
@@ -26,13 +26,13 @@ border_color = #38bdf8 100
 rounded = 6
 border_width = 2
 border_sides = B
-background_color = #7c2d12 90
+background_color = #7c2d12 100
 border_color = #fb923c 100
 
 # Background 5: Tooltip
 rounded = 6
 border_width = 1
-background_color = #020617 98
+background_color = #020617 100
 border_color = #334155 100
 
 #-------------------------------------
@@ -46,11 +46,11 @@ wm_menu = 1
 panel_dock = 0
 panel_position = bottom center horizontal
 panel_layer = top
-panel_monitor = all
+panel_monitor = 1
 strut_policy = follow_size
 panel_window_name = tint2
 autohide = 0
-disable_transparency = 0
+disable_transparency = 1
 mouse_effects = 1
 font_shadow = 0
 
@@ -116,7 +116,7 @@ mouse_scroll_up = toggle
 mouse_scroll_down = iconify
 
 #-------------------------------------
-# System tray (notification area)
+# System tray (notification area - shows fcitx5 中/En icon)
 systray_padding = 4 2 6
 systray_background_id = 0
 systray_sort = ascending

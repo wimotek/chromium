@@ -27,6 +27,7 @@ from core.db import (
     upsert_system_setting,
 )
 from core.models import User
+from core.rate_limit import rate_limit
 from routes import resolve_public_endpoint
 
 setup_bp = Blueprint("setup_bp", __name__)
@@ -105,6 +106,7 @@ def setup_status():
 
 
 @setup_bp.route("/api/setup/test_db", methods=["POST"])
+@rate_limit("setup_test_db", limit=20, window_seconds=60, msg="数据库连通测试过于频繁，请稍后再试")
 def setup_test_db():
     if not is_setup_required():
         return jsonify({"code": 403, "msg": "系统已完成初始化，安装向导已锁定"}), 403
@@ -116,6 +118,7 @@ def setup_test_db():
 
 
 @setup_bp.route("/api/setup/test_redis", methods=["POST"])
+@rate_limit("setup_test_redis", limit=20, window_seconds=60, msg="Redis 连通测试过于频繁，请稍后再试")
 def setup_test_redis():
     if not is_setup_required():
         return jsonify({"code": 403, "msg": "系统已完成初始化，安装向导已锁定"}), 403
@@ -128,6 +131,7 @@ def setup_test_redis():
 
 
 @setup_bp.route("/api/setup/complete", methods=["POST"])
+@rate_limit("setup_complete", limit=10, window_seconds=60, msg="提交过于频繁，请稍后再试")
 def setup_complete():
     if not is_setup_required():
         return jsonify({"code": 403, "msg": "系统已完成初始化，禁止重复提交安装向导"}), 403

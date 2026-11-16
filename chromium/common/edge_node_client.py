@@ -627,8 +627,87 @@ def _select_cleanup_targets(
     return list(selected.values())
 
 
+def _read_container_nic_bytes() -> Tuple[int, int]:
+    """读取容器 /proc/net/dev 非回环网卡累计收发字节数 (rx_bytes, tx_bytes)"""
+    rx_total = 0
+    tx_total = 0
+    try:
+        with open("/proc/net/dev", "r", encoding="utf-8") as f:
+            lines = f.readlines()[2:]
+        for line in lines:
+            if ":" not in line:
+                continue
+            iface, stats = line.split(":", 1)
+            iface = iface.strip()
+            if not iface or iface == "lo":
+                continue
+            cols = stats.split()
+            if len(cols) >= 9:
+                rx_total += int(cols[0])
+                tx_total += int(cols[8])
+    except Exception:
+        pass
+    return rx_total, tx_total
+
+
+class _EdgeMetricsTracker:
+    def __init__(self):
+        nic_rx, nic_tx = _read_container_nic_bytes()
+        self.last_nic_rx = nic_rx
+        self.last_nic_tx = nic_tx
+        self.cdp_rx_total = 0
+        self.cdp_tx_total = 0
+        self.last_cdp_rx = 0
+        self.last_cdp_tx = 0
+        self.active_streams = 0
+
+    def sample_report(self):
+        cur_nic_rx, cur_nic_tx = _read_container_nic_bytes()
+        cur_cdp_rx = self.cdp_rx_total
+        cur_cdp_tx = self.cdp_tx_total
+
+        net_rx_delta = max(0, cur_nic_rx - self.last_nic_rx) if cur_nic_rx >= self.last_nic_rx else cur_nic_rx
+        net_tx_delta = max(0, cur_nic_tx - self.last_nic_tx) if cur_nic_tx >= self.last_nic_tx else cur_nic_tx
+        cdp_rx_delta = max(0, cur_cdp_rx - self.last_cdp_rx)
+        cdp_tx_delta = max(0, cur_cdp_tx - self.last_cdp_tx)
+
+        payload = {
+            "type": "metrics_report",
+            "net_rx_delta": net_rx_delta,
+            "net_tx_delta": net_tx_delta,
+            "cdp_rx_delta": cdp_rx_delta,
+            "cdp_tx_delta": cdp_tx_delta,
+            "active_streams": self.active_streams,
+        }
+
+        def commit():
+            self.last_nic_rx = cur_nic_rx
+            self.last_nic_tx = cur_nic_tx
+            self.last_cdp_rx = cur_cdp_rx
+            self.last_cdp_tx = cur_cdp_tx
+
+        return payload, commit
+
+
+_edge_metrics = _EdgeMetricsTracker()
+
+
+async def metrics_reporter_loop(ws, interval_sec: Optional[int] = None):
+    """每 10 秒上报一次容器网卡流量增量与活跃 CDP 会话数，仅在 ws.send 成功后推进基线"""
+    step = interval_sec or max(5, int(os.getenv("METRICS_REPORT_INTERVAL_SECONDS", "10")))
+    while True:
+        await asyncio.sleep(step)
+        payload, commit = _edge_metrics.sample_report()
+        try:
+            await ws.send(json.dumps(payload))
+            commit()
+        except Exception:
+            break
+
+
 async def bridge_cdp_ws_stream(tunnel_ws, stream_id: str, inbound_queue: asyncio.Queue):
     """通过 WSS 通道多路复用透传 Playwright / Puppeteer CDP WebSocket 会话至本地 127.0.0.1:9222"""
+    _edge_metrics.active_streams += 1
     try:
         local_base = await get_local_cdp_base()
         async with httpx.AsyncClient(timeout=3.0) as client:
@@ -638,10 +717,12 @@ async def bridge_cdp_ws_stream(tunnel_ws, stream_id: str, inbound_queue: asyncio
         async with websockets.connect(local_ws_url, open_timeout=5.0, max_size=100 * 1024 * 1024) as cdp_ws:
             async def _cdp_to_hub():
                 async for msg in cdp_ws:
+                    text_data = msg if isinstance(msg, str) else msg.decode("utf-8", errors="replace")
+                    _edge_metrics.cdp_tx_total += len(text_data.encode("utf-8"))
                     await tunnel_ws.send(json.dumps({
                         "type": "cdp_ws_frame",
                         "stream_id": stream_id,
-                        "data": msg if isinstance(msg, str) else msg.decode("utf-8", errors="replace"),
+                        "data": text_data,
                     }))
 
             async def _hub_to_cdp():
@@ -649,6 +730,9 @@ async def bridge_cdp_ws_stream(tunnel_ws, stream_id: str, inbound_queue: asyncio
                     payload = await inbound_queue.get()
                     if payload is None:
                         break
+                    _edge_metrics.cdp_rx_total += (
+                        len(payload) if isinstance(payload, bytes) else len(str(payload).encode("utf-8"))
+                    )
                     await cdp_ws.send(payload)
 
             _, pending = await asyncio.wait(
@@ -667,10 +751,212 @@ async def bridge_cdp_ws_stream(tunnel_ws, stream_id: str, inbound_queue: asyncio
         except Exception:
             pass
     finally:
+        _edge_metrics.active_streams = max(0, _edge_metrics.active_streams - 1)
         try:
             await tunnel_ws.send(json.dumps({"type": "cdp_ws_close", "stream_id": stream_id}))
         except Exception:
             pass
+
+
+HUB_BOOKMARK_ROOT_FOLDER = "☁️ Hub 联动收藏"
+
+
+def _chrome_webkit_now() -> str:
+    return str(int((time.time() + 11644473600) * 1_000_000))
+
+
+def _compute_chromium_bookmarks_checksum(roots: Dict[str, Any]) -> str:
+    md5 = hashlib.md5()
+
+    def _walk(node: Any):
+        if not isinstance(node, dict):
+            return
+        md5.update(str(node.get("id") or "").encode("utf-8"))
+        md5.update(str(node.get("name") or "").encode("utf-16le"))
+        if node.get("type") == "url":
+            md5.update(b"url")
+            md5.update(str(node.get("url") or "").encode("utf-8"))
+        else:
+            md5.update(b"folder")
+            for child in node.get("children") or []:
+                _walk(child)
+
+    for rk in ("bookmark_bar", "other", "synced"):
+        if rk in roots:
+            _walk(roots[rk])
+    return md5.hexdigest()
+
+
+def _max_chromium_bookmark_id(roots: Dict[str, Any]) -> int:
+    max_id = 10
+
+    def _scan(node: Any):
+        nonlocal max_id
+        if not isinstance(node, dict):
+            return
+        try:
+            nid = int(str(node.get("id") or "0"))
+            if nid > max_id:
+                max_id = nid
+        except Exception:
+            pass
+        for child in node.get("children") or []:
+            _scan(child)
+
+    for rk in ("bookmark_bar", "other", "synced"):
+        if rk in roots:
+            _scan(roots[rk])
+    return max_id
+
+
+def sync_hub_bookmarks_to_chromium(data_dir: Path, bookmarks: List[Dict[str, Any]]) -> Tuple[int, str]:
+    """将 Hub 收藏列表写入 Chromium Default/Bookmarks 的专用联动文件夹并重算 MD5 Checksum"""
+    cache_file = data_dir / ".edge_bookmarks.json"
+    try:
+        cache_file.parent.mkdir(parents=True, exist_ok=True)
+        cache_file.write_text(json.dumps(bookmarks, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception:
+        pass
+
+    bm_file = data_dir / "Default" / "Bookmarks"
+    bm_file.parent.mkdir(parents=True, exist_ok=True)
+    now_wk = _chrome_webkit_now()
+
+    doc: Dict[str, Any] = {}
+    if bm_file.exists():
+        try:
+            doc = json.loads(bm_file.read_text(encoding="utf-8"))
+        except Exception:
+            doc = {}
+    if not isinstance(doc, dict):
+        doc = {}
+
+    roots = doc.setdefault("roots", {})
+    if not isinstance(roots, dict):
+        roots = {}
+        doc["roots"] = roots
+
+    for rkey, rname, rid in (("bookmark_bar", "书签栏", "1"), ("other", "其他书签", "2"), ("synced", "移动设备书签", "3")):
+        rnode = roots.get(rkey)
+        if not isinstance(rnode, dict):
+            roots[rkey] = {
+                "children": [],
+                "date_added": now_wk,
+                "date_last_used": "0",
+                "date_modified": now_wk,
+                "id": rid,
+                "name": rname,
+                "type": "folder",
+            }
+        elif not isinstance(rnode.get("children"), list):
+            rnode["children"] = []
+
+    bar_children = roots["bookmark_bar"]["children"]
+    preserved = [
+        c for c in bar_children
+        if not (isinstance(c, dict) and c.get("type") == "folder" and c.get("name") == HUB_BOOKMARK_ROOT_FOLDER)
+    ]
+
+    next_id = _max_chromium_bookmark_id(roots) + 1
+
+    def _alloc_id() -> str:
+        nonlocal next_id
+        val = str(next_id)
+        next_id += 1
+        return val
+
+    grouped: Dict[str, List[Dict[str, Any]]] = {}
+    for b in bookmarks or []:
+        if not isinstance(b, dict):
+            continue
+        url_val = str(b.get("url") or "").strip()
+        if not url_val:
+            continue
+        folder = str(b.get("folder") or "常用站点").strip() or "常用站点"
+        grouped.setdefault(folder, []).append(b)
+
+    folder_nodes: List[Dict[str, Any]] = []
+    for folder_name, items in grouped.items():
+        url_nodes = []
+        for b in items:
+            url_nodes.append({
+                "date_added": now_wk,
+                "date_last_used": "0",
+                "guid": str(uuid.uuid4()),
+                "id": _alloc_id(),
+                "name": str(b.get("title") or b.get("url") or "").strip()[:255],
+                "type": "url",
+                "url": str(b.get("url") or "").strip(),
+            })
+        folder_nodes.append({
+            "children": url_nodes,
+            "date_added": now_wk,
+            "date_last_used": "0",
+            "date_modified": now_wk,
+            "guid": str(uuid.uuid4()),
+            "id": _alloc_id(),
+            "name": folder_name,
+            "type": "folder",
+        })
+
+    hub_root_folder = {
+        "children": folder_nodes,
+        "date_added": now_wk,
+        "date_last_used": "0",
+        "date_modified": now_wk,
+        "guid": str(uuid.uuid4()),
+        "id": _alloc_id(),
+        "name": HUB_BOOKMARK_ROOT_FOLDER,
+        "type": "folder",
+    }
+
+    roots["bookmark_bar"]["children"] = [hub_root_folder] + preserved
+    roots["bookmark_bar"]["date_modified"] = now_wk
+    doc["version"] = 1
+    doc["checksum"] = _compute_chromium_bookmarks_checksum(roots)
+
+    tmp_file = bm_file.with_suffix(".tmp")
+    tmp_file.write_text(json.dumps(doc, ensure_ascii=False, indent=3), encoding="utf-8")
+    os.replace(tmp_file, bm_file)
+    return len(bookmarks or []), str(bm_file)
+
+
+def read_chromium_bookmarks(data_dir: Path) -> List[Dict[str, Any]]:
+    """读取本机 Chromium Default/Bookmarks 及缓存中的全部书签用于上传合并至 Hub"""
+    out: List[Dict[str, Any]] = []
+    seen_urls = set()
+    bm_file = data_dir / "Default" / "Bookmarks"
+    if bm_file.exists():
+        try:
+            doc = json.loads(bm_file.read_text(encoding="utf-8"))
+            roots = doc.get("roots") or {}
+
+            def _walk(node: Any, folder_name: str):
+                if not isinstance(node, dict):
+                    return
+                ntype = node.get("type")
+                if ntype == "url":
+                    u = str(node.get("url") or "").strip()
+                    if u and (u.startswith("http://") or u.startswith("https://")) and u not in seen_urls:
+                        seen_urls.add(u)
+                        out.append({
+                            "title": str(node.get("name") or u).strip()[:255],
+                            "url": u,
+                            "folder": folder_name or "常用站点",
+                            "pinned": 0,
+                        })
+                elif ntype == "folder":
+                    cur_name = str(node.get("name") or "").strip()
+                    next_folder = folder_name if cur_name in ("", "书签栏", "其他书签", "移动设备书签", HUB_BOOKMARK_ROOT_FOLDER) else cur_name
+                    for child in node.get("children") or []:
+                        _walk(child, next_folder)
+
+            for rk, default_f in (("bookmark_bar", "常用站点"), ("other", "其他书签"), ("synced", "移动书签")):
+                if rk in roots:
+                    _walk(roots[rk], default_f)
+        except Exception:
+            pass
+    return out
 
 
 async def handle_cdp_command(
@@ -698,6 +984,16 @@ async def handle_cdp_command(
         )
         return
 
+    if msg_type == "bookmarks_sync":
+        bm_list = cmd.get("bookmarks") or []
+        data_dir = Path(os.getenv("DATA_DIR", "/data"))
+        try:
+            cnt, bm_path = sync_hub_bookmarks_to_chromium(data_dir, bm_list)
+            print(f"📑 [Bookmarks] 已同步写入 {cnt} 条 Hub 联动收藏 -> {bm_path}", flush=True)
+        except Exception as e:
+            print(f"⚠️ [Bookmarks] 写入 Chromium 书签失败: {e}", flush=True)
+        return
+
     if msg_type == "cdp_ws_open":
         stream_id = cmd["stream_id"]
         q: asyncio.Queue = asyncio.Queue()
@@ -716,6 +1012,16 @@ async def handle_cdp_command(
         q = ws_streams.pop(stream_id, None)
         if q is not None:
             await q.put(None)
+        return
+
+    if action == "fetch_bookmarks":
+        try:
+            data_dir = Path(os.getenv("DATA_DIR", "/data"))
+            items = read_chromium_bookmarks(data_dir)
+            print(f"📑 [Bookmarks] 扫描并上传 {len(items)} 条本机书签至 Hub", flush=True)
+            await ws.send(json.dumps({"req_id": req_id, "status": "ok", "bookmarks": items}))
+        except Exception as e:
+            await ws.send(json.dumps({"req_id": req_id, "status": "error", "message": str(e)}))
         return
 
     if action == "fetch_cookies":
@@ -844,6 +1150,7 @@ async def start_public_wss_servers(
         activity_tracker["last_inbound"] = time.monotonic()
         print("🔐 [Edge WSS Server] Hub 鉴权直连已建立！正在桥接本地 127.0.0.1:9222 ...", flush=True)
         ws_streams: Dict[str, asyncio.Queue] = {}
+        reporter_task = asyncio.create_task(metrics_reporter_loop(websocket))
         try:
             async with httpx.AsyncClient(timeout=4.0) as http_client:
                 async for msg_text in websocket:
@@ -854,6 +1161,7 @@ async def start_public_wss_servers(
         except Exception as e:
             print(f"ℹ️ [Edge WSS Server] Hub 直连会话断开: {type(e).__name__}", flush=True)
         finally:
+            reporter_task.cancel()
             for q in ws_streams.values():
                 await q.put(None)
             ws_streams.clear()
@@ -965,6 +1273,7 @@ async def run_tunnel_client(
                 continue
 
             heartbeat_task = asyncio.create_task(keep_alive_heartbeat(ws))
+            reporter_task = asyncio.create_task(metrics_reporter_loop(ws))
 
             try:
                 async with httpx.AsyncClient(timeout=4.0) as http_client:
@@ -983,6 +1292,7 @@ async def run_tunnel_client(
                         asyncio.create_task(handle_cdp_command(ws, http_client, msg_text, ws_streams))
             finally:
                 heartbeat_task.cancel()
+                reporter_task.cancel()
                 for q in ws_streams.values():
                     await q.put(None)
                 ws_streams.clear()

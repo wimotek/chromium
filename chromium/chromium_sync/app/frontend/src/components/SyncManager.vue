@@ -24,6 +24,171 @@ const editingPolicyId = ref(null)
 const showLogModal = ref(false)
 const selectedLogDetail = ref('')
 
+// ==================== 云端联动收藏夹 ====================
+const bookmarks = ref([])
+const bookmarkFolders = ref(['常用站点'])
+const bookmarkFolderFilter = ref('')
+const bookmarkOnlineNodes = ref(0)
+const bookmarkBusy = ref(false)
+const pullNodeId = ref('')
+const showBookmarkModal = ref(false)
+const editingBookmarkId = ref(null)
+const bookmarkForm = reactive({
+  title: '',
+  url: '',
+  folder: '常用站点',
+  pinned: 1
+})
+
+const filteredBookmarks = computed(() => {
+  if (!bookmarkFolderFilter.value) return bookmarks.value
+  return bookmarks.value.filter(b => b.folder === bookmarkFolderFilter.value)
+})
+
+const onlineTunnelNodes = computed(() => {
+  return nodes.value.filter(n => n.status === 'connected' && (n.conn_type === 'reverse' || n.conn_type === 'public_wss' || n.conn_type === 'wss_direct'))
+})
+
+const loadBookmarks = async () => {
+  try {
+    const res = await props.api('/api/bookmarks')
+    if (res.ok) {
+      const data = await res.json()
+      bookmarks.value = data.bookmarks || []
+      bookmarkFolders.value = data.folders || ['常用站点']
+      bookmarkOnlineNodes.value = data.online_nodes || 0
+    }
+  } catch (e) {}
+}
+
+const openCreateBookmark = () => {
+  editingBookmarkId.value = null
+  Object.assign(bookmarkForm, {
+    title: '',
+    url: '',
+    folder: bookmarkFolderFilter.value || '常用站点',
+    pinned: 1
+  })
+  showBookmarkModal.value = true
+}
+
+const openEditBookmark = (b) => {
+  editingBookmarkId.value = b.id
+  Object.assign(bookmarkForm, {
+    title: b.title,
+    url: b.url,
+    folder: b.folder || '常用站点',
+    pinned: b.pinned ? 1 : 0
+  })
+  showBookmarkModal.value = true
+}
+
+const submitBookmark = async () => {
+  const isEdit = editingBookmarkId.value !== null
+  const url = isEdit ? `/api/bookmarks/${editingBookmarkId.value}` : '/api/bookmarks'
+  const method = isEdit ? 'PUT' : 'POST'
+  bookmarkBusy.value = true
+  try {
+    const res = await props.api(url, {
+      method,
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        title: bookmarkForm.title,
+        url: bookmarkForm.url,
+        folder: bookmarkForm.folder || '常用站点',
+        pinned: bookmarkForm.pinned ? 1 : 0
+      })
+    })
+    const data = await res.json()
+    if (res.ok) {
+      props.showToast(data.message || '收藏已保存并联动下发', 'success')
+      showBookmarkModal.value = false
+      await loadBookmarks()
+    } else {
+      props.showToast(data.detail || '保存收藏失败', 'error')
+    }
+  } finally {
+    bookmarkBusy.value = false
+  }
+}
+
+const toggleBookmarkPin = async (b) => {
+  const res = await props.api(`/api/bookmarks/${b.id}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ pinned: b.pinned ? 0 : 1 })
+  })
+  if (res.ok) {
+    await loadBookmarks()
+    props.showToast(b.pinned ? '已取消快捷置顶并同步' : '已设为快捷置顶并同步', 'success')
+  }
+}
+
+const removeBookmark = async (b) => {
+  if (!confirm(`确认删除收藏 [${b.title}] 并通知所有在线客户端同步移除？`)) return
+  const res = await props.api(`/api/bookmarks/${b.id}`, { method: 'DELETE' })
+  const data = await res.json()
+  if (res.ok) {
+    props.showToast(data.message || '已删除收藏并同步全网', 'success')
+    await loadBookmarks()
+  } else {
+    props.showToast(data.detail || '删除失败', 'error')
+  }
+}
+
+const pushAllBookmarksNow = async () => {
+  bookmarkBusy.value = true
+  try {
+    const res = await props.api('/api/bookmarks/push-all', { method: 'POST' })
+    const data = await res.json()
+    if (res.ok) {
+      props.showToast(data.message || '已全网推送收藏夹', 'success')
+      await loadBookmarks()
+    } else {
+      props.showToast(data.detail || '下发失败', 'error')
+    }
+  } finally {
+    bookmarkBusy.value = false
+  }
+}
+
+const importStarterBookmarks = async () => {
+  bookmarkBusy.value = true
+  try {
+    const res = await props.api('/api/bookmarks/import-defaults', { method: 'POST' })
+    const data = await res.json()
+    if (res.ok) {
+      props.showToast(data.message || '已导入常用站点', 'success')
+      await loadBookmarks()
+    } else {
+      props.showToast(data.detail || '导入失败', 'error')
+    }
+  } finally {
+    bookmarkBusy.value = false
+  }
+}
+
+const pullBookmarksFromNode = async () => {
+  const nid = parseInt(pullNodeId.value)
+  if (!nid) {
+    props.showToast('请先选择一个在线节点用于提取书签', 'warning')
+    return
+  }
+  bookmarkBusy.value = true
+  try {
+    const res = await props.api(`/api/bookmarks/pull/${nid}`, { method: 'POST' })
+    const data = await res.json()
+    if (res.ok) {
+      props.showToast(data.message || '提取并合并成功', 'success')
+      await loadBookmarks()
+    } else {
+      props.showToast(data.detail || '提取书签失败', 'error')
+    }
+  } finally {
+    bookmarkBusy.value = false
+  }
+}
+
 // 全局 Cookie 过滤与差量同步策略弹窗模型 (从第 4 张卡迁入)
 const showCookiePolicyModal = ref(false)
 const cookiePolicy = reactive({
@@ -119,18 +284,25 @@ const policyForm = reactive({
 const selectedTargetToAdd = ref('')
 
 const loadAllData = async () => {
-  const [pRes, nRes, gRes, lRes, cRes] = await Promise.all([
+  const [pRes, nRes, gRes, lRes, cRes, bRes] = await Promise.all([
     props.api('/api/sync/policies'),
     props.api('/api/nodes'),
     props.api('/api/node-groups'),
     props.api('/api/sync/logs'),
-    props.api('/api/cookie-policy')
+    props.api('/api/cookie-policy'),
+    props.api('/api/bookmarks')
   ])
   if (pRes.ok) policies.value = await pRes.json()
   if (nRes.ok) nodes.value = await nRes.json()
   if (gRes.ok) groups.value = await gRes.json()
   if (lRes.ok) logs.value = await lRes.json()
   if (cRes && cRes.ok) Object.assign(cookiePolicy, await cRes.json())
+  if (bRes && bRes.ok) {
+    const bData = await bRes.json()
+    bookmarks.value = bData.bookmarks || []
+    bookmarkFolders.value = bData.folders || ['常用站点']
+    bookmarkOnlineNodes.value = bData.online_nodes || 0
+  }
 }
 
 // 任务审计智能过滤计算属性 (状态筛选 + 关键字模糊匹配)
@@ -398,6 +570,79 @@ onUnmounted(() => {
 
       <div v-if="policies.length === 0" class="empty-policy-box">
         暂无调度策略，请点击右上角「+ 新增调度策略」配置同步策略。
+      </div>
+    </div>
+
+    <!-- ==================== 云端联动收藏夹：Hub ↔ Android / Windows / Docker 实时双向同步 ==================== -->
+    <div class="bookmark-section-wrapper">
+      <div class="audit-header-bar">
+        <div class="audit-title-box">
+          <span style="font-size:16px;">📑</span>
+          <h3 class="audit-title-text">云端联动收藏夹 (Hub ⇄ Windows / Android / Docker)</h3>
+          <span class="badge-retention-note">
+            共 {{ bookmarks.length }} 条 · 在线联动 {{ bookmarkOnlineNodes }} 节点
+          </span>
+        </div>
+        <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+          <select v-model="bookmarkFolderFilter" class="sync-input font-mono" style="width:auto; height:32px; font-size:11px; padding:2px 8px;">
+            <option value="">📁 全部分类</option>
+            <option v-for="f in bookmarkFolders" :key="f" :value="f">📂 {{ f }}</option>
+          </select>
+
+          <select v-model="pullNodeId" class="sync-input font-mono" style="width:auto; max-width:170px; height:32px; font-size:11px; padding:2px 8px;">
+            <option value="">-- 选择在线节点提取书签 --</option>
+            <option v-for="n in onlineTunnelNodes" :key="n.id" :value="n.id">
+              {{ n.name }} ({{ n.client_type || 'desktop' }})
+            </option>
+          </select>
+          <button type="button" :disabled="bookmarkBusy || !pullNodeId" @click="pullBookmarksFromNode" class="btn-sub-action" style="height:32px; font-size:11px;">
+            📥 从节点提取
+          </button>
+
+          <button type="button" :disabled="bookmarkBusy" @click="importStarterBookmarks" class="btn-sub-action" style="height:32px; font-size:11px;">
+            ✨ 导入常用站点
+          </button>
+          <button type="button" :disabled="bookmarkBusy" @click="pushAllBookmarksNow" class="btn-sub-action" style="height:32px; font-size:11px; border-color:#0284c7; color:#38bdf8;">
+            ⚡ 全网下发
+          </button>
+          <button type="button" @click="openCreateBookmark" class="btn-primary-gradient" style="height:32px; padding:4px 14px;">
+            + 添加收藏
+          </button>
+        </div>
+      </div>
+
+      <div class="bookmark-grid-box">
+        <div v-for="b in filteredBookmarks" :key="b.id" class="bookmark-card-item">
+          <div class="bookmark-card-top">
+            <button
+              type="button"
+              @click="toggleBookmarkPin(b)"
+              :title="b.pinned ? '已快捷置顶（点击取消）' : '设为快捷置顶（Android 浏览器快捷栏优先显示）'"
+              :class="['bookmark-pin-btn', b.pinned ? 'pin-active' : '']"
+            >
+              {{ b.pinned ? '★' : '☆' }}
+            </button>
+            <div class="bookmark-meta-col">
+              <div class="bookmark-title-line">
+                <span class="bookmark-title-str" :title="b.title">{{ b.title }}</span>
+                <span class="bookmark-folder-tag">{{ b.folder || '常用站点' }}</span>
+              </div>
+              <a :href="b.url" target="_blank" rel="noopener" class="bookmark-url-link" :title="b.url">{{ b.url }}</a>
+            </div>
+          </div>
+
+          <div class="bookmark-card-foot">
+            <span class="bookmark-source-text">来源: {{ b.source_node || 'hub' }}</span>
+            <div style="display:flex; gap:6px;">
+              <button type="button" @click="openEditBookmark(b)" class="btn-micro btn-blue">✏️ 编辑</button>
+              <button type="button" @click="removeBookmark(b)" class="btn-micro btn-trash">🗑️ 删除</button>
+            </div>
+          </div>
+        </div>
+
+        <div v-if="filteredBookmarks.length === 0" class="empty-policy-box" style="padding:22px;">
+          暂无云端收藏，可点击右上角「✨ 导入常用站点」或「+ 添加收藏」，手机 Android / Windows / Docker 节点将即时同步收到！
+        </div>
       </div>
     </div>
 
@@ -744,6 +989,50 @@ onUnmounted(() => {
             <button @click="showLogModal = false" class="btn-primary-gradient">关闭</button>
           </div>
         </div>
+      </div>
+    </div>
+
+    <!-- 弹窗 4：新增 / 编辑云端联动收藏 -->
+    <div v-if="showBookmarkModal" class="modal-backdrop">
+      <div class="modal-card" style="width:520px; max-width:94vw;">
+        <div class="modal-title-bar">
+          <h3 class="modal-title-h3">{{ editingBookmarkId !== null ? '✏️ 编辑云端收藏' : '📑 添加云端联动收藏' }}</h3>
+          <button @click="showBookmarkModal = false" class="modal-close-btn">✕</button>
+        </div>
+        <form @submit.prevent="submitBookmark" class="form-vertical-flow" style="margin-top:14px;">
+          <div class="form-block">
+            <label class="block-label">站点名称 (Title)</label>
+            <input v-model="bookmarkForm.title" required placeholder="如: GitHub 登录" class="sync-input" style="width:100% !important;">
+          </div>
+          <div class="form-block">
+            <label class="block-label">网址 URL</label>
+            <input v-model="bookmarkForm.url" required placeholder="如: https://github.com/login" class="sync-input font-cyan-mono" style="width:100% !important;">
+          </div>
+          <div class="row-flex-gap">
+            <div class="form-block" style="flex:1;">
+              <label class="block-label">分类文件夹</label>
+              <input v-model="bookmarkForm.folder" list="bookmark-folder-presets" placeholder="常用站点" class="sync-input" style="width:100% !important;">
+              <datalist id="bookmark-folder-presets">
+                <option value="常用站点" />
+                <option value="开发工具" />
+                <option value="购物生活" />
+                <option value="工作台" />
+              </datalist>
+            </div>
+            <div class="form-block" style="flex:1; justify-content:flex-end; padding-bottom:6px;">
+              <label style="display:flex; align-items:center; gap:8px; cursor:pointer; font-size:12px; color:#fbbf24;">
+                <input type="checkbox" :checked="Boolean(bookmarkForm.pinned)" @change="bookmarkForm.pinned = $event.target.checked ? 1 : 0" class="check-box-blue">
+                ★ 设为快捷置顶（Android 快捷栏优先展示）
+              </label>
+            </div>
+          </div>
+          <div style="display:flex; justify-content:flex-end; gap:8px; margin-top:8px;">
+            <button type="button" @click="showBookmarkModal = false" class="btn-gray-test">取消</button>
+            <button type="submit" :disabled="bookmarkBusy" class="btn-primary-gradient">
+              {{ bookmarkBusy ? '同步中...' : '保存并联动下发' }}
+            </button>
+          </div>
+        </form>
       </div>
     </div>
 
@@ -1459,5 +1748,142 @@ onUnmounted(() => {
   border-radius: 9999px;
   padding: 2px 8px;
   font-size: 11px;
+}
+
+/* ==================== 云端联动收藏夹面板 ==================== */
+.bookmark-section-wrapper {
+  margin-top: 8px;
+  margin-bottom: 22px;
+  background: #09122a;
+  border: 1px solid #172554;
+  border-radius: 10px;
+  padding: 14px 16px;
+}
+
+.bookmark-grid-box {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  margin-top: 10px;
+}
+
+@media (max-width: 1200px) {
+  .bookmark-grid-box {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 768px) {
+  .bookmark-grid-box {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.bookmark-card-item {
+  background: #060b17;
+  border: 1px solid #172554;
+  border-radius: 8px;
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.bookmark-card-item:hover {
+  border-color: #1d4ed8;
+}
+
+.bookmark-card-top {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  min-width: 0;
+}
+
+.bookmark-pin-btn {
+  background: #0f1c3f;
+  border: 1px solid #1e3a8a;
+  color: #64748b;
+  border-radius: 6px;
+  width: 26px;
+  height: 26px;
+  font-size: 14px;
+  cursor: pointer;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.bookmark-pin-btn.pin-active {
+  color: #fbbf24;
+  border-color: rgba(251, 191, 36, 0.5);
+  background: rgba(251, 191, 36, 0.12);
+}
+
+.bookmark-meta-col {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+  flex: 1;
+}
+
+.bookmark-title-line {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}
+
+.bookmark-title-str {
+  color: #f8fafc;
+  font-size: 13px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.bookmark-folder-tag {
+  background: rgba(56, 189, 248, 0.12);
+  border: 1px solid rgba(56, 189, 248, 0.35);
+  color: #38bdf8;
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.bookmark-url-link {
+  color: #94a3b8;
+  font-family: monospace;
+  font-size: 11px;
+  text-decoration: none;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.bookmark-url-link:hover {
+  color: #38bdf8;
+  text-decoration: underline;
+}
+
+.bookmark-card-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  border-top: 1px solid #111c38;
+  padding-top: 7px;
+}
+
+.bookmark-source-text {
+  font-size: 10px;
+  color: #64748b;
+  font-family: monospace;
 }
 </style>

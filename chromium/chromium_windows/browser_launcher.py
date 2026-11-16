@@ -109,12 +109,26 @@ async def check_local_cdp_ready(cdp_port: int = 9222, timeout: float = 1.5) -> O
     return None
 
 
+def probe_existing_cdp_sync(cdp_port: int = 9222, timeout: float = 0.8) -> Optional[dict]:
+    """同步检测 127.0.0.1:cdp_port 是否已被外部浏览器占用"""
+    url = f"http://127.0.0.1:{int(cdp_port)}/json/version"
+    try:
+        with httpx.Client(timeout=timeout, trust_env=False) as client:
+            res = client.get(url)
+            if res.status_code == 200:
+                return res.json()
+    except Exception:
+        return None
+    return None
+
+
 class BrowserProcessManager:
     """管理由本应用拉起的隔离式 Edge / Chrome 调试进程"""
 
     def __init__(self):
         self.proc: Optional[subprocess.Popen] = None
         self.active_browser_label: str = ""
+        self.last_launch_warning: str = ""
 
     def is_running(self) -> bool:
         return self.proc is not None and self.proc.poll() is None
@@ -128,28 +142,60 @@ class BrowserProcessManager:
         custom_profile_dir: str = "",
         homepage: str = "about:blank",
         extra_args: str = "",
+        isolate_os_signin: bool = True,
     ) -> Tuple[str, List[str]]:
+        self.last_launch_warning = ""
         if self.is_running():
             return self.active_browser_label, []
 
+        # 检测外部是否已有浏览器占用了同一个 CDP 端口（常见于个人日常 Edge 已带 9222 启动，导致误挂个人账号）
+        existing_cdp = probe_existing_cdp_sync(cdp_port)
+        if existing_cdp is not None:
+            browser_ver = existing_cdp.get("Browser", "未知浏览器")
+            self.last_launch_warning = (
+                f"检测到本机 127.0.0.1:{int(cdp_port)} 已被现有浏览器进程 ({browser_ver}) 占用！\n"
+                "客户端将直接复用该端口上的浏览器会话——如果那是你的日常个人浏览器，你的个人账号和 Cookie 会直接暴露给调试接口。"
+                "如需严格独立环境，请更改本程序的 CDP 端口（如 9223）或先关闭外部调试浏览器。"
+            )
+            self.active_browser_label = f"复用已运行端口 ({browser_ver})"
+            return self.active_browser_label, []
+
         label, exe_path = resolve_browser_executable(browser_choice, custom_browser_path)
+        is_isolated = (profile_mode or "isolated").lower() != "system_default"
+
+        disabled_features = ["msEdgeStartupBoost"]
+        if is_isolated and isolate_os_signin:
+            # 阻止 Windows Microsoft Edge 自动将系统登录的微软账号(MSA/AAD)隐式绑定到独立沙盒 Profile
+            disabled_features.extend(["msImplicitSignin", "msEdgeAccountConsistency"])
 
         cmd: List[str] = [
             exe_path,
             f"--remote-debugging-port={int(cdp_port)}",
             "--remote-debugging-address=127.0.0.1",
             "--remote-allow-origins=*",
-            "--disable-features=msEdgeStartupBoost",
+            f"--disable-features={','.join(disabled_features)}",
             "--no-first-run",
             "--no-default-browser-check",
         ]
 
         # Chrome/Edge 136+ 仅允许在非默认数据目录下开启远程调试端口；
         # 独立 Profile 也避免把个人日常网银 Cookie 混入同步池
-        if (profile_mode or "isolated").lower() != "system_default":
+        if is_isolated:
             profile_dir = Path(custom_profile_dir.strip()) if custom_profile_dir.strip() else get_default_profile_dir()
             profile_dir.mkdir(parents=True, exist_ok=True)
             cmd.append(f"--user-data-dir={profile_dir}")
+            if isolate_os_signin:
+                cmd.append("--disable-sync")
+        else:
+            if custom_profile_dir.strip():
+                profile_dir = Path(custom_profile_dir.strip())
+                profile_dir.mkdir(parents=True, exist_ok=True)
+                cmd.append(f"--user-data-dir={profile_dir}")
+            else:
+                self.last_launch_warning = (
+                    "已选择「主机默认 Profile」：1) Chrome / Edge 136+ 默认禁止在系统默认 User Data 目录开启 9222 远程调试端口；"
+                    "2) 若本机日常浏览器已在后台运行，新窗口会并入旧进程导致 9222 端口不生效（请先完全退出全部 Edge/Chrome 窗口再启动）。"
+                )
 
         if extra_args and extra_args.strip():
             import shlex
@@ -187,3 +233,4 @@ class BrowserProcessManager:
         finally:
             self.proc = None
             self.active_browser_label = ""
+

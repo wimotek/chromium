@@ -372,6 +372,8 @@ const onUserChangeNodeSni = (node) => {
   ElMessage.success(`已切换该节点的伪装 SNI 为: ${node.selected_sni}`)
 }
 
+const extractErrMsg = (err, fallback) => err?.response?.data?.msg || fallback
+
 const handleUserResetUuid = async () => {
   const tip =
     `⚠️ 确定要重置您的节点连接凭证 (UUID) 吗？\n\n` +
@@ -388,8 +390,8 @@ const handleUserResetUuid = async () => {
       ElMessage.success(res.data.msg)
       emit('refresh-user')
     }
-  } catch (_) {
-    ElMessage.error('重置凭证失败')
+  } catch (err) {
+    ElMessage.error(extractErrMsg(err, '重置凭证失败'))
   }
 }
 
@@ -448,8 +450,8 @@ const sendChangeEmailCode = async () => {
     } else {
       ElMessage.error(res.data.msg)
     }
-  } catch (_) {
-    ElMessage.error('发送验证码请求失败')
+  } catch (err) {
+    ElMessage.error(extractErrMsg(err, '发送验证码请求失败'))
   } finally {
     sendingEmailCode.value = false
   }
@@ -486,8 +488,8 @@ const submitChangeEmail = async () => {
     } else {
       ElMessage.error(res.data.msg)
     }
-  } catch (_) {
-    ElMessage.error('修改绑定邮箱失败')
+  } catch (err) {
+    ElMessage.error(extractErrMsg(err, '修改绑定邮箱失败'))
   } finally {
     loadingChangeEmail.value = false
   }
@@ -508,6 +510,8 @@ const handleRecharge = async () => {
     } else {
       ElMessage.error(res.data.msg)
     }
+  } catch (err) {
+    ElMessage.error(extractErrMsg(err, '卡密充值核销失败，请稍后重试'))
   } finally {
     loading.value = false
   }
@@ -526,8 +530,8 @@ const saveNotifySettings = async () => {
     } else {
       ElMessage.error(res.data.msg)
     }
-  } catch (_) {
-    ElMessage.error('保存失败')
+  } catch (err) {
+    ElMessage.error(extractErrMsg(err, '保存失败'))
   }
 }
 
@@ -539,13 +543,14 @@ const testUserNotify = async () => {
     } else {
       ElMessage.error(res.data.msg)
     }
-  } catch (_) {
-    ElMessage.error('测试发送失败')
+  } catch (err) {
+    ElMessage.error(extractErrMsg(err, '测试发送失败'))
   }
 }
 
 const submitChangePassword = async () => {
   if (!pwdForm.old_pwd || !pwdForm.new_pwd) return ElMessage.warning('请输入密码')
+  if (pwdForm.new_pwd.length < 6) return ElMessage.warning('新密码长度不能少于 6 位')
   if (pwdForm.new_pwd !== pwdForm.confirm_pwd) return ElMessage.warning('两次密码不一致')
   try {
     const res = await axios.post('/api/user/change_password', {
@@ -559,8 +564,8 @@ const submitChangePassword = async () => {
     } else {
       ElMessage.error(res.data.msg)
     }
-  } catch (_) {
-    ElMessage.error('改密失败')
+  } catch (err) {
+    ElMessage.error(extractErrMsg(err, '改密失败'))
   }
 }
 </script>

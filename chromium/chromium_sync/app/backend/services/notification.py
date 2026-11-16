@@ -4,7 +4,7 @@ from email.header import Header
 from typing import Optional
 import httpx
 from config import logger
-from core.database import get_setting
+from core.db import get_setting
 
 def send_email_notification(title: str, content: str, override_to: Optional[str] = None) -> tuple[bool, str]:
     if get_setting('email_notify_enabled', '0') != '1' and not override_to:

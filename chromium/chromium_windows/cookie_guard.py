@@ -286,3 +286,107 @@ class CookieGuard:
             })
 
         return rows, stats
+
+
+def evaluate_profile_privacy_risk(
+    profile_mode: str,
+    guard_mode: str,
+    whitelist_domains: Optional[List[str]] = None,
+    isolate_os_signin: bool = True,
+) -> Dict[str, str]:
+    """评估当前『浏览器 Profile 模式 × CookieGuard 策略』组合的隐私与兼容风险"""
+    pmode = (profile_mode or "isolated").strip().lower()
+    gmode = (guard_mode or "whitelist").strip().lower()
+    wl_count = len([x for x in (whitelist_domains or []) if str(x).strip()])
+
+    if pmode == "system_default":
+        if gmode in {"all", "blacklist"}:
+            return {
+                "level": "danger",
+                "title": "高危隐私预警：主机个人 Profile + 非白名单模式",
+                "message": (
+                    "当前正在直接复用宿主机的个人浏览器数据目录，且未开启严格白名单！"
+                    "你在本机已登录的个人邮箱、网银、社交账号、公司内网等所有 Cookie 都会暴露给同步池或远端。"
+                    "请立即切换为「主机 Profile · 白名单模式」或「独立 Profile · 全量模式」。"
+                ),
+            }
+        if gmode == "block_export":
+            return {
+                "level": "info",
+                "title": "主机 Profile · 禁止导出（仅远程 CDP 控制）",
+                "message": (
+                    "本地 Cookie 禁止上传 Hub，但 Chrome / Edge 136+ 默认禁止在默认 User Data 目录开启 9222 端口；"
+                    "同时远端拿到 CDP 权限后仍可操作当前浏览器标签页，使用完毕建议关闭共享或改用独立 Profile。"
+                ),
+            }
+        if wl_count == 0:
+            return {
+                "level": "warning",
+                "title": "主机 Profile · 严格白名单模式（当前白名单为空 → 拦截 100% 本地 Cookie）",
+                "message": (
+                    "请在白名单中显式填入允许同步的工作域名（如 example.com）。提示：1) Chrome / Edge 136+ 官方限制"
+                    "默认 User Data 目录开启 9222 端口，若无法连接请改用「独立 Profile」或指定自定义数据目录；"
+                    "2) 拉起前需先完全退出正在运行的日常 Edge/Chrome 窗口。"
+                ),
+            }
+        return {
+            "level": "warning",
+            "title": f"主机 Profile · 严格白名单模式（仅放行 {wl_count} 条白名单规则）",
+            "message": (
+                "非白名单的个人网银、邮箱及隐私站点 Cookie 将在本机内存中直接拦截，不离开网卡。"
+                "注意：Chrome / Edge 136+ 对默认 User Data 目录限制调试端口，且拉起前请关闭已打开的日常浏览器窗口；"
+                "若在多用户/共享池出租该节点，强烈建议改用「独立 Profile」防越权操作个人标签页。"
+            ),
+        }
+
+    # isolated 模式
+    os_tip = (
+        ""
+        if isolate_os_signin
+        else "（当前未勾选“屏蔽 Windows 微软账号隐式登录”，Edge 可能自动登录系统微软账号并提示同步）"
+    )
+    if gmode == "all":
+        return {
+            "level": "safe",
+            "title": "推荐工作区：独立 Profile · 全量模式（隔离沙盒）",
+            "message": (
+                "浏览器使用独立隔离的数据目录，与你日常个人浏览器物理隔离；该沙盒内登录的所有业务站点 Cookie 可全量同步。"
+                f"请勿在此沙盒窗口内登录个人网银或私人主账号。{os_tip}"
+            ),
+        }
+    return {
+        "level": "safe",
+        "title": f"双重隔离：独立 Profile + Cookie 防火墙 ({gmode})",
+        "message": (
+            f"同时启用了物理目录隔离与本地内存防火墙，隐私安全性最高。{os_tip}"
+        ),
+    }
+
+
+def build_preset_patch(preset_key: str) -> Dict[str, Any]:
+    """返回标准场景预设对应的配置补丁"""
+    key = (preset_key or "").strip().lower()
+    if key == "isolated_all":
+        return {
+            "browser": {
+                "profile_mode": "isolated",
+                "isolate_os_signin": True,
+            },
+            "cookie_guard": {
+                "mode": "all",
+                "exclude_expired": True,
+            },
+        }
+    if key == "system_whitelist":
+        return {
+            "browser": {
+                "profile_mode": "system_default",
+            },
+            "cookie_guard": {
+                "mode": "whitelist",
+                "exclude_expired": True,
+                "protect_inject": True,
+            },
+        }
+    raise ValueError(f"未知的预设方案: {preset_key}")
+

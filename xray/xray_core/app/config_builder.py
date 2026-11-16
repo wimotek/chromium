@@ -128,11 +128,8 @@ def build_xray_config(
                 "decryption": "none"
             },
             "streamSettings": {
-                "network": "ws",
-                "security": "none",
-                "wsSettings": {
-                    "path": "/internal/bridge"
-                }
+                "network": "tcp",
+                "security": "none"
             },
             "sniffing": {
                 "enabled": True,

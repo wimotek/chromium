@@ -5,7 +5,7 @@ const props = defineProps({
   api: Function,
   showToast: Function
 })
-const emit = defineEmits(['logout'])
+const emit = defineEmits(['logout', 'runtime-updated'])
 
 // 1. 管理员账号模型
 const profile = reactive({
@@ -13,6 +13,24 @@ const profile = reactive({
   new_password: '',
   api_key: ''
 })
+
+// 1.5 存储引擎 (ORM) 与缓存运行时监控状态
+const runtimeInfo = reactive({
+  db: { db_type: 'sqlite', target: '' },
+  cache: {
+    active_backend: 'sqlite_cache',
+    redis_configured: false,
+    redis_connected: false,
+    redis_url_masked: '',
+    last_error: null,
+    stats: { hits: 0, misses: 0, fallbacks: 0, sqlite_fallbacks: 0 },
+    sqlite_cache: { entries: 0, buffered_hashes: 0, db_path: '' }
+  }
+})
+const redisInput = ref('')
+const testingRedis = ref(false)
+const reloadingCache = ref(false)
+const redisTestMsg = ref('')
 
 // 2. 指南 Tab 状态 (精炼 3 大实战场景)
 const activeGuideTab = ref('same_host') // 'same_host' | 'remote_host' | 'api'
@@ -38,13 +56,71 @@ const currentHubPort = computed(() => {
 })
 
 const loadData = async () => {
-  const [pRes, kRes, cRes] = await Promise.all([
+  const [pRes, kRes, cRes, rtRes] = await Promise.all([
     props.api('/api/profile'),
     props.api('/api/ssh-keys'),
-    props.api('/api/cookie-policy')
+    props.api('/api/cookie-policy'),
+    props.api('/api/system/runtime-info')
   ])
   Object.assign(profile, await pRes.json())
   keys.value = await kRes.json()
+  if (rtRes.ok) {
+    const rt = await rtRes.json()
+    Object.assign(runtimeInfo.db, rt.db || {})
+    Object.assign(runtimeInfo.cache, rt.cache || {})
+    if (!redisInput.value && rt.cache?.redis_url_masked) {
+      redisInput.value = ''
+    }
+  }
+}
+
+const testRedisConn = async () => {
+  if (!redisInput.value.trim()) {
+    redisTestMsg.value = '留空时将使用内置 SQLite WAL Cache，无需外接 Redis'
+    return
+  }
+  testingRedis.value = true
+  redisTestMsg.value = ''
+  try {
+    const res = await props.api('/api/setup/test-redis', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ redis_url: redisInput.value.trim() })
+    })
+    const data = await res.json()
+    if (res.ok) {
+      redisTestMsg.value = data.detail || 'Redis 连接成功'
+      props.showToast(redisTestMsg.value, 'success')
+    } else {
+      redisTestMsg.value = data.detail || 'Redis 连接失败，将自动回退 SQLite Cache'
+      props.showToast(redisTestMsg.value, 'error')
+    }
+  } finally {
+    testingRedis.value = false
+  }
+}
+
+const reloadCacheEngine = async (clearToSqlite = false) => {
+  reloadingCache.value = true
+  try {
+    const targetUrl = clearToSqlite ? '' : redisInput.value.trim()
+    const res = await props.api('/api/system/cache/reload', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ redis_url: targetUrl })
+    })
+    const data = await res.json()
+    if (res.ok) {
+      props.showToast(data.message || '缓存引擎已切换', 'success')
+      if (clearToSqlite) redisInput.value = ''
+      await loadData()
+      emit('runtime-updated')
+    } else {
+      props.showToast(data.detail || '切换缓存失败', 'error')
+    }
+  } finally {
+    reloadingCache.value = false
+  }
 }
 
 const copyText = async (text, desc) => {
@@ -235,9 +311,76 @@ onMounted(() => {
 <template>
   <div class="grid-2col-fluid">
     
-    <!-- ==================== 左列：管理员账号 + SSH 密钥存储库 ==================== -->
+    <!-- ==================== 左列：存储缓存监控 + 管理员账号 + SSH 密钥存储库 ==================== -->
     <div class="layout-column-item">
-      
+
+      <!-- 卡片 0: ORM 存储引擎与 Redis / SQLite Cache 熔断状态 -->
+      <div class="content-full-card">
+        <div class="table-header-bar" style="margin-bottom:12px; padding-bottom:8px;">
+          <h3 class="card-inner-h3">🗄️ 存储引擎 (ORM) 与缓存运行监控</h3>
+          <span :class="runtimeInfo.cache.active_backend === 'redis' ? 'runtime-pill-redis' : 'runtime-pill-sqlite'">
+            {{ runtimeInfo.cache.active_backend === 'redis' ? '⚡ Redis 已激活' : '💾 SQLite Cache 运行中' }}
+          </span>
+        </div>
+
+        <div class="runtime-metrics-grid">
+          <div class="runtime-box">
+            <div class="runtime-k">主数据库 (SQLAlchemy ORM)</div>
+            <div class="runtime-v font-cyan-mono">
+              {{ (runtimeInfo.db.db_type || 'sqlite').toUpperCase() }}
+            </div>
+            <div class="runtime-sub font-mono" :title="runtimeInfo.db.target">
+              {{ runtimeInfo.db.target || '/data/app.db' }}
+            </div>
+          </div>
+
+          <div class="runtime-box">
+            <div class="runtime-k">缓存命中 / 回退次数</div>
+            <div class="runtime-v font-mono" style="color:#e2e8f0;">
+              {{ runtimeInfo.cache.stats?.hits || 0 }} <span style="font-size:11px; color:#64748b;">hits</span>
+              · {{ runtimeInfo.cache.stats?.misses || 0 }} <span style="font-size:11px; color:#64748b;">miss</span>
+            </div>
+            <div class="runtime-sub font-mono">
+              回退次数: {{ runtimeInfo.cache.stats?.fallbacks || runtimeInfo.cache.stats?.sqlite_fallbacks || 0 }}
+              · 缓冲键: {{ runtimeInfo.cache.sqlite_cache?.buffered_hashes || 0 }}
+            </div>
+          </div>
+        </div>
+
+        <div v-if="runtimeInfo.cache.last_error" class="runtime-warn-box font-mono">
+          ⚠️ 最近 Redis 异常（已自动回退 SQLite Cache 兜底，每 30s 自动探活重连）: {{ runtimeInfo.cache.last_error }}
+        </div>
+
+        <div style="margin-top:12px;">
+          <label class="form-label">热更新 Redis URL (如 redis://127.0.0.1:6379/0，留空则切回 SQLite WAL Cache)</label>
+          <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-top:4px;">
+            <input
+              v-model="redisInput"
+              :placeholder="runtimeInfo.cache.redis_url_masked || 'redis://:password@host:6379/0'"
+              class="cdp-input font-mono"
+              style="flex:1; min-width:200px;"
+            >
+            <button type="button" @click="testRedisConn" :disabled="testingRedis" class="btn-gray-test">
+              {{ testingRedis ? '测试中...' : '连通性测试' }}
+            </button>
+            <button type="button" @click="reloadCacheEngine(false)" :disabled="reloadingCache" class="btn-primary-gradient">
+              {{ reloadingCache ? '切换中...' : '应用热切换' }}
+            </button>
+            <button
+              v-if="runtimeInfo.cache.redis_configured"
+              type="button"
+              @click="reloadCacheEngine(true)"
+              :disabled="reloadingCache"
+              class="btn-gray-test"
+              title="清空 Redis 配置并切回本地 SQLite Cache"
+            >
+              切回 SQLite
+            </button>
+          </div>
+          <p v-if="redisTestMsg" style="font-size:11px; color:#38bdf8; margin-top:6px;">{{ redisTestMsg }}</p>
+        </div>
+      </div>
+
       <!-- 卡片 1: 管理员账号 -->
       <div class="content-full-card">
         <h3 class="card-inner-h3" style="margin-bottom:16px;">👤 管理员账号设置</h3>
@@ -731,5 +874,61 @@ curl -k -X POST -H "X-API-Key: {{ profile.api_key }}" "{{ currentHubUrl }}/api/v
   background: #172554;
   border-color: #00f0ff;
   color: #ffffff;
+}
+
+.runtime-pill-redis {
+  background: rgba(16, 185, 129, 0.16);
+  border: 1px solid #059669;
+  color: #34d399;
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 4px;
+}
+.runtime-pill-sqlite {
+  background: rgba(245, 158, 11, 0.15);
+  border: 1px solid #d97706;
+  color: #fbbf24;
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 4px;
+}
+.runtime-metrics-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+.runtime-box {
+  background: #060b17;
+  border: 1px solid #172554;
+  border-radius: 6px;
+  padding: 10px 12px;
+  min-width: 0;
+}
+.runtime-k {
+  font-size: 11px;
+  color: #94a3b8;
+  margin-bottom: 4px;
+}
+.runtime-v {
+  font-size: 14px;
+  font-weight: 700;
+}
+.runtime-sub {
+  font-size: 11px;
+  color: #64748b;
+  margin-top: 3px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.runtime-warn-box {
+  margin-top: 10px;
+  background: rgba(217, 119, 6, 0.12);
+  border: 1px solid #d97706;
+  color: #fbbf24;
+  border-radius: 6px;
+  padding: 8px 10px;
+  font-size: 11px;
+  word-break: break-all;
 }
 </style>

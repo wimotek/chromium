@@ -12,6 +12,7 @@ import ipaddress
 import os
 import secrets
 import socket
+import threading
 from pathlib import Path
 from typing import Optional, Dict, Any, Tuple
 
@@ -37,6 +38,7 @@ def _is_valid_public_ip(ip_str: Optional[str]) -> bool:
 
 class EdgeAgentService:
     _instance: Optional['EdgeAgentService'] = None
+    _instance_lock = threading.Lock()
 
     def __init__(self):
         base_dir = os.environ.get("DATA_DIR", "/data")
@@ -63,7 +65,9 @@ class EdgeAgentService:
     @classmethod
     def get_instance(cls) -> 'EdgeAgentService':
         if cls._instance is None:
-            cls._instance = EdgeAgentService()
+            with cls._instance_lock:
+                if cls._instance is None:
+                    cls._instance = EdgeAgentService()
         return cls._instance
 
     def issue_token(

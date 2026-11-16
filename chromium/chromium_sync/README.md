@@ -19,6 +19,19 @@
    - **分阶段时区文件提取**：`tzdata` 仅在 builder 阶段安装，最终运行镜像仅复制 `/etc/localtime` 与 `/etc/timezone` 2 个文件；清理 `/opt/venv` 中冗余 `pip*` 与 `__pycache__`、`apt` 缓存及 `/var/log`，内建 Python 原生 `HEALTHCHECK`。
 4. **多策略 Cookie 调度中枢与安全 WSS 网关 (默认 `8443`，可自定义 `HUB_PORT`)**：
    - 支持智能双向合并 (Smart Merge)、组对组、节点对组及自动清理熔断，原生支持 RFC 2732 IPv6 `[host]:port` CDP 连接；默认关闭高频 Uvicorn HTTP 轮询访问日志，可通过 `UVICORN_ACCESS_LOG=true` 按需开启。
+5. **SQLAlchemy 2.0 ORM（SQLite / MySQL）+ Redis 自动熔断回退 SQLite Cache**：
+   - 主数据全面迁移至 SQLAlchemy 2.0 ORM，开箱支持 SQLite WAL (`/data/app.db`) 与 MySQL/PyMySQL (`utf8mb4`)；
+   - 高频流量计数、图形验证码、运行态指标及热配置缓存优先写入 Redis（1.5s 超时熔断），若未配置 Redis 或 Redis 异常自动无缝回退本地 `/data/cache.db` (SQLite WAL)，并每 30s 自动探活重连。
+6. **双层实时流量统计与首次安装向导**：
+   - Hub 代理网关 (`cdp_gateway` + `tunnel_manager`) 按 `public_wss` / `reverse` / `direct` / `ssh` 精确计量 CDP `rx/tx/requests/duration_sec` 与活跃会话数，Docker 边缘节点每 10s 采集 `/proc/net/dev`、Windows 桌面客户端每 10s 采集隧道与 CDP 转发真实流量并发起 `metrics_report` 上报，最终按小时汇总写入 `traffic_stats`；
+   - 全新空库首次打开控制台自动触发 **4 步图形化安装向导**（支持数据库连通性测试、Redis 测试、管理员设密与 TOFU 默认策略初始化，写入 `/data/bootstrap.json`）；自动化/无人值守场景可传 `SKIP_SETUP_WIZARD=true`。
+7. **全平台云端联动收藏夹（Hub ⇄ Windows / Android / Docker）**：
+   - 支持在 Hub 控制台集中管理书签分类/置顶/一键导入常用站点/全网下发及从在线节点逆向拉取 (`fetch_bookmarks`)；
+   - 节点上线、审批通过及 Hub 增删改时自动通过 `public_wss` / `reverse` 双信道推送 `bookmarks_sync`，Windows / Docker 客户端无损写入 `Default/Bookmarks` 的 `☁️ Hub 联动收藏` 文件夹并保留本地书签，Android 端提供快捷收藏夹弹窗与离线编辑重连回放。
+8. **Hub 全链路防刷、防爆破与 TOFU 防洪水体系**：
+   - 基于现有 **Redis + SQLite Cache** 原子滑动固定窗口计数器 (`incr_window`)，无需额外外部组件即可跨请求/重启持久化防刷状态；
+   - **登录与密钥防爆破**：`/api/captcha` / `/api/login` 限流 + 连续错误 5 次自动递增封禁 IP+账号；`API-Key` 与 `JOIN_TOKEN` 使用 `secrets.compare_digest` 恒定时间比对，连续猜错自动拉黑来源 IP；
+   - **TOFU 防洪水与 SSRF 护盾**：限制全局及单 IP 待审批 TOFU 节点配额（防垃圾节点写满数据库）、WebSocket 握手前前置校验封禁与单 IP 并发隧道上限、`detect-mode` 限流与回落探测公网 IP 强制校验、`audit.jsonl` 超 5MB 自动轮转防撑爆磁盘。
 
 ---
 
@@ -28,7 +41,9 @@
 
 三个容器均采用业内主流的 **启动瞬间 Root 初始化 + `exec gosu` 降权至 UID 1000** 架构：
 * **安全边界**：在打开任何监听端口前完成初始化，`exec gosu` 会彻底替换掉 root shell，容器中不存在任何常驻 root 业务进程；
-* **宝塔 / Let's Encrypt 证书零改动兼容**：可直接只读挂载宿主机 `-v /www/server/panel/vhost/cert/yourdomain.com:/certs:ro`（即使私钥权限为 `0600 root:root`），容器会将其安全复制至内部 `/etc/ssl/app/` 并转为 `UID 1000 (600)` 读取，**绝对不触碰宿主机原目录属主**；
+* **宝塔 / Let's Encrypt 证书零改动兼容**：
+  * **一体直连模式（默认 `HUB_SERVE_FRONTEND=true`）**：后端挂载 `-v /www/server/panel/vhost/cert/yourdomain.com:/certs:ro`，`entrypoint.sh` 复制至内部 `/etc/ssl/app/` 并转为 `UID 1000 (600)` 读取，**绝对不触碰宿主机原目录属主**；
+  * **前后端分离模式（`HUB_SERVE_FRONTEND=false`）**：后端彻底跳过 `/certs` 扫描与 TLS 初始化，仅以明文 HTTP/WS 运行；SSL 证书直接由 **宿主机 Nginx / 宝塔 / 1Panel 面板** 配置。
 * **数据卷自动自愈**：启动自动校准 `/data` 属主为 `1000:1000`，避免因宿主机以 `root` 建目录导致 SQLite WAL (`attempt to write a readonly database`) 或 Chromium `SingletonLock` 报错。
 
 > 若宿主机 `./data` 已有海量文件或需规范化运维，仍建议预先手动授权：`chown -R 1000:1000 ./data && chmod -R 750 ./data`。
@@ -59,23 +74,79 @@ sudo setfacl -m u:1000:r /etc/letsencrypt/archive/yourdomain.com/privkey*.pem
 
 ---
 
-## 🛠️ Hub 主控端快速部署 (`chromium_sync`)
+## 🛠️ Hub 主控端快速部署 (`chromium_sync` —— 单一镜像，一个参数切换分离)
+
+> 全程只需维护 **1 个镜像**，通过 **`HUB_SERVE_FRONTEND`** 一个参数即可在「单容器一体」与「Nginx 前后端彻底分离」之间无缝切换。
+
+### 方式 1：默认单容器一体模式（开箱即用，兼容所有旧版配置）
+
+默认 `HUB_SERVE_FRONTEND=true`，单容器同时托管 Vue 前端页面与内置 HTTPS/WSS 证书（挂载 `./certs` 或自动生成自签证书）：
 
 ```bash
 cd chromium/chromium_sync
-# 1. 使用默认 8443 端口启动
+# 1. 使用默认 8443 端口启动（一体直连）
 docker compose up -d --build
 
 # 2. 自定义容器内外统一端口（如 9443:9443）：
 HUB_PORT=9443 docker compose up -d --build
 
-# 3. 宿主机映射不同对外端口（如 3000:8443，容器内仍监听 8443，对外端点自动识别为 3000）：
+# 3. 宿主机映射不同对外端口（如 3000:8443，对外端点自动识别为 3000）：
 HUB_EXTERNAL_PORT=3000 docker compose up -d --build
 ```
 
-* **访问地址**：`https://<服务器IP或域名>:${HUB_PORT:-8443}`
-* **默认账号密码**：`admin` / `123456`（可选参数 `ADMIN_INIT_USER` / `ADMIN_INIT_PASS` 控制，仅首次初始化 `/data/app.db` 时生效）
-* **宝塔证书挂载示例**：将 `docker-compose.yml` 中 `./certs:/certs:ro` 改为 `/www/server/panel/vhost/cert/yourdomain.com:/certs:ro` 即可。
+### 方式 2：前后端分离模式（推荐生产：一个参数 `HUB_SERVE_FRONTEND=false`，静态文件直接从镜像拷给 Nginx）
+
+当需要用宿主机 Nginx / 宝塔 / 1Panel 独立托管静态前端与 HTTPS 证书时，**无需单独构建第二套镜像**，只需传 **`HUB_SERVE_FRONTEND=false`**：
+- 后端自动**停止托管 `/assets` 与前端页面**，同时**自动跳过所有证书处理与自签 TLS**，仅在 `127.0.0.1:8443` 暴露纯 HTTP/WS 接口（`/api/*`、`/cdp/*`）；
+- 管理员直接从容器内把打包好的 `/app/frontend/dist` 拷出交给 Nginx 站点即可（更新镜像后重新拷一次覆盖）。
+
+```bash
+cd chromium/chromium_sync
+
+# 1. 启动纯后端模式（仅改一个参数 HUB_SERVE_FRONTEND=false，建议绑定回环 127.0.0.1）
+HUB_SERVE_FRONTEND=false HUB_BIND_ADDR=127.0.0.1 docker compose up -d --build
+
+# 2. 从容器内直接拷出前端静态产物到宿主机 Nginx / 宝塔站点目录
+mkdir -p /www/wwwroot/hub.yourdomain.com
+docker cp cdp_sync_manager:/app/frontend/dist/. /www/wwwroot/hub.yourdomain.com/
+```
+
+然后在 Nginx / 宝塔 / 1Panel 中为站点开启面板 SSL 证书，并配置静态托管 + `/api/` `/cdp/` 反代（完整模板见 `nginx/baota-proxy.conf.example`）：
+
+```nginx
+root /www/wwwroot/hub.yourdomain.com;
+index index.html;
+
+location /assets/ {
+    expires 30d;
+    add_header Cache-Control "public, immutable";
+    try_files $uri =404;
+}
+
+location ~ ^/(api|cdp)/ {
+    proxy_pass http://127.0.0.1:8443;
+    proxy_http_version 1.1;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection "upgrade";
+    proxy_set_header Host $http_host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_set_header X-Forwarded-Host $http_host;
+    proxy_set_header X-Forwarded-Port $server_port;
+    proxy_buffering off;
+    proxy_read_timeout 3600s;
+    proxy_send_timeout 3600s;
+}
+
+location / {
+    try_files $uri $uri/ /index.html;
+}
+```
+
+* **访问地址**：方式 1 为 `https://<IP或域名>:${HUB_PORT:-8443}`；方式 2 为 `https://<域名或IP>[:端口]`
+* **首次安装向导**：全新部署默认在首次访问 Web UI 时进入图形化安装向导，依次配置 **SQLite / MySQL (ORM)**、**Redis / SQLite Cache**、**管理员账号** 与 **对外网关/TOFU 默认策略**；若需 CI/自动化脚本跳过向导，可设置 `SKIP_SETUP_WIZARD=true`（将使用 `ADMIN_INIT_USER` / `ADMIN_INIT_PASS`，默认 `admin` / `123456`）。
+* **宝塔证书挂载示例**：仅方式 1（一体直连）需挂载证书，将 `docker-compose.yml` 中 `./certs:/certs:ro` 改为 `/www/server/panel/vhost/cert/yourdomain.com:/certs:ro`；方式 2 直接在宝塔/1Panel 站点面板开启 SSL，后端不碰证书。
 
 ---
 
@@ -124,15 +195,27 @@ docker run -d \
 | `EDGE_WSS_PORT` | Node | `9443` | 节点内置加密鉴权 WSS 服务端监听端口 |
 | `EDGE_WSS_EXTERNAL_PORT` | Node | `EDGE_WSS_PORT` | 宿主机对外映射的 WSS 端口（兼容旧参数 `DIRECT_PORT`） |
 | `CDP_FORWARD_PORT` | Node | *(空，不启用)* | 仅显式设置时才启用 `socat` 将指定端口（填 `true` 默认 `9223`）转发至 `127.0.0.1:9222`（亦支持 `ENABLE_CDP_FORWARD=true`） |
-| `HUB_PORT` | Hub | `8443` | Hub 容器内部 HTTPS/WSS 监听端口（同步 `HEALTHCHECK`） |
+| `HUB_PORT` | Hub | `8443` | Hub 容器内部监听端口（同步 `HEALTHCHECK`） |
+| `HUB_SERVE_FRONTEND` | Hub | `true` | **核心分离开关**：`true`=一体容器（托管前端+内置TLS）；`false`=前后端分离（仅纯后端 HTTP/WS API，跳过证书处理，静态资源用 `docker cp` 拷出给 Nginx） |
+| `HUB_BIND_ADDR` / `HUB_HOST_PORT` | Hub | `0.0.0.0` / `HUB_PORT` | Compose 宿主机绑定 IP 与映射端口（前置 Nginx 时建议设 `HUB_BIND_ADDR=127.0.0.1`） |
 | `HUB_EXTERNAL_PORT` | Hub | 自动推导 | 宿主机对外映射端口（如 `-p 3000:8443` 时填 `3000`；不填也会从 `Host` / `X-Forwarded-Port` 请求头自动识别） |
 | `HUB_PUBLIC_HOST` | Hub | *(空)* | 强制指定对外拼接域名/IP（适用于多级反代改写 `Host` 头时） |
 | `HUB_HOST` | Hub | `::` | 默认同时监听 IPv4 + IPv6 双栈（容器未开启 IPv6 时自动回退 `0.0.0.0`） |
-| `ADMIN_INIT_USER` / `ADMIN_INIT_PASS` | Hub | `admin` / `123456` | 可选参数；首次初始化空库时的管理员账号与密码（已存在库或已改密则不覆盖） |
+| `ADMIN_INIT_USER` / `ADMIN_INIT_PASS` | Hub | `admin` / `123456` | 仅当 `SKIP_SETUP_WIZARD=true` 时生效；用于无人值守初始化管理员账号与密码 |
+| `SKIP_SETUP_WIZARD` | Hub | `false` | 设为 `true` 跳过 Web 首次安装向导，直接按环境变量自动初始化 |
+| `DB_TYPE` / `DATABASE_URL` | Hub | `sqlite` / *(空)* | 主库 ORM 驱动类型（`sqlite` 或 `mysql`），也可直接传完整 SQLAlchemy 连接串 |
+| `MYSQL_HOST` / `MYSQL_PORT` / `MYSQL_USER` / `MYSQL_PASSWORD` / `MYSQL_DATABASE` | Hub | `127.0.0.1` / `3306` / `root` / *(空)* / `chromium_sync` | `DB_TYPE=mysql` 时的 PyMySQL (`utf8mb4`) 默认连接参数 |
+| `REDIS_URL` | Hub | *(空)* | 可选 Redis 缓存连接串（如 `redis://127.0.0.1:6379/0`）；留空或不可达时自动回退 `/data/cache.db` |
 | `UVICORN_ACCESS_LOG` | Hub | `false` | 是否输出 Uvicorn HTTP 访问日志（默认关闭以免前端 3s 轮询与健康检查刷屏） |
 | `EDGE_AGENT_ALLOW_NON_PUBLIC_PROBE` | Hub | `false` | 是否允许探测内网/私网 IP（生产公网务必保持 `false` 防 SSRF） |
 | `EDGE_AGENT_NETWORK_PROBE_TIMEOUT_SECONDS` | Hub | `2.0` | Hub TCP 三次握手探测超时秒数 |
 | `EDGE_AGENT_SESSION_TICKET_TTL_SECONDS` | Hub | `300` | Session Ticket 有效期（秒） |
+| `HUB_RATE_LIMIT_ENABLED` | Hub | `true` | 是否开启 Hub 全局与细粒度防刷保护（设 `false` 可一键旁路） |
+| `RATE_LIMIT_GLOBAL_PER_MIN` / `RATE_LIMIT_API_V1_PER_MIN` | Hub | `360` / `240` | 单 IP 每分钟全局 `/api/*` 及开放 API (`/api/v1/*`) 限流阈值 |
+| `RATE_LIMIT_DETECT_PER_MIN` / `RATE_LIMIT_REGISTER_PER_MIN` | Hub | `20` / `40` | 单 IP 每分钟网络探测 (`detect-mode`) 与节点注册/WS建连上限 |
+| `LOGIN_MAX_FAILURES` / `LOGIN_BLOCK_SECONDS` | Hub | `5` / `300` | 登录连续失败锁定阈值与基础封禁秒数（`API_KEY_MAX_FAILURES=15`、`JOIN_TOKEN_MAX_FAILURES=8`） |
+| `MAX_PENDING_TOFU_NODES` / `MAX_PENDING_TOFU_PER_IP` | Hub | `200` / `10` | 待审批 TOFU 队列全局上限与单 IP 建档配额，防止垃圾节点洪水 |
+| `MAX_WS_TUNNELS_PER_IP` / `MAX_WS_CDP_PER_IP` | Hub | `60` / `60` | 单 IP 最大并发反向 WS 隧道数与 CDP 网关会话数 |
 
 ---
 

@@ -31,16 +31,25 @@ from cookie_guard import (
     DEFAULT_SENSITIVE_BLACKLIST,
     CookieGuard,
     CookieGuardConfig,
+    build_preset_patch,
+    evaluate_profile_privacy_risk,
     parse_rule_list,
 )
 from win_edge_agent import (
     WinEdgeAgent,
     append_disk_log,
     clear_log_file,
+    enqueue_pending_bookmark_op,
     extract_raw_local_cookies,
     get_app_data_dir,
     get_log_file_path,
+    load_local_bookmarks_cache,
+    normalize_bookmark_url,
+    read_chromium_bookmarks,
     read_recent_logs,
+    resolve_browser_profile_dir,
+    save_local_bookmarks_cache,
+    sync_hub_bookmarks_to_chromium,
 )
 
 
@@ -70,6 +79,8 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "extra_args": "",
         "launch_browser_on_start": True,
         "auto_connect_on_launch": False,
+        "sync_bookmarks": True,
+        "isolate_os_signin": True,
     },
     "cookie_guard": {
         "mode": "whitelist",
@@ -127,7 +138,10 @@ def run_headless(config_path: Optional[Path] = None):
                 custom_profile_dir=b["custom_profile_dir"],
                 homepage=b["homepage"],
                 extra_args=b["extra_args"],
+                isolate_os_signin=bool(b.get("isolate_os_signin", True)),
             )
+            if browser_mgr.last_launch_warning:
+                print(f"[Browser][Privacy/Notice] {browser_mgr.last_launch_warning}", flush=True)
             print(f"[Browser] Started {label}", flush=True)
         except Exception as e:
             print(f"[Browser] Warning: {e}", flush=True)
@@ -174,6 +188,7 @@ def _run_gui(config_path: Optional[Path] = None):
             QHeaderView,
             QLabel,
             QMenu,
+            QMessageBox,
             QSizePolicy,
             QStyle,
             QSystemTrayIcon,
@@ -224,6 +239,14 @@ def _run_gui(config_path: Optional[Path] = None):
             f"padding: 5px 12px; font-weight: 600; font-size: 12px; }}"
         )
         return lbl
+
+    def _fmt_bytes(num: int) -> str:
+        val = float(max(0, int(num or 0)))
+        for unit in ("B", "KB", "MB", "GB"):
+            if val < 1024.0 or unit == "GB":
+                return f"{int(val)} B" if unit == "B" else f"{val:.1f} {unit}"
+            val /= 1024.0
+        return "0 B"
 
     class _AgentBridge(QObject):
         log_received = Signal(str, str)
@@ -354,6 +377,190 @@ def _run_gui(config_path: Optional[Path] = None):
                 for col, it in enumerate(items):
                     self.table.setItem(idx, col, it)
 
+    class BookmarkManagerDialog(QDialog):
+        def __init__(self, parent, window_ref):
+            super().__init__(parent)
+            self._win = window_ref
+            self._rows: List[Dict[str, Any]] = []
+
+            self.setWindowTitle("Hub 云端联动收藏夹 (双向同步 Edge / Chrome)")
+            self.resize(920, 560)
+            self.setMinimumSize(740, 440)
+            self.setStyleSheet(
+                "QDialog { background-color: #111827; color: #f8fafc; }"
+                "QTableWidget { background-color: #0f172a; color: #e2e8f0; gridline-color: #1e293b; "
+                "border: 1px solid #334155; border-radius: 6px; selection-background-color: #1d4ed8; }"
+                "QHeaderView::section { background-color: #1e293b; color: #cbd5e1; padding: 6px 8px; "
+                "border: none; border-bottom: 1px solid #334155; font-weight: 600; }"
+            )
+
+            lay = QVBoxLayout(self)
+            lay.setContentsMargins(18, 16, 18, 16)
+            lay.setSpacing(10)
+
+            top_bar = QHBoxLayout()
+            self.lbl_summary = StrongBodyLabel("正在加载云端联动收藏...", self)
+            top_bar.addWidget(self.lbl_summary)
+            top_bar.addStretch()
+            self.btn_pull = PushButton(_icon("SYNC"), "从 Hub 拉取同步", self)
+            self.btn_pull.clicked.connect(self._on_pull)
+            top_bar.addWidget(self.btn_pull)
+            lay.addLayout(top_bar)
+
+            add_bar = QHBoxLayout()
+            add_bar.setSpacing(8)
+            self.in_title = LineEdit(self)
+            self.in_title.setPlaceholderText("站点标题 (如 GitHub)")
+            self.in_url = LineEdit(self)
+            self.in_url.setPlaceholderText("网址 (如 https://github.com)")
+            self.in_folder = LineEdit(self)
+            self.in_folder.setText("常用站点")
+            self.in_folder.setFixedWidth(120)
+            btn_add = PrimaryPushButton(_icon("ADD"), "添加并联动", self)
+            btn_add.clicked.connect(self._on_add)
+            add_bar.addWidget(self.in_title, 2)
+            add_bar.addWidget(self.in_url, 3)
+            add_bar.addWidget(self.in_folder)
+            add_bar.addWidget(btn_add)
+            lay.addLayout(add_bar)
+
+            flt_bar = QHBoxLayout()
+            self.in_search = LineEdit(self)
+            self.in_search.setPlaceholderText("按标题、分类或 URL 过滤...")
+            self.in_search.textChanged.connect(self._render_table)
+            flt_bar.addWidget(self.in_search, 1)
+            lay.addLayout(flt_bar)
+
+            self.table = QTableWidget(0, 5, self)
+            self.table.setHorizontalHeaderLabels(["置顶", "站点标题", "分类", "网址 URL", "来源"])
+            self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+            self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
+            self.table.verticalHeader().setVisible(False)
+            self.table.doubleClicked.connect(self._on_open_selected)
+            hdr = self.table.horizontalHeader()
+            hdr.setSectionResizeMode(0, QHeaderView.ResizeToContents)
+            hdr.setSectionResizeMode(1, QHeaderView.Interactive)
+            hdr.setSectionResizeMode(2, QHeaderView.ResizeToContents)
+            hdr.setSectionResizeMode(3, QHeaderView.Stretch)
+            hdr.setSectionResizeMode(4, QHeaderView.ResizeToContents)
+            self.table.setColumnWidth(1, 180)
+            lay.addWidget(self.table, 1)
+
+            foot = QHBoxLayout()
+            btn_open = PrimaryPushButton(_icon("GLOBE"), "打开选中网址", self)
+            btn_open.clicked.connect(self._on_open_selected)
+            btn_pin = PushButton(_icon("PIN", FIF.TAG), "置顶/取消置顶", self)
+            btn_pin.clicked.connect(self._on_toggle_pin)
+            btn_del = PushButton(_icon("DELETE"), "删除并全网同步", self)
+            btn_del.clicked.connect(self._on_delete_selected)
+            btn_close = PushButton("关闭", self)
+            btn_close.clicked.connect(self.close)
+            foot.addWidget(btn_open)
+            foot.addWidget(btn_pin)
+            foot.addWidget(btn_del)
+            foot.addStretch()
+            foot.addWidget(btn_close)
+            lay.addLayout(foot)
+            self.reload_data()
+
+        def reload_data(self):
+            data_dir = get_app_data_dir()
+            cached = load_local_bookmarks_cache(data_dir)
+            if not cached:
+                prof = resolve_browser_profile_dir(self._win.config, data_dir)
+                cached = read_chromium_bookmarks(prof, data_dir)
+            self._rows = cached
+            self.lbl_summary.setText(
+                f"共 {len(self._rows)} 条联动收藏（自动写入浏览器书签栏「☁️ Hub 联动收藏」，与 Android / Docker / Hub 实时互通）"
+            )
+            self._render_table()
+
+        def _render_table(self, *_unused):
+            kw = self.in_search.text().strip().lower()
+            filtered = [
+                r for r in self._rows
+                if not kw
+                or kw in str(r.get("title", "")).lower()
+                or kw in str(r.get("url", "")).lower()
+                or kw in str(r.get("folder", "")).lower()
+            ]
+            self._filtered = filtered
+            self.table.setRowCount(len(filtered))
+            for idx, r in enumerate(filtered):
+                pin_txt = "★" if r.get("pinned") in (1, True, "1", "true") else "☆"
+                items = [
+                    QTableWidgetItem(pin_txt),
+                    QTableWidgetItem(str(r.get("title") or "")),
+                    QTableWidgetItem(str(r.get("folder") or "常用站点")),
+                    QTableWidgetItem(str(r.get("url") or "")),
+                    QTableWidgetItem(str(r.get("source_node") or "hub")),
+                ]
+                if pin_txt == "★":
+                    items[0].setForeground(QColor("#fbbf24"))
+                for col, it in enumerate(items):
+                    self.table.setItem(idx, col, it)
+
+        def _selected_row(self) -> Optional[Dict[str, Any]]:
+            row_idx = self.table.currentRow()
+            if row_idx < 0 or row_idx >= len(getattr(self, "_filtered", [])):
+                return None
+            return self._filtered[row_idx]
+
+        def _on_add(self):
+            title = self.in_title.text().strip()
+            url = self.in_url.text().strip()
+            folder = self.in_folder.text().strip() or "常用站点"
+            if not url:
+                self._win._toast("warning", "缺少网址", "请输入要收藏的网址 URL")
+                return
+            sent = self._win.upsert_local_or_hub_bookmark(title or url, url, folder, 1)
+            self.in_title.clear()
+            self.in_url.clear()
+            self.reload_data()
+            self._win._toast(
+                "success",
+                "已收藏并联动" if sent else "已本地保存（连接 Hub 后自动同步）",
+                url,
+            )
+
+        def _on_toggle_pin(self):
+            row = self._selected_row()
+            if not row:
+                return
+            new_pin = 0 if row.get("pinned") in (1, True, "1", "true") else 1
+            self._win.upsert_local_or_hub_bookmark(
+                str(row.get("title") or ""),
+                str(row.get("url") or ""),
+                str(row.get("folder") or "常用站点"),
+                new_pin,
+            )
+            self.reload_data()
+
+        def _on_delete_selected(self):
+            row = self._selected_row()
+            if not row:
+                return
+            url = str(row.get("url") or "")
+            sent = self._win.delete_local_or_hub_bookmark(url)
+            self.reload_data()
+            self._win._toast("info", "已删除收藏" if sent else "已本地删除（上线后同步 Hub）", url)
+
+        def _on_open_selected(self, *_unused):
+            row = self._selected_row()
+            if not row:
+                return
+            url = str(row.get("url") or "").strip()
+            if url:
+                import webbrowser
+                webbrowser.open(url)
+
+        def _on_pull(self):
+            if self._win.agent is not None and self._win.agent.request_bookmarks_pull():
+                self._win._toast("info", "已发送拉取指令", "正在从 Hub 同步最新云端收藏夹...")
+            else:
+                self.reload_data()
+                self._win._toast("warning", "Hub 未连接", "已刷新本地缓存收藏列表")
+
     class _PageScrollArea(ScrollArea):
         def __init__(self, object_name: str, parent=None):
             super().__init__(parent)
@@ -381,6 +588,7 @@ def _run_gui(config_path: Optional[Path] = None):
             self._last_cdp_ok: Optional[bool] = None
             self._last_cookie_sig: Optional[Tuple[int, int, int]] = None
             self._inventory_dialog: Optional[CookieInventoryDialog] = None
+            self._bookmark_dialog: Optional[BookmarkManagerDialog] = None
             self._cached_rows: List[Dict[str, Any]] = []
             self._cached_stats: Any = None
             self._loading_ui: bool = False
@@ -393,6 +601,9 @@ def _run_gui(config_path: Optional[Path] = None):
                 "hub": "未接入",
                 "mode": "-",
                 "guard": self.config["cookie_guard"]["mode"],
+                "rx": 0,
+                "tx": 0,
+                "streams": 0,
             }
 
             self._init_window()
@@ -476,10 +687,12 @@ def _run_gui(config_path: Optional[Path] = None):
             self.badge_hub = _make_badge("Hub: 未接入", "#334155")
             self.badge_guard = _make_badge(f"Cookie 保护: {self.status_state['guard']}", "#0f766e", "#ccfbf1")
             self.badge_cookies = _make_badge("本机 Cookie: 待检测", "#334155")
+            self.badge_traffic = _make_badge("流量: RX 0 B / TX 0 B | 流 0", "#1e293b", "#94a3b8")
             badge_row.addWidget(self.badge_cdp)
             badge_row.addWidget(self.badge_hub)
             badge_row.addWidget(self.badge_guard)
             badge_row.addWidget(self.badge_cookies)
+            badge_row.addWidget(self.badge_traffic)
             badge_row.addStretch()
             hero_lay.addLayout(badge_row)
 
@@ -490,12 +703,14 @@ def _run_gui(config_path: Optional[Path] = None):
             self.btn_stop.setEnabled(False)
             self.btn_launch_only = PushButton(_icon("GLOBE"), "仅拉起调试浏览器", hero)
             self.btn_cookie_inventory = PushButton(_icon("SEARCH"), "本机 Cookie 清单", hero)
+            self.btn_bookmarks = PushButton(_icon("BOOKMARK", FIF.TAG), "联动收藏夹", hero)
             self.btn_save_hub = PushButton(_icon("SAVE"), "保存配置", hero)
 
             ctrl_row.addWidget(self.btn_start)
             ctrl_row.addWidget(self.btn_stop)
             ctrl_row.addWidget(self.btn_launch_only)
             ctrl_row.addWidget(self.btn_cookie_inventory)
+            ctrl_row.addWidget(self.btn_bookmarks)
             ctrl_row.addStretch()
             ctrl_row.addWidget(self.btn_save_hub)
             hero_lay.addLayout(ctrl_row)
@@ -516,7 +731,7 @@ def _run_gui(config_path: Optional[Path] = None):
             self.in_hub_url = LineEdit(card_hub)
             self.in_hub_url.setPlaceholderText("例如 https://hub.yourdomain.com:8443")
             self.in_join_token = PasswordLineEdit(card_hub)
-            self.in_join_token.setPlaceholderText("留空则走 Hub TOFU 人工审批")
+            self.in_join_token.setPlaceholderText("SaaS 多用户 Hub 必填个人入网通行码 JOIN_TOKEN；单机版留空走审批")
             self.in_node_name = LineEdit(card_hub)
             self.in_node_name.setPlaceholderText("留空自动使用 Win-<主机名>")
             self.in_group_name = LineEdit(card_hub)
@@ -633,6 +848,41 @@ def _run_gui(config_path: Optional[Path] = None):
             probe_lay.addWidget(btn_reprobe)
             v.addWidget(probe_card)
 
+            preset_card = CardWidget(self.page_browser.container)
+            p_lay = QVBoxLayout(preset_card)
+            p_lay.setContentsMargins(18, 14, 18, 14)
+            p_lay.setSpacing(8)
+            p_lay.addWidget(StrongBodyLabel("快捷方案预设（一键联动 Profile 模式与 Cookie 防火墙）", preset_card))
+            p_desc = CaptionLabel(
+                "提示：Windows 本机若已登录 Microsoft 账户，Edge 可能通过系统隐式登录 (msImplicitSignin) 或 9222 端口冲突带出本机账号；建议优先使用「方案 A」。",
+                preset_card,
+            )
+            p_desc.setWordWrap(True)
+            p_desc.setTextColor(QColor("#94a3b8"), QColor("#94a3b8"))
+            p_lay.addWidget(p_desc)
+            p_btn_row = QHBoxLayout()
+            p_btn_row.setSpacing(10)
+            btn_preset_iso = PrimaryPushButton(_icon("CERTIFICATE"), "方案 A：独立 Profile · 全量模式（推荐）", preset_card)
+            btn_preset_iso.clicked.connect(lambda: self._apply_profile_preset("isolated_all"))
+            btn_preset_sys = PushButton(_icon("VPN", FIF.SETTING), "方案 B：使用主机 Profile · 严格白名单", preset_card)
+            btn_preset_sys.clicked.connect(lambda: self._apply_profile_preset("system_whitelist"))
+            p_btn_row.addWidget(btn_preset_iso)
+            p_btn_row.addWidget(btn_preset_sys)
+            p_btn_row.addStretch()
+            p_lay.addLayout(p_btn_row)
+            v.addWidget(preset_card)
+
+            self.card_browser_privacy = CardWidget(self.page_browser.container)
+            bp_lay = QVBoxLayout(self.card_browser_privacy)
+            bp_lay.setContentsMargins(18, 12, 18, 12)
+            bp_lay.setSpacing(4)
+            self.lbl_browser_privacy_title = StrongBodyLabel("隐私与安全评估", self.card_browser_privacy)
+            self.lbl_browser_privacy_body = CaptionLabel("", self.card_browser_privacy)
+            self.lbl_browser_privacy_body.setWordWrap(True)
+            bp_lay.addWidget(self.lbl_browser_privacy_title)
+            bp_lay.addWidget(self.lbl_browser_privacy_body)
+            v.addWidget(self.card_browser_privacy)
+
             br_card = CardWidget(self.page_browser.container)
             lay = QVBoxLayout(br_card)
             lay.setContentsMargins(18, 16, 18, 16)
@@ -661,7 +911,7 @@ def _run_gui(config_path: Optional[Path] = None):
             self.cmb_profile_mode = ComboBox(br_card)
             self.cmb_profile_mode.addItems([
                 f"isolated（推荐独立沙盒：{get_default_profile_dir().name}）",
-                "system_default（系统默认目录，136+ 版本可能被浏览器拒绝开启 9222）",
+                "system_default（系统默认目录，共享本机个人账号且 136+ 可能拒开 9222）",
             ])
 
             prof_row = QHBoxLayout()
@@ -684,6 +934,13 @@ def _run_gui(config_path: Optional[Path] = None):
             form.addRow(BodyLabel("附加启动参数", br_card), self.in_extra_args)
             lay.addLayout(form)
 
+            sw_row0 = QHBoxLayout()
+            sw_row0.addWidget(BodyLabel("阻止 Edge 自动静默关联 Windows 系统账号 (msImplicitSignin / Sync)", br_card))
+            sw_row0.addStretch()
+            self.sw_isolate_os_signin = SwitchButton(br_card)
+            sw_row0.addWidget(self.sw_isolate_os_signin)
+            lay.addLayout(sw_row0)
+
             sw_row1 = QHBoxLayout()
             sw_row1.addWidget(BodyLabel("接入 Hub 时自动拉起浏览器", br_card))
             sw_row1.addStretch()
@@ -697,6 +954,13 @@ def _run_gui(config_path: Optional[Path] = None):
             self.sw_auto_connect = SwitchButton(br_card)
             sw_row2.addWidget(self.sw_auto_connect)
             lay.addLayout(sw_row2)
+
+            sw_row3 = QHBoxLayout()
+            sw_row3.addWidget(BodyLabel("自动将 Hub 云端联动收藏同步写入浏览器书签栏 (☁️ Hub 联动收藏)", br_card))
+            sw_row3.addStretch()
+            self.sw_sync_bookmarks = SwitchButton(br_card)
+            sw_row3.addWidget(self.sw_sync_bookmarks)
+            lay.addLayout(sw_row3)
 
             save_row = QHBoxLayout()
             save_row.addStretch()
@@ -715,6 +979,26 @@ def _run_gui(config_path: Optional[Path] = None):
             sub.setTextColor(QColor("#94a3b8"), QColor("#94a3b8"))
             v.addWidget(sub)
 
+            self.card_guard_privacy = CardWidget(self.page_guard.container)
+            gp_lay = QVBoxLayout(self.card_guard_privacy)
+            gp_lay.setContentsMargins(18, 12, 18, 12)
+            gp_lay.setSpacing(6)
+            self.lbl_guard_privacy_title = StrongBodyLabel("当前组合隐私安全提示", self.card_guard_privacy)
+            self.lbl_guard_privacy_body = CaptionLabel("", self.card_guard_privacy)
+            self.lbl_guard_privacy_body.setWordWrap(True)
+            gp_row = QHBoxLayout()
+            btn_g_iso = PushButton(_icon("CERTIFICATE"), "切换：独立 Profile + 全量", self.card_guard_privacy)
+            btn_g_iso.clicked.connect(lambda: self._apply_profile_preset("isolated_all"))
+            btn_g_wl = PushButton(_icon("VPN", FIF.SETTING), "切换：主机 Profile + 白名单", self.card_guard_privacy)
+            btn_g_wl.clicked.connect(lambda: self._apply_profile_preset("system_whitelist"))
+            gp_row.addWidget(btn_g_iso)
+            gp_row.addWidget(btn_g_wl)
+            gp_row.addStretch()
+            gp_lay.addWidget(self.lbl_guard_privacy_title)
+            gp_lay.addWidget(self.lbl_guard_privacy_body)
+            gp_lay.addLayout(gp_row)
+            v.addWidget(self.card_guard_privacy)
+
             mode_card = CardWidget(self.page_guard.container)
             m_lay = QVBoxLayout(mode_card)
             m_lay.setContentsMargins(18, 16, 18, 16)
@@ -726,7 +1010,7 @@ def _run_gui(config_path: Optional[Path] = None):
             mode_defs = [
                 ("whitelist", "严格白名单（推荐）：仅放行下方白名单域名（注意：白名单为空时会拦截全部 Cookie，Hub 显示 0 条）"),
                 ("blacklist", "黑名单排除：放行除黑名单域名与敏感 Cookie 名以外的域名"),
-                ("all", "本地全量放行：允许本地所有有效 Cookie 参与 Hub 同步（建议配合独立 BrowserProfile）"),
+                ("all", "本地全量放行：允许本地所有有效 Cookie 参与 Hub 同步（强烈建议仅配合独立 Profile + 禁系统自动登录）"),
                 ("block_export", "禁止导出（纯远程 CDP）：不允许 Hub 读取本地 Cookie，仅保留远程调试能力"),
             ]
             for val, desc in mode_defs:
@@ -931,8 +1215,13 @@ def _run_gui(config_path: Optional[Path] = None):
             self.btn_stop.clicked.connect(self.stop_all)
             self.btn_launch_only.clicked.connect(self.launch_browser_only)
             self.btn_cookie_inventory.clicked.connect(self.open_cookie_inventory)
+            self.btn_bookmarks.clicked.connect(self.open_bookmark_manager)
             self.btn_save_hub.clicked.connect(self.save_ui_config)
             self.sw_close_to_tray.checkedChanged.connect(self._on_close_to_tray_toggled)
+            self.cmb_profile_mode.currentIndexChanged.connect(self._update_privacy_banners)
+            self.sw_isolate_os_signin.checkedChanged.connect(lambda _: self._update_privacy_banners())
+            self.guard_btn_group.buttonClicked.connect(lambda _: self._update_privacy_banners())
+            self.txt_whitelist.textChanged.connect(self._update_privacy_banners)
 
             self.bridge.log_received.connect(self._append_log)
             self.bridge.status_received.connect(self._apply_status_patch)
@@ -968,8 +1257,10 @@ def _run_gui(config_path: Optional[Path] = None):
                 self.in_custom_profile.setText(b.get("custom_profile_dir", ""))
                 self.in_homepage.setText(b.get("homepage", "about:blank"))
                 self.in_extra_args.setText(b.get("extra_args", ""))
+                self.sw_isolate_os_signin.setChecked(bool(b.get("isolate_os_signin", True)))
                 self.sw_launch_browser.setChecked(bool(b.get("launch_browser_on_start", True)))
                 self.sw_auto_connect.setChecked(bool(b.get("auto_connect_on_launch", False)))
+                self.sw_sync_bookmarks.setChecked(bool(b.get("sync_bookmarks", True)))
 
                 g = self.config["cookie_guard"]
                 mode = g.get("mode", "whitelist")
@@ -987,6 +1278,7 @@ def _run_gui(config_path: Optional[Path] = None):
                 self.sw_close_to_tray.setChecked(bool(ui_cfg.get("close_to_tray", True)))
             finally:
                 self._loading_ui = False
+            self._update_privacy_banners()
 
         def _collect_config_from_vars(self) -> Dict[str, Any]:
             cfg = copy.deepcopy(self.config)
@@ -1019,8 +1311,10 @@ def _run_gui(config_path: Optional[Path] = None):
                 "custom_profile_dir": self.in_custom_profile.text().strip(),
                 "homepage": self.in_homepage.text().strip() or "about:blank",
                 "extra_args": self.in_extra_args.text().strip(),
+                "isolate_os_signin": bool(self.sw_isolate_os_signin.isChecked()),
                 "launch_browser_on_start": bool(self.sw_launch_browser.isChecked()),
                 "auto_connect_on_launch": bool(self.sw_auto_connect.isChecked()),
+                "sync_bookmarks": bool(self.sw_sync_bookmarks.isChecked()),
             })
 
             selected_mode = "whitelist"
@@ -1041,6 +1335,76 @@ def _run_gui(config_path: Optional[Path] = None):
             cfg.setdefault("ui", {})["close_to_tray"] = bool(self.sw_close_to_tray.isChecked())
             return cfg
 
+        def _update_privacy_banners(self):
+            if self._loading_ui:
+                return
+            try:
+                profile_mode = "system_default" if self.cmb_profile_mode.currentIndex() == 1 else "isolated"
+                isolate_os = bool(self.sw_isolate_os_signin.isChecked())
+                guard_mode = "whitelist"
+                for m, rb in self.rb_modes.items():
+                    if rb.isChecked():
+                        guard_mode = m
+                        break
+                wl = parse_rule_list(self.txt_whitelist.toPlainText())
+                risk = evaluate_profile_privacy_risk(profile_mode, guard_mode, wl, isolate_os)
+                palette = {
+                    "ok": ("#064e3b", "#10b981", "#d1fae5"),
+                    "caution": ("#451a03", "#f59e0b", "#fef3c7"),
+                    "danger": ("#4c1d95", "#f97316", "#ffedd5"),
+                    "critical": ("#450a0a", "#ef4444", "#fee2e2"),
+                }
+                bg, border, fg = palette.get(risk["level"], palette["caution"])
+                card_css = (
+                    f"CardWidget {{ background-color: {bg}; border: 1px solid {border}; border-radius: 10px; }}"
+                )
+                for card, lbl_t, lbl_b in (
+                    (self.card_browser_privacy, self.lbl_browser_privacy_title, self.lbl_browser_privacy_body),
+                    (self.card_guard_privacy, self.lbl_guard_privacy_title, self.lbl_guard_privacy_body),
+                ):
+                    card.setStyleSheet(card_css)
+                    lbl_t.setText(risk["title"])
+                    lbl_t.setStyleSheet(f"color: {fg};")
+                    lbl_b.setText(risk["detail"])
+                    lbl_b.setStyleSheet(f"color: {fg};")
+            except Exception:
+                pass
+
+        def _apply_profile_preset(self, preset_key: str):
+            try:
+                patch = build_preset_patch(preset_key)
+                if preset_key == "system_whitelist":
+                    ans = QMessageBox.warning(
+                        self,
+                        "高隐私敏感切换确认：使用主机默认 Profile + 严格白名单",
+                        "您即将切换为「主机默认 Profile」模式：\n\n"
+                        "1. 客户端将读取本机默认 Chrome/Edge 数据目录（包含您本机已登录个人账号的会话）。\n"
+                        "2. 为防止隐私泄露，本预设将强制开启 Cookie 严格白名单（仅放行白名单域名）与 inject_cookies 入站保护。\n"
+                        "3. Edge/Chrome 136+ 默认拒绝在默认目录开启 9222 端口，启动前需关闭个人日常浏览器，或搭配自定义克隆目录。\n"
+                        "4. 若本机节点用于多人 SaaS 共享出租，切勿使用此模式！\n\n"
+                        "是否确认切换并应用此方案？",
+                        QMessageBox.Yes | QMessageBox.No,
+                        QMessageBox.No,
+                    )
+                    if ans != QMessageBox.Yes:
+                        return
+                self._loading_ui = True
+                try:
+                    b_patch = patch["browser"]
+                    g_patch = patch["cookie_guard"]
+                    self.cmb_profile_mode.setCurrentIndex(1 if b_patch["profile_mode"] == "system_default" else 0)
+                    self.sw_isolate_os_signin.setChecked(bool(b_patch["isolate_os_signin"]))
+                    if g_patch["mode"] in self.rb_modes:
+                        self.rb_modes[g_patch["mode"]].setChecked(True)
+                    self.sw_protect_inject.setChecked(bool(g_patch["protect_inject"]))
+                finally:
+                    self._loading_ui = False
+                self._update_privacy_banners()
+                self.save_ui_config()
+                self._log_event("GUARD", f"已应用预设方案：{preset_key}")
+            except Exception as e:
+                self._toast("error", "应用预设失败", str(e))
+
         def _toast(self, kind: str, title: str, content: str):
             fn = {
                 "success": InfoBar.success,
@@ -1060,10 +1424,30 @@ def _run_gui(config_path: Optional[Path] = None):
 
         def save_ui_config(self):
             try:
-                self.config = self._collect_config_from_vars()
+                candidate = self._collect_config_from_vars()
+                b = candidate["browser"]
+                g = candidate["cookie_guard"]
+                risk = evaluate_profile_privacy_risk(
+                    b.get("profile_mode", "isolated"),
+                    g.get("mode", "whitelist"),
+                    g.get("whitelist_domains", []),
+                    bool(b.get("isolate_os_signin", True)),
+                )
+                if risk["level"] == "critical":
+                    ans = QMessageBox.critical(
+                        self,
+                        "极高隐私泄露风险提醒",
+                        f"{risk['title']}\n\n{risk['detail']}\n\n是否仍坚持保存该高危配置？",
+                        QMessageBox.Yes | QMessageBox.No,
+                        QMessageBox.No,
+                    )
+                    if ans != QMessageBox.Yes:
+                        return
+                self.config = candidate
                 save_config(self.config, self.config_path)
                 mode = self.config["cookie_guard"]["mode"]
                 self.badge_guard.setText(f"Cookie 保护: {mode}")
+                self._update_privacy_banners()
                 if self.agent is not None:
                     self.agent.update_cookie_guard(self.config["cookie_guard"])
                     msg = f"配置已保存并热更新至 Cookie 防火墙 (策略={mode})"
@@ -1114,10 +1498,15 @@ def _run_gui(config_path: Optional[Path] = None):
                     custom_profile_dir=b["custom_profile_dir"],
                     homepage=b["homepage"],
                     extra_args=b["extra_args"],
+                    isolate_os_signin=bool(b.get("isolate_os_signin", True)),
                 )
                 msg = f"已启动 {label} (CDP 127.0.0.1:{cdp_port})" if cmd else f"{label} 已在运行中"
                 self._log_event("INFO", msg)
-                self._toast("success", "浏览器就绪", msg)
+                if self.browser_mgr.last_launch_warning:
+                    self._log_event("WARNING", self.browser_mgr.last_launch_warning)
+                    self._toast("warning", "安全与端口提醒", self.browser_mgr.last_launch_warning)
+                else:
+                    self._toast("success", "浏览器就绪", msg)
                 QTimer.singleShot(1200, self._poll_cdp_health)
             except Exception as e:
                 self._log_event("ERROR", f"启动浏览器失败: {e}")
@@ -1221,6 +1610,56 @@ def _run_gui(config_path: Optional[Path] = None):
 
         def _on_preview_finished(self, kind: str, msg: str):
             self._toast(kind, "Cookie 防火墙试算结果" if kind == "success" else "试算失败", msg)
+
+        def open_bookmark_manager(self):
+            if self._bookmark_dialog is None:
+                self._bookmark_dialog = BookmarkManagerDialog(self, self)
+            self._bookmark_dialog.reload_data()
+            self._bookmark_dialog.show()
+            self._bookmark_dialog.raise_()
+            self._bookmark_dialog.activateWindow()
+
+        def upsert_local_or_hub_bookmark(self, title: str, url: str, folder: str = "常用站点", pinned: int = 1) -> bool:
+            if self.agent is not None:
+                return self.agent.send_bookmark_upsert(title, url, folder, pinned)
+            data_dir = get_app_data_dir()
+            norm_url = normalize_bookmark_url(url)
+            if not norm_url:
+                return False
+            item = {
+                "title": str(title or norm_url).strip()[:255],
+                "url": norm_url,
+                "folder": str(folder or "常用站点").strip() or "常用站点",
+                "pinned": 1 if pinned else 0,
+                "source_node": "windows_local",
+            }
+            items = [b for b in load_local_bookmarks_cache(data_dir) if b.get("url") != norm_url]
+            items.insert(0, item)
+            save_local_bookmarks_cache(data_dir, items)
+            enqueue_pending_bookmark_op(data_dir, {"type": "bookmark_upsert", "bookmark": item})
+            if self.config.get("browser", {}).get("sync_bookmarks", True):
+                try:
+                    sync_hub_bookmarks_to_chromium(resolve_browser_profile_dir(self.config, data_dir), items)
+                except Exception:
+                    pass
+            return False
+
+        def delete_local_or_hub_bookmark(self, url: str) -> bool:
+            if self.agent is not None:
+                return self.agent.send_bookmark_delete(url)
+            data_dir = get_app_data_dir()
+            norm_url = normalize_bookmark_url(url)
+            if not norm_url:
+                return False
+            items = [b for b in load_local_bookmarks_cache(data_dir) if b.get("url") != norm_url]
+            save_local_bookmarks_cache(data_dir, items)
+            enqueue_pending_bookmark_op(data_dir, {"type": "bookmark_delete", "url": norm_url})
+            if self.config.get("browser", {}).get("sync_bookmarks", True):
+                try:
+                    sync_hub_bookmarks_to_chromium(resolve_browser_profile_dir(self.config, data_dir), items)
+                except Exception:
+                    pass
+            return False
 
         def open_cookie_inventory(self):
             if self._inventory_dialog is None:
@@ -1360,6 +1799,19 @@ def _run_gui(config_path: Optional[Path] = None):
                     f"QLabel {{ background-color: {bg}; color: {fg}; border-radius: 6px; padding: 5px 12px; font-weight: 600; font-size: 12px; }}"
                 )
                 self._update_tray_tooltip()
+            if "net_rx_total" in patch or "net_tx_total" in patch or "active_streams" in patch:
+                rx = int(patch.get("net_rx_total", self.status_state.get("rx", 0)))
+                tx = int(patch.get("net_tx_total", self.status_state.get("tx", 0)))
+                st = int(patch.get("active_streams", self.status_state.get("streams", 0)))
+                self.status_state["rx"] = rx
+                self.status_state["tx"] = tx
+                self.status_state["streams"] = st
+                self.badge_traffic.setText(f"流量: RX {_fmt_bytes(rx)} / TX {_fmt_bytes(tx)} | 流 {st}")
+                self.badge_traffic.setStyleSheet(
+                    "QLabel { background-color: #0f172a; color: #38bdf8; border: 1px solid #1e3a8a; border-radius: 6px; padding: 5px 12px; font-weight: 600; font-size: 12px; }"
+                )
+            if "bookmarks_count" in patch and self._bookmark_dialog is not None and self._bookmark_dialog.isVisible():
+                self._bookmark_dialog.reload_data()
 
         def _on_agent_stopped(self):
             self.btn_start.setEnabled(True)

@@ -4,6 +4,7 @@ import secrets
 import threading
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 
 from flask import Blueprint, jsonify, request
 from sqlalchemy import delete, select
@@ -253,51 +254,68 @@ def admin_ping_node():
 
     with db_session() as s:
         stmt = select(Node).where(Node.node_id == node_id) if node_id else select(Node).order_by(Node.id.asc())
-        node_objs = s.scalars(stmt).all()
+        node_snapshots = [n.to_dict() for n in s.scalars(stmt).all()]
 
-        for node_obj in node_objs:
-            nid = node_obj.node_id
-            ip = (node_obj.ip or "").strip()
-            port = int(node_obj.port or 443)
-            net_mode = node_obj.net_mode or "direct"
-            last_hb = node_obj.last_heartbeat or ""
+    direct_targets = []
+    for n in node_snapshots:
+        nid = n["node_id"]
+        net_mode = n.get("net_mode") or "direct"
+        last_hb = n.get("last_heartbeat") or ""
+        hb_alive = False
+        if last_hb and "等待" not in last_hb and "下线" not in last_hb:
+            try:
+                hb_dt = datetime.datetime.strptime(last_hb, "%Y-%m-%d %H:%M:%S")
+                hb_alive = (now_dt - hb_dt).total_seconds() <= 135
+            except Exception:
+                pass
 
-            hb_alive = False
-            if last_hb and "等待" not in last_hb and "下线" not in last_hb:
-                try:
-                    hb_dt = datetime.datetime.strptime(last_hb, "%Y-%m-%d %H:%M:%S")
-                    hb_alive = (now_dt - hb_dt).total_seconds() <= 135
-                except Exception:
-                    pass
-
-            if net_mode == "reverse_wss":
-                results[nid] = {
-                    "reachable": hb_alive,
-                    "rtt_ms": 0.0 if hb_alive else None,
-                    "net_mode": "reverse_wss",
-                    "network_mode": "reverse_tunnel",
-                    "ipv4_reachable": False,
-                    "ipv6_reachable": False,
-                    "recommended_endpoint": None,
-                    "last_heartbeat": last_hb,
-                }
-                continue
-
-            reachable, rtt_ms, det = edge_svc.probe_host_endpoint(ip, port)
-            node_obj.tunnel_status = det.network_mode
+        if net_mode == "reverse_wss":
             results[nid] = {
-                "reachable": reachable,
-                "rtt_ms": rtt_ms,
-                "net_mode": net_mode,
-                "network_mode": det.network_mode,
-                "ipv4_reachable": det.ipv4_reachable,
-                "ipv6_reachable": det.ipv6_reachable,
-                "recommended_endpoint": det.recommended_endpoint,
+                "reachable": hb_alive,
+                "rtt_ms": 0.0 if hb_alive else None,
+                "net_mode": "reverse_wss",
+                "network_mode": "reverse_tunnel",
+                "ipv4_reachable": False,
+                "ipv6_reachable": False,
+                "recommended_endpoint": None,
                 "last_heartbeat": last_hb,
             }
+        else:
+            direct_targets.append((nid, (n.get("ip") or "").strip(), int(n.get("port") or 443), net_mode, last_hb))
 
+    tunnel_updates: dict[str, str] = {}
+    if direct_targets:
+        def _probe_one(target):
+            nid, ip, port, net_mode, last_hb = target
+            reachable, rtt_ms, det = edge_svc.probe_host_endpoint(ip, port)
+            return nid, reachable, rtt_ms, det, net_mode, last_hb
+
+        max_workers = min(16, max(1, len(direct_targets)))
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            for nid, reachable, rtt_ms, det, net_mode, last_hb in pool.map(_probe_one, direct_targets):
+                tunnel_updates[nid] = det.network_mode
+                results[nid] = {
+                    "reachable": reachable,
+                    "rtt_ms": rtt_ms,
+                    "net_mode": net_mode,
+                    "network_mode": det.network_mode,
+                    "ipv4_reachable": det.ipv4_reachable,
+                    "ipv6_reachable": det.ipv6_reachable,
+                    "recommended_endpoint": det.recommended_endpoint,
+                    "last_heartbeat": last_hb,
+                }
+
+    with db_session() as s:
+        stmt = select(Node).where(Node.node_id == node_id) if node_id else select(Node).order_by(Node.id.asc())
+        node_objs = s.scalars(stmt).all()
+        for node_obj in node_objs:
+            if node_obj.node_id in tunnel_updates:
+                node_obj.tunnel_status = tunnel_updates[node_obj.node_id]
         s.flush()
         nodes = [n.to_dict() for n in node_objs]
+
+    if tunnel_updates:
+        invalidate_nodes_cache()
 
     return jsonify({"code": 200, "msg": "基于 wimotek-edge-agent TCP 三次握手的节点连通性检测完成", "data": results, "nodes": nodes})
 

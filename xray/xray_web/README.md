@@ -210,12 +210,156 @@ docker run -d \
 
 ---
 
+## 🚀 单参数开启前后端分离 + TLS 移交 Nginx (`SEPARATE_FRONTEND=true`)
+
+在高并发或宿主机已有 Nginx（如宝塔面板 / 独立 Nginx 网关）的场景下，建议将 **静态资源缓存、Gzip/Brotli 压缩、HTTPS TLS 握手与前沿限流** 全部交给最擅长的 Nginx，让后端容器专心处理纯 API 业务逻辑。
+
+只需在主控容器中添加 **单个环境变量 `SEPARATE_FRONTEND=true`**，后端将自动完成全套分离切换：
+1. **关闭后端静态托管**：Flask 不再挂载 `../frontend/dist` 静态路由（`/` 返回 API 状态 JSON），彻底释放后端工作线程；
+2. **关闭后端 TLS 监听**：`entrypoint.sh` 自动跳过 `/app/certs` 初始化与证书读取，Granian 以纯 **HTTP** 协议高速监听 `${WEB_HOST}:${WEB_PORT}`（建议配合 `-e WEB_HOST=127.0.0.1` 仅对本机回环开放）；
+3. **健康检查自动适配**：Dockerfile `HEALTHCHECK` 自动探测 `http://127.0.0.1:${WEB_PORT}/healthz`；
+4. **HTTPS 链接透传对齐**：后端通过 `ProxyFix` 自动识别 Nginx 传递的 `X-Forwarded-Proto: https`、`X-Forwarded-Host` 与 `X-Forwarded-Port`，订阅地址（`sub_url`）与节点 WSS 反穿地址依然精准输出 `https://` 与公网端口。
+
+### 第 1 步：以分离模式启动后端容器
+
+```bash
+docker run -d --name xray-web-master --restart unless-stopped \
+  --network host \
+  -e TZ=Asia/Shanghai \
+  -e SEPARATE_FRONTEND=true \
+  -e WEB_HOST=127.0.0.1 \
+  -e WEB_PORT=8443 \
+  -e PUBLIC_URL=https://panel.example.com \
+  -e WEB_WORKERS=4 \
+  -e WEB_BLOCKING_THREADS=32 \
+  -v $(pwd)/data:/data \
+  -v $(pwd)/data/backups:/data/backups \
+  xray-web:latest
+```
+*(若 Nginx 运行在另一台容器而非宿主机 host 网络，可将 `WEB_HOST` 保持默认 `::` / `0.0.0.0`，通过 Docker 内网互通。)*
+
+### 第 2 步：手动将前端静态资源拷贝给 Nginx
+
+从已构建的镜像/容器中直接提取编译好的 `frontend/dist` 到宿主机 Nginx 站点目录（如 `/var/www/xray-web`）：
+
+```bash
+mkdir -p /var/www/xray-web
+docker cp xray-web-master:/app/frontend/dist/. /var/www/xray-web/
+```
+*(或在本地源码 `app/frontend` 执行 `npm install && npm run build`，将生成的 `dist/*` 上传至 `/var/www/xray-web/`。)*
+
+### 第 3 步：Nginx 生产配置参考（含 TLS + 静态缓存 + 反代 + WS 隧道 + 防刷限流）
+
+```nginx
+# 放在 nginx.conf 的 http {} 块内：针对登录/发信/订阅做前置连接与速率保护
+limit_req_zone $binary_remote_addr zone=xray_api_burst:10m rate=20r/s;
+limit_req_zone $binary_remote_addr zone=xray_auth_strict:10m rate=5r/s;
+
+server {
+    listen 443 ssl http2;
+    listen [::]:443 ssl http2;
+    server_name panel.example.com;
+
+    # TLS 证书完全交由 Nginx 宿主机维护（宝塔 / Certbot / Acme.sh 自动续签零影响）
+    ssl_certificate     /www/server/panel/vhost/cert/panel.example.com/fullchain.pem;
+    ssl_certificate_key /www/server/panel/vhost/cert/panel.example.com/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_session_cache shared:SSL:20m;
+    ssl_session_timeout 1d;
+
+    # 前端静态资源根目录（管理员手动拷贝的 dist 内容）
+    root /var/www/xray-web;
+    index index.html;
+
+    gzip on;
+    gzip_min_length 1024;
+    gzip_types text/plain text/css application/javascript application/json image/svg+xml;
+
+    # 静态资源长缓存（index.html 不缓存以确保发版即时生效）
+    location = /index.html {
+        add_header Cache-Control "no-cache, no-store, must-revalidate";
+    }
+    location /assets/ {
+        expires 30d;
+        add_header Cache-Control "public, immutable";
+    }
+
+    # SPA 前端路由兜底
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+
+    # 登录/注册/发信/卡密敏感接口加强防刷
+    location ~ ^/api/(login|register|recharge|auth/) {
+        limit_req zone=xray_auth_strict burst=10 nodelay;
+        limit_req_status 429;
+        proxy_pass http://127.0.0.1:8443;
+        proxy_set_header Host $http_host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-Host $http_host;
+        proxy_set_header X-Forwarded-Port $server_port;
+    }
+
+    # 通用 API 与 WSS 反向穿透隧道代理
+    location ~ ^/(api/|healthz$) {
+        limit_req zone=xray_api_burst burst=40 nodelay;
+        limit_req_status 429;
+        proxy_pass http://127.0.0.1:8443;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $http_host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-Host $http_host;
+        proxy_set_header X-Forwarded-Port $server_port;
+        proxy_read_timeout 300s;
+    }
+}
+```
+
+---
+
+## ⚡ 高并发性能调优与全链路防刷保护
+
+### 1. 并发架构与调优参数
+后端在路由与数据层针对高并发进行了系统级改造：
+- **非阻塞网络拨测解耦**：节点 TOFU 首次接入 / `FORCE_RESYNC` / 后台批量 `ping` 探测均在 **数据库事务锁外** 执行（后台全节点测活采用 `ThreadPoolExecutor` 并发握手），避免慢网络 I/O 长期占用数据库连接池；
+- **全原子并发防竞态更新**：
+  - 节点流量扣费（`/api/node/traffic`）：先批次内存聚合，再执行 `UPDATE users SET used_mb = ROUND(COALESCE(used_mb, 0) + inc, 2)` 原子累加；
+  - 卡密核销（`/api/recharge`）：采用条件原子更新 `UPDATE cards SET is_used=1 WHERE code=? AND is_used=0`，彻底杜绝并发双花漏洞；
+  - 推荐返利（`/api/register`）：条件原子递增 `referral_count < max_per_user`，防止并发突破上限；
+- **热点读缓存**：登录、个人刷新、UUID 重置与订阅接口统一读取 `get_cached_nodes()` 与 `get_cached_active_users()`（30s TTL，后台修改节点/用户时自动失效）。
+
+可通过环境变量按机器规格弹性扩容 Granian 与数据库连接池：
+| 变量名 | 默认值 | 高并发推荐（MySQL + Redis + Nginx） | 说明 |
+| :--- | :---: | :---: | :--- |
+| `WEB_WORKERS` | `2` | `4` ~ `CPU核数` | Granian 多进程 Worker 数（SQLite 建议维持 `2`） |
+| `WEB_BLOCKING_THREADS` | `16` | `32` ~ `64` | 每个 Worker 并发处理 WSGI 阻塞线程数 |
+| `WEB_BACKLOG` | `2048` | `4096` | Socket 全连接等待队列深度 |
+| `DB_POOL_SIZE` | `20` | `20` ~ `50` | MySQL 连接池常驻连接数 |
+| `DB_MAX_OVERFLOW` | `30` | `50` | MySQL 峰值溢出最大连接数 |
+
+### 2. 全方位后端防刷与防爆破保护（Redis Lua / SQLite & MySQL 原子协同）
+内置统一限流与风控模块 `core/rate_limit.py`（复用 `core.cache`，Redis 通过原子 Lua 脚本计数，未开启或故障自动回退至 SQLite `INSERT...ON CONFLICT RETURNING` / MySQL `ON DUPLICATE KEY UPDATE` 原子 SQL，默认 `RATE_LIMIT_ENABLE=true`）：
+- **可信代理防伪造 (`TRUST_PROXY=auto`)**：通过 `TrustedProxyMiddleware` 校验底层 TCP 对端 IP；公网直连请求一律忽略伪造的 `X-Forwarded-For` / `X-Real-IP`，即使位于 Nginx 后也仅解析受信任代理追加的最右端真实客户端 IP（支持 `TRUST_PROXY=auto|always|never` 与 `RATE_LIMIT_WHITELIST` 白名单）；
+- **滑动时间窗口 & 标准限流响应头**：所有限流器采用双桶滑动窗口算法彻底消除固定窗口边界 2 倍突发漏洞，并返回 `Retry-After` 与 `X-RateLimit-Limit / Remaining / Reset` 响应头；
+- **人机、蜜罐封禁与账号级防爆破**：`/api/auth/captcha` 限流 `30次/60秒/IP`；`/api/login` 限流 `20次/60秒/IP` + **触发蜜罐即刻全域封禁 IP 30 分钟** + 人机响应时间窗口（`<0.5s` 拦截）+ IP 阶梯锁定（`15m -> 30m -> 60m`）+ **按目标账号连续 8 次错误锁定 15 分钟**（彻底封堵代理池轮换 IP 撞库）；
+- **后台管理接口防爆破**：`/api/admin/*` 连续 20 次密码校验失败自动封禁 IP 30 分钟；
+- **邮件防轰炸 & OTP 防枚举**：注册/找回/换绑发信接口严格限制 **IP 5次/5分钟**、**同邮箱 60 秒冷却**、**单 IP 单日 15 封** 以及 **同目标邮箱单日 10 封跨 IP 封顶**；`APP_MODE=admin` 时一并关闭发信；6 位邮箱验证码输错 **5 次立即作废销毁**；
+- **卡密、订阅与高开销资源防护**：`/api/recharge` 限制 `15次/5分钟/IP`（8 次无效卡密锁定 15 分钟）；`/api/sub` 与 `/api/qrcode` 限制 `60次/60秒/IP`；`/api/user/download_client`（ZIP 打包）限制 `8次/5分钟/IP`，`/api/user/download_apk` 限制 `10次/5分钟/IP`；`/api/user/change_password` 增加 `10次/5分钟/IP` + 原密码错 5 次锁定 10 分钟；第三方发卡 `/api/open/faka_generate` 限制 `120次/60秒/IP` 与 10 次错误 Token 限流。
+
+---
+
 ## 🌐 IPv4 + IPv6 双栈监听说明（Granian）
 
 主控 `entrypoint.sh` 启动时会自动检测宿主机内核协议栈：
 1. 若宿主机支持 IPv6 且 `net.ipv6.bindv6only=0`（Linux 默认值），Granian 自动绑定 `--host "::"`，在单个端口上**同时接管 IPv4 与 IPv6 请求**；
 2. 若宿主机禁用了 IPv6（如 `ipv6.disable=1`）或开启了 `bindv6only=1`，系统会自动安全回退到 `--host 0.0.0.0`（纯 IPv4），确保容器健康检查（`HEALTHCHECK`）与控制面板 100% 正常启动不崩溃；
-3. 如需强制锁定监听地址，可通过环境变量 `-e WEB_HOST="::"` 或 `-e WEB_HOST="0.0.0.0"` 显式指定。
+3. 如需强制锁定监听地址，可通过环境变量 `-e WEB_HOST="::"` 或 `-e WEB_HOST="0.0.0.0"` 显式指定；在 `SEPARATE_FRONTEND=true` 配合本机 Nginx 反代时推荐设为 `-e WEB_HOST="127.0.0.1"` 禁止外部绕过 Nginx 直连后端。
 
 ---
 
