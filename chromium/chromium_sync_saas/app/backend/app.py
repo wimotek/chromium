@@ -167,7 +167,7 @@ def _create_listen_sockets(host: str, port: int):
     return [sock4]
 
 
-if __name__ == "__main__":
+def run_server():
     import logging
 
     logging.getLogger("httpx").setLevel(logging.WARNING)
@@ -191,3 +191,7 @@ if __name__ == "__main__":
 
     uv_config = uvicorn.Config(app, **uv_kwargs)
     uvicorn.Server(uv_config).run(sockets=listen_sockets)
+
+
+if __name__ == "__main__":
+    run_server()

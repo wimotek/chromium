@@ -179,6 +179,7 @@ def resolve_hub_access_info(request) -> dict:
         public_netloc = f"localhost:{fallback_p}"
 
     return {
+        "http_scheme": "https" if ws_scheme == "wss" else "http",
         "ws_scheme": ws_scheme,
         "internal_ws_scheme": internal_ws_scheme,
         "ssl_enabled": HUB_SERVE_FRONTEND,
