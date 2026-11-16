@@ -10,6 +10,7 @@ import subprocess
 import sys
 
 from Cython.Build import cythonize
+from Cython.Compiler import Options
 from setuptools import Extension, setup
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -58,11 +59,13 @@ def main():
     nthreads = max(1, min(8, os.cpu_count() or 2))
     print(f"==> [Cython Build] 准备并行编译 {len(extensions)} 个核心模块 (threads={nthreads})...", flush=True)
 
+    if hasattr(Options, "docstrings"):
+        Options.docstrings = False
+
     directives = {
         "language_level": "3",
         "binding": True,
         "embedsignature": False,
-        "docstrings": False,
         "annotation_typing": False,
     }
     try:
