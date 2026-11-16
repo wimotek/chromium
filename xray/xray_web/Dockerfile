@@ -10,7 +10,7 @@ COPY app/frontend/package.json ./
 RUN npm install --no-audit --no-fund
 
 COPY app/frontend/ ./
-RUN npm run build >/tmp/vite.log 2>&1 && cat /tmp/vite.log || { cat /tmp/vite.log; ls -la /build/src /build/src/components /build/src/components/admin /build/src/components/common 2>/dev/null || true; echo "=== VITE ERROR SUMMARY ==="; grep -vE '^[[:space:]]*at ' /tmp/vite.log | tail -n 8; exit 1; }
+RUN npm run build >/tmp/vite.log 2>&1 && node -e 'const fs=require("fs"),path=require("path"),zlib=require("zlib");let cnt=0,rawSum=0,gzSum=0;(function walk(d){for(const e of fs.readdirSync(d,{withFileTypes:true})){const p=path.join(d,e.name);if(e.isDirectory())walk(p);else if(/\.(js|mjs|css|html|svg|json)$/i.test(e.name)){const b=fs.readFileSync(p);if(b.length>=512){const g=zlib.gzipSync(b,{level:9});if(g.length<b.length){fs.writeFileSync(p+".gz",g);cnt++;rawSum+=b.length;gzSum+=g.length;}}}}} )("/build/dist");console.log(`==> Precompressed ${cnt} files (.gz): ${(rawSum/1024).toFixed(1)} KB -> ${(gzSum/1024).toFixed(1)} KB`);' >>/tmp/vite.log 2>&1 && cat /tmp/vite.log || { cat /tmp/vite.log; ls -la /build/src /build/src/components /build/src/components/admin /build/src/components/common 2>/dev/null || true; echo "=== VITE ERROR SUMMARY ==="; grep -vE '^[[:space:]]*at ' /tmp/vite.log | tail -n 8; exit 1; }
 
 # ==============================================================================
 # 阶段 2：构建依赖 Wheel 缓存 (python:3.11-slim manylinux 预编译轮子，免去 Rust/Cargo 编译)
@@ -31,15 +31,24 @@ WORKDIR /build/backend
 RUN apt-get update && \
     apt-get install -y --no-install-recommends gcc python3-dev binutils && \
     rm -rf /var/lib/apt/lists/* && \
-    pip install --no-cache-dir "cython>=3.0,<3.2" setuptools
+    pip install --no-cache-dir "cython>=3.0,<3.2" "setuptools>=68,<80"
 
 RUN --mount=type=bind,from=python-builder,source=/wheels,target=/wheels \
     pip install --no-cache-dir --no-index --find-links=/wheels /wheels/*.whl
 
 COPY app/backend/ ./
-RUN python3 build_binary.py && \
-    chmod 755 /build/backend/entrypoint.sh && \
-    python3 -c "import os, shutil, tempfile; d=tempfile.mkdtemp(); os.environ['DATA_DIR']=d; os.environ['BACKUP_DIR']=os.path.join(d,'backups'); os.environ['DB_PATH']=os.path.join(d,'t.db'); os.environ['HUB_CONFIG_PATH']=os.path.join(d,'hub.json'); import app, config, core.cache, core.rate_limit, core.captcha, core.db, core.cert_init, routes; assert hasattr(app, 'app'); shutil.rmtree(d, ignore_errors=True); shutil.rmtree('/data', ignore_errors=True)"
+RUN { \
+      python3 build_binary.py && \
+      chmod 755 /build/backend/entrypoint.sh && \
+      python3 -c "import os, shutil, tempfile; d=tempfile.mkdtemp(); os.environ['DATA_DIR']=d; os.environ['BACKUP_DIR']=os.path.join(d,'backups'); os.environ['DB_PATH']=os.path.join(d,'t.db'); os.environ['HUB_CONFIG_PATH']=os.path.join(d,'hub.json'); import app, config, core.cache, core.rate_limit, core.captcha, core.db, core.cert_init, routes; assert hasattr(app, 'app'); shutil.rmtree(d, ignore_errors=True); shutil.rmtree('/data', ignore_errors=True)"; \
+    } >/tmp/backend_build.log 2>&1 && cat /tmp/backend_build.log || { \
+      rc=$?; \
+      cat /tmp/backend_build.log; \
+      ls -la /build/backend 2>/dev/null || true; \
+      echo "=== BACKEND BUILD ERROR (exit=$rc) ==="; \
+      tail -n 10 /tmp/backend_build.log 2>/dev/null || true; \
+      exit $rc; \
+    }
 
 # ==============================================================================
 # 阶段 4：极致精简非 Root 闭源运行镜像 (零 .py 业务源码，零编译工具链残留)

@@ -32,6 +32,7 @@
         v-else-if="!currentUser.username"
         :systemNotice="systemNotice"
         :isPureAdmin="isPureAdmin"
+        :initialCaptcha="prefetchedCaptcha"
         @login-success="onLoginSuccess"
       />
 
@@ -101,6 +102,7 @@
 
     <!-- 全局二维码弹窗 -->
     <QrModal
+      v-if="showQrModal"
       :visible="showQrModal"
       :title="targetModalUser"
       :link="targetModalLink"
@@ -115,20 +117,22 @@ import { ref, reactive, computed, onMounted, defineAsyncComponent } from 'vue'
 import axios from 'axios'
 import { ElMessage } from 'element-plus'
 
-import QrModal from './components/common/QrModal.vue'
-import SetupWizard from './components/SetupWizard.vue'
 import AuthView from './components/AuthView.vue'
-import UserDashboard from './components/UserDashboard.vue'
 
-import AdminUsers from './components/admin/AdminUsers.vue'
-import AdminNodes from './components/admin/AdminNodes.vue'
-import AdminCards from './components/admin/AdminCards.vue'
-import AdminSettings from './components/admin/AdminSettings.vue'
+const QrModal = defineAsyncComponent(() => import('./components/common/QrModal.vue'))
+const SetupWizard = defineAsyncComponent(() => import('./components/SetupWizard.vue'))
+const UserDashboard = defineAsyncComponent(() => import('./components/UserDashboard.vue'))
+
+const AdminUsers = defineAsyncComponent(() => import('./components/admin/AdminUsers.vue'))
+const AdminNodes = defineAsyncComponent(() => import('./components/admin/AdminNodes.vue'))
+const AdminCards = defineAsyncComponent(() => import('./components/admin/AdminCards.vue'))
+const AdminSettings = defineAsyncComponent(() => import('./components/admin/AdminSettings.vue'))
 
 const setupRequired = ref(false)
 const systemLoading = ref(true)
 const isPureAdmin = ref(false)
 const systemNotice = ref('')
+const prefetchedCaptcha = ref(null)
 const activeTab = ref('users')
 const adminPassword = ref('')
 
@@ -158,6 +162,7 @@ const fetchSystemInfo = async () => {
 
 const onSetupCompleted = async () => {
   setupRequired.value = false
+  prefetchedCaptcha.value = null
   localStorage.removeItem('xray_auth_session')
   Object.assign(currentUser, { username: '', role: '' })
   adminPassword.value = ''
@@ -165,8 +170,18 @@ const onSetupCompleted = async () => {
 }
 
 onMounted(async () => {
-  await fetchSystemInfo()
+  const savedSession = localStorage.getItem('xray_auth_session')
+  const captchaTask = !savedSession
+    ? axios.get('/api/auth/captcha', { timeout: 15000 })
+        .then((res) => (res.data?.code === 200 ? res.data.data : null))
+        .catch(() => null)
+    : Promise.resolve(null)
+
+  const [, prefetchedCap] = await Promise.all([fetchSystemInfo(), captchaTask])
+  prefetchedCaptcha.value = prefetchedCap
+
   if (setupRequired.value) {
+    prefetchedCaptcha.value = null
     localStorage.removeItem('xray_auth_session')
     Object.assign(currentUser, { username: '', role: '' })
     adminPassword.value = ''
@@ -174,7 +189,6 @@ onMounted(async () => {
     return
   }
 
-  const savedSession = localStorage.getItem('xray_auth_session')
   if (savedSession) {
     try {
       const parsed = JSON.parse(savedSession)

@@ -272,6 +272,7 @@ server {
     index index.html;
 
     gzip on;
+    gzip_static on;
     gzip_min_length 1024;
     gzip_types text/plain text/css application/javascript application/json image/svg+xml;
 
@@ -342,7 +343,7 @@ server {
 可通过环境变量按机器规格弹性扩容 Granian 与数据库连接池：
 | 变量名 | 默认值 | 高并发推荐（MySQL + Redis + Nginx） | 说明 |
 | :--- | :---: | :---: | :--- |
-| `WEB_WORKERS` | `2` | `4` ~ `CPU核数` | Granian 多进程 Worker 数（SQLite 建议维持 `2`） |
+| `WEB_WORKERS` | `1` | `4` ~ `CPU核数` | Granian 多进程 Worker 数（1GB 低配 VPS / SQLite 默认 `1` 省内存，高配可按需调大） |
 | `WEB_BLOCKING_THREADS` | `16` | `32` ~ `64` | 每个 Worker 并发处理 WSGI 阻塞线程数 |
 | `WEB_BACKLOG` | `2048` | `4096` | Socket 全连接等待队列深度 |
 | `DB_POOL_SIZE` | `20` | `20` ~ `50` | MySQL 连接池常驻连接数 |

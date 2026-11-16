@@ -15,6 +15,7 @@ import qrcode.image.svg
 from flask import Flask, abort, jsonify, request, send_file, send_from_directory
 from sqlalchemy import select
 from werkzeug.middleware.proxy_fix import ProxyFix
+from werkzeug.security import safe_join
 
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 if CURRENT_DIR not in sys.path:
@@ -79,6 +80,44 @@ def _no_cache_html_response(response):
     return response
 
 
+def _client_accepts_gzip():
+    enc = (request.headers.get('Accept-Encoding') or '').lower()
+    return 'gzip' in enc
+
+
+def _append_vary_accept_encoding(response):
+    existing = response.headers.get('Vary')
+    if not existing:
+        response.headers['Vary'] = 'Accept-Encoding'
+    elif 'accept-encoding' not in [v.strip().lower() for v in existing.split(',')]:
+        response.headers['Vary'] = f"{existing}, Accept-Encoding"
+    return response
+
+
+def _send_precompressed_static(rel_path, is_html=False):
+    if not app.static_folder:
+        abort(404)
+    target = safe_join(app.static_folder, rel_path)
+    if not target or not os.path.isfile(target):
+        abort(404)
+
+    mime, _ = mimetypes.guess_type(target)
+    if not mime:
+        mime = 'text/html; charset=utf-8' if is_html else 'application/octet-stream'
+    elif mime == 'text/html' and 'charset=' not in mime:
+        mime = 'text/html; charset=utf-8'
+
+    gz_target = f"{target}.gz"
+    if _client_accepts_gzip() and os.path.isfile(gz_target):
+        resp = send_file(gz_target, mimetype=mime, conditional=True, etag=True)
+        resp.headers['Content-Encoding'] = 'gzip'
+    else:
+        resp = send_from_directory(app.static_folder, rel_path, mimetype=mime)
+
+    _append_vary_accept_encoding(resp)
+    return _no_cache_html_response(resp) if is_html else resp
+
+
 @app.after_request
 def add_cdn_safe_headers(response):
     path = request.path or ''
@@ -88,7 +127,7 @@ def add_cdn_safe_headers(response):
         response.headers.setdefault('Cloudflare-CDN-Cache-Control', 'no-store')
     elif path.startswith('/assets/'):
         if response.status_code == 200:
-            response.headers.setdefault('Cache-Control', 'public, max-age=2592000, immutable')
+            response.headers['Cache-Control'] = 'public, max-age=2592000, immutable'
         else:
             response.headers['Cache-Control'] = 'no-store'
             response.headers['CDN-Cache-Control'] = 'no-store'
@@ -105,13 +144,27 @@ def spa_or_api_not_found(_err):
         resp.headers['Cache-Control'] = 'no-store'
         resp.headers['CDN-Cache-Control'] = 'no-store'
         return resp
-    return _no_cache_html_response(send_from_directory(app.static_folder, 'index.html'))
+    return _send_precompressed_static('index.html', is_html=True)
 
 
 @app.route('/healthz', methods=['GET'])
 def health_check():
     """轻量健康探测接口，供 Docker HEALTHCHECK 及 Nginx / K8s 探针秒级检测"""
     return "OK", 200
+
+
+@app.route('/assets/<path:filename>')
+def serve_precompressed_asset(filename):
+    if Config.SEPARATE_FRONTEND or filename.endswith('.gz'):
+        abort(404)
+    return _send_precompressed_static(os.path.join('assets', filename), is_html=False)
+
+
+@app.route('/index.html')
+def index_html():
+    if Config.SEPARATE_FRONTEND:
+        abort(404)
+    return _send_precompressed_static('index.html', is_html=True)
 
 
 @app.route('/')
@@ -123,7 +176,7 @@ def index():
             "separate_frontend": True,
             "health": "/healthz",
         })
-    return _no_cache_html_response(send_from_directory(app.static_folder, 'index.html'))
+    return _send_precompressed_static('index.html', is_html=True)
 
 
 @app.route('/api/qrcode', methods=['GET'])

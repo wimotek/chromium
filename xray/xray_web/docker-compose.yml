@@ -20,7 +20,7 @@ services:
       # ==================== 单参数开启前后端分离 + TLS 交由 Nginx ====================
       # 开启后后端仅监听纯 HTTP API（不托管静态资源、不加载证书），静态资产手动拷给 Nginx，HTTPS 证书由 Nginx 负责：
       # - SEPARATE_FRONTEND=true
-      # ==================== 高并发性能调优（建议配合 MySQL + Redis） ====================
+      # ==================== 高并发性能调优（默认 WEB_WORKERS=1 适配 1G 内存低配机；高配可配合 MySQL + Redis 调大） ====================
       # - WEB_WORKERS=4
       # - WEB_BLOCKING_THREADS=32
       # - WEB_BACKLOG=2048

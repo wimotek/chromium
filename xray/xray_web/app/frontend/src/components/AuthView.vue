@@ -144,7 +144,8 @@ import { ElMessage } from 'element-plus'
 
 const props = defineProps({
   systemNotice: { type: String, default: '' },
-  isPureAdmin: { type: Boolean, default: false }
+  isPureAdmin: { type: Boolean, default: false },
+  initialCaptcha: { type: Object, default: null }
 })
 
 const emit = defineEmits(['login-success'])
@@ -154,6 +155,7 @@ const authMode = ref('login')
 const countdown = ref(0)
 const sendingCode = ref(false)
 const botHoneyToken = ref('')
+let usedInitialCaptcha = false
 
 const loginCaptcha = reactive({ id: '', svg: '', hint: '' })
 const loginCaptchaAns = ref('')
@@ -169,6 +171,32 @@ const forgotForm = reactive({ email: '', code: '', new_password: '' })
 const cleanSystemNotice = computed(() => (props.systemNotice || '').trim())
 const hasNoticeContent = computed(() => Boolean(cleanSystemNotice.value))
 
+const applyCaptchaData = (type, data) => {
+  if (!data || !data.captcha_id || !data.svg) return false
+  if (type === 'login') {
+    loginCaptcha.id = data.captcha_id
+    loginCaptcha.svg = data.svg
+    loginCaptcha.hint = data.hint || ''
+    loginCaptchaAns.value = ''
+    return true
+  }
+  if (type === 'register') {
+    registerCaptcha.id = data.captcha_id
+    registerCaptcha.svg = data.svg
+    registerCaptcha.hint = data.hint || ''
+    registerCaptchaAns.value = ''
+    return true
+  }
+  if (type === 'forgot') {
+    forgotCaptcha.id = data.captcha_id
+    forgotCaptcha.svg = data.svg
+    forgotCaptcha.hint = data.hint || ''
+    forgotCaptchaAns.value = ''
+    return true
+  }
+  return false
+}
+
 onMounted(() => {
   try {
     const urlParams = new URLSearchParams(window.location.search)
@@ -178,6 +206,11 @@ onMounted(() => {
       authMode.value = 'register'
     }
   } catch (_) {}
+
+  if (!usedInitialCaptcha && props.initialCaptcha && applyCaptchaData(authMode.value, props.initialCaptcha)) {
+    usedInitialCaptcha = true
+    return
+  }
   refreshCaptcha(authMode.value)
 })
 
@@ -186,26 +219,10 @@ const extractErrMsg = (err, fallback) => err?.response?.data?.msg || fallback
 const refreshCaptcha = async (type) => {
   try {
     const res = await axios.get('/api/auth/captcha')
-    if (res.data?.code === 200 && res.data?.data) {
-      if (type === 'login') {
-        loginCaptcha.id = res.data.data.captcha_id
-        loginCaptcha.svg = res.data.data.svg
-        loginCaptcha.hint = res.data.data.hint || ''
-        loginCaptchaAns.value = ''
-      } else if (type === 'register') {
-        registerCaptcha.id = res.data.data.captcha_id
-        registerCaptcha.svg = res.data.data.svg
-        registerCaptcha.hint = res.data.data.hint || ''
-        registerCaptchaAns.value = ''
-      } else if (type === 'forgot') {
-        forgotCaptcha.id = res.data.data.captcha_id
-        forgotCaptcha.svg = res.data.data.svg
-        forgotCaptcha.hint = res.data.data.hint || ''
-        forgotCaptchaAns.value = ''
-      }
-    } else {
-      ElMessage.error(res.data?.msg || '获取验证码失败')
+    if (res.data?.code === 200 && applyCaptchaData(type, res.data?.data)) {
+      return
     }
+    ElMessage.error(res.data?.msg || '获取验证码失败')
   } catch (err) {
     ElMessage.error(err?.response?.data?.msg || '验证码接口请求失败，请检查服务状态')
   }
