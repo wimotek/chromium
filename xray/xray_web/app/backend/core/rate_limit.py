@@ -19,8 +19,46 @@ from config import Config
 from core.cache import cache
 
 
+_CF_CIDRS = (
+    "173.245.48.0/20",
+    "103.21.244.0/22",
+    "103.22.200.0/22",
+    "103.31.4.0/22",
+    "141.101.64.0/18",
+    "108.162.192.0/18",
+    "190.93.240.0/20",
+    "188.114.96.0/20",
+    "197.234.240.0/22",
+    "198.41.128.0/17",
+    "162.158.0.0/15",
+    "104.16.0.0/13",
+    "104.24.0.0/14",
+    "172.64.0.0/13",
+    "131.0.72.0/22",
+    "2400:cb00::/32",
+    "2606:4700::/32",
+    "2803:f800::/32",
+    "2405:b500::/32",
+    "2405:8100::/32",
+    "2a06:98c0::/29",
+    "2c0f:f248::/32",
+)
+_CF_NETWORKS = tuple(ipaddress.ip_network(c) for c in _CF_CIDRS)
+
+
+def is_cloudflare_ip(ip_str: str) -> bool:
+    clean = (ip_str or "").strip().strip("[]")
+    if not clean:
+        return False
+    try:
+        addr = ipaddress.ip_address(clean)
+        return any(addr in net for net in _CF_NETWORKS)
+    except ValueError:
+        return False
+
+
 def is_trusted_proxy_peer(peer_ip: str) -> bool:
-    """判定底层 TCP 连接对端是否为可信反向代理（防止公网用户直接伪造 X-Forwarded-For）"""
+    """判定底层 TCP 连接对端是否为可信反向代理或 Cloudflare 边缘节点（防止公网直连伪造 X-Forwarded-For）"""
     mode = (Config.TRUST_PROXY or "auto").strip().lower()
     if mode in ("always", "true", "1", "yes", "all"):
         return True
@@ -32,7 +70,9 @@ def is_trusted_proxy_peer(peer_ip: str) -> bool:
         return False
     try:
         addr = ipaddress.ip_address(clean)
-        return addr.is_loopback or addr.is_private or addr.is_link_local
+        if mode in ("cloudflare", "cf"):
+            return addr.is_loopback or addr.is_private or addr.is_link_local or is_cloudflare_ip(clean)
+        return addr.is_loopback or addr.is_private or addr.is_link_local or is_cloudflare_ip(clean)
     except ValueError:
         return False
 
@@ -49,7 +89,7 @@ def is_valid_ip_literal(ip_str: str) -> bool:
 
 
 def get_client_ip(req=None) -> str:
-    """安全提取客户端真实 IP：仅对受信任代理透传头解包，防头伪造绕过"""
+    """安全提取客户端真实 IP：仅对受信任代理/Cloudflare 解包 CF-Connecting-IP 与透传头，防伪造绕过"""
     target_req = req
     if target_req is None:
         if not has_request_context():
@@ -61,11 +101,22 @@ def get_client_ip(req=None) -> str:
         return peer_ip
 
     forwarded = (target_req.headers.get("X-Forwarded-For") or "").strip()
+    rightmost_fwd = ""
     if forwarded:
         for cand in reversed(forwarded.split(",")):
             cand_ip = cand.strip()
             if is_valid_ip_literal(cand_ip):
-                return cand_ip
+                rightmost_fwd = cand_ip
+                break
+
+    mode = (Config.TRUST_PROXY or "auto").strip().lower()
+    cf_ip = (target_req.headers.get("CF-Connecting-IP") or "").strip()
+    if cf_ip and is_valid_ip_literal(cf_ip):
+        if mode in ("always", "cloudflare", "cf") or is_cloudflare_ip(peer_ip) or is_cloudflare_ip(rightmost_fwd):
+            return cf_ip
+
+    if rightmost_fwd:
+        return rightmost_fwd
 
     real_ip = (target_req.headers.get("X-Real-IP") or "").strip()
     if is_valid_ip_literal(real_ip):

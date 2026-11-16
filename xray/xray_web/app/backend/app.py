@@ -1,8 +1,14 @@
 import base64
 import io
+import mimetypes
 import os
 import random
 import sys
+
+mimetypes.add_type("application/javascript", ".js")
+mimetypes.add_type("application/javascript", ".mjs")
+mimetypes.add_type("text/css", ".css")
+mimetypes.add_type("image/svg+xml", ".svg")
 
 import qrcode
 import qrcode.image.svg
@@ -64,6 +70,44 @@ app.register_blueprint(setup_bp)
 init_db()
 
 
+def _no_cache_html_response(response):
+    response.headers['Cache-Control'] = 'private, no-cache, no-store, must-revalidate, max-age=0'
+    response.headers['CDN-Cache-Control'] = 'no-store'
+    response.headers['Cloudflare-CDN-Cache-Control'] = 'no-store'
+    response.headers['Pragma'] = 'no-cache'
+    response.headers['Expires'] = '0'
+    return response
+
+
+@app.after_request
+def add_cdn_safe_headers(response):
+    path = request.path or ''
+    if path.startswith('/api/'):
+        response.headers.setdefault('Cache-Control', 'private, no-store, max-age=0')
+        response.headers.setdefault('CDN-Cache-Control', 'no-store')
+        response.headers.setdefault('Cloudflare-CDN-Cache-Control', 'no-store')
+    elif path.startswith('/assets/'):
+        if response.status_code == 200:
+            response.headers.setdefault('Cache-Control', 'public, max-age=2592000, immutable')
+        else:
+            response.headers['Cache-Control'] = 'no-store'
+            response.headers['CDN-Cache-Control'] = 'no-store'
+        response.headers.setdefault('X-Content-Type-Options', 'nosniff')
+    return response
+
+
+@app.errorhandler(404)
+def spa_or_api_not_found(_err):
+    path = request.path or ''
+    if path.startswith('/api/') or path.startswith('/assets/') or Config.SEPARATE_FRONTEND:
+        resp = jsonify({"code": 404, "msg": "Not Found"})
+        resp.status_code = 404
+        resp.headers['Cache-Control'] = 'no-store'
+        resp.headers['CDN-Cache-Control'] = 'no-store'
+        return resp
+    return _no_cache_html_response(send_from_directory(app.static_folder, 'index.html'))
+
+
 @app.route('/healthz', methods=['GET'])
 def health_check():
     """轻量健康探测接口，供 Docker HEALTHCHECK 及 Nginx / K8s 探针秒级检测"""
@@ -79,11 +123,7 @@ def index():
             "separate_frontend": True,
             "health": "/healthz",
         })
-    response = send_from_directory(app.static_folder, 'index.html')
-    response.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate, max-age=0'
-    response.headers['Pragma'] = 'no-cache'
-    response.headers['Expires'] = '0'
-    return response
+    return _no_cache_html_response(send_from_directory(app.static_folder, 'index.html'))
 
 
 @app.route('/api/qrcode', methods=['GET'])

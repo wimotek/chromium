@@ -3,7 +3,7 @@
 基于 **Xray-core (VLESS-REALITY-Vision / WSS 反向打洞隧道)** 打造的高性能分布式节点管理与商业化运营中枢。
 
 系统采用 **Master-Agent（主控中心 - 边缘工作节点）彻底解耦架构**：
-* **`xray_web` (主控端)**：轻量化 Web 管理面板（**`dumb-init + gosu` Root-Init-Drop 安全降权架构**，业务层以非 Root `UID 10001` 运行，Granian 原生支持 IPv4+IPv6 双栈 HTTPS，支持自由修改 `WEB_PORT` 与 `-p 3000:8443` 端口映射智能识别），内置官方 **`wimotek-edge-agent >= 1.0.17`** 零信任安全引擎，负责用户生命周期、数据库备份恢复、卡密核销、邮件通知、聚合订阅下发、单次防重放 Join Token 签发与审计流水；
+* **`xray_web` (主控端)**：轻量化 Web 管理面板（**Cython 原生 `.so` 二进制闭源编译 + `python:3.11-slim` 预编译轮子多阶段构建 + `dumb-init + gosu` Root-Init-Drop 安全降权架构**，业务层以非 Root `UID 10001` 运行，Granian 原生支持 IPv4+IPv6 双栈 HTTPS，支持自由修改 `WEB_PORT` 与 `-p 3000:8443` 端口映射智能识别），内置官方 **`wimotek-edge-agent >= 1.0.17`** 零信任安全引擎，负责用户生命周期、数据库备份恢复、卡密核销、邮件通知、聚合订阅下发、单次防重放 Join Token 签发与审计流水；
 * **`xray_core` (节点端)**：极致精简的纯 Python 异步守护镜像（Alpine 多阶段构建 + 非 Root `UID 10001` + `dumb-init` 信号链 + 仅回环 `/healthz` 健康探针），部署于任意海外 VPS 或家庭内网主机，专注高速 REALITY 代理与反向穿透。
 
 ---
@@ -275,18 +275,23 @@ server {
     gzip_min_length 1024;
     gzip_types text/plain text/css application/javascript application/json image/svg+xml;
 
-    # 静态资源长缓存（index.html 不缓存以确保发版即时生效）
+    # 静态资源长缓存（index.html 禁止浏览器与 Cloudflare CDN 缓存，确保发版即时生效）
     location = /index.html {
-        add_header Cache-Control "no-cache, no-store, must-revalidate";
+        add_header Cache-Control "private, no-cache, no-store, must-revalidate";
+        add_header CDN-Cache-Control "no-store";
+        add_header Cloudflare-CDN-Cache-Control "no-store";
     }
     location /assets/ {
         expires 30d;
         add_header Cache-Control "public, immutable";
     }
 
-    # SPA 前端路由兜底
+    # SPA 前端路由兜底（非真实静态文件走 index.html，同样禁止 CDN 缓存）
     location / {
         try_files $uri $uri/ /index.html;
+        add_header Cache-Control "private, no-cache, must-revalidate";
+        add_header CDN-Cache-Control "no-store";
+        add_header Cloudflare-CDN-Cache-Control "no-store";
     }
 
     # 登录/注册/发信/卡密敏感接口加强防刷

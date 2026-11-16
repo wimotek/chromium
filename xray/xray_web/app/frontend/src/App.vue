@@ -16,15 +16,20 @@
     </header>
 
     <main class="main-body">
+      <!-- 加载态 -->
+      <div v-if="systemLoading" class="boot-loading-panel">
+        ⚡ 正在初始化控制台环境...
+      </div>
+
       <!-- 0. 首次运行安装向导 -->
       <SetupWizard
-        v-if="setupRequired"
+        v-else-if="setupRequired"
         @completed="onSetupCompleted"
       />
 
       <!-- 1. 未登录：认证模块 -->
       <AuthView
-        v-else-if="!systemLoading && !currentUser.username"
+        v-else-if="!currentUser.username"
         :systemNotice="systemNotice"
         :isPureAdmin="isPureAdmin"
         @login-success="onLoginSuccess"
@@ -143,7 +148,7 @@ const adminNodes = ref([])
 
 const fetchSystemInfo = async () => {
   try {
-    const res = await axios.get('/api/system/info')
+    const res = await axios.get('/api/system/info', { timeout: 15000 })
     const d = res.data?.data || {}
     setupRequired.value = Boolean(d.setup_required)
     isPureAdmin.value = d.mode === 'admin'
@@ -213,7 +218,7 @@ const onLoginSuccess = ({ user, password }) => {
 // 核心修复：更新内存同时同步覆写 localStorage，杜绝 F5 还原
 const refreshUserInfo = async () => {
   try {
-    const res = await axios.post('/api/user/refresh_info', { username: currentUser.username })
+    const res = await axios.post('/api/user/refresh_info', { username: currentUser.username }, { timeout: 15000 })
     if (res.data.code === 200) {
       Object.assign(currentUser, res.data.data)
       const session = JSON.parse(localStorage.getItem('xray_auth_session') || '{}')
@@ -347,6 +352,16 @@ const logout = () => {
   margin: 20px auto;
   padding: 0 12px;
   box-sizing: border-box;
+}
+.boot-loading-panel {
+  min-height: 50vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #38bdf8;
+  font-size: 15px;
+  font-weight: 700;
+  letter-spacing: 1px;
 }
 .dashboard-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
 .col-span-2 { grid-column: span 2; }

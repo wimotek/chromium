@@ -6,3 +6,4 @@ import App from './App.vue'
 const app = createApp(App)
 app.use(ElementPlus)
 app.mount('#app')
+window.__xrayAppMounted = true

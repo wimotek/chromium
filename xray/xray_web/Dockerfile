@@ -1,5 +1,5 @@
 # ==============================================================================
-# 阶段 1：编译 Vue 3 前端静态资产 (Multi-Platform Build Kit)
+# 阶段 1：编译 Vue 3 前端静态资产 (原生构建平台，无 QEMU 模拟损耗)
 # ==============================================================================
 FROM --platform=$BUILDPLATFORM node:20-alpine AS frontend-builder
 WORKDIR /build
@@ -11,46 +11,61 @@ COPY app/frontend/ ./
 RUN npm run build
 
 # ==============================================================================
-# 阶段 2：提前编译/打包 Python Wheel 二进制轮子 (Builder 阶段)
-# 彻底隔离编译依赖 (gcc, libffi, openssl-dev)，不在最终生产镜像中留下任何残留
+# 阶段 2：构建依赖 Wheel 缓存 (python:3.11-slim manylinux 预编译轮子，免去 Rust/Cargo 编译)
 # ==============================================================================
-FROM python:3.11-alpine AS python-builder
+FROM python:3.11-slim AS python-builder
 WORKDIR /wheels
 
-# 安装预编译所需工具
-RUN apk add --no-cache gcc musl-dev libffi-dev openssl-dev cargo
-
-# 关键：升级 pip 以识别 musllinux wheel
-RUN pip install --no-cache-dir --upgrade pip
-
 COPY app/backend/requirements.txt .
-# 预先下载并编译所有依赖为独立 wheel 轮子文件
-RUN pip wheel --no-cache-dir --wheel-dir=/wheels -r requirements.txt
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip wheel --no-cache-dir --wheel-dir=/wheels -r requirements.txt
 
 # ==============================================================================
-# 阶段 3：极致轻量化生产运行镜像 (Final Slim Image)
+# 阶段 3：Cython 编译 Hub 后端全部业务源码为原生 ELF .so 二进制并剥离源码与符号
 # ==============================================================================
-FROM python:3.11-alpine AS runner
+FROM python:3.11-slim AS backend-builder
+WORKDIR /build/backend
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends gcc python3-dev binutils && \
+    rm -rf /var/lib/apt/lists/* && \
+    pip install --no-cache-dir "cython>=3.0,<3.2" setuptools
+
+RUN --mount=type=bind,from=python-builder,source=/wheels,target=/wheels \
+    pip install --no-cache-dir --no-index --find-links=/wheels /wheels/*.whl
+
+COPY app/backend/ ./
+RUN python3 build_binary.py && \
+    chmod 755 /build/backend/entrypoint.sh && \
+    python3 -c "import os, shutil, tempfile; d=tempfile.mkdtemp(); os.environ['DB_PATH']=os.path.join(d,'t.db'); os.environ['HUB_CONFIG_PATH']=os.path.join(d,'hub.json'); import app, config, core.cache, core.rate_limit, core.captcha, core.db, core.cert_init, routes; assert hasattr(app, 'app'); shutil.rmtree(d, ignore_errors=True)"
+
+# ==============================================================================
+# 阶段 4：极致精简非 Root 闭源运行镜像 (零 .py 业务源码，零编译工具链残留)
+# ==============================================================================
+FROM python:3.11-slim AS runner
 WORKDIR /app
 
 LABEL maintainer="Wimotek <i@Wimotek.com>"
-LABEL description="Xray-Web Master Control Hub (Optimized & Precompiled)"
+LABEL description="Xray-Web Master Control Hub (Compiled Cython Binaries & Multi-Arch)"
 
-# 仅安装生产必须的运行时动态链接库 (dumb-init + gosu 实现 Root-Init-Drop 安全降权，libcap 支持非 root 绑定 443)
-RUN apk add --no-cache ca-certificates tzdata openssl dumb-init gosu libcap
-
-# adduser 与 mkdir/chown 逻辑相关，合并成一层是合理的 (包含持久化 /data /data/backups 与运行期证书目录 /app/certs)
-RUN addgroup -g 10001 -S appgroup && \
-    adduser -u 10001 -S -G appgroup -s /sbin/nologin appuser && \
+# 安装最小化运行时工具：ca-certificates、tzdata、openssl、dumb-init、gosu(安全降权)、libcap2-bin(非root绑定443)
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends ca-certificates tzdata openssl dumb-init gosu libcap2-bin && \
+    ln -snf /usr/share/zoneinfo/Asia/Shanghai /etc/localtime && \
+    echo Asia/Shanghai > /etc/timezone && \
+    rm -rf /var/lib/apt/lists/* && \
+    groupadd -g 10001 -r appgroup && \
+    useradd -u 10001 -r -g appgroup -s /usr/sbin/nologin appuser && \
     mkdir -p /data /data/backups /app/certs && \
     chown -R appuser:appgroup /data /app/certs && \
     setcap 'cap_net_bind_service=+ep' "$(readlink -f "$(which python3)")"
 
-# 关键：bind mount，wheels 不进入任何层
+# 关键：bind mount，wheels 不进入任何镜像层
 RUN --mount=type=bind,from=python-builder,source=/wheels,target=/wheels \
     pip install --no-cache-dir --no-index --find-links=/wheels /wheels/*.whl
 
-COPY --chown=appuser:appgroup --chmod=755 app/backend/ ./backend/
+# 仅拷贝已编译且 strip 的 .so 原生模块与前端构建产物，不含任何业务源码与 gcc/cython
+COPY --chown=appuser:appgroup --chmod=755 --from=backend-builder /build/backend/ ./backend/
 COPY --chown=appuser:appgroup --from=frontend-builder /build/dist ./frontend/dist
 
 WORKDIR /app/backend
@@ -59,16 +74,12 @@ ENV TZ=Asia/Shanghai \
     PYTHONDONTWRITEBYTECODE=1 \
     WEB_PORT=8443
 
-# 注：不静态固定 USER appuser，而是由 dumb-init + entrypoint.sh (Root-Init) 读取宝塔/外部 0600 证书并修复 /data 权限后，
-# 再通过 gosu appuser:appgroup 不可逆降权为 UID 10001 运行 Granian！
-
-# EXPOSE 为镜像默认元数据声明（默认 8443，支持 -e WEB_PORT=自定义端口 或 -p 3000:8443 端口映射）
 EXPOSE 8443
 VOLUME ["/data"]
 
-# 容器健康检查：动态探测 ${WEB_PORT}/healthz（自动适配 SEPARATE_FRONTEND=true 纯 HTTP 与原生 HTTPS 双模式）
+# 容器健康检查：使用 Python 标准库动态探测 ${WEB_PORT}/healthz（兼容 SEPARATE_FRONTEND=true 与原生 HTTPS）
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
-    CMD sh -c 'case "$(printf "%s" "${SEPARATE_FRONTEND:-false}" | tr "[:upper:]" "[:lower:]")" in true|1|yes) wget -q --spider "http://127.0.0.1:${WEB_PORT:-8443}/healthz" ;; *) wget --no-check-certificate -q --spider "https://127.0.0.1:${WEB_PORT:-8443}/healthz" ;; esac'
+    CMD python3 -c "import os,ssl,urllib.request; sep=os.getenv('SEPARATE_FRONTEND','').lower() in ('true','1','yes'); port=os.getenv('WEB_PORT','8443'); url=f'{\"http\" if sep else \"https\"}://127.0.0.1:{port}/healthz'; ctx=None if sep else ssl._create_unverified_context(); urllib.request.urlopen(url, timeout=4, context=ctx).read()"
 
 # 关键：dumb-init (PID 1 信号转发) -> entrypoint.sh (Root-Init-Drop 证书与权限初始化) -> gosu appuser
 ENTRYPOINT ["/usr/bin/dumb-init", "--", "/app/backend/entrypoint.sh"]

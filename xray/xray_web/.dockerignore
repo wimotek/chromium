@@ -12,11 +12,15 @@ app/frontend/node_modules
 app/frontend/dist
 dist
 
-# 忽略 Python 缓存与本地虚拟环境
+# 忽略 Python 缓存、本地编译产物与虚拟环境
 __pycache__
+**/__pycache__
 *.pyc
 *.pyo
 *.pyd
+*.c
+app/backend/**/*.so
+app/backend/build
 venv
 .venv
 env
