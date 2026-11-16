@@ -10,7 +10,7 @@ COPY app/frontend/package.json ./
 RUN npm install --no-audit --no-fund
 
 COPY app/frontend/ ./
-RUN npm run build
+RUN npm run build >/tmp/vite.log 2>&1 && cat /tmp/vite.log || { cat /tmp/vite.log; ls -la /build/src /build/src/components /build/src/components/admin /build/src/components/common 2>/dev/null || true; echo "=== VITE ERROR SUMMARY ==="; grep -vE '^[[:space:]]*at ' /tmp/vite.log | tail -n 8; exit 1; }
 
 # ==============================================================================
 # 阶段 2：构建依赖 Wheel 缓存 (python:3.11-slim manylinux 预编译轮子，免去 Rust/Cargo 编译)
