@@ -1,7 +1,7 @@
 # ==============================================================================
-# 阶段 1：编译 Vue 3 前端静态资产 (原生 glibc 构建平台，避免 Alpine musl 原生包缺失)
+# 阶段 1：编译 Vue 3 前端静态资产 (Node 22 LTS + 原生 glibc 构建平台，满足 @vueuse/core@15+ 的 Node>=22 要求并避免 Alpine musl 原生包缺失)
 # ==============================================================================
-FROM --platform=$BUILDPLATFORM node:20-slim AS frontend-builder
+FROM --platform=$BUILDPLATFORM node:22-slim AS frontend-builder
 WORKDIR /build
 
 ENV NODE_OPTIONS="--max-old-space-size=2048"
