@@ -40,7 +40,7 @@ if [ "$(id -u)" = "0" ]; then
     if [ "${IS_SEPARATED}" -eq 0 ]; then
         mkdir -p /app/certs
         chown -R appuser:appgroup /app/certs
-        python3 -m core.cert_init
+        python3 -c 'import sys; from core.cert_init import main; sys.exit(main())'
         chown -R appuser:appgroup /app/certs /data
     else
         echo "==> [Sep Mode] SEPARATE_FRONTEND=true：已跳过容器内 TLS 证书初始化，证书与静态资源交由 Nginx 负责"
@@ -49,7 +49,7 @@ else
     mkdir -p /data/backups 2>/dev/null || true
     if [ "${IS_SEPARATED}" -eq 0 ]; then
         mkdir -p /app/certs 2>/dev/null || true
-        python3 -m core.cert_init
+        python3 -c 'import sys; from core.cert_init import main; sys.exit(main())'
     else
         echo "==> [Sep Mode] SEPARATE_FRONTEND=true：已跳过容器内 TLS 证书初始化，证书与静态资源交由 Nginx 负责"
     fi
