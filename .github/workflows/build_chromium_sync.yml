@@ -1,30 +1,106 @@
-name: Build and Push Sync Docker Image
+name: Build and Push Sync Docker Image (Binary)
 
 on:
   push:
-    branches: [ "main" ]
+    branches: [ "main", "master" ]
     paths:
-      - 'chromium/chromium_sync/**'
+      - "chromium/chromium_sync/**"
+      - ".github/workflows/build_chromium_sync.yml"
+    tags:
+      - "sync-v*"
   workflow_dispatch:
+    inputs:
+      platforms:
+        description: "Target architectures (comma-separated)"
+        required: true
+        type: string
+        default: "linux/amd64,linux/arm64"
+      extra_tag:
+        description: "Optional additional tag (e.g. sync-v1.0.0)"
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+  packages: write
 
 env:
   WORKING_DIR: ./chromium/chromium_sync
 
 jobs:
   build-and-push:
+    name: Build & Push Sync Binary Image (Docker Hub + GHCR)
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
 
     steps:
       - name: 检出仓库代码
         uses: actions/checkout@v4
 
+      - name: 构建前语法与脚本检查
+        run: |
+          bash -n ${{ env.WORKING_DIR }}/entrypoint.sh
+          python3 -m py_compile \
+            ${{ env.WORKING_DIR }}/app/backend/*.py \
+            ${{ env.WORKING_DIR }}/app/backend/core/*.py \
+            ${{ env.WORKING_DIR }}/app/backend/services/*.py \
+            ${{ env.WORKING_DIR }}/app/backend/routers/*.py
+
+      - name: 设置 QEMU
+        uses: docker/setup-qemu-action@v3
+
       - name: 设置 Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      # 登录到 GitHub Container Registry (GHCR)
+      - name: 准备镜像标签与目标架构
+        id: meta
+        env:
+          DOCKERHUB_TOKEN_VAL: ${{ secrets.DOCKERHUB_TOKEN }}
+          DOCKERHUB_USER_VAL: ${{ secrets.DOCKERHUB_USERNAME }}
+          INPUT_PLATFORMS: ${{ inputs.platforms }}
+          INPUT_EXTRA_TAG: ${{ inputs.extra_tag }}
+        run: |
+          OWNER_LC="$(printf '%s' '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')"
+          GHCR_REPO="ghcr.io/${OWNER_LC}/chromium"
+          DOCKERHUB_USER="${DOCKERHUB_USER_VAL:-wimotek}"
+          DOCKERHUB_REPO="${DOCKERHUB_USER}/chromium"
+          SHORT_SHA="${GITHUB_SHA::7}"
+
+          PLATFORMS="${INPUT_PLATFORMS:-linux/amd64,linux/arm64}"
+
+          EXTRA_VER=""
+          if [[ "${{ github.ref }}" == refs/tags/sync-v* ]]; then
+            EXTRA_VER="${{ github.ref_name }}"
+          elif [[ -n "${INPUT_EXTRA_TAG// /}" ]]; then
+            EXTRA_VER="${INPUT_EXTRA_TAG// /}"
+          fi
+
+          TAGS="${GHCR_REPO}:sync"$'\n'"${GHCR_REPO}:sync-sha-${SHORT_SHA}"
+          if [[ -n "$EXTRA_VER" ]]; then
+            TAGS="${TAGS}"$'\n'"${GHCR_REPO}:${EXTRA_VER}"
+          fi
+
+          if [[ -n "$DOCKERHUB_TOKEN_VAL" ]]; then
+            DOCKERHUB_ENABLED="true"
+            TAGS="${TAGS}"$'\n'"${DOCKERHUB_REPO}:sync"
+            if [[ -n "$EXTRA_VER" ]]; then
+              TAGS="${TAGS}"$'\n'"${DOCKERHUB_REPO}:${EXTRA_VER}"
+            fi
+          else
+            DOCKERHUB_ENABLED="false"
+            echo "::warning::未配置 DOCKERHUB_TOKEN Secret，本次仅推送 GHCR (${GHCR_REPO}:sync)"
+          fi
+
+          {
+            echo "tags<<EOF"
+            echo "$TAGS"
+            echo "EOF"
+            echo "platforms=${PLATFORMS}"
+            echo "ghcr_image=${GHCR_REPO}:sync"
+            echo "dockerhub_image=${DOCKERHUB_REPO}:sync"
+            echo "dockerhub_enabled=${DOCKERHUB_ENABLED}"
+          } >> "$GITHUB_OUTPUT"
+
       - name: 登录到 GHCR
         uses: docker/login-action@v3
         with:
@@ -32,22 +108,45 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # 登录到 Docker Hub
       - name: 登录到 Docker Hub
+        if: steps.meta.outputs.dockerhub_enabled == 'true'
         uses: docker/login-action@v3
         with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          username: ${{ secrets.DOCKERHUB_USERNAME || 'wimotek' }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      # 构建并推送到两个镜像仓库
-      - name: 编译并推送到 GHCR 和 Docker Hub
+      - name: 编译并推送闭源二进制 Sync 镜像
         uses: docker/build-push-action@v6
         with:
           context: ${{ env.WORKING_DIR }}
           file: ${{ env.WORKING_DIR }}/Dockerfile
+          platforms: ${{ steps.meta.outputs.platforms }}
           push: true
-          tags: |
-            ghcr.io/wimotek/chromium:sync
-            ${{ secrets.DOCKERHUB_USERNAME }}/chromium:sync
+          tags: ${{ steps.meta.outputs.tags }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+          labels: |
+            org.opencontainers.image.title=Chromium Sync Hub (Binary)
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+
+      - name: 校验 linux/amd64 二进制运行时镜像与无源码残留
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ env.WORKING_DIR }}
+          file: ${{ env.WORKING_DIR }}/Dockerfile
+          platforms: linux/amd64
+          load: true
+          tags: sync-binary-verify:local
+          cache-from: type=gha
+
+      - name: 执行容器内二进制自检
+        run: |
+          docker run --rm --entrypoint sh sync-binary-verify:local -c '
+            set -e
+            PY_LEFT=$(find /app/backend -type f \( -name "*.py" -o -name "*.pyc" -o -name "*.c" -o -name "*.pyx" \) | wc -l)
+            echo "Backend source/intermediate files found: ${PY_LEFT}"
+            test "${PY_LEFT}" = "0"
+            test -x /app/backend/chromium-sync
+            DATA_DIR=/tmp/verify_sync /app/backend/chromium-sync --self-test
+          '

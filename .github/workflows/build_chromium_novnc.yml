@@ -1,21 +1,26 @@
-name: Build and Push noVNC Edition
+name: Build and Push noVNC Edition (Binary)
 
 on:
   push:
     branches: [ "main", "master" ]
     paths:
-      - 'chromium/chromium_novnc/**'
-      - '.github/workflows/build_chromium_novnc.yml'
-      - 'chromium/common/**'
-    tags: [ 'v*.*.*' ]
+      - "chromium/chromium_novnc/**"
+      - ".github/workflows/build_chromium_novnc.yml"
+      - "chromium/common/**"
+    tags: [ "v*.*.*" ]
   workflow_dispatch:
+    inputs:
+      platforms:
+        description: "Target architectures (comma-separated)"
+        required: true
+        type: string
+        default: "linux/amd64,linux/arm64"
 
 permissions:
   contents: read
   packages: write
 
 env:
-  IMAGE_NAME: ${{ secrets.DOCKERHUB_USERNAME }}/chromium
   WORKING_DIR: ./chromium/chromium_novnc
 
 jobs:
@@ -25,10 +30,14 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Prepare common client
+      - name: Prepare common client & pre-build checks
         run: |
           cp chromium/common/edge_node_client.py chromium/chromium_novnc/edge_node_client.py
+          cp chromium/common/build_edge_binary.py chromium/chromium_novnc/build_edge_binary.py
+          rm -rf chromium/chromium_novnc/desktop
           cp -r chromium/common/desktop chromium/chromium_novnc/desktop
+          bash -n chromium/chromium_novnc/entrypoint.sh
+          python3 -m py_compile chromium/common/edge_node_client.py chromium/common/build_edge_binary.py
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -36,11 +45,49 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Log in to Docker Hub
-        uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - name: Prepare image tags and targets
+        id: meta
+        env:
+          DOCKERHUB_TOKEN_VAL: ${{ secrets.DOCKERHUB_TOKEN }}
+          DOCKERHUB_USER_VAL: ${{ secrets.DOCKERHUB_USERNAME }}
+          INPUT_PLATFORMS: ${{ inputs.platforms }}
+        run: |
+          OWNER_LC="$(printf '%s' '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')"
+          GHCR_REPO="ghcr.io/${OWNER_LC}/chromium"
+          DOCKERHUB_USER="${DOCKERHUB_USER_VAL:-wimotek}"
+          DOCKERHUB_REPO="${DOCKERHUB_USER}/chromium"
+          PLATFORMS="${INPUT_PLATFORMS:-linux/amd64,linux/arm64}"
+
+          EXTRA_VER=""
+          if [[ "${{ github.ref }}" == refs/tags/v* ]]; then
+            EXTRA_VER="${{ github.ref_name }}"
+            EXTRA_VER="${EXTRA_VER#v}"
+          fi
+
+          TAGS="${GHCR_REPO}:latest"$'\n'"${GHCR_REPO}:novnc"
+          if [[ -n "$EXTRA_VER" ]]; then
+            TAGS="${TAGS}"$'\n'"${GHCR_REPO}:${EXTRA_VER}-novnc"
+          fi
+
+          if [[ -n "$DOCKERHUB_TOKEN_VAL" ]]; then
+            DOCKERHUB_ENABLED="true"
+            TAGS="${TAGS}"$'\n'"${DOCKERHUB_REPO}:latest"$'\n'"${DOCKERHUB_REPO}:novnc"
+            if [[ -n "$EXTRA_VER" ]]; then
+              TAGS="${TAGS}"$'\n'"${DOCKERHUB_REPO}:${EXTRA_VER}-novnc"
+            fi
+          else
+            DOCKERHUB_ENABLED="false"
+            echo "::warning::未配置 DOCKERHUB_TOKEN Secret，本次仅推送 GHCR (${GHCR_REPO}:novnc)"
+          fi
+
+          {
+            echo "tags<<EOF"
+            echo "$TAGS"
+            echo "EOF"
+            echo "platforms=${PLATFORMS}"
+            echo "dockerhub_repo=${DOCKERHUB_REPO}"
+            echo "dockerhub_enabled=${DOCKERHUB_ENABLED}"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Log in to GHCR
         uses: docker/login-action@v3
@@ -49,34 +96,56 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Extract metadata
-        id: meta
-        uses: docker/metadata-action@v5
+      - name: Log in to Docker Hub
+        if: steps.meta.outputs.dockerhub_enabled == 'true'
+        uses: docker/login-action@v3
         with:
-          images: |
-            ${{ env.IMAGE_NAME }}
-            ghcr.io/${{ github.repository_owner }}/chromium
-          tags: |
-            type=raw,value=latest
-            type=raw,value=novnc
-            type=semver,pattern={{version}}-novnc
+          username: ${{ secrets.DOCKERHUB_USERNAME || 'wimotek' }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Build and push noVNC
         uses: docker/build-push-action@v6
         with:
           context: ${{ env.WORKING_DIR }}
-          platforms: linux/amd64,linux/arm64
+          file: ${{ env.WORKING_DIR }}/Dockerfile
+          platforms: ${{ steps.meta.outputs.platforms }}
           push: true
           tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+          labels: |
+            org.opencontainers.image.title=Chromium noVNC Edge Node (Binary)
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+
+      - name: Verify built linux/amd64 image contains compiled edge binary only
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ env.WORKING_DIR }}
+          file: ${{ env.WORKING_DIR }}/Dockerfile
+          platforms: linux/amd64
+          load: true
+          tags: novnc-binary-verify:local
+          cache-from: type=gha
+
+      - name: Assert edge binary self-test & no source leak
+        run: |
+          docker run --rm --entrypoint sh novnc-binary-verify:local -c '
+            set -e
+            test ! -f /opt/edge_node_client.py
+            PY_LEFT=$(find /opt -maxdepth 1 -type f \( -name "*.py" -o -name "*.pyc" -o -name "*.pyx" -o -name "*.c" \) | wc -l)
+            echo "Edge /opt source/intermediate files found: ${PY_LEFT}"
+            test "${PY_LEFT}" = "0"
+            test -x /opt/edge-node-client
+            /opt/edge-node-client --self-test
+          '
 
       - name: Update Docker Hub Description
+        if: steps.meta.outputs.dockerhub_enabled == 'true'
         uses: peter-evans/dockerhub-description@v4
         with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          username: ${{ secrets.DOCKERHUB_USERNAME || 'wimotek' }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
-          repository: ${{ env.IMAGE_NAME }}
+          repository: ${{ steps.meta.outputs.dockerhub_repo }}
           readme-filepath: ${{ env.WORKING_DIR }}/README.md
           short-description: "Minimal Chromium with KasmVNC/noVNC, CDP, and Clipboard sync"
