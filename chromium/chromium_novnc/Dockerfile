@@ -121,6 +121,7 @@ RUN IME_PKGS=""; \
     openssl \
     ca-certificates \
     python3 \
+    libpython3.11 \
     $IME_PKGS \
     && echo "zh_CN.UTF-8 UTF-8" > /etc/locale.gen \
     && echo "en_US.UTF-8 UTF-8" >> /etc/locale.gen \

@@ -108,6 +108,7 @@ RUN IME_PKGS=""; \
     openssl \
     ca-certificates \
     python3 \
+    libpython3.11 \
     libxcomposite1 \
     libxfixes3 \
     libxrandr2 \

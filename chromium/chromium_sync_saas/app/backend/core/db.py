@@ -353,11 +353,16 @@ def _ensure_schema_migrations(engine):
         },
     }
     existing_tables = set(inspector.get_table_names())
+    existing_cols_by_table = {
+        tbl: {c["name"] for c in inspector.get_columns(tbl)}
+        for tbl in pending_alters
+        if tbl in existing_tables
+    }
     with engine.begin() as conn:
         for tbl, cols in pending_alters.items():
             if tbl not in existing_tables:
                 continue
-            existing_cols = {c["name"] for c in inspector.get_columns(tbl)}
+            existing_cols = existing_cols_by_table.get(tbl, set())
             for col_name, col_def in cols.items():
                 if col_name not in existing_cols:
                     try:
