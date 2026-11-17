@@ -33,7 +33,6 @@ SSL_CERT_FILE = os.path.join(CERTS_DIR, "fullchain.pem")
 SSL_KEY_FILE = os.path.join(CERTS_DIR, "privkey.pem")
 
 # 数据库与缓存配置 (可通过环境变量覆盖，也可由首次安装向导写入 bootstrap.json)
-SKIP_SETUP_WIZARD = os.getenv("SKIP_SETUP_WIZARD", "false").strip().lower() in {"1", "true", "yes", "on"}
 DEFAULT_DB_TYPE = (os.getenv("DB_TYPE") or "sqlite").strip().lower()
 DEFAULT_DATABASE_URL = (os.getenv("DATABASE_URL") or "").strip()
 DEFAULT_MYSQL_HOST = (os.getenv("MYSQL_HOST") or "127.0.0.1").strip()
@@ -206,16 +205,10 @@ def resolve_hub_access_info(request) -> dict:
     }
 
 
-# 管理员初始凭据 (未设置默认: admin / 123456)
-INIT_USERNAME = (os.getenv("ADMIN_INIT_USER") or "admin").strip()
-INIT_PASSWORD = (os.getenv("ADMIN_INIT_PASS") or "123456").strip()
-
 logger.info(
     f"🌐 [Hub 服务端口] 内部监听 {HUB_HOST}:{HUB_PORT}"
     + (f" | 声明对外端口 {HUB_EXTERNAL_PORT}" if HUB_EXTERNAL_PORT else " | 对外端口自动跟随 Host/Proxy 请求头")
 )
-logger.info(f"🔑 [管理员初始凭据] 初始账号: {INIT_USERNAME} | 初始密码: {INIT_PASSWORD}")
-logger.info("💡 提示：若此前已在管理控制台修改过密码，则以数据库持久化的最新密码为准。")
 
 # =========================================================================
 # 1. 动态加载通用 SSH 隧道引擎 (wimotek-ssh-tunnel)

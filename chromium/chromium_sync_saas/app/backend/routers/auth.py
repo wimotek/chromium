@@ -211,6 +211,8 @@ def public_register(data: RegisterDTO, request: Request):
 
 @router.post("/api/login", summary="多租户账号密码 + 验证码登录")
 def login(data: LoginDTO, req: Request):
+    if is_setup_required():
+        raise HTTPException(status_code=403, detail="系统尚未完成初始化安装，请先引导管理员完成安装向导")
     ip = get_client_ip(req)
     uname = (data.username or "").strip()
     user_scope_key = f"{ip}:{uname[:64]}"

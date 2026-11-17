@@ -11,7 +11,6 @@ from config import (
     DEFAULT_MYSQL_PORT,
     DEFAULT_MYSQL_USER,
     HUB_PORT,
-    SKIP_SETUP_WIZARD,
     apply_hub_network_overrides,
     logger,
 )
@@ -80,7 +79,6 @@ def get_setup_status():
     cache_status = cache_mgr.get_status()
     return {
         "setup_required": is_setup_required(),
-        "skip_wizard": SKIP_SETUP_WIZARD,
         "db_type": db_info.get("db_type", "sqlite"),
         "cache_backend": cache_status.get("active_backend", "sqlite_cache"),
         "defaults": {

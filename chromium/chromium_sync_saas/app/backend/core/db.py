@@ -22,13 +22,10 @@ from config import (
     DEFAULT_MYSQL_PASSWORD,
     DEFAULT_MYSQL_PORT,
     DEFAULT_MYSQL_USER,
-    INIT_PASSWORD,
-    INIT_USERNAME,
     SAAS_ALLOW_PUBLIC_REGISTER,
     SAAS_ALLOW_SELF_RECHARGE,
     SAAS_DEFAULT_PLATFORM_FEE_BPS,
     SAAS_WELCOME_BONUS_UNITS,
-    SKIP_SETUP_WIZARD,
     logger,
 )
 from core.cache import cache_mgr
@@ -381,73 +378,84 @@ def _ensure_schema_migrations(engine):
                 logger.debug(f"下线历史直连/SSH节点跳过: {exc}")
 
 
-def init_db_and_jwt(cfg: Optional[Dict[str, Any]] = None, mark_setup_completed: Optional[bool] = None):
+def create_or_update_initial_admin(db: Session, username: str, raw_password: str) -> User:
     from core.security import hash_password
 
+    default_plan = db.query(Plan).filter(Plan.is_default == 1).first() or db.query(Plan).order_by(Plan.id.asc()).first()
+    ent_plan = db.query(Plan).filter(Plan.code == "enterprise").first() or default_plan
+    default_plan_id = ent_plan.id if ent_plan else 1
+    default_level = db.query(UserLevel).order_by(UserLevel.rank_order.asc()).first()
+    default_level_id = default_level.id if default_level else 1
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    admin_user = db.query(User).filter(User.role == "admin").order_by(User.id.asc()).first()
+    if admin_user is not None:
+        admin_user.username = username
+        admin_user.password_hash = hash_password(raw_password)
+        db.flush()
+        return admin_user
+
+    admin_user = User(
+        username=username,
+        email=f"{username}@local.saas",
+        password_hash=hash_password(raw_password),
+        role="admin",
+        status="active",
+        plan_id=default_plan_id,
+        level_id=default_level_id,
+        balance_units=1000000,  # 初始运营管理员测试钱包 100.00 元
+        total_recharged_units=1000000,
+        api_key=issue_user_api_key(),
+        cluster_join_token=issue_user_join_token(),
+        created_at=now_str,
+    )
+    db.add(admin_user)
+    db.flush()
+    db.add(
+        BillingLedger(
+            user_id=admin_user.id,
+            tx_type="welcome_bonus",
+            amount_units=1000000,
+            balance_after_units=1000000,
+            platform_spread_units=0,
+            remark="SaaS 平台管理员初始化授信余额",
+            created_at=now_str,
+        )
+    )
+    db.add(
+        SyncPolicy(
+            owner_id=admin_user.id,
+            name="我的自有节点智能双向合并",
+            enabled=1,
+            interval_minutes=15,
+            sync_type="smart_merge",
+            source_type="all",
+            source_id=0,
+            source_group="",
+            target_type="all",
+            target_ids="[]",
+            target_group="",
+            created_at=now_str,
+        )
+    )
+    db.flush()
+    return admin_user
+
+
+def init_db_and_jwt(cfg: Optional[Dict[str, Any]] = None, mark_setup_completed: Optional[bool] = None):
     engine = init_engine(cfg)
     Base.metadata.create_all(bind=engine)
     _ensure_schema_migrations(engine)
 
-    # 验证是否已有任何历史用户，决定向导初始状态
+    # 初始化默认套餐、用户等级与系统配置；超级管理员账号由首次安装向导强制创建
     with session_scope() as db:
         _seed_default_plans(db)
         _seed_default_user_levels(db)
-        default_plan = db.query(Plan).filter(Plan.is_default == 1).first() or db.query(Plan).order_by(Plan.id.asc()).first()
-        ent_plan = db.query(Plan).filter(Plan.code == "enterprise").first() or default_plan
-        default_plan_id = ent_plan.id if ent_plan else 1
-        default_level = db.query(UserLevel).order_by(UserLevel.rank_order.asc()).first()
-        default_level_id = default_level.id if default_level else 1
 
-        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        admin_user = db.query(User).filter(User.role == "admin").order_by(User.id.asc()).first()
-        if admin_user is None:
-            admin_user = User(
-                username=INIT_USERNAME,
-                email=f"{INIT_USERNAME}@local.saas",
-                password_hash=hash_password(INIT_PASSWORD),
-                role="admin",
-                status="active",
-                plan_id=default_plan_id,
-                level_id=default_level_id,
-                balance_units=1000000,  # 初始运营管理员测试钱包 100.00 元
-                total_recharged_units=1000000,
-                api_key=issue_user_api_key(),
-                cluster_join_token=issue_user_join_token(),
-                created_at=now_str,
-            )
-            db.add(admin_user)
-            db.flush()
-            db.add(
-                BillingLedger(
-                    user_id=admin_user.id,
-                    tx_type="welcome_bonus",
-                    amount_units=1000000,
-                    balance_after_units=1000000,
-                    platform_spread_units=0,
-                    remark="SaaS 平台管理员初始化授信余额",
-                    created_at=now_str,
-                )
-            )
-            db.add(
-                SyncPolicy(
-                    owner_id=admin_user.id,
-                    name="我的自有节点智能双向合并",
-                    enabled=1,
-                    interval_minutes=15,
-                    sync_type="smart_merge",
-                    source_type="all",
-                    source_id=0,
-                    source_group="",
-                    target_type="all",
-                    target_ids="[]",
-                    target_group="",
-                    created_at=now_str,
-                )
-            )
-
+        existing_admin_exists = db.query(User.id).filter(User.role == "admin").first() is not None
         existing_nodes_count = db.query(Node).count()
         boot = load_bootstrap_config()
-        default_setup_flag = "1" if (mark_setup_completed or SKIP_SETUP_WIZARD or boot.get("setup_completed") or existing_nodes_count > 0) else "0"
+        default_setup_flag = "1" if (mark_setup_completed or boot.get("setup_completed") or existing_nodes_count > 0 or existing_admin_exists) else "0"
 
         defaults = {
             "jwt_secret": secrets.token_hex(32),
@@ -513,8 +521,6 @@ def init_db_and_jwt(cfg: Optional[Dict[str, Any]] = None, mark_setup_completed: 
 
 
 def is_setup_required() -> bool:
-    if SKIP_SETUP_WIZARD:
-        return False
     boot = load_bootstrap_config()
     if boot.get("setup_completed"):
         return False

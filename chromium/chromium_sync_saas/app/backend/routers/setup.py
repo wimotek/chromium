@@ -13,12 +13,12 @@ from config import (
     HUB_PORT,
     SAAS_ALLOW_PUBLIC_REGISTER,
     SAAS_DEFAULT_PLATFORM_FEE_BPS,
-    SKIP_SETUP_WIZARD,
     apply_hub_network_overrides,
     logger,
 )
 from core.cache import cache_mgr
 from core.db import (
+    create_or_update_initial_admin,
     get_active_db_info,
     init_db_and_jwt,
     is_setup_required,
@@ -27,9 +27,8 @@ from core.db import (
     set_setting,
     test_db_connection,
 )
-from core.models import User
 from core.rate_limit import RATE_LIMIT_SETUP_PER_MIN, enforce_rate_limit, get_client_ip
-from core.security import hash_password, issue_user_jwt, require_admin, verify_token
+from core.security import issue_user_jwt, require_admin, verify_token
 from services.audit_service import write_audit_log
 from services.sync_service import reschedule_all_policies
 
@@ -79,7 +78,6 @@ def get_setup_status():
     cache_status = cache_mgr.get_status()
     return {
         "setup_required": is_setup_required(),
-        "skip_wizard": SKIP_SETUP_WIZARD,
         "edition": "saas",
         "tofu_removed": True,
         "db_type": db_info.get("db_type", "sqlite"),
@@ -182,15 +180,9 @@ def _complete_initial_setup_locked(data: CompleteSetupDTO, client_ip: str):
     set_setting("setup_completed", "1")
 
     with session_scope() as db:
-        admin_obj = db.query(User).filter(User.role == "admin").order_by(User.id.asc()).first()
-        if admin_obj is not None:
-            admin_obj.username = username
-            admin_obj.password_hash = hash_password(data.admin_password)
-            db.flush()
-            token = issue_user_jwt(admin_obj)
-            user_payload = admin_obj.to_dict(include_secrets=True)
-        else:
-            raise HTTPException(status_code=500, detail="管理员记录创建异常")
+        admin_obj = create_or_update_initial_admin(db, username, data.admin_password)
+        token = issue_user_jwt(admin_obj)
+        user_payload = admin_obj.to_dict(include_secrets=True)
 
     reschedule_all_policies()
     write_audit_log(

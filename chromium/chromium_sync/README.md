@@ -24,7 +24,7 @@
    - 高频流量计数、图形验证码、运行态指标及热配置缓存优先写入 Redis（1.5s 超时熔断），若未配置 Redis 或 Redis 异常自动无缝回退本地 `/data/cache.db` (SQLite WAL)，并每 30s 自动探活重连。
 6. **双层实时流量统计与首次安装向导**：
    - Hub 代理网关 (`cdp_gateway` + `tunnel_manager`) 按 `public_wss` / `reverse` / `direct` / `ssh` 精确计量 CDP `rx/tx/requests/duration_sec` 与活跃会话数，Docker 边缘节点每 10s 采集 `/proc/net/dev`、Windows 桌面客户端每 10s 采集隧道与 CDP 转发真实流量并发起 `metrics_report` 上报，最终按小时汇总写入 `traffic_stats`；
-   - 全新空库首次打开控制台自动触发 **4 步图形化安装向导**（支持数据库连通性测试、Redis 测试、管理员设密与 TOFU 默认策略初始化，写入 `/data/bootstrap.json`）；自动化/无人值守场景可传 `SKIP_SETUP_WIZARD=true`。
+   - 全新空库首次打开控制台自动触发 **4 步图形化安装向导**（支持数据库连通性测试、Redis 测试、管理员设密与 TOFU 默认策略初始化，写入 `/data/bootstrap.json`）。
 7. **闭源二进制构建 + Cloudflare CDN 与界面加载加速**：
    - Hub 后端 (`chromium-sync`) 与边缘节点客户端 (`/opt/edge-node-client`) 均通过 Cython 编译为原生 `.so` 动态库与剥离符号的 ELF 可执行文件，运行时镜像不保留 `.py` / `.pyc` 源码（保留 `openssh-client` 供单用户 SSH 隧道使用）；
    - 服务端默认启用 `GZipMiddleware`、`Cache-Control` 精细分层头（`/assets/` `max-age=31536000, immutable`；HTML `no-cache`；`/api/` `/cdp/` `no-store`）以及 `CF-Connecting-IP` / `True-Client-IP` / `CF-Visitor` 穿透解析；前端 Vite 分块（`vue` 独立 chunk）+ `defineAsyncComponent` 按需懒加载，显著降低 Cloudflare 回源耗时；
@@ -146,7 +146,7 @@ location / {
 ```
 
 * **访问地址**：方式 1 为 `https://<IP或域名>:${HUB_PORT:-8443}`；方式 2 为 `https://<域名或IP>[:端口]`
-* **首次安装向导**：全新部署默认在首次访问 Web UI 时进入图形化安装向导，依次配置 **SQLite / MySQL (ORM)**、**Redis / SQLite Cache**、**管理员账号** 与 **对外网关/TOFU 默认策略**；若需 CI/自动化脚本跳过向导，可设置 `SKIP_SETUP_WIZARD=true`（将使用 `ADMIN_INIT_USER` / `ADMIN_INIT_PASS`，默认 `admin` / `123456`）。
+* **首次安装向导**：全新部署强制在首次访问 Web UI 时进入图形化安装向导，依次配置 **SQLite / MySQL (ORM)**、**Redis / SQLite Cache**、**管理员账号密码** 与 **对外网关/TOFU 默认策略**。
 * **宝塔证书挂载示例**：仅方式 1（一体直连）需挂载证书，将 `docker-compose.yml` 中 `./certs:/certs:ro` 改为 `/www/server/panel/vhost/cert/yourdomain.com:/certs:ro`；方式 2 直接在宝塔/1Panel 站点面板开启 SSL，后端不碰证书。
 
 ---
@@ -204,8 +204,6 @@ docker run -d \
 | `HUB_EXTERNAL_PORT` | Hub | 自动推导 | 宿主机对外映射端口（如 `-p 3000:8443` 时填 `3000`；不填也会从 `Host` / `X-Forwarded-Port` 请求头自动识别） |
 | `HUB_PUBLIC_HOST` | Hub | *(空)* | 强制指定对外拼接域名/IP（适用于多级反代改写 `Host` 头时） |
 | `HUB_HOST` | Hub | `::` | 默认同时监听 IPv4 + IPv6 双栈（容器未开启 IPv6 时自动回退 `0.0.0.0`） |
-| `ADMIN_INIT_USER` / `ADMIN_INIT_PASS` | Hub | `admin` / `123456` | 仅当 `SKIP_SETUP_WIZARD=true` 时生效；用于无人值守初始化管理员账号与密码 |
-| `SKIP_SETUP_WIZARD` | Hub | `false` | 设为 `true` 跳过 Web 首次安装向导，直接按环境变量自动初始化 |
 | `DB_TYPE` / `DATABASE_URL` | Hub | `sqlite` / *(空)* | 主库 ORM 驱动类型（`sqlite` 或 `mysql`），也可直接传完整 SQLAlchemy 连接串 |
 | `MYSQL_HOST` / `MYSQL_PORT` / `MYSQL_USER` / `MYSQL_PASSWORD` / `MYSQL_DATABASE` | Hub | `127.0.0.1` / `3306` / `root` / *(空)* / `chromium_sync` | `DB_TYPE=mysql` 时的 PyMySQL (`utf8mb4`) 默认连接参数 |
 | `REDIS_URL` | Hub | *(空)* | 可选 Redis 缓存连接串（如 `redis://127.0.0.1:6379/0`）；留空或不可达时自动回退 `/data/cache.db` |

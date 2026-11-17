@@ -22,9 +22,6 @@ from config import (
     DEFAULT_MYSQL_PASSWORD,
     DEFAULT_MYSQL_PORT,
     DEFAULT_MYSQL_USER,
-    INIT_PASSWORD,
-    INIT_USERNAME,
-    SKIP_SETUP_WIZARD,
     logger,
 )
 from core.cache import cache_mgr
@@ -291,10 +288,8 @@ def _ensure_additive_columns(engine):
 def init_db_and_jwt(cfg: Optional[Dict[str, Any]] = None, mark_setup_completed: Optional[bool] = None):
     """
     初始化 ORM 表结构、历史字段热升级与默认全局设置。
-    支持在首次安装向导切换 SQLite / MySQL 后热重载调用。
+    支持在首次安装向导切换 SQLite / MySQL 后热重载调用（管理员账号密码由安装向导创建）。
     """
-    from core.security import hash_password
-
     engine = init_engine(cfg)
     Base.metadata.create_all(bind=engine)
     _ensure_additive_columns(engine)
@@ -319,14 +314,13 @@ def init_db_and_jwt(cfg: Optional[Dict[str, Any]] = None, mark_setup_completed: 
                 )
             )
 
+        has_admin_creds = db.query(Setting).filter(Setting.key == "admin_password").first() is not None
         existing_nodes_count = db.query(Node).count()
         boot = load_bootstrap_config()
-        default_setup_flag = "1" if (mark_setup_completed or SKIP_SETUP_WIZARD or boot.get("setup_completed") or existing_nodes_count > 0) else "0"
+        default_setup_flag = "1" if (mark_setup_completed or boot.get("setup_completed") or existing_nodes_count > 0 or has_admin_creds) else "0"
 
         initial_join_token = "hub_join_" + secrets.token_urlsafe(24)
         defaults = {
-            "admin_username": INIT_USERNAME,
-            "admin_password": hash_password(INIT_PASSWORD),
             "jwt_secret": secrets.token_hex(32),
             "edge_agent_secret": secrets.token_urlsafe(32),
             "api_key": "cdp_" + secrets.token_urlsafe(24),
@@ -376,8 +370,6 @@ def init_db_and_jwt(cfg: Optional[Dict[str, Any]] = None, mark_setup_completed: 
 
 
 def is_setup_required() -> bool:
-    if SKIP_SETUP_WIZARD:
-        return False
     boot = load_bootstrap_config()
     if boot.get("setup_completed"):
         return False

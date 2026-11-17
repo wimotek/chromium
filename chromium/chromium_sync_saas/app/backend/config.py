@@ -28,7 +28,6 @@ CERTS_DIR = "/certs"
 SSL_CERT_FILE = os.path.join(CERTS_DIR, "fullchain.pem")
 SSL_KEY_FILE = os.path.join(CERTS_DIR, "privkey.pem")
 
-SKIP_SETUP_WIZARD = os.getenv("SKIP_SETUP_WIZARD", "false").strip().lower() in {"1", "true", "yes", "on"}
 DEFAULT_DB_TYPE = (os.getenv("DB_TYPE") or "sqlite").strip().lower()
 DEFAULT_DATABASE_URL = (os.getenv("DATABASE_URL") or "").strip()
 DEFAULT_MYSQL_HOST = (os.getenv("MYSQL_HOST") or "127.0.0.1").strip()
@@ -196,9 +195,6 @@ def resolve_hub_access_info(request) -> dict:
         "internal_port": HUB_PORT,
     }
 
-
-INIT_USERNAME = (os.getenv("ADMIN_INIT_USER") or "admin").strip()
-INIT_PASSWORD = (os.getenv("ADMIN_INIT_PASS") or "123456").strip()
 
 logger.info(
     f"🌐 [SaaS Hub 服务端口] 内部监听 {HUB_HOST}:{HUB_PORT}"

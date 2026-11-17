@@ -8,8 +8,10 @@ services:
     container_name: cdp_sync_saas_hub
     restart: unless-stopped
     ports:
+      # 注意：ports 中的 ${...} 在宿主机解析，只读取同目录 .env 文件或启动命令传入的环境变量（不能引用下方 environment: 里写死的值）。
+      # - HUB_BIND_ADDR：宿主机绑定网卡，默认 0.0.0.0；前置 Nginx/宝塔反代时建议设 127.0.0.1（如 HUB_BIND_ADDR=127.0.0.1 docker compose up -d）
+      # - HUB_HOST_PORT：宿主机对外暴露端口，未设置时依次回退 HUB_EXTERNAL_PORT -> HUB_PORT -> 8443
       - "${HUB_BIND_ADDR:-0.0.0.0}:${HUB_HOST_PORT:-${HUB_EXTERNAL_PORT:-${HUB_PORT:-8443}}}:${HUB_PORT:-8443}"
-      - "19200-19250:19200-19250"
     volumes:
       - ./data:/data
       - ./certs:/certs:ro
@@ -19,10 +21,6 @@ services:
       - HUB_SERVE_FRONTEND=${HUB_SERVE_FRONTEND:-true}
       - HUB_EXTERNAL_PORT=${HUB_EXTERNAL_PORT:-}
       - HUB_PUBLIC_HOST=${HUB_PUBLIC_HOST:-}
-      # 初始平台超级管理员配置
-      - ADMIN_INIT_USER=${ADMIN_INIT_USER:-admin}
-      - ADMIN_INIT_PASS=${ADMIN_INIT_PASS:-123456}
-      - SKIP_SETUP_WIZARD=${SKIP_SETUP_WIZARD:-false}
       # SaaS 开放运营与平台差价抽成配置
       - SAAS_ALLOW_PUBLIC_REGISTER=${SAAS_ALLOW_PUBLIC_REGISTER:-true}
       - SAAS_ALLOW_SELF_RECHARGE=${SAAS_ALLOW_SELF_RECHARGE:-true}

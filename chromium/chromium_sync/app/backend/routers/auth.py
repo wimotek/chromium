@@ -67,6 +67,8 @@ def get_captcha(request: Request):
 
 @router.post("/api/login")
 def login(data: LoginDTO, req: Request):
+    if is_setup_required():
+        raise HTTPException(status_code=403, detail="系统尚未完成初始化安装，请先通过首次安装向导设置管理员账号与密码")
     ip = get_client_ip(req)
     uname = (data.username or "").strip()
     user_scope_key = f"{ip}:{uname[:64]}"
@@ -85,10 +87,10 @@ def login(data: LoginDTO, req: Request):
             )
         raise HTTPException(status_code=400, detail="验证码错误或已过期")
 
-    admin_user = get_setting("admin_username", "admin")
-    hashed_pwd = get_setting("admin_password")
+    admin_user = get_setting("admin_username", "")
+    hashed_pwd = get_setting("admin_password", "")
 
-    if uname != admin_user or not verify_password(data.password, hashed_pwd):
+    if not admin_user or not hashed_pwd or uname != admin_user or not verify_password(data.password, hashed_pwd):
         fails_ip, blk_ip = record_auth_failure("login", ip, LOGIN_MAX_FAILURES, LOGIN_FAIL_WINDOW_SEC, LOGIN_BLOCK_SECONDS)
         _, blk_user = record_auth_failure("login_user", user_scope_key, LOGIN_MAX_FAILURES, LOGIN_FAIL_WINDOW_SEC, LOGIN_BLOCK_SECONDS)
         blk = max(blk_ip, blk_user)

@@ -72,7 +72,7 @@
 
 ```bash
 docker run -d --name cdp_sync_saas_hub --restart unless-stopped \
-  -p 8443:8443 -p 19200-19250:19200-19250 \
+  -p 8443:8443 \
   -v $(pwd)/data:/data -v $(pwd)/certs:/certs:ro \
   wimotek/chromium:saas
 ```
@@ -85,4 +85,8 @@ docker compose up -d --build
 ```
 
 * 默认一体模式（`HUB_SERVE_FRONTEND=true`）：访问 `https://<IP>:8443` 进入首次安装向导。
-* 前后端分离模式（`HUB_SERVE_FRONTEND=false`）：容器以内部明文 HTTP/WS 监听 `8443`，由 Nginx / 管理面板配置域名 TLS 与静态资源（从镜像 `/app/frontend/dist` 拷贝导出即可）。
+* 前后端分离 / 外部反代模式（`HUB_SERVE_FRONTEND=false`）：容器以内部明文 HTTP/WS 监听 `8443`，由 Nginx / 管理面板配置域名 TLS 与静态资源（从镜像 `/app/frontend/dist` 拷贝导出即可），可通过宿主机环境变量或同目录 `.env` 限制仅本机回环监听：
+  ```bash
+  HUB_SERVE_FRONTEND=false HUB_BIND_ADDR=127.0.0.1 docker compose up -d --build
+  ```
+* `docker-compose.yml` 端口变量说明：`HUB_BIND_ADDR`（默认 `0.0.0.0`）与 `HUB_HOST_PORT`（默认回退 `HUB_EXTERNAL_PORT` -> `HUB_PORT` -> `8443`）仅由 Docker Compose 在宿主机侧解析，需写在同目录 `.env` 或通过命令行注入，无法从 `environment:` 段反向引用；SaaS 版仅保留 `public_wss` 与 `reverse`（全部复用 `HUB_PORT`），无需映射 `19200-19250`。
