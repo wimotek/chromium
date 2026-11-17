@@ -376,6 +376,9 @@ onMounted(async () => {
       detected.detected_public_port = d.detected_public_port || 8443
     }
   } catch (_) {}
+  if (!form.cluster_token) {
+    regenerateClusterToken()
+  }
 })
 
 const regenerateClusterToken = () => {
@@ -457,19 +460,23 @@ const submitSetup = async () => {
   if (!form.admin_email.includes('@')) {
     return ElMessage.warning('请输入合法的管理员邮箱')
   }
-  if (form.admin_password.length < 6) {
+  if (form.admin_password.trim().length < 6) {
     return ElMessage.warning('管理员密码至少需要 6 位字符')
   }
-  if (form.admin_password !== adminPasswordConfirm.value) {
+  if (form.admin_password.trim() !== adminPasswordConfirm.value.trim()) {
     return ElMessage.warning('两次输入的管理员密码不一致')
+  }
+  const parsedPort = Number(form.public_port || 0)
+  if (!Number.isInteger(parsedPort) || parsedPort < 0 || parsedPort > 65535) {
+    return ElMessage.warning('对外映射端口需在 0 ~ 65535 之间')
   }
 
   submitting.value = true
   try {
     const res = await axios.post('/api/setup/complete', {
       ...form,
-      public_port: Number(form.public_port || 0)
-    })
+      public_port: parsedPort
+    }, { timeout: 30000 })
     if (res.data.code === 200) {
       ElMessage.success(res.data.msg || 'Hub 初始化完成！')
       emit('completed', res.data.data || {})
@@ -477,6 +484,11 @@ const submitSetup = async () => {
       ElMessage.error(res.data.msg || '初始化失败')
     }
   } catch (err) {
+    if (err?.response?.status === 403) {
+      ElMessage.info('系统已完成初始化，正在进入登录面板...')
+      emit('completed')
+      return
+    }
     ElMessage.error(err?.response?.data?.msg || '初始化提交失败，请检查配置')
   } finally {
     submitting.value = false

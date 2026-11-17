@@ -9,13 +9,16 @@ High-Security Anti-Bot Adaptive Verification Engine
 5. IP 级暴力撞库与高频尝试熔断锁定 (Anti-Brute Force Lockout)
 """
 
-import uuid
-import random
-import time
+import html
 import math
+import secrets
+import time
+import uuid
 from typing import Tuple, Dict, Any, Optional
 from core.cache import cache
 from core.rate_limit import ban_ip, check_ip_ban, is_whitelisted_ip
+
+_rng = secrets.SystemRandom()
 
 # 汉字数字映射表
 CN_NUMS = {
@@ -32,27 +35,32 @@ COLOR_PALETTE = [
 ]
 
 NOISE_COLORS = [
-    'rgba(56, 189, 248, 0.35)', 'rgba(129, 140, 248, 0.35)',
-    'rgba(52, 211, 153, 0.3)', 'rgba(244, 114, 182, 0.3)',
-    'rgba(251, 191, 36, 0.3)', 'rgba(148, 163, 184, 0.25)'
+    'rgba(56, 189, 248, 0.42)', 'rgba(129, 140, 248, 0.42)',
+    'rgba(52, 211, 153, 0.36)', 'rgba(244, 114, 182, 0.36)',
+    'rgba(251, 191, 36, 0.36)', 'rgba(148, 163, 184, 0.30)'
 ]
+
+FONT_FAMILIES = [
+    'system-ui, -apple-system, sans-serif',
+    'ui-sans-serif, Arial, sans-serif',
+    'ui-monospace, Consolas, monospace',
+]
+
 
 def _generate_challenge_content() -> Tuple[str, str, str]:
     """
     生成随机多元题型，打破单一数学公式的刻板模式
     返回: (题目字符串, 正确答案字符串, 提示说明)
     """
-    mode = random.choices(['math_mixed', 'compare', 'trivia', 'alphanumeric'], weights=[40, 25, 15, 20])[0]
+    mode = _rng.choices(['math_mixed', 'compare', 'trivia', 'alphanumeric'], weights=[40, 22, 13, 25])[0]
 
     if mode == 'math_mixed':
-        # 汉字数字与阿拉伯数字混合加减乘法
-        op = random.choice(['+', '-', '*'])
+        op = _rng.choice(['+', '-', '*'])
         if op == '+':
-            a = random.randint(1, 15)
-            b = random.randint(1, 15)
+            a = _rng.randint(1, 15)
+            b = _rng.randint(1, 15)
             ans = str(a + b)
-            # 随机将 a 或 b 或操作符转换为汉字
-            choice = random.choice([1, 2, 3])
+            choice = _rng.choice([1, 2, 3])
             if choice == 1:
                 expr = f"{CN_NUMS.get(a, str(a))}加{b}=?"
             elif choice == 2:
@@ -60,10 +68,10 @@ def _generate_challenge_content() -> Tuple[str, str, str]:
             else:
                 expr = f"{CN_NUMS.get(a, str(a))}+{b}=?"
         elif op == '-':
-            a = random.randint(10, 25)
-            b = random.randint(1, a - 1)
+            a = _rng.randint(10, 25)
+            b = _rng.randint(1, a - 1)
             ans = str(a - b)
-            choice = random.choice([1, 2, 3])
+            choice = _rng.choice([1, 2, 3])
             if choice == 1:
                 expr = f"{a}减{CN_NUMS.get(b, str(b))}=?"
             elif choice == 2:
@@ -71,20 +79,19 @@ def _generate_challenge_content() -> Tuple[str, str, str]:
             else:
                 expr = f"{a}-{CN_NUMS.get(b, str(b))}=?"
         else:
-            a = random.randint(2, 9)
-            b = random.randint(2, 9)
+            a = _rng.randint(2, 9)
+            b = _rng.randint(2, 9)
             ans = str(a * b)
             expr = f"{CN_NUMS.get(a, str(a))}乘{b}=?"
         return expr, ans, "计算结果"
 
     elif mode == 'compare':
-        # 极值或比大小题目
-        a = random.randint(3, 20)
-        b = random.randint(3, 20)
+        a = _rng.randint(3, 20)
+        b = _rng.randint(3, 20)
         while a == b:
-            b = random.randint(3, 20)
-        
-        kind = random.choice(['max', 'min', 'diff'])
+            b = _rng.randint(3, 20)
+
+        kind = _rng.choice(['max', 'min', 'diff'])
         if kind == 'max':
             expr = f"{a}与{b}谁大?"
             ans = str(max(a, b))
@@ -98,125 +105,206 @@ def _generate_challenge_content() -> Tuple[str, str, str]:
         return expr, ans, "数字答案"
 
     elif mode == 'trivia':
-        # 常见数学常识与生活问答 (数字作答)
         trivias = [
             ("一周有几天?", "7"),
             ("一年有几季?", "4"),
-            ("直角是多少度?", "90"),
-            ("平角是多少度?", "180"),
-            ("一小时几分钟?", "60"),
-            ("一分钟几秒钟?", "60"),
-            ("1公里几千米?", "1"),
-            ("一打等于几个?", "12"),
-            ("四加六等于?", "10"),
-            ("三角形几个角?", "3"),
+            ("一年几个月?", "12"),
+            ("两天几小时?", "48"),
+            ("半小时几分?", "30"),
+            ("直角多少度?", "90"),
+            ("平角多少度?", "180"),
+            ("一小时几分?", "60"),
+            ("一分钟几秒?", "60"),
+            ("一打有几个?", "12"),
+            ("正方形几边?", "4"),
+            ("三角形几角?", "3"),
             ("五乘五等于?", "25"),
+            ("七加八等于?", "15"),
+            ("九减三等于?", "6"),
         ]
-        q, a = random.choice(trivias)
+        q, a = _rng.choice(trivias)
         return q, a, "常识数字"
 
     else:
-        # 高抗 OCR 字母数字混合挑战码 (4位排除易混字符)
-        charset = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ"
-        code = "".join(random.choice(charset) for _ in range(4))
-        # 格式如 "验: 7KM8"
-        expr = f"验:{code}"
-        return expr, code.upper(), "4位验证码"
+        # 4位高抗 OCR 字母数字混合挑战码（无固定前缀锚点，排除易混字符 0/O/1/I/L）
+        charset = "23456789ABCDEFGHJKMNPQRSTUVWXYZ"
+        code = "".join(_rng.choice(charset) for _ in range(4))
+        return code, code.upper(), "4位字符(忽略大小写)"
+
+
+def _build_char_node(
+    ch: str,
+    target_x: float,
+    target_y: float,
+    font_sz: int,
+    extra_attr: str = "",
+) -> str:
+    """使用随机局部坐标系偏移 + 旋转错切渲染单字，防止通过固定 x/y/opacity 属性正则抽取"""
+    rot_deg = _rng.uniform(-20, 20)
+    skew_deg = _rng.uniform(-14, 14)
+    weight = "bold" if _rng.random() > 0.3 else "700"
+    color = _rng.choice(COLOR_PALETTE)
+    font_fam = _rng.choice(FONT_FAMILIES)
+    dx = _rng.uniform(-45, 45)
+    dy = _rng.uniform(-20, 20)
+    rx = target_x - dx
+    ry = target_y - dy
+    escaped_ch = html.escape(ch)
+    return (
+        f'<g transform="translate({dx:.1f},{dy:.1f})" {extra_attr}>'
+        f'<text x="{rx:.1f}" y="{ry:.1f}" '
+        f'text-anchor="middle" dominant-baseline="middle" '
+        f'fill="{color}" stroke="#060a12" stroke-width="0.55" paint-order="stroke fill" '
+        f'font-family="{font_fam}" font-size="{font_sz}" font-weight="{weight}" '
+        f'transform="rotate({rot_deg:.1f} {rx:.1f} {ry:.1f}) skewX({skew_deg:.1f})">'
+        f'{escaped_ch}</text></g>'
+    )
 
 
 def _generate_hardened_svg(expr: str) -> str:
     """
-    渲染深度防机器人解析的 SVG：
-    1. 单字独立坐标定位 + 独立随机角度旋转 + 独立倾斜错位 (Jitter)
-    2. 随机注入 2-3 个不可见/零尺寸假诱饵字符，彻底摧毁正则表达式与 DOM 解析爬虫
-    3. 5-7 条随机三次贝塞尔曲线，穿切字符表面，破除 OCR 连通域
-    4. 40-50 个动态彩色噪斑与随机干扰微粒
+    强力抗 OCR & 抗 XML 源码解析 SVG：
+    1. 像素级波浪形变滤镜 (<feTurbulence> + <feDisplacementMap>) 扭曲所有字符笔画边缘
+    2. 遮挡层诱饵字符 (置于不透明渐变背景之下，具备与真字完全相同的字号/颜色/透明度，彻底迷惑 XML/正则爬虫)
+    3. clipPath 零域诱饵 + 真字符节点 DOM 顺序随机打乱 + 随机 <g> 相对坐标偏移
+    4. 前景与背景多层三次贝塞尔穿切曲线、彩色噪斑与高频短划线
     """
-    width = 145
-    height = 42
+    width = 148
+    height = 44
+    uid = secrets.token_hex(4)
 
-    # 1. 生成背景多重随机噪斑
-    noise_elements = []
-    for _ in range(35):
-        cx = random.randint(3, width - 3)
-        cy = random.randint(3, height - 3)
-        r = random.uniform(0.8, 2.2)
-        color = random.choice(NOISE_COLORS)
-        noise_elements.append(f'<circle cx="{cx}" cy="{cy}" r="{r:.1f}" fill="{color}" />')
+    # 1. 定义渐变背景、零域裁剪与波浪扭曲滤镜
+    bf_x = _rng.uniform(0.030, 0.046)
+    bf_y = _rng.uniform(0.055, 0.082)
+    warp_scale = _rng.uniform(2.6, 3.6)
+    noise_seed = _rng.randint(1, 9999)
 
-    # 2. 生成多条贝塞尔混淆曲线 (穿透并切割字符，阻止 OCR 连通分割)
-    for _ in range(5):
-        x1 = random.randint(0, 20)
-        y1 = random.randint(5, height - 5)
-        cx1 = random.randint(25, 60)
-        cy1 = random.randint(2, height - 2)
-        cx2 = random.randint(70, 110)
-        cy2 = random.randint(2, height - 2)
-        x2 = random.randint(width - 25, width)
-        y2 = random.randint(5, height - 5)
-        stroke = random.choice(NOISE_COLORS)
-        sw = random.uniform(1.2, 2.0)
-        dash = 'stroke-dasharray="3,2"' if random.random() > 0.5 else ''
-        noise_elements.append(
-            f'<path d="M {x1},{y1} C {cx1},{cy1} {cx2},{cy2} {x2},{y2}" fill="none" stroke="{stroke}" stroke-width="{sw:.1f}" {dash} />'
+    c_start = _rng.choice(['#080d1a', '#090f1d', '#0b1120'])
+    c_end = _rng.choice(['#0f192d', '#111c33', '#0d172a'])
+
+    defs_block = (
+        f'<defs>'
+        f'<linearGradient id="bg_{uid}" x1="0%" y1="0%" x2="100%" y2="100%">'
+        f'<stop offset="0%" stop-color="{c_start}"/>'
+        f'<stop offset="100%" stop-color="{c_end}"/>'
+        f'</linearGradient>'
+        f'<clipPath id="cp_{uid}"><rect x="-12" y="-12" width="1" height="1"/></clipPath>'
+        f'<filter id="wp_{uid}" filterUnits="userSpaceOnUse" x="-12" y="-12" width="{width + 24}" height="{height + 24}">'
+        f'<feTurbulence type="fractalNoise" baseFrequency="{bf_x:.3f} {bf_y:.3f}" numOctaves="2" seed="{noise_seed}" result="ns"/>'
+        f'<feDisplacementMap in="SourceGraphic" in2="ns" scale="{warp_scale:.2f}" xChannelSelector="R" yChannelSelector="G"/>'
+        f'</filter>'
+        f'</defs>'
+    )
+
+    # 2. 底层遮挡诱饵字符（位于不透明背景 <rect> 之下，视觉完全不可见，但属性与真字符高度一致）
+    decoy_pool = "0123456789ABCDEFGHJKMNPQRSTUVWXYZ加减乘大小一二三四五六七八九十=?"
+    occluded_decoys = []
+    for _ in range(_rng.randint(8, 12)):
+        occluded_decoys.append(
+            _build_char_node(
+                _rng.choice(decoy_pool),
+                _rng.uniform(12, width - 12),
+                _rng.uniform(14, height - 12),
+                _rng.randint(15, 20),
+            )
         )
 
-    # 3. 逐字渲染真实字符，并在随机位置插入不可见诱饵字符 (Decoy)
-    char_elements = []
+    # 3. 覆盖不透明背景矩形（遮住底层诱饵）
+    bg_rect = (
+        f'<rect width="100%" height="100%" fill="url(#bg_{uid})" '
+        f'rx="6" stroke="#1e293b" stroke-width="1"/>'
+    )
+
+    # 4. 背景干扰层（噪斑、微短线、低透明度水印曲线）
+    bg_noise = []
+    for _ in range(30):
+        cx = _rng.randint(4, width - 4)
+        cy = _rng.randint(4, height - 4)
+        r = _rng.uniform(0.7, 2.0)
+        bg_noise.append(f'<circle cx="{cx}" cy="{cy}" r="{r:.1f}" fill="{_rng.choice(NOISE_COLORS)}" />')
+
+    for _ in range(8):
+        lx1 = _rng.randint(4, width - 14)
+        ly1 = _rng.randint(4, height - 6)
+        lx2 = lx1 + _rng.randint(-14, 14)
+        ly2 = ly1 + _rng.randint(-10, 10)
+        bg_noise.append(
+            f'<line x1="{lx1}" y1="{ly1}" x2="{lx2}" y2="{ly2}" '
+            f'stroke="{_rng.choice(NOISE_COLORS)}" stroke-width="{_rng.uniform(0.8, 1.4):.1f}" />'
+        )
+
+    for _ in range(3):
+        x1 = _rng.randint(0, 18)
+        y1 = _rng.randint(6, height - 6)
+        cx1 = _rng.randint(25, 62)
+        cy1 = _rng.randint(2, height - 2)
+        cx2 = _rng.randint(75, 118)
+        cy2 = _rng.randint(2, height - 2)
+        x2 = _rng.randint(width - 20, width)
+        y2 = _rng.randint(6, height - 6)
+        dash = f'stroke-dasharray="{_rng.randint(2,4)},{_rng.randint(2,3)}"' if _rng.random() > 0.45 else ''
+        bg_noise.append(
+            f'<path d="M {x1},{y1} C {cx1},{cy1} {cx2},{cy2} {x2},{y2}" '
+            f'fill="none" stroke="{_rng.choice(NOISE_COLORS)}" stroke-width="{_rng.uniform(1.1, 1.8):.1f}" {dash} />'
+        )
+
+    # 5. 渲染真实字符 + clipPath 零域诱饵，全部随机打乱 DOM 顺序并整体施加波浪形变滤镜
     char_list = list(expr)
     total_chars = len(char_list)
-
-    # 均分 X 轴宽度
-    margin_x = 8
+    margin_x = 12 if total_chars <= 4 else 8
     avail_w = width - margin_x * 2
     step_w = avail_w / max(1, total_chars)
+    base_font_min = 18 if total_chars <= 4 else 15
+    base_font_max = 21 if total_chars <= 4 else 18
 
-    # 准备 2 个随机诱饵字符（假数字或假符号），给爬虫制造乱码
-    decoys = [random.choice("0123456789+-%"), random.choice("789ABCDEF")]
-    decoy_insert_indices = random.sample(range(max(1, total_chars)), min(2, total_chars))
-
+    warped_nodes = []
     for idx, ch in enumerate(char_list):
-        # 如果当前位置需要插入诱饵字符
-        if idx in decoy_insert_indices and decoys:
-            decoy_char = decoys.pop()
-            # 诱饵字符使用极小字号、0 透明度或绝对隐藏样式，视觉不可见但 DOM textContent 会捕获
-            char_elements.append(
-                f'<text x="{int(margin_x + idx * step_w)}" y="24" fill="none" opacity="0.001" font-size="1px">{decoy_char}</text>'
+        base_x = margin_x + idx * step_w + step_w / 2 + _rng.uniform(-1.5, 1.5)
+        base_y = height / 2 + 1 + _rng.uniform(-3.0, 3.0)
+        font_sz = _rng.randint(base_font_min, base_font_max)
+        warped_nodes.append(_build_char_node(ch, base_x, base_y, font_sz))
+
+    for _ in range(_rng.randint(2, 3)):
+        warped_nodes.append(
+            _build_char_node(
+                _rng.choice(decoy_pool),
+                _rng.uniform(15, width - 15),
+                _rng.uniform(14, height - 12),
+                _rng.randint(15, 19),
+                extra_attr=f'clip-path="url(#cp_{uid})"',
             )
-
-        # 计算当前字符的基础中心坐标
-        base_x = margin_x + idx * step_w + step_w / 2
-        # 随机上下微调 (±3.5px)
-        jitter_y = 25 + random.uniform(-3.5, 3.5)
-        # 随机旋转 (-18° ~ +18°)
-        rot_deg = random.uniform(-18, 18)
-        # 随机倾斜 (-12° ~ +12°)
-        skew_deg = random.uniform(-12, 12)
-        # 随机字体大小 (15px ~ 19px)
-        font_sz = random.randint(15, 19)
-        # 随机加粗
-        weight = "bold" if random.random() > 0.35 else "600"
-        # 随机高对比度色彩
-        color = random.choice(COLOR_PALETTE)
-
-        transform_attr = f'transform="rotate({rot_deg:.1f} {base_x:.1f} {jitter_y:.1f}) skewX({skew_deg:.1f})"'
-
-        char_elements.append(
-            f'<text x="{base_x:.1f}" y="{jitter_y:.1f}" '
-            f'text-anchor="middle" dominant-baseline="middle" '
-            f'fill="{color}" font-family="system-ui, -apple-system, sans-serif" '
-            f'font-size="{font_sz}" font-weight="{weight}" '
-            f'{transform_attr}>{ch}</text>'
         )
 
-    # 4. 组装完整 SVG
-    svg_body = "".join(noise_elements) + "".join(char_elements)
+    _rng.shuffle(warped_nodes)
+    char_layer = f'<g filter="url(#wp_{uid})">{"".join(warped_nodes)}</g>'
+
+    # 6. 前景穿切干扰曲线（破除 OCR 字符连通域分割）
+    fg_noise = []
+    for _ in range(3):
+        x1 = _rng.randint(0, 15)
+        y1 = _rng.randint(6, height - 6)
+        cx1 = _rng.randint(28, 65)
+        cy1 = _rng.randint(3, height - 3)
+        cx2 = _rng.randint(78, 120)
+        cy2 = _rng.randint(3, height - 3)
+        x2 = _rng.randint(width - 16, width)
+        y2 = _rng.randint(6, height - 6)
+        dash = 'stroke-dasharray="4,3"' if _rng.random() > 0.5 else ''
+        fg_noise.append(
+            f'<path d="M {x1},{y1} C {cx1},{cy1} {cx2},{cy2} {x2},{y2}" '
+            f'fill="none" stroke="{_rng.choice(NOISE_COLORS)}" stroke-width="{_rng.uniform(0.9, 1.4):.1f}" {dash} />'
+        )
+
     svg = (
         f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}" '
-        f'style="background:#0b1120; border-radius:6px; user-select:none; cursor:pointer;" '
+        f'style="background:{c_start}; border-radius:6px; user-select:none; cursor:pointer;" '
         f'title="点击图片刷新验证码">'
-        f'<rect width="100%" height="100%" fill="#0b1120" rx="6" stroke="#1e293b" stroke-width="1"/>'
-        f'{svg_body}'
+        f'{defs_block}'
+        f'{"".join(occluded_decoys)}'
+        f'{bg_rect}'
+        f'{"".join(bg_noise)}'
+        f'{char_layer}'
+        f'{"".join(fg_noise)}'
         f'</svg>'
     )
     return svg

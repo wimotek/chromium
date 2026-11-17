@@ -161,12 +161,23 @@ const fetchSystemInfo = async () => {
 }
 
 const onSetupCompleted = async () => {
-  setupRequired.value = false
+  systemLoading.value = true
   prefetchedCaptcha.value = null
   localStorage.removeItem('xray_auth_session')
   Object.assign(currentUser, { username: '', role: '' })
   adminPassword.value = ''
-  await fetchSystemInfo()
+  try {
+    const [, cap] = await Promise.all([
+      fetchSystemInfo(),
+      axios.get('/api/auth/captcha', { timeout: 15000 })
+        .then((res) => (res.data?.code === 200 ? res.data.data : null))
+        .catch(() => null)
+    ])
+    prefetchedCaptcha.value = cap
+  } finally {
+    setupRequired.value = false
+    systemLoading.value = false
+  }
 }
 
 onMounted(async () => {

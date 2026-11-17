@@ -8,6 +8,7 @@
 4. 管理员初始账密与邮箱、集群引导令牌 (cluster_token)、TOFU 策略、系统公告
 """
 import datetime
+import os
 import secrets
 import uuid
 
@@ -33,6 +34,13 @@ from routes import resolve_public_endpoint
 setup_bp = Blueprint("setup_bp", __name__)
 
 
+def _safe_int(val, default: int) -> int:
+    try:
+        return int(val) if val not in (None, "") else default
+    except (TypeError, ValueError):
+        return default
+
+
 def _build_db_url_from_payload(data: dict) -> str:
     db_type = str(data.get("db_type") or "sqlite").strip().lower()
     if db_type == "mysql":
@@ -43,7 +51,7 @@ def _build_db_url_from_payload(data: dict) -> str:
             return explicit_url
         return Config.build_mysql_url(
             host=str(data.get("mysql_host") or "127.0.0.1").strip(),
-            port=int(data.get("mysql_port") or 3306),
+            port=_safe_int(data.get("mysql_port"), 3306),
             user=str(data.get("mysql_user") or "root").strip(),
             password=str(data.get("mysql_password") or ""),
             database=str(data.get("mysql_database") or "xray_web").strip(),
@@ -59,9 +67,9 @@ def _build_redis_url_from_payload(data: dict) -> str:
     if explicit_url:
         return explicit_url
     host = str(data.get("redis_host") or "127.0.0.1").strip()
-    port = int(data.get("redis_port") or 6379)
+    port = _safe_int(data.get("redis_port"), 6379)
     password = str(data.get("redis_password") or "").strip()
-    db_idx = int(data.get("redis_db") or 0)
+    db_idx = _safe_int(data.get("redis_db"), 0)
     if password:
         import urllib.parse
         return f"redis://:{urllib.parse.quote_plus(password)}@{host}:{port}/{db_idx}"
@@ -169,77 +177,130 @@ def setup_complete():
         app_mode = "all"
 
     public_url = str(data.get("public_url") or "").strip().rstrip("/")
-    try:
-        public_port = int(data.get("public_port") or 0)
-    except (TypeError, ValueError):
-        public_port = 0
+    public_port = _safe_int(data.get("public_port"), 0)
+    if public_port < 0 or public_port > 65535:
+        return jsonify({"code": 400, "msg": "对外映射端口需在 0 ~ 65535 之间"}), 400
 
     cluster_token = str(data.get("cluster_token") or "").strip() or ("ctk_" + secrets.token_hex(16))
     tofu_enabled = bool(data.get("tofu_enabled", True))
     node_auto_approve = bool(data.get("node_auto_approve", True))
     system_notice = str(data.get("system_notice") or "").strip()
 
-    # 1. 持久化引导配置到 /data/hub_config.json (含 setup_completed=true)
+    # 记录写盘前的配置快照，若初始化建表或写入管理员失败可完整回滚，避免半残状态锁定向导
+    hub_path = os.getenv("HUB_CONFIG_PATH", Config.HUB_CONFIG_PATH)
+    had_hub_file = bool(hub_path and os.path.exists(hub_path))
+    prev_hub_bytes = None
+    if had_hub_file:
+        try:
+            with open(hub_path, "rb") as f:
+                prev_hub_bytes = f.read()
+        except OSError:
+            prev_hub_bytes = None
+
+    prev_cfg_snapshot = {
+        "SETUP_COMPLETED": Config.SETUP_COMPLETED,
+        "DATABASE_URL": Config.DATABASE_URL,
+        "DB_TYPE": Config.DB_TYPE,
+        "DB_PATH": Config.DB_PATH,
+        "MYSQL_HOST": Config.MYSQL_HOST,
+        "MYSQL_PORT": Config.MYSQL_PORT,
+        "MYSQL_USER": Config.MYSQL_USER,
+        "MYSQL_PASSWORD": Config.MYSQL_PASSWORD,
+        "MYSQL_DATABASE": Config.MYSQL_DATABASE,
+        "REDIS_URL": Config.REDIS_URL,
+        "REDIS_HOST": Config.REDIS_HOST,
+        "REDIS_PORT": Config.REDIS_PORT,
+        "REDIS_PASSWORD": Config.REDIS_PASSWORD,
+        "REDIS_DB": Config.REDIS_DB,
+        "PUBLIC_URL": Config.PUBLIC_URL,
+        "PUBLIC_PORT": Config.PUBLIC_PORT,
+        "APP_MODE": Config.APP_MODE,
+    }
+
+    # 1. 先以 setup_completed=False 写入连接参数，确保目标数据库/表结构/管理员全部成功后才最终置为 True
     hub_cfg = {
-        "setup_completed": True,
+        "setup_completed": False,
         "db_type": db_type,
         "database_url": target_db_url,
         "db_path": str(data.get("db_path") or Config.DB_PATH).strip() or "/data/xray_web.db",
-        "mysql_host": str(data.get("mysql_host") or "").strip(),
-        "mysql_port": int(data.get("mysql_port") or 3306),
-        "mysql_user": str(data.get("mysql_user") or "").strip(),
-        "mysql_password": str(data.get("mysql_password") or ""),
-        "mysql_database": str(data.get("mysql_database") or "xray_web").strip(),
+        "mysql_host": str(data.get("mysql_host") or "").strip() if db_type == "mysql" else "",
+        "mysql_port": _safe_int(data.get("mysql_port"), 3306),
+        "mysql_user": str(data.get("mysql_user") or "").strip() if db_type == "mysql" else "",
+        "mysql_password": str(data.get("mysql_password") or "") if db_type == "mysql" else "",
+        "mysql_database": str(data.get("mysql_database") or "xray_web").strip() if db_type == "mysql" else "",
         "redis_url": redis_url,
         "redis_host": str(data.get("redis_host") or "").strip() if redis_enabled else "",
-        "redis_port": int(data.get("redis_port") or 6379),
+        "redis_port": _safe_int(data.get("redis_port"), 6379),
         "redis_password": str(data.get("redis_password") or "").strip() if redis_enabled else "",
-        "redis_db": int(data.get("redis_db") or 0),
+        "redis_db": _safe_int(data.get("redis_db"), 0),
         "public_url": public_url,
         "public_port": public_port,
         "app_mode": app_mode,
     }
-    Config.save_hub_config(hub_cfg)
 
-    # 2. 重建 SQLAlchemy 连接池并初始化目标数据库表结构
-    reset_engine()
-    init_db(force_reload=True)
-    cache.reset_client()
+    try:
+        Config.save_hub_config(hub_cfg)
 
-    # 3. 写入管理员账号与 Hub 核心配置
-    ten_years = (datetime.datetime.now() + datetime.timedelta(days=3650)).strftime("%Y-%m-%d %H:%M:%S")
-    with db_session() as s:
-        admin_user = s.scalar(select(User).where(User.role == "admin").order_by(User.id.asc()).limit(1))
-        if admin_user:
-            admin_user.username = admin_username
-            admin_user.password_hash = hash_pwd(admin_password)
-            admin_user.email = admin_email
-            admin_user.status = 1
-            admin_user.is_verified = 1
-        else:
-            s.add(
-                User(
-                    username=admin_username,
-                    password_hash=hash_pwd(admin_password),
-                    uuid=str(uuid.uuid4()),
-                    email=admin_email,
-                    traffic_limit_mb=1048576,
-                    used_mb=0.0,
-                    expire_date=ten_years,
-                    role="admin",
-                    status=1,
-                    is_verified=1,
-                    user_group="admin",
+        # 2. 重建 SQLAlchemy 连接池并初始化目标数据库表结构
+        reset_engine()
+        init_db(force_reload=True)
+        cache.reset_client()
+
+        # 3. 写入管理员账号与 Hub 核心配置
+        ten_years = (datetime.datetime.now() + datetime.timedelta(days=3650)).strftime("%Y-%m-%d %H:%M:%S")
+        with db_session() as s:
+            admin_user = s.scalar(select(User).where(User.role == "admin").order_by(User.id.asc()).limit(1))
+            if admin_user:
+                admin_user.username = admin_username
+                admin_user.password_hash = hash_pwd(admin_password)
+                admin_user.email = admin_email
+                admin_user.status = 1
+                admin_user.is_verified = 1
+            else:
+                s.add(
+                    User(
+                        username=admin_username,
+                        password_hash=hash_pwd(admin_password),
+                        uuid=str(uuid.uuid4()),
+                        email=admin_email,
+                        traffic_limit_mb=1048576,
+                        used_mb=0.0,
+                        expire_date=ten_years,
+                        role="admin",
+                        status=1,
+                        is_verified=1,
+                        user_group="admin",
+                    )
                 )
-            )
-        upsert_system_setting(s, "cluster_token", cluster_token)
-        upsert_system_setting(s, "tofu_enabled", "true" if tofu_enabled else "false")
-        upsert_system_setting(s, "node_auto_approve", "true" if node_auto_approve else "false")
-        upsert_system_setting(s, "system_notice", system_notice)
-        upsert_system_setting(s, "setup_completed", "true")
+            upsert_system_setting(s, "cluster_token", cluster_token)
+            upsert_system_setting(s, "tofu_enabled", "true" if tofu_enabled else "false")
+            upsert_system_setting(s, "node_auto_approve", "true" if node_auto_approve else "false")
+            upsert_system_setting(s, "system_notice", system_notice)
+            upsert_system_setting(s, "setup_completed", "true")
 
-    cache.delete_prefix("setting:")
-    set_setting("setup_completed", "true")
+        cache.delete_prefix("setting:")
+        set_setting("setup_completed", "true")
+
+        # 4. 数据库全部落库成功，正式原子落盘 setup_completed=True
+        Config.save_hub_config({"setup_completed": True})
+    except Exception as exc:
+        try:
+            if had_hub_file and prev_hub_bytes is not None:
+                with open(hub_path, "wb") as f:
+                    f.write(prev_hub_bytes)
+            elif not had_hub_file and hub_path and os.path.exists(hub_path):
+                os.remove(hub_path)
+        except OSError:
+            pass
+        for k, v in prev_cfg_snapshot.items():
+            setattr(Config, k, v)
+        Config._loaded_mtime = -1.0
+        try:
+            reset_engine()
+            cache.reset_client()
+        except Exception:
+            pass
+        return jsonify({"code": 500, "msg": f"初始化写入数据库失败，已自动回滚可重试: {exc}"}), 500
 
     return jsonify({
         "code": 200,
