@@ -42,11 +42,7 @@ jobs:
       - name: Pre-build syntax & script checks
         run: |
           bash -n ${{ env.WORKING_DIR }}/entrypoint.sh
-          python3 -m py_compile \
-            ${{ env.WORKING_DIR }}/app/backend/*.py \
-            ${{ env.WORKING_DIR }}/app/backend/core/*.py \
-            ${{ env.WORKING_DIR }}/app/backend/services/*.py \
-            ${{ env.WORKING_DIR }}/app/backend/routers/*.py
+          find ${{ env.WORKING_DIR }}/app/backend -type f -name "*.py" -exec python3 -B -m py_compile {} +
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
