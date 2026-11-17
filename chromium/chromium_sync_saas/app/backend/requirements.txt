@@ -1,0 +1,14 @@
+fastapi==0.110.0
+uvicorn[standard]==0.29.0
+bcrypt==4.1.2
+pyjwt==2.8.0
+apscheduler==3.10.4
+websockets==12.0
+httpx==0.27.0
+cryptography>=3.3
+python-multipart==0.0.9
+sqlalchemy>=2.0.29
+pymysql>=1.1.0
+redis>=5.0.0
+wimotek-edge-agent>=1.0.17
+wimotek-chromium-sync>=1.3.0

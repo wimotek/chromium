@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+exec xterm \
+  -u8 \
+  -fa "WenQuanYi Zen Hei" \
+  -fs 11 \
+  -bg "#0f172a" \
+  -fg "#e2e8f0" \
+  -cr "#38bdf8" \
+  -geometry 76x22 \
+  -title "Wimotek 剪贴板工具 (X11 CLIPBOARD)" \
+  -e python3 -c '
+import subprocess
+
+def read_clip():
+    p = subprocess.run(["xclip", "-o", "-selection", "clipboard"], capture_output=True, text=True)
+    return p.stdout if p.returncode == 0 else ""
+
+def write_clip(text):
+    subprocess.run(["xclip", "-i", "-selection", "clipboard"], input=text, text=True, check=False)
+    subprocess.run(["xclip", "-i", "-selection", "primary"], input=text, text=True, check=False)
+
+while True:
+    print("\033[2J\033[H=== Wimotek X11 剪贴板助手 ===")
+    cur = read_clip()
+    print(f"当前长度: {len(cur)} 字符")
+    print("-" * 48)
+    print(cur if cur else "(当前剪贴板为空)")
+    print("-" * 48)
+    print("[r] 刷新查看   [w] 写入单行文本   [c] 清空   [q] 退出")
+    try:
+        cmd = input("请选择操作 > ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        break
+    if cmd == "w":
+        val = input("请输入/粘贴要写入剪贴板的文本: ")
+        write_clip(val)
+    elif cmd == "c":
+        write_clip("")
+    elif cmd == "q":
+        break
+' >/dev/null 2>&1 &

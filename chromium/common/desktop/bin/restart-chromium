@@ -1,0 +1,2 @@
+#!/usr/bin/env bash
+pkill -x chromium >/dev/null 2>&1 || pkill -f "/usr/lib/chromium/chromium" >/dev/null 2>&1 || true

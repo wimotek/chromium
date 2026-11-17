@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=新建无痕窗口
+GenericName=Incognito Chromium
+Comment=打开无痕隐私浏览器窗口 (Ctrl+Alt+I)
+Exec=/usr/local/bin/open-chromium --incognito
+Icon=/usr/share/icons/wimotek/incognito.svg
+Terminal=false
+Categories=Network;WebBrowser;

@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=打开终端
+GenericName=Terminal
+Comment=打开命令行终端 (Ctrl+Alt+T)
+Exec=/usr/local/bin/open-terminal
+Icon=/usr/share/icons/wimotek/terminal.svg
+Terminal=false
+Categories=System;TerminalEmulator;

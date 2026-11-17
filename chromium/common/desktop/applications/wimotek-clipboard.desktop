@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=剪贴板查看/同步
+GenericName=Clipboard Helper
+Comment=查看或手动写入 X11 剪贴板内容
+Exec=/usr/local/bin/show-clipboard
+Icon=/usr/share/icons/wimotek/clipboard.svg
+Terminal=false
+Categories=Utility;
