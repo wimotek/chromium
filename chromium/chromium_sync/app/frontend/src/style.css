@@ -65,7 +65,7 @@ input:-webkit-autofill:focus {
 }
 
 .login-card-navy {
-  width: 420px;
+  width: 450px;
   max-width: 95vw;
   background-color: #0b132b;
   border: 1px solid #172554;
@@ -94,8 +94,8 @@ input:-webkit-autofill:focus {
 
 .captcha-row { display: flex; gap: 10px; align-items: center; width: 100%; }
 .captcha-box {
-  width: 120px;
-  height: 38px;
+  width: 168px;
+  height: 48px;
   background: #09122a;
   border: 1px solid #172554;
   border-radius: 6px;

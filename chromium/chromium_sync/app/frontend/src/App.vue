@@ -14,6 +14,7 @@ const runtimeBadge = reactive({ db_type: 'sqlite', cache_backend: 'sqlite_cache'
 
 const activeNav = ref('nodes')
 const captchaSvg = ref('')
+const loggingIn = ref(false)
 const toastMsg = ref('')
 const toastType = ref('success')
 
@@ -44,27 +45,54 @@ const api = async (url, options = {}) => {
   return res
 }
 
+const readJsonSafe = async (res) => {
+  const raw = await res.text()
+  if (!raw) return {}
+  try {
+    return JSON.parse(raw)
+  } catch {
+    return { detail: raw.slice(0, 200) }
+  }
+}
+
 const refreshCaptcha = async () => {
-  const res = await fetch('/api/captcha')
-  const data = await res.json()
-  captchaSvg.value = data.svg
-  loginForm.captcha_token = data.token
+  try {
+    const res = await fetch('/api/captcha')
+    const data = await readJsonSafe(res)
+    if (res.ok && data.svg) {
+      captchaSvg.value = data.svg
+      loginForm.captcha_token = data.token
+      loginForm.captcha_answer = ''
+    } else {
+      showToast(data.detail || '获取验证码失败', 'error')
+    }
+  } catch (e) {
+    showToast(`获取验证码异常: ${e}`, 'error')
+  }
 }
 
 const login = async () => {
-  const res = await fetch('/api/login', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(loginForm)
-  })
-  const data = await res.json()
-  if (res.ok) {
-    token.value = data.token
-    localStorage.setItem('token', data.token)
-    loadBaseInfo()
-  } else {
-    showToast(data.detail || '用户名或密码错误', 'error')
-    refreshCaptcha()
+  if (loggingIn.value) return
+  loggingIn.value = true
+  try {
+    const res = await fetch('/api/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(loginForm)
+    })
+    const data = await readJsonSafe(res)
+    if (res.ok && data.token) {
+      token.value = data.token
+      localStorage.setItem('token', data.token)
+      loadBaseInfo()
+    } else {
+      showToast(data.detail || `登录失败 (HTTP ${res.status})`, 'error')
+      refreshCaptcha()
+    }
+  } catch (e) {
+    showToast(`登录请求异常: ${e}`, 'error')
+  } finally {
+    loggingIn.value = false
   }
 }
 
@@ -178,15 +206,15 @@ onMounted(() => {
           <div class="form-row">
             <label class="form-label">人机验证</label>
             <div class="captcha-row">
-              <input v-model="loginForm.captcha_answer" required placeholder="计算答案" class="cdp-input" style="flex:1;">
+              <input v-model="loginForm.captcha_answer" required placeholder="输入右侧字符(不区分大小写)" class="cdp-input" style="flex:1; min-width:0;">
               <div @click="refreshCaptcha" class="captcha-box" title="点击刷新验证码">
                 <div v-html="captchaSvg"></div>
               </div>
             </div>
           </div>
 
-          <button type="submit" class="btn-primary-gradient" style="width:100%; padding:10px; margin-top:8px;">
-            登 录 控 制 台
+          <button type="submit" :disabled="loggingIn" class="btn-primary-gradient" style="width:100% !important; height:40px; margin-top:8px;">
+            {{ loggingIn ? '正在验证登录...' : '登 录 控 制 台' }}
           </button>
         </form>
       </div>

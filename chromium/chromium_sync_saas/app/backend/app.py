@@ -17,22 +17,22 @@ from config import DIST_DIR, HUB_HOST, HUB_PORT, HUB_SERVE_FRONTEND, logger
 from core.db import init_db_and_jwt
 from core.rate_limit import RATE_LIMIT_GLOBAL_PER_MIN, check_rate_limit, get_client_ip, is_loopback_ip
 from core.security import ensure_ssl_certificates
-from services.billing_service import billing_settlement_loop
-from services.level_service import level_evaluation_loop
-from services.sync_service import reschedule_all_policies, scheduler, set_main_event_loop
-from services.traffic_service import flush_traffic_buffers, traffic_flush_loop
-from services.tunnel_manager import tunnel_mgr, tunnel_watchdog_loop
-
-from routers.admin import router as admin_router
-from routers.api_v1 import router as api_v1_router
-from routers.audit import router as audit_router
-from routers.auth import router as auth_router
-from routers.cdp_gateway import router as cdp_gateway_router
-from routers.market import router as market_router
-from routers.nodes import router as nodes_router
-from routers.notify import router as notify_router
-from routers.setup import router as setup_router
-from routers.sync import router as sync_router
+from modules.announcements.router import router as announcements_router
+from modules.audit.router import router as audit_router
+from modules.billing import billing_router, billing_settlement_loop
+from modules.market import market_router
+from modules.nodes import (
+    api_v1_router,
+    cdp_gateway_router,
+    nodes_router,
+    tunnel_mgr,
+    tunnel_watchdog_loop,
+)
+from modules.nodes.traffic_service import flush_traffic_buffers, traffic_flush_loop
+from modules.notifications.router import router as notify_router
+from modules.sync import reschedule_all_policies, scheduler, set_main_event_loop, sync_router
+from modules.system import admin_router, setup_router
+from modules.users import level_evaluation_loop, users_router
 
 init_db_and_jwt()
 
@@ -98,10 +98,12 @@ async def global_antispam_middleware(request: Request, call_next):
     return response
 
 
-app.include_router(auth_router)
+app.include_router(users_router)
 app.include_router(setup_router)
+app.include_router(announcements_router)
 app.include_router(nodes_router)
 app.include_router(market_router)
+app.include_router(billing_router)
 app.include_router(admin_router)
 app.include_router(audit_router)
 app.include_router(sync_router)
@@ -114,7 +116,7 @@ if not HUB_SERVE_FRONTEND:
 
     @app.get("/")
     async def backend_only_root():
-        return {"service": "chromium_sync_saas_backend", "mode": "backend_only", "tofu": False}
+        return {"service": "chromium_sync_saas_backend", "mode": "backend_only", "auth": "strict_join_token"}
 elif DIST_DIR:
     assets_dir = os.path.join(DIST_DIR, "assets")
     if os.path.exists(assets_dir):

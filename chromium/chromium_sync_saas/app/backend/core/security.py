@@ -3,7 +3,7 @@ import os
 import secrets
 import time
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 import bcrypt
 import jwt
@@ -14,7 +14,7 @@ from cryptography.x509.oid import NameOID
 from fastapi import Depends, HTTPException, Header as ReqHeader, Request, Security
 from fastapi.security.api_key import APIKeyHeader, APIKeyQuery
 
-from config import CERTS_DIR, DATA_DIR, SSL_CERT_FILE, SSL_KEY_FILE, logger
+from config import CERTS_DIR, DATA_DIR, SSL_CERT_FILE, SSL_KEY_FILE
 from core.cache import cache_mgr
 from core.db import get_setting, session_scope
 from core.models import User
@@ -31,9 +31,80 @@ from core.rate_limit import (
 api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 api_key_query = APIKeyQuery(name="api_key", auto_error=False)
 
+_CAPTCHA_ALPHABET = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ"
+_CAPTCHA_COLORS = ["#38bdf8", "#34d399", "#f472b6", "#facc15", "#a78bfa", "#fb923c"]
 
-def store_captcha(token: str, answer: int, ttl_seconds: int = 180):
-    payload = {"ans": int(answer), "exp": time.time() + ttl_seconds}
+
+def generate_strong_captcha(length: int = 5) -> Tuple[str, str]:
+    """生成抗 OCR 干扰图形验证码 (code, svg_markup)"""
+    chars = [secrets.choice(_CAPTCHA_ALPHABET) for _ in range(length)]
+    code = "".join(chars)
+
+    width, height = 168, 48
+    parts = [
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}">',
+        '<defs>',
+        '<linearGradient id="capBg" x1="0%" y1="0%" x2="100%" y2="100%">',
+        '<stop offset="0%" stop-color="#090f1e"/>',
+        '<stop offset="100%" stop-color="#13213c"/>',
+        '</linearGradient>',
+        '</defs>',
+        '<rect width="100%" height="100%" fill="url(#capBg)" rx="6"/>',
+    ]
+
+    # Subtle background grid
+    for gx in range(12, width, 18):
+        parts.append(f'<line x1="{gx}" y1="0" x2="{gx}" y2="{height}" stroke="#1e293b" stroke-width="0.8"/>')
+    for gy in range(10, height, 12):
+        parts.append(f'<line x1="0" y1="{gy}" x2="{width}" y2="{gy}" stroke="#1e293b" stroke-width="0.8"/>')
+
+    # Random Bezier interference waves
+    for _ in range(5):
+        x1 = secrets.randbelow(25)
+        y1 = 6 + secrets.randbelow(height - 12)
+        cx1 = 35 + secrets.randbelow(55)
+        cy1 = 2 + secrets.randbelow(height - 4)
+        cx2 = 90 + secrets.randbelow(50)
+        cy2 = 2 + secrets.randbelow(height - 4)
+        x2 = width - secrets.randbelow(20)
+        y2 = 6 + secrets.randbelow(height - 12)
+        c = secrets.choice(_CAPTCHA_COLORS)
+        sw = round(1.0 + secrets.randbelow(10) / 10.0, 1)
+        parts.append(
+            f'<path d="M{x1},{y1} C{cx1},{cy1} {cx2},{cy2} {x2},{y2}" '
+            f'fill="none" stroke="{c}" stroke-opacity="0.38" stroke-width="{sw}"/>'
+        )
+
+    # Random interference dots
+    for _ in range(36):
+        dx = 4 + secrets.randbelow(width - 8)
+        dy = 4 + secrets.randbelow(height - 8)
+        dr = 1 + secrets.randbelow(2)
+        c = secrets.choice(_CAPTCHA_COLORS)
+        parts.append(f'<circle cx="{dx}" cy="{dy}" r="{dr}" fill="{c}" fill-opacity="0.45"/>')
+
+    # Distorted, rotated, skewed, multi-colored glyphs
+    start_x = 18
+    step_x = 28
+    for idx, ch in enumerate(chars):
+        tx = start_x + idx * step_x + (secrets.randbelow(7) - 3)
+        ty = 31 + (secrets.randbelow(9) - 4)
+        rot = secrets.randbelow(45) - 22
+        skew = secrets.randbelow(21) - 10
+        fsize = 21 + secrets.randbelow(5)
+        c = secrets.choice(_CAPTCHA_COLORS)
+        parts.append(
+            f'<text x="0" y="0" transform="translate({tx},{ty}) rotate({rot}) skewX({skew})" '
+            f'font-family="JetBrains Mono, Consolas, monospace" font-size="{fsize}" font-weight="800" '
+            f'fill="{c}" stroke="#020617" stroke-width="0.6">{ch}</text>'
+        )
+
+    parts.append("</svg>")
+    return code, "".join(parts)
+
+
+def store_captcha(token: str, answer: Any, ttl_seconds: int = 180):
+    payload = {"ans": str(answer).strip().upper(), "exp": time.time() + ttl_seconds}
     cache_mgr.set_json(f"auth:captcha:{token}", payload, ttl=ttl_seconds)
 
 
@@ -47,7 +118,66 @@ def verify_and_pop_captcha(token: str, user_answer: str) -> bool:
         return False
     if time.time() > float(cap.get("exp", 0)):
         return False
-    return str(cap.get("ans", "")) == (user_answer or "").strip()
+    expected = str(cap.get("ans", "")).strip().upper()
+    presented = (user_answer or "").strip().upper()
+    if not expected or not presented:
+        return False
+    return secrets.compare_digest(expected, presented)
+
+
+def get_email_code_cooldown(email: str) -> int:
+    norm = (email or "").strip().lower()
+    if not norm:
+        return 0
+    raw = cache_mgr.get(f"auth:email_cd:{norm}")
+    if not raw:
+        return 0
+    try:
+        rem = int(float(raw) - time.time())
+        return max(0, rem)
+    except (TypeError, ValueError):
+        return 0
+
+
+def store_email_code(email: str, code: str, ttl_seconds: int = 600, cooldown_seconds: int = 60):
+    norm = (email or "").strip().lower()
+    now = time.time()
+    cache_mgr.set_json(
+        f"auth:email_otp:{norm}",
+        {"code": str(code).strip(), "attempts": 0, "exp": now + ttl_seconds},
+        ttl=ttl_seconds,
+    )
+    cache_mgr.set(f"auth:email_cd:{norm}", f"{now + cooldown_seconds:.2f}", ttl=cooldown_seconds)
+
+
+def verify_and_pop_email_code(email: str, user_code: str) -> Tuple[bool, str]:
+    norm = (email or "").strip().lower()
+    presented = (user_code or "").strip()
+    if not norm or not presented:
+        return False, "请输入邮箱验证码"
+
+    otp_key = f"auth:email_otp:{norm}"
+    rec = cache_mgr.get_json(otp_key)
+    if not rec:
+        return False, "邮箱验证码不存在或已过期，请重新发送"
+    if time.time() > float(rec.get("exp", 0)):
+        cache_mgr.delete(otp_key)
+        return False, "邮箱验证码已过期，请重新获取"
+
+    expected = str(rec.get("code", "")).strip()
+    if secrets.compare_digest(expected, presented):
+        cache_mgr.delete(otp_key)
+        return True, ""
+
+    attempts = int(rec.get("attempts", 0)) + 1
+    if attempts >= 5:
+        cache_mgr.delete(otp_key)
+        return False, "邮箱验证码连续错误 5 次，已作废，请重新发送"
+
+    rem_ttl = max(10, int(float(rec.get("exp", 0)) - time.time()))
+    rec["attempts"] = attempts
+    cache_mgr.set_json(otp_key, rec, ttl=rem_ttl)
+    return False, f"邮箱验证码错误（剩余 {5 - attempts} 次机会）"
 
 
 def hash_password(password: str) -> str:
@@ -63,12 +193,21 @@ def verify_password(password: str, hashed: str) -> bool:
         return False
 
 
-def issue_user_jwt(user: User, expire_hours: int = 24) -> str:
+def issue_user_jwt(user_or_dict: Any, expire_hours: int = 24) -> str:
     jwt_secret = get_setting("jwt_secret")
+    if isinstance(user_or_dict, dict):
+        uid = int(user_or_dict.get("id") or user_or_dict.get("uid") or 0)
+        username = str(user_or_dict.get("username") or user_or_dict.get("sub") or "")
+        role = str(user_or_dict.get("role") or "user")
+    else:
+        uid = int(user_or_dict.id)
+        username = str(user_or_dict.username)
+        role = str(user_or_dict.role)
+
     payload = {
-        "sub": user.username,
-        "uid": int(user.id),
-        "role": user.role,
+        "sub": username,
+        "uid": uid,
+        "role": role,
         "exp": datetime.now(timezone.utc) + timedelta(hours=expire_hours),
     }
     return jwt.encode(payload, jwt_secret, algorithm="HS256")

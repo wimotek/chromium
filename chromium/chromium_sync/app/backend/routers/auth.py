@@ -21,6 +21,7 @@ from core.rate_limit import (
     record_auth_failure,
 )
 from core.security import (
+    generate_strong_captcha,
     hash_password,
     store_captcha,
     verify_and_pop_captcha,
@@ -55,13 +56,9 @@ def auth_status():
 def get_captcha(request: Request):
     ip = get_client_ip(request)
     enforce_rate_limit("captcha", ip, RATE_LIMIT_CAPTCHA_PER_MIN, 60, "获取验证码过于频繁，请稍后再试")
-    a, b = random.randint(10, 50), random.randint(1, 9)
+    code, svg = generate_strong_captcha(5)
     token = str(uuid.uuid4())
-    store_captcha(token, a + b, ttl_seconds=180)
-    svg = f'''<svg xmlns="http://www.w3.org/2000/svg" width="120" height="38" viewBox="0 0 120 38">
-        <rect width="100%" height="100%" fill="#09122a" rx="4"/>
-        <text x="18" y="25" font-family="-apple-system, system-ui" font-size="16" font-weight="bold" fill="#00f0ff">{a} + {b} = ?</text>
-    </svg>'''
+    store_captcha(token, code, ttl_seconds=180)
     return {"token": token, "svg": svg}
 
 

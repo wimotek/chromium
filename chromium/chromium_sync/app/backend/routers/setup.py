@@ -22,7 +22,7 @@ from core.db import (
     is_setup_required,
     load_bootstrap_config,
     save_bootstrap_config,
-    set_setting,
+    set_settings_batch,
     test_db_connection,
 )
 from core.rate_limit import RATE_LIMIT_SETUP_PER_MIN, enforce_rate_limit, get_antispam_stats, get_client_ip
@@ -163,39 +163,47 @@ def _complete_initial_setup_locked(data: CompleteSetupDTO):
     if not db_test.get("ok"):
         raise HTTPException(status_code=400, detail=db_test.get("detail", "目标数据库连接测试失败"))
 
-    # 2. 保存 bootstrap.json 并切换缓存引擎（Redis 不可达会自动回退 SQLite Cache）
-    save_bootstrap_config(boot_cfg)
+    # 2. 切换缓存引擎并应用对外域名/端口覆盖参数（此时尚未落盘 bootstrap.json，确保失败可重试）
     cache_mgr.reload_from_config(boot_cfg["redis_url"])
-
-    # 3. 应用对外域名/端口覆盖参数
     apply_hub_network_overrides(
         public_host=boot_cfg.get("hub_public_host"),
         external_port=boot_cfg.get("hub_external_port"),
     )
 
-    # 4. 热初始化目标数据库引擎、ORM 表与默认系统设置
+    # 3. 热初始化目标数据库引擎、ORM 表、默认策略与管理员凭据（单事务批量写入）
     init_db_and_jwt(boot_cfg, mark_setup_completed=True)
-    set_setting("admin_username", username)
-    set_setting("admin_password", hash_password(data.admin_password))
-    set_setting("tofu_enabled", "1" if data.tofu_enabled else "0")
-    set_setting("tofu_auto_approve", "1" if data.tofu_auto_approve else "0")
-    set_setting("setup_completed", "1")
+    set_settings_batch({
+        "admin_username": username,
+        "admin_password": hash_password(data.admin_password),
+        "tofu_enabled": "1" if data.tofu_enabled else "0",
+        "tofu_auto_approve": "1" if data.tofu_auto_approve else "0",
+        "setup_completed": "1",
+    })
 
-    reschedule_all_policies()
-
+    # 4. 生成管理员会话 JWT 与集群关键凭据
     jwt_secret = get_setting("jwt_secret")
+    api_key_val = get_setting("api_key")
+    join_tok_val = get_setting("cluster_join_token")
     token = jwt.encode(
         {"sub": username, "exp": datetime.utcnow() + timedelta(days=7)},
         jwt_secret,
         algorithm="HS256",
     )
 
+    # 5. 所有核心初始化全部成功后再原子落盘 bootstrap.json，彻底避免半成品锁死安装向导
+    save_bootstrap_config(boot_cfg)
+
+    try:
+        reschedule_all_policies()
+    except Exception as exc:
+        logger.warning(f"⚠️ 首次安装后重载定时策略异常（将在服务周期内自动恢复）: {exc}")
+
     logger.info(f"🎉 [首次安装完成] 管理员={username} | DB={db_type.upper()} | Cache={cache_mgr.get_status()['active_backend']}")
     return {
         "message": "系统初始化完成",
         "token": token,
-        "api_key": get_setting("api_key"),
-        "cluster_join_token": get_setting("cluster_join_token"),
+        "api_key": api_key_val,
+        "cluster_join_token": join_tok_val,
         "db_type": db_type,
         "cache_backend": cache_mgr.get_status()["active_backend"],
     }

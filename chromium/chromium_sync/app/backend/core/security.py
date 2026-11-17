@@ -29,10 +29,76 @@ api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 api_key_query = APIKeyQuery(name="api_key", auto_error=False)
 
 CAPTCHA_STORE = {}
+_CAPTCHA_ALPHABET = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ"
+_CAPTCHA_COLORS = ["#38bdf8", "#34d399", "#f472b6", "#facc15", "#a78bfa", "#fb923c"]
 
 
-def store_captcha(token: str, answer: int, ttl_seconds: int = 180):
-    payload = {"ans": int(answer), "exp": time.time() + ttl_seconds}
+def generate_strong_captcha(length: int = 5):
+    """生成抗 OCR 干扰图形验证码 (code, svg_markup)"""
+    chars = [secrets.choice(_CAPTCHA_ALPHABET) for _ in range(length)]
+    code = "".join(chars)
+
+    width, height = 168, 48
+    parts = [
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}">',
+        '<defs>',
+        '<linearGradient id="capBg" x1="0%" y1="0%" x2="100%" y2="100%">',
+        '<stop offset="0%" stop-color="#090f1e"/>',
+        '<stop offset="100%" stop-color="#13213c"/>',
+        '</linearGradient>',
+        '</defs>',
+        '<rect width="100%" height="100%" fill="url(#capBg)" rx="6"/>',
+    ]
+
+    for gx in range(12, width, 18):
+        parts.append(f'<line x1="{gx}" y1="0" x2="{gx}" y2="{height}" stroke="#1e293b" stroke-width="0.8"/>')
+    for gy in range(10, height, 12):
+        parts.append(f'<line x1="0" y1="{gy}" x2="{width}" y2="{gy}" stroke="#1e293b" stroke-width="0.8"/>')
+
+    for _ in range(5):
+        x1 = secrets.randbelow(25)
+        y1 = 6 + secrets.randbelow(height - 12)
+        cx1 = 35 + secrets.randbelow(55)
+        cy1 = 2 + secrets.randbelow(height - 4)
+        cx2 = 90 + secrets.randbelow(50)
+        cy2 = 2 + secrets.randbelow(height - 4)
+        x2 = width - secrets.randbelow(20)
+        y2 = 6 + secrets.randbelow(height - 12)
+        c = secrets.choice(_CAPTCHA_COLORS)
+        sw = round(1.0 + secrets.randbelow(10) / 10.0, 1)
+        parts.append(
+            f'<path d="M{x1},{y1} C{cx1},{cy1} {cx2},{cy2} {x2},{y2}" '
+            f'fill="none" stroke="{c}" stroke-opacity="0.38" stroke-width="{sw}"/>'
+        )
+
+    for _ in range(36):
+        dx = 4 + secrets.randbelow(width - 8)
+        dy = 4 + secrets.randbelow(height - 8)
+        dr = 1 + secrets.randbelow(2)
+        c = secrets.choice(_CAPTCHA_COLORS)
+        parts.append(f'<circle cx="{dx}" cy="{dy}" r="{dr}" fill="{c}" fill-opacity="0.45"/>')
+
+    start_x = 18
+    step_x = 28
+    for idx, ch in enumerate(chars):
+        tx = start_x + idx * step_x + (secrets.randbelow(7) - 3)
+        ty = 31 + (secrets.randbelow(9) - 4)
+        rot = secrets.randbelow(45) - 22
+        skew = secrets.randbelow(21) - 10
+        fsize = 21 + secrets.randbelow(5)
+        c = secrets.choice(_CAPTCHA_COLORS)
+        parts.append(
+            f'<text x="0" y="0" transform="translate({tx},{ty}) rotate({rot}) skewX({skew})" '
+            f'font-family="JetBrains Mono, Consolas, monospace" font-size="{fsize}" font-weight="800" '
+            f'fill="{c}" stroke="#020617" stroke-width="0.6">{ch}</text>'
+        )
+
+    parts.append("</svg>")
+    return code, "".join(parts)
+
+
+def store_captcha(token: str, answer, ttl_seconds: int = 180):
+    payload = {"ans": str(answer).strip().upper(), "exp": time.time() + ttl_seconds}
     cache_mgr.set_json(f"auth:captcha:{token}", payload, ttl=ttl_seconds)
 
 
@@ -46,7 +112,11 @@ def verify_and_pop_captcha(token: str, user_answer: str) -> bool:
         return False
     if time.time() > float(cap.get("exp", 0)):
         return False
-    return str(cap.get("ans", "")) == (user_answer or "").strip()
+    expected = str(cap.get("ans", "")).strip().upper()
+    presented = (user_answer or "").strip().upper()
+    if not expected or not presented:
+        return False
+    return secrets.compare_digest(expected, presented)
 
 def hash_password(password: str) -> str:
     pwd_bytes = password.encode('utf-8')[:72]

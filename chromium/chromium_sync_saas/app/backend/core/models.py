@@ -36,7 +36,6 @@ class Plan(Base):
     max_nodes = Column(Integer, nullable=False, default=3)
     max_active_leases = Column(Integer, nullable=False, default=2)
     max_monthly_traffic_bytes = Column(BigInteger, nullable=False, default=10 * 1024 * 1024 * 1024)
-    # 买家购买套餐后享有的平台抽成减免基点（bps，例如 500 = 减免 5%）
     platform_fee_discount_bps = Column(Integer, nullable=False, default=0)
     can_share_nodes = Column(Integer, nullable=False, default=1)
     is_default = Column(Integer, nullable=False, default=0)
@@ -64,21 +63,19 @@ class UserLevel(Base):
     __tablename__ = "user_levels"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    code = Column(String(32), unique=True, nullable=False, index=True)  # lv1 | lv2 | lv3 | lv4
+    code = Column(String(32), unique=True, nullable=False, index=True)
     name = Column(String(64), nullable=False)
     rank_order = Column(Integer, nullable=False, default=1, index=True)
     badge_color = Column(String(32), default="#94a3b8")
 
-    # 自动升级与降级判定门槛
     min_online_hours = Column(Integer, nullable=False, default=0)
     min_contributed_gb = Column(Integer, nullable=False, default=0)
-    max_avg_latency_ms = Column(Integer, nullable=False, default=0)  # 0=不限；高于此延迟则触发降级或无法升级
-    min_speed_kbps = Column(Integer, nullable=False, default=0)      # 0=不限；低于此速率则触发降级或无法升级
+    max_avg_latency_ms = Column(Integer, nullable=False, default=0)
+    min_speed_kbps = Column(Integer, nullable=False, default=0)
 
-    # 按接入通道配置平台对卖家底价的加价率（基点 bps：1000=10%，2500=25%）
-    reverse_fee_bps = Column(Integer, nullable=False, default=2500)      # WSS 反向穿透（消耗 Hub 中继流量，差价较高）
-    public_wss_fee_bps = Column(Integer, nullable=False, default=1000)  # 公网 WSS 直连（轻调度，差价较低）
-    buyer_discount_bps = Column(Integer, nullable=False, default=0)     # 作为买家租用节点时的额外差价减免
+    reverse_fee_bps = Column(Integer, nullable=False, default=2500)
+    public_wss_fee_bps = Column(Integer, nullable=False, default=1000)
+    buyer_discount_bps = Column(Integer, nullable=False, default=0)
     description = Column(String(255), default="")
 
     def to_dict(self) -> Dict[str, Any]:
@@ -100,16 +97,20 @@ class UserLevel(Base):
 
 
 class User(Base):
-    """多租户 SaaS 账号、等级信用指标、余额账户与专属入网/API 凭据"""
+    """多租户 SaaS 账号、邮箱认证、推荐邀请、等级信用指标、余额账户与专属入网/API 凭据"""
     __tablename__ = "users"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     username = Column(String(64), unique=True, nullable=False, index=True)
     email = Column(String(191), unique=True, nullable=True, index=True)
+    email_verified = Column(Integer, nullable=False, default=0)
     password_hash = Column(String(255), nullable=False)
-    role = Column(String(32), nullable=False, default="user")  # user | admin
-    status = Column(String(32), nullable=False, default="active")  # active | suspended
+    role = Column(String(32), nullable=False, default="user")
+    status = Column(String(32), nullable=False, default="active")
     plan_id = Column(Integer, nullable=False, default=1, index=True)
+
+    invite_code = Column(String(32), unique=True, nullable=True, index=True)
+    invited_by_id = Column(Integer, nullable=True, index=True)
 
     level_id = Column(Integer, nullable=False, default=1, index=True)
     level_locked = Column(Integer, nullable=False, default=0)
@@ -130,7 +131,6 @@ class User(Base):
     self_reverse_billed_bytes = Column(BigInteger, nullable=False, default=0)
     self_reverse_billed_units = Column(BigInteger, nullable=False, default=0)
 
-    # 推广激励（每日签到 + 每月固定领取）
     last_checkin_date = Column(String(16), default="")
     checkin_streak = Column(Integer, nullable=False, default=0)
     last_monthly_claim_ym = Column(String(16), default="")
@@ -145,9 +145,12 @@ class User(Base):
             "id": self.id,
             "username": self.username,
             "email": self.email or "",
+            "email_verified": bool(self.email_verified),
             "role": self.role,
             "status": self.status,
             "plan_id": self.plan_id,
+            "invite_code": self.invite_code or "",
+            "invited_by_id": self.invited_by_id,
             "level_id": int(self.level_id or 1),
             "level_locked": bool(self.level_locked),
             "total_online_seconds": int(self.total_online_seconds or 0),
@@ -181,8 +184,68 @@ class User(Base):
         return d
 
 
+class ReferralReward(Base):
+    """推荐邀请奖励明细流水"""
+    __tablename__ = "referral_rewards"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    inviter_id = Column(Integer, nullable=False, index=True)
+    invitee_id = Column(Integer, nullable=False, index=True)
+    invitee_username = Column(String(64), nullable=False)
+    inviter_bonus_units = Column(BigInteger, nullable=False, default=0)
+    invitee_bonus_units = Column(BigInteger, nullable=False, default=0)
+    status = Column(String(32), nullable=False, default="credited")
+    remark = Column(String(255), default="")
+    created_at = Column(String(64), nullable=False)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "id": self.id,
+            "inviter_id": self.inviter_id,
+            "invitee_id": self.invitee_id,
+            "invitee_username": self.invitee_username,
+            "inviter_bonus_units": int(self.inviter_bonus_units or 0),
+            "inviter_bonus_yuan": units_to_yuan_str(self.inviter_bonus_units or 0),
+            "invitee_bonus_units": int(self.invitee_bonus_units or 0),
+            "invitee_bonus_yuan": units_to_yuan_str(self.invitee_bonus_units or 0),
+            "status": self.status,
+            "remark": self.remark or "",
+            "created_at": self.created_at,
+        }
+
+
+class Announcement(Base):
+    """平台系统公告（支持登录页公开展示与工作台顶部横幅）"""
+    __tablename__ = "announcements"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    title = Column(String(200), nullable=False)
+    content = Column(Text, nullable=False)
+    level = Column(String(32), nullable=False, default="info")  # info | success | warn | danger
+    is_pinned = Column(Integer, nullable=False, default=0)
+    is_active = Column(Integer, nullable=False, default=1, index=True)
+    show_on_auth = Column(Integer, nullable=False, default=1)
+    author_username = Column(String(64), default="admin")
+    created_at = Column(String(64), nullable=False)
+    updated_at = Column(String(64), nullable=False)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "id": self.id,
+            "title": self.title,
+            "content": self.content,
+            "level": self.level or "info",
+            "is_pinned": bool(self.is_pinned),
+            "is_active": bool(self.is_active),
+            "show_on_auth": bool(self.show_on_auth),
+            "author_username": self.author_username or "admin",
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
+        }
+
+
 class Node(Base):
-    """节点实体（彻底移除 TOFU approval_status，强归属 owner_id 并支持共享市场定价与实时质量遥测）"""
+    """节点实体（强归属 owner_id 并支持共享市场定价与实时质量遥测）"""
     __tablename__ = "nodes"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
@@ -190,7 +253,7 @@ class Node(Base):
     name = Column(String(255), nullable=False)
     group_name = Column(String(128), default="默认分组")
     enabled = Column(Integer, default=1)
-    conn_type = Column(String(32), default="reverse")  # 仅保留 reverse (WSS反穿) | public_wss (公网WSS直连)
+    conn_type = Column(String(32), default="reverse")
     node_uuid = Column(String(128), default="", index=True)
     fingerprint = Column(String(128), default="")
     is_source = Column(Integer, default=0)
@@ -215,22 +278,20 @@ class Node(Base):
     active_cdp_streams = Column(Integer, default=0)
     last_metrics_at = Column(String(64), nullable=True)
 
-    # 节点速度与在线时长遥测（用于卖家自动评级/降级）
     avg_latency_ms = Column(Integer, default=0)
     avg_speed_kbps = Column(Integer, default=0)
     online_seconds = Column(BigInteger, default=0)
     last_online_tick_at = Column(String(64), default="")
 
-    # 共享节点市场定价与隔离模式
     share_enabled = Column(Integer, default=0, index=True)
     share_title = Column(String(255), default="")
     share_region = Column(String(64), default="Global")
     share_tags = Column(String(255), default="")
-    seller_price_per_hour_units = Column(BigInteger, default=5000)  # 默认 0.50 元/小时
-    seller_price_per_gb_units = Column(BigInteger, default=10000)   # 默认 1.00 元/GB
-    max_concurrent_leases = Column(Integer, default=1)              # 默认 1 独占租约槽位
+    seller_price_per_hour_units = Column(BigInteger, default=5000)
+    seller_price_per_gb_units = Column(BigInteger, default=10000)
+    max_concurrent_leases = Column(Integer, default=1)
     active_lease_count = Column(Integer, default=0)
-    isolation_mode = Column(String(32), default="exclusive_slot")   # exclusive_slot | ephemeral_profile
+    isolation_mode = Column(String(32), default="exclusive_slot")
     total_leased_seconds = Column(BigInteger, default=0)
     total_leased_bytes = Column(BigInteger, default=0)
     created_at = Column(String(64), default="")
@@ -247,7 +308,7 @@ class NodeLease(Base):
     node_id = Column(Integer, nullable=False, index=True)
     seller_id = Column(Integer, nullable=False, index=True)
     buyer_id = Column(Integer, nullable=False, index=True)
-    status = Column(String(32), nullable=False, default="active", index=True)  # active | ended | exhausted | revoked
+    status = Column(String(32), nullable=False, default="active", index=True)
     lease_token = Column(String(64), unique=True, nullable=False)
     isolation_profile_id = Column(String(64), nullable=False)
     channel_type = Column(String(32), nullable=False, default="reverse")
@@ -307,7 +368,7 @@ class NodeLease(Base):
 
 
 class BillingLedger(Base):
-    """钱包财务双分录流水（充值 / 租约扣费 / 卖家分成 / 平台差价抽成 / 管理员调账）"""
+    """钱包财务双分录流水"""
     __tablename__ = "billing_ledger"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
@@ -315,7 +376,7 @@ class BillingLedger(Base):
     related_lease_id = Column(Integer, nullable=True, index=True)
     related_node_id = Column(Integer, nullable=True, index=True)
     tx_type = Column(String(32), nullable=False, index=True)
-    amount_units = Column(BigInteger, nullable=False, default=0)  # 正为入账，负为扣款
+    amount_units = Column(BigInteger, nullable=False, default=0)
     balance_after_units = Column(BigInteger, nullable=False, default=0)
     platform_spread_units = Column(BigInteger, nullable=False, default=0)
     remark = Column(String(255), default="")
@@ -379,15 +440,15 @@ class SyncLog(Base):
 
 
 class RechargeOrder(Base):
-    """用户钱包充值订单（支付宝 / 微信支付 / 人工审核 / 回调入账）"""
+    """用户钱包充值订单"""
     __tablename__ = "recharge_orders"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     order_no = Column(String(64), unique=True, nullable=False, index=True)
     user_id = Column(Integer, nullable=False, index=True)
-    channel = Column(String(32), nullable=False, default="alipay")  # alipay | wechat
+    channel = Column(String(32), nullable=False, default="alipay")
     amount_units = Column(BigInteger, nullable=False, default=0)
-    status = Column(String(32), nullable=False, default="pending", index=True)  # pending | paid | closed
+    status = Column(String(32), nullable=False, default="pending", index=True)
     pay_url = Column(String(512), default="")
     qr_code_text = Column(String(512), default="")
     external_trade_no = Column(String(128), default="")
@@ -446,7 +507,7 @@ class AuditLog(Base):
     target_type = Column(String(64), default="")
     target_id = Column(String(128), default="")
     ip = Column(String(64), default="unknown")
-    status = Column(String(32), nullable=False, default="ok", index=True)  # ok | deny | error
+    status = Column(String(32), nullable=False, default="ok", index=True)
     detail_json = Column(Text, default="{}")
     created_at = Column(String(64), nullable=False, index=True)
 

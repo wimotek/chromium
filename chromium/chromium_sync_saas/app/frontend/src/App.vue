@@ -16,6 +16,7 @@
           <button class="nav-btn" :class="{ active: tab === 'market' }" @click="tab = 'market'">共享交易市场</button>
           <button class="nav-btn" :class="{ active: tab === 'sync' }" @click="tab = 'sync'">Cookie 同步</button>
           <button class="nav-btn" :class="{ active: tab === 'billing' }" @click="tab = 'billing'">套餐与钱包 (¥{{ user.balance_yuan }})</button>
+          <button class="nav-btn" :class="{ active: tab === 'referrals' }" @click="tab = 'referrals'">推广邀请</button>
           <button class="nav-btn" :class="{ active: tab === 'audit' }" @click="tab = 'audit'">审计日志</button>
           <button v-if="user.role === 'admin'" class="nav-btn" :class="{ active: tab === 'admin' }" @click="tab = 'admin'">运营管理台</button>
         </nav>
@@ -26,6 +27,8 @@
           <button class="btn btn-sm" @click="logout">退出登录</button>
         </div>
       </header>
+
+      <AnnouncementBanner />
 
       <main class="main">
         <MyNodesView
@@ -45,6 +48,7 @@
         />
         <SyncPolicyView v-else-if="tab === 'sync'" @notify="showToast" />
         <BillingView v-else-if="tab === 'billing'" @notify="showToast" @refresh-profile="refreshProfile" />
+        <ReferralView v-else-if="tab === 'referrals'" @notify="showToast" />
         <AuditView v-else-if="tab === 'audit'" @notify="showToast" />
         <AdminView v-else-if="tab === 'admin' && user.role === 'admin'" @notify="showToast" />
       </main>
@@ -57,15 +61,17 @@
 <script setup>
 import { defineAsyncComponent, onMounted, ref } from 'vue'
 import { apiFetch } from './api'
-import AuthGate from './components/AuthGate.vue'
-import SetupWizard from './components/SetupWizard.vue'
+import AnnouncementBanner from './modules/announcements/AnnouncementBanner.vue'
+import AuthGate from './modules/users/AuthGate.vue'
+import SetupWizard from './modules/system/SetupWizard.vue'
 
-const MyNodesView = defineAsyncComponent(() => import('./components/MyNodesView.vue'))
-const MarketView = defineAsyncComponent(() => import('./components/MarketView.vue'))
-const SyncPolicyView = defineAsyncComponent(() => import('./components/SyncPolicyView.vue'))
-const BillingView = defineAsyncComponent(() => import('./components/BillingView.vue'))
-const AuditView = defineAsyncComponent(() => import('./components/AuditView.vue'))
-const AdminView = defineAsyncComponent(() => import('./components/AdminView.vue'))
+const MyNodesView = defineAsyncComponent(() => import('./modules/nodes/MyNodesView.vue'))
+const MarketView = defineAsyncComponent(() => import('./modules/market/MarketView.vue'))
+const SyncPolicyView = defineAsyncComponent(() => import('./modules/sync/SyncPolicyView.vue'))
+const BillingView = defineAsyncComponent(() => import('./modules/billing/BillingView.vue'))
+const ReferralView = defineAsyncComponent(() => import('./modules/users/ReferralView.vue'))
+const AuditView = defineAsyncComponent(() => import('./modules/audit/AuditView.vue'))
+const AdminView = defineAsyncComponent(() => import('./modules/system/AdminView.vue'))
 
 const setupRequired = ref(false)
 const authed = ref(false)
@@ -122,10 +128,20 @@ async function boot() {
 }
 
 async function onSetupDone(res) {
-  setupRequired.value = false
   user.value = res.user || {}
+  plan.value = res.plan || null
+  level.value = res.level || null
+  setupRequired.value = false
   authed.value = true
+  try {
+    const st = await apiFetch('/api/auth/status')
+    authStatus.value = st
+    if (st.channel_fees) channelFees.value = st.channel_fees
+  } catch {
+    // ignore
+  }
   await refreshProfile()
+  showToast('SaaS 平台初始化完成，欢迎进入控制台')
 }
 
 async function onAuthed(res) {

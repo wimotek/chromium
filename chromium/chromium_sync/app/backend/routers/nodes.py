@@ -1038,6 +1038,7 @@ async def _run_reverse_tunnel_session(
     valid_token = get_setting("cluster_join_token")
     tofu_enabled = get_setting("tofu_enabled", "1") == "1"
     tofu_auto_approve = get_setting("tofu_auto_approve", "0") == "1"
+    ticket_verified = _verify_session_ticket(session_ticket, node_uuid, node_fp)
 
     try:
         with session_scope() as db:
@@ -1050,7 +1051,7 @@ async def _run_reverse_tunnel_session(
                 status = "connected"
                 decision = "allow_token"
                 reason = "edge_agent_token_verified"
-            elif _verify_session_ticket(session_ticket, node_uuid, node_fp):
+            elif ticket_verified:
                 approved = 1
                 status = "connected"
                 decision = "allow_session"

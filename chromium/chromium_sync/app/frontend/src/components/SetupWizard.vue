@@ -37,6 +37,16 @@ const form = reactive({
   tofu_auto_approve: Boolean(props.defaults?.tofu_auto_approve)
 })
 
+const readJsonSafe = async (res) => {
+  const raw = await res.text()
+  if (!raw) return {}
+  try {
+    return JSON.parse(raw)
+  } catch {
+    return { detail: raw.slice(0, 200) }
+  }
+}
+
 const testDbConnection = async () => {
   testingDb.value = true
   dbTestResult.value = null
@@ -53,11 +63,11 @@ const testDbConnection = async () => {
         mysql_database: form.mysql_database
       })
     })
-    const data = await res.json()
+    const data = await readJsonSafe(res)
     if (res.ok) {
       dbTestResult.value = { ok: true, msg: data.message }
     } else {
-      dbTestResult.value = { ok: false, msg: data.detail || '数据库连接失败' }
+      dbTestResult.value = { ok: false, msg: data.detail || `数据库连接失败 (HTTP ${res.status})` }
     }
   } catch (e) {
     dbTestResult.value = { ok: false, msg: String(e) }
@@ -79,11 +89,11 @@ const testRedisConnection = async () => {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ redis_url: form.redis_url.trim() })
     })
-    const data = await res.json()
+    const data = await readJsonSafe(res)
     if (res.ok) {
       redisTestResult.value = { ok: true, msg: data.message }
     } else {
-      redisTestResult.value = { ok: false, msg: data.detail || 'Redis 连接失败（保存后仍会自动回退至 SQLite Cache）' }
+      redisTestResult.value = { ok: false, msg: data.detail || `Redis 连接失败 (HTTP ${res.status})，保存后仍会自动回退至 SQLite Cache` }
     }
   } catch (e) {
     redisTestResult.value = { ok: false, msg: String(e) }
@@ -146,12 +156,12 @@ const submitSetup = async () => {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload)
     })
-    const data = await res.json()
+    const data = await readJsonSafe(res)
     if (!res.ok) {
-      props.showToast(data.detail || '初始化失败', 'error')
+      props.showToast(data.detail || `初始化失败 (HTTP ${res.status})`, 'error')
       return
     }
-    props.showToast(`安装向导完成！数据库: ${data.db_type.toUpperCase()} | 缓存: ${data.cache_backend}`, 'success')
+    props.showToast(`安装向导完成！数据库: ${(data.db_type || form.db_type).toUpperCase()} | 缓存: ${data.cache_backend || 'sqlite_cache'}`, 'success')
     emit('completed', data)
   } catch (e) {
     props.showToast(`请求异常: ${e}`, 'error')

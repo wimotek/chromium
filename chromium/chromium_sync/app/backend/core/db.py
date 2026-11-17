@@ -31,6 +31,7 @@ _engine_lock = threading.Lock()
 _engine = None
 _SessionLocal = None
 _active_db_config: Dict[str, Any] = {}
+_active_session_tls = threading.local()
 
 SETTINGS_CACHE_PREFIX = "cfg:setting:"
 
@@ -158,7 +159,16 @@ def get_session() -> Session:
 
 @contextmanager
 def session_scope():
+    stack = getattr(_active_session_tls, "stack", None)
+    if stack is None:
+        stack = []
+        _active_session_tls.stack = stack
+    if stack:
+        yield stack[-1]
+        return
+
     session = get_session()
+    stack.append(session)
     try:
         yield session
         session.commit()
@@ -166,6 +176,7 @@ def session_scope():
         session.rollback()
         raise
     finally:
+        stack.pop()
         session.close()
 
 
@@ -399,3 +410,22 @@ def set_setting(key: str, value: str):
         else:
             row.value = str_val
     cache_mgr.set(f"{SETTINGS_CACHE_PREFIX}{key}", str_val, ttl=120)
+
+
+def set_settings_batch(items: Dict[str, Any]):
+    if not items:
+        return
+    normalized = {str(k): str(v) for k, v in items.items()}
+    with session_scope() as db:
+        existing = {
+            row.key: row
+            for row in db.query(Setting).filter(Setting.key.in_(list(normalized.keys()))).all()
+        }
+        for k, str_val in normalized.items():
+            row = existing.get(k)
+            if row is None:
+                db.add(Setting(key=k, value=str_val))
+            else:
+                row.value = str_val
+    for k, str_val in normalized.items():
+        cache_mgr.set(f"{SETTINGS_CACHE_PREFIX}{k}", str_val, ttl=120)

@@ -29,12 +29,13 @@ from config import (
     logger,
 )
 from core.cache import cache_mgr
-from core.models import Base, BillingLedger, Node, Plan, Setting, SyncPolicy, User, UserLevel
+from core.models import Announcement, Base, BillingLedger, Node, Plan, Setting, SyncPolicy, User, UserLevel
 
 _engine_lock = threading.Lock()
 _engine = None
 _SessionLocal = None
 _active_db_config: Dict[str, Any] = {}
+_active_session_tls = threading.local()
 
 SETTINGS_CACHE_PREFIX = "cfg:setting:"
 
@@ -157,9 +158,21 @@ def get_session() -> Session:
     return _SessionLocal()
 
 
+def _get_thread_active_session() -> Optional[Session]:
+    stack = getattr(_active_session_tls, "stack", None)
+    if stack:
+        return stack[-1]
+    return None
+
+
 @contextmanager
 def session_scope():
     session = get_session()
+    stack = getattr(_active_session_tls, "stack", None)
+    if stack is None:
+        stack = []
+        _active_session_tls.stack = stack
+    stack.append(session)
     try:
         yield session
         session.commit()
@@ -167,6 +180,8 @@ def session_scope():
         session.rollback()
         raise
     finally:
+        if stack and stack[-1] is session:
+            stack.pop()
         session.close()
 
 
@@ -206,6 +221,11 @@ def issue_user_join_token() -> str:
     return "hub_u_" + secrets.token_urlsafe(24)
 
 
+def issue_user_invite_code() -> str:
+    alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+    return "".join(secrets.choice(alphabet) for _ in range(8))
+
+
 def _seed_default_plans(db: Session):
     if db.query(Plan).count() > 0:
         return
@@ -225,11 +245,11 @@ def _seed_default_plans(db: Session):
         Plan(
             code="pro",
             name="Pro 专业租户版",
-            monthly_price_units=990000,  # 99.00 元/月
+            monthly_price_units=990000,
             max_nodes=25,
             max_active_leases=12,
             max_monthly_traffic_bytes=200 * 1024 * 1024 * 1024,
-            platform_fee_discount_bps=500,  # 市场租用加价减免 5%
+            platform_fee_discount_bps=500,
             can_share_nodes=1,
             is_default=0,
             description="专业运营套餐：25 个节点配额、12 路并发租用、200 GB 月流量、市场手续费减免 5%",
@@ -237,11 +257,11 @@ def _seed_default_plans(db: Session):
         Plan(
             code="enterprise",
             name="Enterprise 集群版",
-            monthly_price_units=3990000,  # 399.00 元/月
+            monthly_price_units=3990000,
             max_nodes=200,
             max_active_leases=64,
             max_monthly_traffic_bytes=2 * 1024 * 1024 * 1024 * 1024,
-            platform_fee_discount_bps=1000,  # 市场租用加价减免 10%
+            platform_fee_discount_bps=1000,
             can_share_nodes=1,
             is_default=0,
             description="企业大规模集群：200 节点上限、64 路并发市场租用、2 TB 月流量、手续费减免 10%",
@@ -265,8 +285,8 @@ def _seed_default_user_levels(db: Session):
             min_contributed_gb=0,
             max_avg_latency_ms=0,
             min_speed_kbps=0,
-            reverse_fee_bps=2800,     # WSS 反穿消耗 Hub 中继流量：默认加价 28%
-            public_wss_fee_bps=1200,  # 公网 WSS 直连轻调度：默认加价 12%
+            reverse_fee_bps=2800,
+            public_wss_fee_bps=1200,
             buyer_discount_bps=0,
             description="入门基础等级，新注册默认归属；WSS 反穿差价较高，公网 WSS 直连更优惠",
         ),
@@ -279,9 +299,9 @@ def _seed_default_user_levels(db: Session):
             min_contributed_gb=1,
             max_avg_latency_ms=450,
             min_speed_kbps=50,
-            reverse_fee_bps=2400,     # 反穿加价降至 24%
-            public_wss_fee_bps=1000,  # WSS 直连加价降至 10%
-            buyer_discount_bps=200,   # 市场租用额外减免 2%
+            reverse_fee_bps=2400,
+            public_wss_fee_bps=1000,
+            buyer_discount_bps=200,
             description="累计在线 >=12h、贡献流量 >=1GB 且节点延迟 <=450ms / 速度 >=50KB/s",
         ),
         UserLevel(
@@ -293,9 +313,9 @@ def _seed_default_user_levels(db: Session):
             min_contributed_gb=10,
             max_avg_latency_ms=200,
             min_speed_kbps=200,
-            reverse_fee_bps=1900,     # 反穿加价降至 19%
-            public_wss_fee_bps=700,   # WSS 直连加价降至 7%
-            buyer_discount_bps=400,   # 市场租用额外减免 4%
+            reverse_fee_bps=1900,
+            public_wss_fee_bps=700,
+            buyer_discount_bps=400,
             description="累计在线 >=72h、贡献流量 >=10GB 且节点延迟 <=200ms / 速度 >=200KB/s",
         ),
         UserLevel(
@@ -307,9 +327,9 @@ def _seed_default_user_levels(db: Session):
             min_contributed_gb=50,
             max_avg_latency_ms=100,
             min_speed_kbps=500,
-            reverse_fee_bps=1400,     # 反穿最低仅加价 14%
-            public_wss_fee_bps=400,   # 公网 WSS 直连最低仅加价 4%
-            buyer_discount_bps=600,   # 市场租用额外减免 6%
+            reverse_fee_bps=1400,
+            public_wss_fee_bps=400,
+            buyer_discount_bps=600,
             description="累计在线 >=240h、贡献流量 >=50GB 且节点延迟 <=100ms / 速度 >=500KB/s；若速率退化将自动降级",
         ),
     ]
@@ -318,11 +338,34 @@ def _seed_default_user_levels(db: Session):
     db.flush()
 
 
+def _seed_default_announcement(db: Session):
+    if db.query(Announcement).count() > 0:
+        return
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    db.add(
+        Announcement(
+            title="欢迎使用 Chromium Sync SaaS 多租户云控平台",
+            content="平台支持公网 WSS 直连与 WSS 反向穿透接入，开启推荐邀请奖励与邮箱安全认证。管理员可在后台随时发布、置顶或编辑系统公告。",
+            level="info",
+            is_pinned=1,
+            is_active=1,
+            show_on_auth=1,
+            author_username="system",
+            created_at=now_str,
+            updated_at=now_str,
+        )
+    )
+    db.flush()
+
+
 def _ensure_schema_migrations(engine):
     """兼容已有 SQLite/MySQL 库平滑补齐新增字段"""
     inspector = inspect(engine)
     pending_alters = {
         "users": {
+            "email_verified": "INTEGER NOT NULL DEFAULT 0",
+            "invite_code": "VARCHAR(32) DEFAULT ''",
+            "invited_by_id": "INTEGER NULL",
             "level_id": "INTEGER NOT NULL DEFAULT 1",
             "level_locked": "INTEGER NOT NULL DEFAULT 0",
             "total_online_seconds": "BIGINT NOT NULL DEFAULT 0",
@@ -378,7 +421,21 @@ def _ensure_schema_migrations(engine):
                 logger.debug(f"下线历史直连/SSH节点跳过: {exc}")
 
 
-def create_or_update_initial_admin(db: Session, username: str, raw_password: str) -> User:
+def _backfill_user_invite_codes(db: Session):
+    missing = db.query(User).filter((User.invite_code.is_(None)) | (User.invite_code == "")).all()
+    if not missing:
+        return
+    used = {r[0] for r in db.query(User.invite_code).filter(User.invite_code.isnot(None), User.invite_code != "").all()}
+    for u in missing:
+        code = issue_user_invite_code()
+        while code in used:
+            code = issue_user_invite_code()
+        used.add(code)
+        u.invite_code = code
+    db.flush()
+
+
+def create_or_update_initial_admin(db: Session, username: str, raw_password: str, admin_email: Optional[str] = None) -> User:
     from core.security import hash_password
 
     default_plan = db.query(Plan).filter(Plan.is_default == 1).first() or db.query(Plan).order_by(Plan.id.asc()).first()
@@ -387,23 +444,31 @@ def create_or_update_initial_admin(db: Session, username: str, raw_password: str
     default_level = db.query(UserLevel).order_by(UserLevel.rank_order.asc()).first()
     default_level_id = default_level.id if default_level else 1
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    clean_email = (admin_email or "").strip().lower() or f"{username}@local.saas"
 
     admin_user = db.query(User).filter(User.role == "admin").order_by(User.id.asc()).first()
     if admin_user is not None:
         admin_user.username = username
         admin_user.password_hash = hash_password(raw_password)
+        if admin_email and "@" in clean_email:
+            admin_user.email = clean_email
+        admin_user.email_verified = 1
+        if not admin_user.invite_code:
+            admin_user.invite_code = issue_user_invite_code()
         db.flush()
         return admin_user
 
     admin_user = User(
         username=username,
-        email=f"{username}@local.saas",
+        email=clean_email,
+        email_verified=1,
         password_hash=hash_password(raw_password),
         role="admin",
         status="active",
         plan_id=default_plan_id,
         level_id=default_level_id,
-        balance_units=1000000,  # 初始运营管理员测试钱包 100.00 元
+        invite_code=issue_user_invite_code(),
+        balance_units=1000000,
         total_recharged_units=1000000,
         api_key=issue_user_api_key(),
         cluster_join_token=issue_user_join_token(),
@@ -447,10 +512,11 @@ def init_db_and_jwt(cfg: Optional[Dict[str, Any]] = None, mark_setup_completed: 
     Base.metadata.create_all(bind=engine)
     _ensure_schema_migrations(engine)
 
-    # 初始化默认套餐、用户等级与系统配置；超级管理员账号由首次安装向导强制创建
     with session_scope() as db:
         _seed_default_plans(db)
         _seed_default_user_levels(db)
+        _seed_default_announcement(db)
+        _backfill_user_invite_codes(db)
 
         existing_admin_exists = db.query(User.id).filter(User.role == "admin").first() is not None
         existing_nodes_count = db.query(Node).count()
@@ -461,6 +527,10 @@ def init_db_and_jwt(cfg: Optional[Dict[str, Any]] = None, mark_setup_completed: 
             "jwt_secret": secrets.token_hex(32),
             "edge_agent_secret": secrets.token_urlsafe(32),
             "saas_allow_public_register": "1" if SAAS_ALLOW_PUBLIC_REGISTER else "0",
+            "saas_require_email_verify": "1",
+            "saas_referral_enabled": "1",
+            "saas_referral_inviter_bonus_units": "50000",
+            "saas_referral_invitee_bonus_units": "30000",
             "saas_allow_self_recharge": "1" if SAAS_ALLOW_SELF_RECHARGE else "0",
             "saas_platform_fee_bps": str(SAAS_DEFAULT_PLATFORM_FEE_BPS),
             "saas_reverse_fee_bps": "2500",
@@ -491,6 +561,9 @@ def init_db_and_jwt(cfg: Optional[Dict[str, Any]] = None, mark_setup_completed: 
             "email_notify_to": "",
             "serverchan_enabled": "0",
             "serverchan_key": "",
+            "webhook_enabled": "0",
+            "webhook_url": "",
+            "webhook_secret": "",
             "sync_diff_enabled": "1",
             "sync_include_domains": "",
             "sync_exclude_domains": "doubleclick.net,google-analytics.com",
@@ -509,7 +582,10 @@ def init_db_and_jwt(cfg: Optional[Dict[str, Any]] = None, mark_setup_completed: 
         for k, v in defaults.items():
             if k not in existing_keys:
                 db.add(Setting(key=k, value=v))
-            cache_mgr.delete(f"{SETTINGS_CACHE_PREFIX}{k}")
+                actual_val = v
+            else:
+                actual_val = existing_keys[k].value
+            cache_mgr.set(f"{SETTINGS_CACHE_PREFIX}{k}", str(actual_val), ttl=120)
 
         if mark_setup_completed is True:
             row = existing_keys.get("setup_completed")
@@ -532,6 +608,14 @@ def get_setting(key: str, default: str = "") -> str:
     cached = cache_mgr.get(cache_key)
     if cached is not None:
         return cached
+
+    active_sess = _get_thread_active_session()
+    if active_sess is not None:
+        row = active_sess.get(Setting, key)
+        if row is not None and row.value is not None:
+            cache_mgr.set(cache_key, row.value, ttl=120)
+            return row.value
+        return default
 
     with session_scope() as db:
         row = db.get(Setting, key)
