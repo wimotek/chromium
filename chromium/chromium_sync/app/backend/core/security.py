@@ -235,12 +235,22 @@ def verify_agent_access(
     ip = get_client_ip(request)
     check_block("api_key", ip)
     valid_key = get_setting('api_key')
-    if verify_api_key_value(header_key, valid_key) or verify_api_key_value(query_key, valid_key):
+    token_query = request.query_params.get("token")
+    if (
+        verify_api_key_value(header_key, valid_key)
+        or verify_api_key_value(query_key, valid_key)
+        or verify_api_key_value(token_query, valid_key)
+    ):
+        clear_auth_failures("api_key", ip)
         return {"sub": "external_agent"}
     if authorization and authorization.startswith("Bearer "):
+        bearer_val = authorization[7:].strip()
+        if verify_api_key_value(bearer_val, valid_key):
+            clear_auth_failures("api_key", ip)
+            return {"sub": "external_agent"}
         try:
             jwt_secret = get_setting('jwt_secret')
-            return jwt.decode(authorization.split(" ")[1], jwt_secret, algorithms=["HS256"])
+            return jwt.decode(bearer_val, jwt_secret, algorithms=["HS256"])
         except Exception:
             pass
     _, blk_sec = record_auth_failure(

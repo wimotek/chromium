@@ -220,7 +220,43 @@ docker run -d \
 
 ---
 
-## 🤖 外部 Playwright 远程调试调用 (支持直连与 NAT4 反向穿透)
+## 🤖 外部 Playwright & OpenClaw 远程调试调用 (支持直连与 NAT4 反向穿透)
+
+### 1. 网关协议与鉴权方式
+* **支持端点**：
+  * `GET /cdp/{node_id}/json/version`（CDP 版本与 `webSocketDebuggerUrl` 发现）
+  * `GET /cdp/{node_id}/json/list` 与 `/cdp/{node_id}/json`（标签页列表探测，兼容 `https://` 模式 `cdpUrl`）
+  * `WS /cdp/{node_id}/ws?api_key=<API_KEY>`（全双工 CDP 调试通道）
+* **支持鉴权**：`X-API-Key: <API_KEY>`、`Authorization: Bearer <API_KEY>`、`?api_key=<API_KEY>` 或 `?token=<API_KEY>`。
+
+### 2. OpenClaw 快速接入（改设置直连 vs 使用 Skill 动态调度）
+
+1. **方式 A：只连固定单节点（仅改 `~/.openclaw/openclaw.json`，无需 Skill）**
+   ```json5
+   {
+     "browser": {
+       "enabled": true,
+       "defaultProfile": "chromium-hub-node1",
+       "remoteCdpTimeoutMs": 5000,
+       "remoteCdpHandshakeTimeoutMs": 8000,
+       "profiles": {
+         "chromium-hub-node1": {
+           "cdpUrl": "wss://hub.yourdomain.com:8443/cdp/1/ws?api_key=cdp_xxxxxxxxxxxxxxxxxxxx",
+           // 亦支持 HTTPS 自动探测（/json/version + /json/list）：
+           // "cdpUrl": "https://hub.yourdomain.com:8443/cdp/1?api_key=cdp_xxxxxxxxxxxxxxxxxxxx",
+           "attachOnly": true
+         }
+       }
+     }
+   }
+   ```
+
+2. **方式 B：多节点随机/轮询与带 Cookie 采集（导入 Skill `chromium-cdp-hub`）**
+   将仓库中的 `chromium/openclaw-skill/chromium-cdp-hub` 复制到 `~/.openclaw/skills/chromium-cdp-hub`，配置 `CHROMIUM_HUB_URL` 与 `CHROMIUM_HUB_API_KEY` 环境变量后即可在对话或脚本中运行：
+   * **无 Cookie 匿名采集**：`python3 scripts/hub_pool.py crawl --url "https://example.com" --mode anon --strategy round-robin`
+   * **带 Cookie 登录态采集**：`python3 scripts/hub_pool.py crawl --url "https://target.example.com" --mode cookie --cookie-source-node 1 --strategy random`
+
+### 3. Python Playwright 代码示例
 
 ```python
 import asyncio

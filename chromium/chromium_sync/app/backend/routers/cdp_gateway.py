@@ -109,11 +109,101 @@ async def cdp_gateway_version(
         raise HTTPException(status_code=502, detail=f"无法连通该节点的 CDP 服务: {e}")
 
 
+@router.get("/cdp/{node_id}/json/list")
+@router.get("/cdp/{node_id}/json")
+async def cdp_gateway_list(
+    request: Request,
+    node_id: int,
+    auth: dict = Depends(verify_agent_access),
+):
+    enforce_rate_limit("cdp_http", get_client_ip(request), RATE_LIMIT_CDP_PER_MIN, 60, "CDP 接口请求过于频繁")
+    with session_scope() as db:
+        row = db.get(Node, node_id)
+        node = row.to_dict() if row else None
+
+    if not node:
+        raise HTTPException(status_code=404, detail="目标节点不存在")
+    if node.get("api_enabled", 1) == 0 or (node.get("client_type") or "").lower() == "android":
+        raise HTTPException(status_code=403, detail="该节点已禁用第三方 API / CDP 网关接入")
+
+    api_key = get_setting("api_key")
+    hub_info = resolve_hub_access_info(request)
+    ws_scheme = hub_info["ws_scheme"]
+    domain = hub_info["public_netloc"]
+    channel = _resolve_channel_label(node.get("conn_type"))
+    ws_url = f"{ws_scheme}://{domain}/cdp/{node_id}/ws?api_key={api_key}"
+
+    if node.get("conn_type") in ("reverse", "public_wss", "wss_direct"):
+        session = tunnel_mgr.get_reverse_session(node_id)
+        if not session or session.is_closed:
+            raise HTTPException(status_code=502, detail="WSS 节点当前处于离线状态")
+        targets = []
+        try:
+            res = await session.send_command("get_list", timeout=4.0)
+            raw_targets = res.get("targets") if isinstance(res, dict) else None
+            if isinstance(raw_targets, list):
+                for item in raw_targets:
+                    if not isinstance(item, dict):
+                        continue
+                    t = dict(item)
+                    t["webSocketDebuggerUrl"] = ws_url
+                    t.pop("devtoolsFrontendUrl", None)
+                    targets.append(t)
+        except Exception:
+            targets = []
+        if not targets:
+            targets = [
+                {
+                    "description": "",
+                    "id": f"node-{node_id}",
+                    "title": node.get("name") or f"Node #{node_id}",
+                    "type": "page",
+                    "url": "about:blank",
+                    "webSocketDebuggerUrl": ws_url,
+                }
+            ]
+        record_cdp_traffic(node_id, channel_type=channel, tx_bytes=_payload_byte_len(json.dumps(targets)), requests=1)
+        return targets
+
+    target_h = node.get("direct_host", "127.0.0.1") if node["is_local"] else "127.0.0.1"
+    try:
+        host, _ = await resolve_cdp_endpoint(node["local_bind_port"], target_h)
+        clean_h = host.strip("[]")
+        netloc = f"[{clean_h}]:{node['local_bind_port']}" if ":" in clean_h else f"{clean_h}:{node['local_bind_port']}"
+        async with httpx.AsyncClient(timeout=3.0) as client:
+            res = await client.get(f"http://{netloc}/json/list")
+            raw_targets = res.json() if isinstance(res.json(), list) else []
+            targets = []
+            for item in raw_targets:
+                if not isinstance(item, dict):
+                    continue
+                t = dict(item)
+                t["webSocketDebuggerUrl"] = ws_url
+                t.pop("devtoolsFrontendUrl", None)
+                targets.append(t)
+            if not targets:
+                targets = [
+                    {
+                        "description": "",
+                        "id": f"node-{node_id}",
+                        "title": node.get("name") or f"Node #{node_id}",
+                        "type": "page",
+                        "url": "about:blank",
+                        "webSocketDebuggerUrl": ws_url,
+                    }
+                ]
+            record_cdp_traffic(node_id, channel_type=channel, tx_bytes=_payload_byte_len(json.dumps(targets)), requests=1)
+            return targets
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"无法连通该节点的 CDP 服务: {e}")
+
+
 @router.websocket("/cdp/{node_id}/ws")
 async def cdp_gateway_ws(
     websocket: WebSocket,
     node_id: int,
     api_key: Optional[str] = Query(None),
+    token: Optional[str] = Query(None),
 ):
     client_ip = get_client_ip(websocket)
     if get_block_ttl("api_key", client_ip) > 0:
@@ -122,7 +212,14 @@ async def cdp_gateway_ws(
 
     valid_key = get_setting("api_key")
     header_key = websocket.headers.get("x-api-key")
-    if not (verify_api_key_value(api_key, valid_key) or verify_api_key_value(header_key, valid_key)):
+    auth_hdr = websocket.headers.get("authorization") or ""
+    bearer_key = auth_hdr[7:].strip() if auth_hdr.lower().startswith("bearer ") else None
+    if not (
+        verify_api_key_value(api_key, valid_key)
+        or verify_api_key_value(token, valid_key)
+        or verify_api_key_value(header_key, valid_key)
+        or verify_api_key_value(bearer_key, valid_key)
+    ):
         record_auth_failure(
             "api_key",
             client_ip,

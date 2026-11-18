@@ -32,8 +32,8 @@ const testingRedis = ref(false)
 const reloadingCache = ref(false)
 const redisTestMsg = ref('')
 
-// 2. 指南 Tab 状态 (精炼 3 大实战场景)
-const activeGuideTab = ref('same_host') // 'same_host' | 'remote_host' | 'api'
+// 2. 指南 Tab 状态 (4 大实战场景)
+const activeGuideTab = ref('same_host') // 'same_host' | 'remote_host' | 'api' | 'openclaw'
 
 // 3. 代码折叠状态 (默认对齐场景三高度折叠)
 const isCodeExpanded = ref(false)
@@ -234,6 +234,38 @@ curl -k -X POST -H "X-API-Key: ${profile.api_key}" -H "Content-Type: application
 # 4. Webhook 触发全网调度策略即时同步
 curl -k -X POST -H "X-API-Key: ${profile.api_key}" "${currentHubUrl.value}/api/v1/sync"`
   copyText(code, 'CURL 示例命令')
+}
+
+const copyOpenclawScript = () => {
+  const wsProto = window.location.protocol === 'https:' ? 'wss://' : 'ws://'
+  const code = `# 1. 直接改 ~/.openclaw/openclaw.json（单节点固定连接，同时支持 wss:// 与 https:// 探测）
+{
+  "browser": {
+    "enabled": true,
+    "defaultProfile": "chromium-hub-node1",
+    "remoteCdpTimeoutMs": 5000,
+    "remoteCdpHandshakeTimeoutMs": 8000,
+    "profiles": {
+      "chromium-hub-node1": {
+        "cdpUrl": "${wsProto}${currentHubHost.value}/cdp/1/ws?api_key=${profile.api_key}",
+        // 或 HTTPS 发现模式（支持 /json/version 与 /json/list）:
+        // "cdpUrl": "${currentHubUrl.value}/cdp/1?api_key=${profile.api_key}",
+        "attachOnly": true
+      }
+    }
+  }
+}
+
+# 2. 使用 OpenClaw Skill (chromium-cdp-hub) 动态选节点 & 双模式采集
+export CHROMIUM_HUB_URL="${currentHubUrl.value}"
+export CHROMIUM_HUB_API_KEY="${profile.api_key}"
+
+# 无 Cookie 匿名采集（轮询节点）
+python3 ~/.openclaw/skills/chromium-cdp-hub/scripts/hub_pool.py crawl --url "https://example.com" --mode anon --strategy round-robin
+
+# 带 Cookie 登录采集（从节点 1 提取 Cookie 后注入执行）
+python3 ~/.openclaw/skills/chromium-cdp-hub/scripts/hub_pool.py crawl --url "https://target.example.com" --mode cookie --cookie-source-node 1 --strategy random`
+  copyText(code, 'OpenClaw 配置与 Skill 命令')
 }
 
 const saveProfile = async () => {
@@ -509,6 +541,13 @@ onMounted(() => {
             >
               ⚡ 场景三：RESTful 凭据操作
             </button>
+            <button 
+              type="button" 
+              @click="activeGuideTab = 'openclaw'" 
+              :class="activeGuideTab === 'openclaw' ? 'guide-tab-active' : 'guide-tab-normal'"
+            >
+              🤖 场景四：OpenClaw 直连与 Skill
+            </button>
           </div>
 
           <!-- 场景 1: 同机自动化接入 -->
@@ -670,6 +709,32 @@ curl -k -X POST -H "X-API-Key: {{ profile.api_key }}" -H "Content-Type: applicat
 
 # 4. Webhook 触发全网调度策略即时同步
 curl -k -X POST -H "X-API-Key: {{ profile.api_key }}" "{{ currentHubUrl }}/api/v1/sync"</code></pre>
+            </div>
+          </div>
+
+          <!-- 场景 4: OpenClaw 直连与 Skill 动态调度 -->
+          <div v-if="activeGuideTab === 'openclaw'" class="guide-content-box">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:4px;">
+              <span style="color:#a78bfa; font-weight:bold;">🤖 OpenClaw 远程浏览器直连 (/json/version + /json/list + /ws) & Skill：</span>
+              <button 
+                type="button" 
+                @click="copyOpenclawScript"
+                class="btn-copy-tag"
+                style="padding: 2px 6px; font-size: 10px;"
+              >
+                📋 复制 OpenClaw 配置
+              </button>
+            </div>
+            <p style="font-size:11px; color:#94a3b8; line-height:1.5; margin:0 0 8px 0;">
+              单节点固定使用可直接写入 <code>openclaw.json</code> 的 <code>cdpUrl</code>；多节点随机/轮询与带 Cookie 任务请导入仓库 <code>chromium/openclaw-skill/chromium-cdp-hub</code> Skill。
+            </p>
+            <div class="code-viewport-container code-natural-height">
+              <pre class="code-snippet-box"><code># 1) openclaw.json 直连示例 (支持 wss:// 或 https:// 自动探测 /json/version + /json/list)
+"cdpUrl": "{{ currentHubUrl }}/cdp/1?api_key={{ profile.api_key }}"
+
+# 2) OpenClaw Skill 无 Cookie 匿名采集 / 带 Cookie 采集命令
+python3 ~/.openclaw/skills/chromium-cdp-hub/scripts/hub_pool.py crawl --url "https://example.com" --mode anon --strategy round-robin
+python3 ~/.openclaw/skills/chromium-cdp-hub/scripts/hub_pool.py crawl --url "https://target.example.com" --mode cookie --cookie-source-node 1 --strategy random</code></pre>
             </div>
           </div>
         </div>

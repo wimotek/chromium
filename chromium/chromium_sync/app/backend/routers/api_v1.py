@@ -123,7 +123,9 @@ def external_list_nodes(
             topology_type = "direct"
             topology_desc = "本地 / 局域网端口直连"
 
+        http_scheme = "https" if ws_scheme == "wss" else "http"
         remote_gateway_ws = f"{ws_scheme}://{domain}/cdp/{node_id}/ws?api_key={api_key}"
+        remote_gateway_http = f"{http_scheme}://{domain}/cdp/{node_id}?api_key={api_key}"
         internal_gateway_ws = f"{internal_ws_scheme}://127.0.0.1:{internal_port}/cdp/{node_id}/ws?api_key={api_key}"
         same_host_scheme = internal_ws_scheme if (same_host_port == internal_port and not request.headers.get("x-forwarded-proto")) else ws_scheme
         same_host_gateway_ws = f"{same_host_scheme}://127.0.0.1:{same_host_port}/cdp/{node_id}/ws?api_key={api_key}"
@@ -146,6 +148,7 @@ def external_list_nodes(
                 "desc": "部署在外部服务器、本地开发机或独立容器的远程自动化脚本 (支持 IPv4/IPv6)",
                 "recommended_endpoint": remote_gateway_ws,
                 "gateway_url": remote_gateway_ws,
+                "http_discovery_url": remote_gateway_http,
                 "note": f"异机强制统一使用 {domain} 安全网关 (已下线公网裸端口，杜绝扫描入侵)",
             },
         }
@@ -169,6 +172,7 @@ def external_list_nodes(
             "cookie_count": r.get("cookie_count", 0),
             "last_sync": r.get("last_sync"),
             "preferred_cdp_url": remote_gateway_ws,
+            "cdp_http_base": remote_gateway_http,
             "connection_views": connection_views,
             "cookies_export_url": f"/api/v1/nodes/{node_id}/cookies",
             "traffic": {

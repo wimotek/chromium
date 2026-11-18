@@ -40,3 +40,17 @@
 在 Hub 端（[`chromium_sync`](./chromium_sync/README.md)）的 **全局 Cookie 过滤策略** 中，**「域名黑名单」与「域名白名单」采用互斥二选一规则**：
 * 当 **黑名单（Exclude Domains）** 填有内容时，系统自动禁用白名单，仅按黑名单剔除敏感/广告域名；
 * 当需要开启 **白名单（Include Domains）** 仅同步指定域名时，请先清空黑名单。
+
+---
+
+## 🤖 OpenClaw 与第三方 AI Agent 接入指南（单用户 & SaaS 通用）
+
+两个 Hub 版本（[`chromium_sync`](./chromium_sync/) 与 [`chromium_sync_saas`](./chromium_sync_saas/)）均已完整暴露标准 CDP 发现与 WebSocket 网关端点，同时支持 **`X-API-Key` 请求头**、**`Authorization: Bearer <API_KEY>`** 以及 **`?api_key=` / `?token=`** 查询参数鉴权：
+* **`GET /cdp/{node_id}/json/version`**：返回浏览器协议版本及带签名的 `webSocketDebuggerUrl`；
+* **`GET /cdp/{node_id}/json/list`**（及 `/cdp/{node_id}/json`）：返回节点活动页签列表（SaaS 租用节点自动脱敏隔离，仅返回安全可控目标入口）；
+* **`WS /cdp/{node_id}/ws?api_key=<API_KEY>`**：全双工 CDP WebSocket 网关。
+
+我们已在 [`chromium/openclaw-skill/chromium-cdp-hub/`](./openclaw-skill/chromium-cdp-hub/) 提供开箱即用的 **OpenClaw Skill（`SKILL.md` + `scripts/hub_pool.py` + `openclaw.json.example`）**：
+1. **单节点固定直连（只改 `openclaw.json`）**：在 `browser.profiles.<name>.cdpUrl` 中填入 `wss://<Hub>/cdp/{id}/ws?api_key=<Key>` 或 `https://<Hub>/cdp/{id}?api_key=<Key>` 即可。
+2. **多节点随机/轮询与采集任务（使用 Skill）**：支持 **无 Cookie 匿名采集（`--mode anon`）** 与 **带 Cookie 登录采集（`--mode cookie`，自有节点直接同步/注入、租用节点通过 `browser.new_context()` 隔离注入防泄密）**。
+

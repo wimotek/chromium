@@ -881,6 +881,14 @@ async def handle_cdp_command(
         except Exception as e:
             await ws.send(json.dumps({"req_id": req_id, "status": "error", "message": str(e)}))
 
+    elif action == "get_list":
+        try:
+            local_base = await get_local_cdp_base()
+            res = await http_client.get(f"{local_base}/json/list", timeout=3.0)
+            await ws.send(json.dumps({"req_id": req_id, "status": "ok", "targets": res.json()}))
+        except Exception as e:
+            await ws.send(json.dumps({"req_id": req_id, "status": "error", "message": str(e)}))
+
     elif msg_type == "ping" or action == "ping":
         await ws.send(json.dumps({"type": "pong"}))
 

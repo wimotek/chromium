@@ -1,0 +1,35 @@
+{
+  // Copy the browser & skills sections into ~/.openclaw/openclaw.json
+  "browser": {
+    "enabled": true,
+    "defaultProfile": "chromium-hub-node1",
+    "remoteCdpTimeoutMs": 5000,
+    "remoteCdpHandshakeTimeoutMs": 8000,
+    "profiles": {
+      // Option 1: Direct WSS WebSocket (fastest, zero extra HTTP roundtrips)
+      "chromium-hub-node1": {
+        "cdpUrl": "wss://hub.example.com/cdp/1/ws?api_key=cdp_YOUR_API_KEY",
+        "attachOnly": true,
+        "color": "#38BDF8"
+      },
+      // Option 2: HTTPS Discovery URL (uses /json/version + /json/list)
+      "chromium-hub-http": {
+        "cdpUrl": "https://hub.example.com/cdp/1?api_key=cdp_YOUR_API_KEY",
+        "attachOnly": true,
+        "color": "#10B981"
+      }
+    }
+  },
+  "skills": {
+    "entries": {
+      "chromium-cdp-hub": {
+        "enabled": true,
+        "env": {
+          "CHROMIUM_HUB_URL": "https://hub.example.com",
+          "CHROMIUM_HUB_API_KEY": "cdp_YOUR_API_KEY",
+          "CHROMIUM_HUB_SCOPE": "all"
+        }
+      }
+    }
+  }
+}

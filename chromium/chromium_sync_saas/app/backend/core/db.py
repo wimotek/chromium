@@ -419,6 +419,12 @@ def _ensure_schema_migrations(engine):
                 )
             except Exception as exc:
                 logger.debug(f"下线历史直连/SSH节点跳过: {exc}")
+        if "recharge_orders" in existing_tables and engine.dialect.name != "sqlite":
+            for col_name in ("pay_url", "qr_code_text"):
+                try:
+                    conn.execute(text(f"ALTER TABLE recharge_orders MODIFY COLUMN {col_name} TEXT"))
+                except Exception as exc:
+                    logger.debug(f"扩展 recharge_orders.{col_name} 为 TEXT 跳过: {exc}")
 
 
 def _backfill_user_invite_codes(db: Session):
@@ -544,10 +550,24 @@ def init_db_and_jwt(cfg: Optional[Dict[str, Any]] = None, mark_setup_completed: 
             "saas_daily_checkin_units": "5000",
             "saas_daily_streak_bonus_units": "1000",
             "saas_alipay_enabled": "1",
+            "saas_alipay_mode": "precreate",
             "saas_alipay_app_id": "",
+            "saas_alipay_private_key": "",
+            "saas_alipay_public_key": "",
+            "saas_alipay_gateway_url": "https://openapi.alipay.com/gateway.do",
+            "saas_alipay_notify_url": "",
+            "saas_alipay_return_url": "",
             "saas_alipay_qr_url": "",
             "saas_wechat_enabled": "1",
+            "saas_wechat_mode": "native_v3",
+            "saas_wechat_app_id": "",
             "saas_wechat_mch_id": "",
+            "saas_wechat_serial_no": "",
+            "saas_wechat_private_key": "",
+            "saas_wechat_api_v3_key": "",
+            "saas_wechat_platform_public_key": "",
+            "saas_wechat_gateway_url": "https://api.mch.weixin.qq.com",
+            "saas_wechat_notify_url": "",
             "saas_wechat_qr_url": "",
             "saas_payment_notify_secret": secrets.token_urlsafe(24),
             "smtp_host": "smtp.yeah.net",

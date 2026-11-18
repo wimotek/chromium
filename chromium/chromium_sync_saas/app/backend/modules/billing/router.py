@@ -1,10 +1,12 @@
 from datetime import datetime, timedelta
 import hashlib
 import hmac
+import json
 import secrets
 from typing import Any, Dict, Optional
 
-from fastapi import APIRouter, Body, Depends, Header as ReqHeader, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel
 from sqlalchemy import func, or_
 
@@ -23,10 +25,51 @@ from core.models import (
 from core.rate_limit import get_client_ip
 from core.security import verify_token
 from modules.audit.service import write_audit_log
+from modules.billing.payment_gateway import (
+    create_alipay_order,
+    create_wechat_native_order,
+    infer_base_url_from_request,
+    is_alipay_api_configured,
+    is_wechat_v3_configured,
+    query_alipay_order,
+    query_wechat_order,
+    verify_alipay_notify_signature,
+    verify_and_decrypt_wechat_v3_notify,
+)
 from modules.billing.service import get_all_channel_fee_bps, get_self_reverse_hub_gb_units
 from modules.users.level_service import get_user_level_progress
 
 router = APIRouter(tags=["财务系统（套餐 · 钱包 · 充值 · 账单）"])
+
+
+def _get_alipay_gateway_cfg() -> Dict[str, Any]:
+    return {
+        "enabled": get_setting("saas_alipay_enabled", "1") == "1",
+        "mode": get_setting("saas_alipay_mode", "precreate") or "precreate",
+        "app_id": get_setting("saas_alipay_app_id", ""),
+        "private_key": get_setting("saas_alipay_private_key", ""),
+        "public_key": get_setting("saas_alipay_public_key", ""),
+        "gateway_url": get_setting("saas_alipay_gateway_url", "https://openapi.alipay.com/gateway.do"),
+        "notify_url": get_setting("saas_alipay_notify_url", ""),
+        "return_url": get_setting("saas_alipay_return_url", ""),
+        "qr_url": get_setting("saas_alipay_qr_url", ""),
+    }
+
+
+def _get_wechat_gateway_cfg() -> Dict[str, Any]:
+    return {
+        "enabled": get_setting("saas_wechat_enabled", "1") == "1",
+        "mode": get_setting("saas_wechat_mode", "native_v3") or "native_v3",
+        "app_id": get_setting("saas_wechat_app_id", ""),
+        "mch_id": get_setting("saas_wechat_mch_id", ""),
+        "serial_no": get_setting("saas_wechat_serial_no", ""),
+        "private_key": get_setting("saas_wechat_private_key", ""),
+        "api_v3_key": get_setting("saas_wechat_api_v3_key", ""),
+        "platform_public_key": get_setting("saas_wechat_platform_public_key", ""),
+        "gateway_url": get_setting("saas_wechat_gateway_url", "https://api.mch.weixin.qq.com"),
+        "notify_url": get_setting("saas_wechat_notify_url", ""),
+        "qr_url": get_setting("saas_wechat_qr_url", ""),
+    }
 
 
 class RechargeDTO(BaseModel):
@@ -251,7 +294,11 @@ def billing_overview(user: dict = Depends(verify_token)):
         },
         "payment_channels": {
             "alipay_enabled": get_setting("saas_alipay_enabled", "1") == "1",
+            "alipay_mode": get_setting("saas_alipay_mode", "precreate") or "precreate",
+            "alipay_configured": is_alipay_api_configured(_get_alipay_gateway_cfg()),
             "wechat_enabled": get_setting("saas_wechat_enabled", "1") == "1",
+            "wechat_mode": get_setting("saas_wechat_mode", "native_v3") or "native_v3",
+            "wechat_configured": is_wechat_v3_configured(_get_wechat_gateway_cfg()),
             "allow_self_recharge": get_setting("saas_allow_self_recharge", "1") == "1",
             "alipay_qr_url": get_setting("saas_alipay_qr_url", ""),
             "wechat_qr_url": get_setting("saas_wechat_qr_url", ""),
@@ -323,6 +370,10 @@ def claim_monthly_allowance(request: Request, user: dict = Depends(verify_token)
         "message": f"成功领取 {ym} 每月固定补贴 ¥{units_to_yuan_str(claim_units)}",
         "reward_yuan": units_to_yuan_str(claim_units),
         "user": user_payload,
+        "promo": {
+            "monthly_claimed_this_month": True,
+            "current_ym": ym,
+        },
     }
 
 
@@ -396,11 +447,16 @@ def claim_daily_checkin(request: Request, user: dict = Depends(verify_token)):
         "reward_yuan": units_to_yuan_str(total_reward),
         "checkin_streak": new_streak,
         "user": user_payload,
+        "promo": {
+            "checked_in_today": True,
+            "checkin_streak": new_streak,
+            "today": today_str,
+        },
     }
 
 
-@router.post("/api/billing/recharge/create", summary="创建支付宝 / 微信支付充值订单")
-def create_recharge_order(data: RechargeCreateDTO, request: Request, user: dict = Depends(verify_token)):
+@router.post("/api/billing/recharge/create", summary="创建支付宝 / 微信支付充值订单（自动调用官方网关或静态码）")
+async def create_recharge_order(data: RechargeCreateDTO, request: Request, user: dict = Depends(verify_token)):
     ch = (data.channel or "alipay").strip().lower()
     if ch not in {"alipay", "wechat"}:
         raise HTTPException(status_code=400, detail="充值渠道仅支持 alipay（支付宝）或 wechat（微信支付）")
@@ -412,16 +468,37 @@ def create_recharge_order(data: RechargeCreateDTO, request: Request, user: dict 
         raise HTTPException(status_code=400, detail="单笔充值金额需在 0.01 ~ 50000 元之间")
 
     amount_units = yuan_to_units(data.amount_yuan)
+    amount_yuan_str = units_to_yuan_str(amount_units)
     now_dt = datetime.now()
     now_str = now_dt.strftime("%Y-%m-%d %H:%M:%S")
     order_no = f"RC{now_dt.strftime('%Y%m%d%H%M%S')}{secrets.token_hex(4).upper()}"
+    base_url = infer_base_url_from_request(request)
+    subject = f"Chromium Sync SaaS 钱包充值 ¥{float(amount_yuan_str):.2f}"
 
-    if ch == "alipay":
-        qr_url = get_setting("saas_alipay_qr_url", "").strip()
-        qr_text = qr_url or f"alipay://pay?order_no={order_no}&amount={units_to_yuan_str(amount_units)}"
-    else:
-        qr_url = get_setting("saas_wechat_qr_url", "").strip()
-        qr_text = qr_url or f"weixin://wxpay/bizpayurl?order_no={order_no}&amount={units_to_yuan_str(amount_units)}"
+    try:
+        if ch == "alipay":
+            gw_res = await create_alipay_order(
+                order_no=order_no,
+                amount_yuan_str=amount_yuan_str,
+                subject=subject,
+                cfg=_get_alipay_gateway_cfg(),
+                base_url=base_url,
+            )
+        else:
+            gw_res = await create_wechat_native_order(
+                order_no=order_no,
+                amount_units=amount_units,
+                description=subject,
+                cfg=_get_wechat_gateway_cfg(),
+                base_url=base_url,
+            )
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+
+    pay_url = str(gw_res.get("pay_url") or "")
+    qr_text = str(gw_res.get("qr_code_text") or "")
+    gateway_used = str(gw_res.get("gateway_used") or "")
+    order_remark = (data.remark or "").strip() or gateway_used
 
     with session_scope() as db:
         order = RechargeOrder(
@@ -430,10 +507,10 @@ def create_recharge_order(data: RechargeCreateDTO, request: Request, user: dict 
             channel=ch,
             amount_units=amount_units,
             status="pending",
-            pay_url=qr_url,
+            pay_url=pay_url,
             qr_code_text=qr_text,
             created_at=now_str,
-            remark=(data.remark or "")[:255],
+            remark=order_remark[:255],
         )
         db.add(order)
         db.flush()
@@ -447,9 +524,13 @@ def create_recharge_order(data: RechargeCreateDTO, request: Request, user: dict 
         target_id=order_no,
         ip=get_client_ip(request),
         status="ok",
-        details={"channel": ch, "amount_yuan": order_payload["amount_yuan"]},
+        details={"channel": ch, "amount_yuan": order_payload["amount_yuan"], "gateway_used": gateway_used},
     )
-    return {"message": f"充值订单 {order_no} 已创建", "order": order_payload}
+    return {
+        "message": gw_res.get("message") or f"充值订单 {order_no} 已创建",
+        "gateway_used": gateway_used,
+        "order": order_payload,
+    }
 
 
 @router.get("/api/billing/recharge/orders", summary="查询我的钱包充值订单列表")
@@ -463,6 +544,65 @@ def list_my_recharge_orders(user: dict = Depends(verify_token)):
             .all()
         )
         return {"orders": [r.to_dict() for r in rows]}
+
+
+@router.get("/api/billing/recharge/orders/{order_no}", summary="查询单笔充值订单状态（如配置了官方网关将自动主动查单同步）")
+async def get_recharge_order_status(order_no: str, request: Request, user: dict = Depends(verify_token)):
+    with session_scope() as db:
+        order = db.query(RechargeOrder).filter(RechargeOrder.order_no == order_no).first()
+        if order is None:
+            raise HTTPException(status_code=404, detail="充值订单不存在")
+        if int(order.user_id) != int(user["id"]) and user.get("role") != "admin":
+            raise HTTPException(status_code=403, detail="无权查询他人充值订单")
+        order_payload = order.to_dict()
+
+    synced_paid = False
+    user_payload = None
+    if order_payload["status"] == "pending":
+        ch = order_payload["channel"]
+        q_res: Dict[str, Any] = {"supported": False, "paid": False}
+        try:
+            if ch == "alipay":
+                q_res = await query_alipay_order(order_no, _get_alipay_gateway_cfg())
+            elif ch == "wechat":
+                q_res = await query_wechat_order(order_no, _get_wechat_gateway_cfg())
+        except Exception:
+            q_res = {"supported": False, "paid": False}
+
+        if q_res.get("paid"):
+            amt_ok = True
+            if ch == "alipay" and q_res.get("total_amount"):
+                amt_ok = abs(yuan_to_units(q_res["total_amount"]) - int(order_payload["amount_units"])) <= 100
+            elif ch == "wechat" and q_res.get("total_fen"):
+                expected_fen = max(1, int(round(int(order_payload["amount_units"]) / 100)))
+                amt_ok = int(q_res["total_fen"]) == expected_fen
+
+            if amt_ok:
+                ext_no = q_res.get("trade_no") or f"{ch.upper()}-{secrets.token_hex(6).upper()}"
+                with session_scope() as db:
+                    res = _mark_recharge_order_paid_sync(
+                        db,
+                        order_no=order_no,
+                        expected_channel=ch,
+                        external_trade_no=ext_no,
+                        paid_remark=f"{ch.upper()} 官方主动查单入账 ({order_no})",
+                    )
+                    order_payload = res["order"]
+                    user_payload = res["user"]
+                    synced_paid = not res["already_paid"]
+                if synced_paid:
+                    write_audit_log(
+                        action="recharge_query_paid",
+                        actor_id=order_payload["user_id"],
+                        actor_username=user["username"],
+                        target_type="recharge_order",
+                        target_id=order_no,
+                        ip=get_client_ip(request),
+                        status="ok",
+                        details={"channel": ch, "amount_yuan": order_payload["amount_yuan"], "trade_no": ext_no},
+                    )
+
+    return {"order": order_payload, "user": user_payload, "synced_paid": synced_paid}
 
 
 @router.post("/api/billing/recharge/{order_no}/sandbox-pay", summary="沙盒/演示一键确认支付入账")
@@ -503,20 +643,126 @@ def sandbox_pay_recharge_order(order_no: str, request: Request, user: dict = Dep
     }
 
 
-@router.post("/api/billing/recharge/notify/{channel}", summary="支付宝 / 微信支付官方异步回调入账 Webhook (HMAC-SHA256 验签)")
-def payment_webhook_notify(
-    channel: str,
-    request: Request,
-    payload: Dict[str, Any] = Body(...),
-    x_pay_signature: Optional[str] = ReqHeader(None),
-):
+@router.post("/api/billing/recharge/notify/{channel}", summary="支付宝 RSA2 / 微信 V3 AES-GCM 官方异步回调与 HMAC Webhook")
+async def payment_webhook_notify(channel: str, request: Request):
     ch = channel.strip().lower()
     if ch not in {"alipay", "wechat"}:
         raise HTTPException(status_code=400, detail="未知支付渠道")
 
+    client_ip = get_client_ip(request)
+    content_type = (request.headers.get("content-type") or "").lower()
+
+    # 1) 支付宝官方异步回调 (application/x-www-form-urlencoded + RSA2)
+    if ch == "alipay" and ("application/x-www-form-urlencoded" in content_type or "multipart/form-data" in content_type):
+        form_data = dict(await request.form())
+        cfg = _get_alipay_gateway_cfg()
+        if not verify_alipay_notify_signature(form_data, cfg.get("public_key", "")):
+            write_audit_log(
+                action="recharge_alipay_rsa2_denied",
+                actor_username="alipay_notify",
+                target_type="recharge_order",
+                target_id=str(form_data.get("out_trade_no") or ""),
+                ip=client_ip,
+                status="deny",
+                details={"reason": "invalid_rsa2_signature"},
+            )
+            return PlainTextResponse("failure", status_code=400)
+
+        if cfg.get("app_id") and str(form_data.get("app_id") or "") != cfg["app_id"]:
+            return PlainTextResponse("failure", status_code=400)
+        trade_status = str(form_data.get("trade_status") or "")
+        if trade_status not in {"TRADE_SUCCESS", "TRADE_FINISHED"}:
+            return PlainTextResponse("success")
+
+        order_no = str(form_data.get("out_trade_no") or "").strip()
+        trade_no = str(form_data.get("trade_no") or "").strip()
+        total_amount = str(form_data.get("total_amount") or "").strip()
+        with session_scope() as db:
+            order = db.query(RechargeOrder).filter(RechargeOrder.order_no == order_no, RechargeOrder.channel == "alipay").first()
+            if order is None:
+                return PlainTextResponse("failure", status_code=404)
+            if total_amount and abs(yuan_to_units(total_amount) - int(order.amount_units or 0)) > 100:
+                return PlainTextResponse("failure", status_code=400)
+            res = _mark_recharge_order_paid_sync(
+                db,
+                order_no=order_no,
+                expected_channel="alipay",
+                external_trade_no=trade_no or f"ALIPAY-{secrets.token_hex(6).upper()}",
+                paid_remark=f"支付宝官方异步回调到账 ({order_no})",
+            )
+        if not res["already_paid"]:
+            write_audit_log(
+                action="recharge_alipay_paid",
+                actor_id=res["order"]["user_id"],
+                actor_username="alipay_notify",
+                target_type="recharge_order",
+                target_id=order_no,
+                ip=client_ip,
+                status="ok",
+                details={"amount_yuan": res["order"]["amount_yuan"], "trade_no": trade_no},
+            )
+        return PlainTextResponse("success")
+
+    raw_body = await request.body()
+    try:
+        payload = json.loads(raw_body.decode("utf-8")) if raw_body else {}
+    except Exception:
+        raise HTTPException(status_code=400, detail="无法解析回调请求体")
+
+    # 2) 微信支付 V3 官方异步回调 (AEAD_AES_256_GCM 加密报文)
+    if ch == "wechat" and isinstance(payload, dict) and "resource" in payload and "event_type" in payload:
+        cfg = _get_wechat_gateway_cfg()
+        try:
+            decrypted = verify_and_decrypt_wechat_v3_notify(dict(request.headers), raw_body, cfg)
+        except Exception as exc:
+            write_audit_log(
+                action="recharge_wechat_v3_denied",
+                actor_username="wechat_notify",
+                target_type="recharge_order",
+                target_id=str(payload.get("id") or ""),
+                ip=client_ip,
+                status="deny",
+                details={"reason": str(exc)},
+            )
+            raise HTTPException(status_code=403, detail=str(exc))
+
+        if decrypted.get("trade_state") != "SUCCESS":
+            return {"code": "SUCCESS", "message": "成功"}
+
+        order_no = str(decrypted.get("out_trade_no") or "").strip()
+        tx_id = str(decrypted.get("transaction_id") or "").strip()
+        total_fen = int((decrypted.get("amount") or {}).get("total") or 0)
+        with session_scope() as db:
+            order = db.query(RechargeOrder).filter(RechargeOrder.order_no == order_no, RechargeOrder.channel == "wechat").first()
+            if order is None:
+                raise HTTPException(status_code=404, detail="订单不存在")
+            expected_fen = max(1, int(round(int(order.amount_units or 0) / 100)))
+            if total_fen != expected_fen:
+                raise HTTPException(status_code=400, detail="微信回调金额与订单金额不一致")
+            res = _mark_recharge_order_paid_sync(
+                db,
+                order_no=order_no,
+                expected_channel="wechat",
+                external_trade_no=tx_id or f"WXPAY-{secrets.token_hex(6).upper()}",
+                paid_remark=f"微信支付 V3 官方回调到账 ({order_no})",
+            )
+        if not res["already_paid"]:
+            write_audit_log(
+                action="recharge_wechat_paid",
+                actor_id=res["order"]["user_id"],
+                actor_username="wechat_notify",
+                target_type="recharge_order",
+                target_id=order_no,
+                ip=client_ip,
+                status="ok",
+                details={"amount_yuan": res["order"]["amount_yuan"], "transaction_id": tx_id},
+            )
+        return {"code": "SUCCESS", "message": "成功"}
+
+    # 3) 通用 JSON HMAC-SHA256 Webhook（兼容第三方聚合网关或自动化测试）
     order_no = str(payload.get("order_no") or payload.get("out_trade_no") or "").strip()
     ext_trade_no = str(payload.get("external_trade_no") or payload.get("trade_no") or "").strip()
-    sig = str(x_pay_signature or payload.get("signature") or "").strip().lower()
+    sig = str(request.headers.get("x-pay-signature") or payload.get("signature") or "").strip().lower()
     if not order_no or not sig:
         raise HTTPException(status_code=400, detail="缺少 order_no 或签名")
 
@@ -524,7 +770,6 @@ def payment_webhook_notify(
     if not secret:
         raise HTTPException(status_code=503, detail="系统尚未配置支付回调验签密钥")
 
-    client_ip = get_client_ip(request)
     sig_bad = False
     res = None
 
@@ -552,7 +797,7 @@ def payment_webhook_notify(
                 order_no=order_no,
                 expected_channel=ch,
                 external_trade_no=ext_trade_no or f"{ch.upper()}-{secrets.token_hex(6).upper()}",
-                paid_remark=f"{ch.upper()} 官方回调充值入账 ({order_no})",
+                paid_remark=f"{ch.upper()} 回调充值入账 ({order_no})",
             )
 
     if sig_bad:

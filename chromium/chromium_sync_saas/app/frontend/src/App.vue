@@ -11,22 +11,41 @@
           <span class="brand-sub">{{ user.role === 'admin' ? 'ADMIN 运营版' : '租户工作台' }}</span>
         </div>
 
-        <nav class="nav">
-          <button class="nav-btn" :class="{ active: tab === 'nodes' }" @click="tab = 'nodes'">我的节点与凭据</button>
-          <button class="nav-btn" :class="{ active: tab === 'market' }" @click="tab = 'market'">共享交易市场</button>
-          <button class="nav-btn" :class="{ active: tab === 'sync' }" @click="tab = 'sync'">Cookie 同步</button>
-          <button class="nav-btn" :class="{ active: tab === 'billing' }" @click="tab = 'billing'">套餐与钱包 (¥{{ user.balance_yuan }})</button>
-          <button class="nav-btn" :class="{ active: tab === 'referrals' }" @click="tab = 'referrals'">推广邀请</button>
-          <button class="nav-btn" :class="{ active: tab === 'audit' }" @click="tab = 'audit'">审计日志</button>
-          <button v-if="user.role === 'admin'" class="nav-btn" :class="{ active: tab === 'admin' }" @click="tab = 'admin'">运营管理台</button>
+        <nav class="nav desktop-nav">
+          <button class="nav-btn" :class="{ active: tab === 'nodes' }" @click="selectTab('nodes')">我的节点与凭据</button>
+          <button class="nav-btn" :class="{ active: tab === 'market' }" @click="selectTab('market')">共享交易市场</button>
+          <button class="nav-btn" :class="{ active: tab === 'sync' }" @click="selectTab('sync')">Cookie 同步</button>
+          <button class="nav-btn" :class="{ active: tab === 'billing' }" @click="selectTab('billing')">
+            套餐与钱包 (<span class="mono">¥{{ user.balance_yuan || '0.00' }}</span>)
+          </button>
+          <button class="nav-btn" :class="{ active: tab === 'referrals' }" @click="selectTab('referrals')">推广邀请</button>
+          <button class="nav-btn" :class="{ active: tab === 'audit' }" @click="selectTab('audit')">审计日志</button>
+          <button v-if="user.role === 'admin'" class="nav-btn" :class="{ active: tab === 'admin' }" @click="selectTab('admin')">运营管理台</button>
         </nav>
 
-        <div class="row">
-          <span v-if="level" class="tag" :style="{ color: level.badge_color, borderColor: level.badge_color }">{{ level.name }}</span>
-          <span class="tag tag-info">{{ user.username }} · {{ plan?.name || 'Starter' }}</span>
-          <button class="btn btn-sm" @click="logout">退出登录</button>
+        <div class="topbar-right">
+          <div class="row topbar-user-meta" style="gap: 8px">
+            <span v-if="level" class="tag" :style="{ color: level.badge_color, borderColor: level.badge_color }">{{ level.name }}</span>
+            <span class="tag tag-info">{{ user.username }} · {{ plan?.name || 'Starter' }}</span>
+          </div>
+          <button class="btn btn-sm mobile-menu-btn" @click="mobileMenuOpen = !mobileMenuOpen">
+            {{ mobileMenuOpen ? '收起菜单' : '导航菜单' }}
+          </button>
+          <button class="btn btn-sm" @click="logout">退出</button>
         </div>
       </header>
+
+      <div v-if="mobileMenuOpen" class="mobile-nav-drawer">
+        <button class="nav-btn" :class="{ active: tab === 'nodes' }" @click="selectTab('nodes')">我的节点与凭据</button>
+        <button class="nav-btn" :class="{ active: tab === 'market' }" @click="selectTab('market')">共享交易市场</button>
+        <button class="nav-btn" :class="{ active: tab === 'sync' }" @click="selectTab('sync')">Cookie 同步</button>
+        <button class="nav-btn" :class="{ active: tab === 'billing' }" @click="selectTab('billing')">
+          套餐与钱包 (¥{{ user.balance_yuan || '0.00' }})
+        </button>
+        <button class="nav-btn" :class="{ active: tab === 'referrals' }" @click="selectTab('referrals')">推广邀请</button>
+        <button class="nav-btn" :class="{ active: tab === 'audit' }" @click="selectTab('audit')">审计日志</button>
+        <button v-if="user.role === 'admin'" class="nav-btn" :class="{ active: tab === 'admin' }" @click="selectTab('admin')">运营管理台</button>
+      </div>
 
       <AnnouncementBanner />
 
@@ -50,7 +69,7 @@
         <BillingView v-else-if="tab === 'billing'" @notify="showToast" @refresh-profile="refreshProfile" />
         <ReferralView v-else-if="tab === 'referrals'" @notify="showToast" />
         <AuditView v-else-if="tab === 'audit'" @notify="showToast" />
-        <AdminView v-else-if="tab === 'admin' && user.role === 'admin'" @notify="showToast" />
+        <AdminView v-else-if="tab === 'admin' && user.role === 'admin'" :current-user-id="user.id" @notify="showToast" />
       </main>
     </template>
 
@@ -82,8 +101,14 @@ const level = ref(null)
 const channelFees = ref({ reverse: 2500, public_wss: 1000 })
 const quotas = ref({})
 const tab = ref('nodes')
+const mobileMenuOpen = ref(false)
 const toastMsg = ref('')
 let toastTimer = null
+
+function selectTab(nextTab) {
+  tab.value = nextTab
+  mobileMenuOpen.value = false
+}
 
 function showToast(msg) {
   toastMsg.value = msg
@@ -93,7 +118,10 @@ function showToast(msg) {
   }, 3600)
 }
 
-async function refreshProfile() {
+async function refreshProfile(updatedUser = null) {
+  if (updatedUser && typeof updatedUser === 'object') {
+    user.value = { ...user.value, ...updatedUser }
+  }
   try {
     const res = await apiFetch('/api/billing/overview')
     user.value = res.user || {}
@@ -155,6 +183,7 @@ async function onAuthed(res) {
 function logout() {
   localStorage.removeItem('saas_token')
   authed.value = false
+  mobileMenuOpen.value = false
   user.value = {}
 }
 

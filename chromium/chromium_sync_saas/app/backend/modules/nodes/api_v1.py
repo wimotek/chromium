@@ -16,26 +16,36 @@ from modules.sync.service import execute_sync_task
 router = APIRouter(tags=["SaaS 多租户开放 Agent API"])
 
 
-@router.get("/api/v1/nodes", summary="获取当前租户可见的 CDP 节点（自有节点 + 已在市场租用的节点）")
+@router.get("/api/v1/nodes", summary="获取当前租户可见的 CDP 节点（支持筛选：仅自有 / 仅租用 / 自有+租用）")
 def external_list_nodes(
     request: Request,
     online_only: bool = Query(False, description="仅返回在线可用节点"),
+    scope: str = Query("all", description="节点范围过滤：all（自有+租用）、owned（仅自有节点）、leased（仅已租用节点）"),
     auth: dict = Depends(verify_agent_access),
 ):
     enforce_rate_limit("api_v1", get_client_ip(request), RATE_LIMIT_API_V1_PER_MIN, 60, "开放 API 请求过于频繁")
+    clean_scope = (scope or "all").strip().lower()
+    if clean_scope not in {"all", "owned", "leased"}:
+        raise HTTPException(status_code=400, detail="scope 参数仅支持 all / owned / leased")
+
     uid = int(auth["id"])
     api_key = auth.get("api_key", "")
 
     with session_scope() as db:
-        owned_rows = [n.to_dict() for n in db.query(Node).filter(Node.owner_id == uid).order_by(Node.id.asc()).all()]
-        active_leases = db.query(NodeLease).filter(NodeLease.buyer_id == uid, NodeLease.status == "active").all()
-        lease_map = {l.node_id: l.to_dict() for l in active_leases}
+        owned_rows = []
+        if clean_scope in {"all", "owned"}:
+            owned_rows = [n.to_dict() for n in db.query(Node).filter(Node.owner_id == uid).order_by(Node.id.asc()).all()]
+
+        lease_map = {}
         leased_nodes = []
-        if lease_map:
-            leased_nodes = [
-                n.to_dict()
-                for n in db.query(Node).filter(Node.id.in_(list(lease_map.keys()))).order_by(Node.id.asc()).all()
-            ]
+        if clean_scope in {"all", "leased"}:
+            active_leases = db.query(NodeLease).filter(NodeLease.buyer_id == uid, NodeLease.status == "active").all()
+            lease_map = {l.node_id: l.to_dict() for l in active_leases}
+            if lease_map:
+                leased_nodes = [
+                    n.to_dict()
+                    for n in db.query(Node).filter(Node.id.in_(list(lease_map.keys()))).order_by(Node.id.asc()).all()
+                ]
 
     combined = [(r, "owner", None) for r in owned_rows] + [(r, "leased_buyer", lease_map.get(r["id"])) for r in leased_nodes]
     overlay = get_live_node_traffic_overlay([r["id"] for r, _, _ in combined])
@@ -64,7 +74,9 @@ def external_list_nodes(
         if online_only and real_status != "connected":
             continue
 
+        http_scheme = "https" if ws_scheme == "wss" else "http"
         remote_gateway_ws = f"{ws_scheme}://{domain}/cdp/{node_id}/ws?api_key={api_key}"
+        remote_gateway_http = f"{http_scheme}://{domain}/cdp/{node_id}?api_key={api_key}"
         internal_gateway_ws = f"{internal_ws_scheme}://127.0.0.1:{internal_port}/cdp/{node_id}/ws?api_key={api_key}"
         ov = overlay.get(node_id, {})
 
@@ -78,6 +90,7 @@ def external_list_nodes(
             "status": real_status,
             "cookie_count": r.get("cookie_count", 0) if access_role == "owner" else 0,
             "preferred_cdp_url": remote_gateway_ws,
+            "cdp_http_base": remote_gateway_http,
             "connection_views": {
                 "same_host_automation": {
                     "recommended_endpoint": internal_gateway_ws,
@@ -86,6 +99,7 @@ def external_list_nodes(
                 "remote_host_automation": {
                     "recommended_endpoint": remote_gateway_ws,
                     "gateway_url": remote_gateway_ws,
+                    "http_discovery_url": remote_gateway_http,
                 },
             },
             "cookies_export_url": f"/api/v1/nodes/{node_id}/cookies" if access_role == "owner" else None,
@@ -100,9 +114,12 @@ def external_list_nodes(
     return {
         "code": 200,
         "tenant_id": uid,
+        "scope": clean_scope,
         "hub_internal_port": internal_port,
         "hub_external_port": same_host_port,
         "total": len(nodes_result),
+        "owned_count": len([n for n in nodes_result if n["access_role"] == "owner"]),
+        "leased_count": len([n for n in nodes_result if n["access_role"] == "leased_buyer"]),
         "online_count": len([n for n in nodes_result if n["status"] == "connected"]),
         "nodes": nodes_result,
     }

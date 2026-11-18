@@ -28,15 +28,17 @@ def list_policies(user: dict = Depends(verify_token)):
 def create_policy(data: dict, request: Request, user: dict = Depends(verify_token)):
     uid = int(user["id"])
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    sync_type = data.get("sync_type", "smart_merge")
+    default_src_type = "all" if sync_type == "smart_merge" else "node"
     with session_scope() as db:
         p = SyncPolicy(
             owner_id=uid,
-            name=data["name"],
+            name=str(data.get("name") or "新建调度策略").strip(),
             enabled=1 if data.get("enabled", True) else 0,
             interval_minutes=max(1, int(data.get("interval_minutes", 15))),
-            sync_type=data.get("sync_type", "smart_merge"),
-            source_type=data.get("source_type", "node"),
-            source_id=int(data.get("source_id", 0)),
+            sync_type=sync_type,
+            source_type=data.get("source_type", default_src_type),
+            source_id=int(data.get("source_id") or 0),
             source_group=data.get("source_group", ""),
             target_type=data.get("target_type", "all"),
             target_ids=json.dumps(data.get("target_ids", [])),
@@ -55,43 +57,61 @@ def create_policy(data: dict, request: Request, user: dict = Depends(verify_toke
         target_id=pid,
         ip=get_client_ip(request),
         status="ok",
-        details={"name": data["name"], "sync_type": data.get("sync_type", "smart_merge")},
+        details={"name": data.get("name"), "sync_type": sync_type},
     )
     return {"message": "同步调度策略添加成功"}
 
 
 @router.put("/api/sync/policies/{policy_id}")
-def update_policy(policy_id: int, data: dict, user: dict = Depends(verify_token)):
+def update_policy(policy_id: int, data: dict, request: Request, user: dict = Depends(verify_token)):
     uid = int(user["id"])
+    sync_type = data.get("sync_type", "smart_merge")
+    default_src_type = "all" if sync_type == "smart_merge" else "node"
     with session_scope() as db:
         policy = db.get(SyncPolicy, policy_id)
         if policy is None or int(policy.owner_id) != uid:
             raise HTTPException(status_code=404, detail="策略不存在或无权修改")
-        policy.name = data["name"]
+        policy.name = str(data.get("name") or policy.name).strip()
         policy.enabled = 1 if data.get("enabled", True) else 0
         policy.interval_minutes = max(1, int(data.get("interval_minutes", 15)))
-        policy.sync_type = data.get("sync_type", "smart_merge")
-        policy.source_type = data.get("source_type", "node")
-        policy.source_id = int(data.get("source_id", 0))
+        policy.sync_type = sync_type
+        policy.source_type = data.get("source_type", default_src_type)
+        policy.source_id = int(data.get("source_id") or 0)
         policy.source_group = data.get("source_group", "")
         policy.target_type = data.get("target_type", "all")
         policy.target_ids = json.dumps(data.get("target_ids", []))
         policy.target_group = data.get("target_group", "")
     reschedule_all_policies()
+    write_audit_log(
+        action="sync_policy_update",
+        actor_id=uid,
+        actor_username=user["username"],
+        target_type="sync_policy",
+        target_id=policy_id,
+        ip=get_client_ip(request),
+        status="ok",
+        details={"name": data.get("name"), "sync_type": sync_type},
+    )
     return {"message": "策略配置修改已生效"}
 
 
 @router.delete("/api/sync/policies/{policy_id}")
-def delete_policy(policy_id: int, user: dict = Depends(verify_token)):
+def delete_policy(policy_id: int, request: Request, user: dict = Depends(verify_token)):
     uid = int(user["id"])
     with session_scope() as db:
-        count = db.query(SyncPolicy).filter(SyncPolicy.owner_id == uid).count()
-        if count <= 1:
-            raise HTTPException(status_code=400, detail="每个租户至少保留一条同步策略，无法全部删除")
         deleted = db.query(SyncPolicy).filter(SyncPolicy.id == policy_id, SyncPolicy.owner_id == uid).delete(synchronize_session=False)
         if not deleted:
-            raise HTTPException(status_code=404, detail="策略不存在")
+            raise HTTPException(status_code=404, detail="策略不存在或无权删除")
     reschedule_all_policies()
+    write_audit_log(
+        action="sync_policy_delete",
+        actor_id=uid,
+        actor_username=user["username"],
+        target_type="sync_policy",
+        target_id=policy_id,
+        ip=get_client_ip(request),
+        status="ok",
+    )
     return {"message": "策略已删除"}
 
 

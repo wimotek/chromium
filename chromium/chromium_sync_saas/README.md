@@ -90,3 +90,21 @@ docker compose up -d --build
   HUB_SERVE_FRONTEND=false HUB_BIND_ADDR=127.0.0.1 docker compose up -d --build
   ```
 * `docker-compose.yml` 端口变量说明：`HUB_BIND_ADDR`（默认 `0.0.0.0`）与 `HUB_HOST_PORT`（默认回退 `HUB_EXTERNAL_PORT` -> `HUB_PORT` -> `8443`）仅由 Docker Compose 在宿主机侧解析，需写在同目录 `.env` 或通过命令行注入，无法从 `environment:` 段反向引用；SaaS 版仅保留 `public_wss` 与 `reverse`（全部复用 `HUB_PORT`），无需映射 `19200-19250`。
+
+---
+
+## 🤖 OpenClaw / Playwright 多租户接入与 Skill 调度
+
+### 1. CDP 发现协议与开放 API 鉴权
+* **支持网关端点**：
+  * `GET /cdp/{node_id}/json/version`
+  * `GET /cdp/{node_id}/json/list` 与 `/cdp/{node_id}/json`（其中**市场租用节点**返回脱敏隔离目标，不泄露宿主/卖家本地标签页信息）
+  * `WS /cdp/{node_id}/ws?api_key=<API_KEY>`
+* **支持节点池范围**：`GET /api/v1/nodes?online_only=true&scope=owned|leased|all`（同时兼容 `X-API-Key`、`Authorization: Bearer <API_KEY>` 与 `?api_key=`）。
+
+### 2. OpenClaw 两种集成姿势
+1. **固定节点直连（改 `~/.openclaw/openclaw.json`）**：将 `cdpUrl` 设为节点返回的 `preferred_cdp_url`（`wss://.../cdp/{id}/ws?api_key=...`）或 `cdp_http_base`（`https://.../cdp/{id}?api_key=...`）。
+2. **节点池随机/轮询与双模式采集（导入 `chromium/openclaw-skill/chromium-cdp-hub`）**：
+   * **无 Cookie 匿名采集（防风控轮换出口 IP）**：`python3 scripts/hub_pool.py crawl --url "https://example.com" --mode anon --scope all --strategy random`
+   * **带 Cookie 登录采集（含租用节点隐私隔离注入）**：先从本地文件或自有空闲节点提取 Cookie，再在租用节点使用 `browser.new_context()` + `context.add_cookies()` 内存隔离执行，用完立即销毁上下文：`python3 scripts/hub_pool.py crawl --url "https://target.example.com" --mode cookie --cookie-source-node 1 --scope leased --strategy round-robin`
+

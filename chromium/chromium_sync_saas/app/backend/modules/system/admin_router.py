@@ -1,12 +1,23 @@
 from datetime import datetime
+import re
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
-from sqlalchemy import func
+from sqlalchemy import func, or_
 
 from core.cache import cache_mgr
-from core.db import get_active_db_info, get_setting, load_bootstrap_config, save_bootstrap_config, session_scope, set_setting
+from core.db import (
+    get_active_db_info,
+    get_setting,
+    issue_user_api_key,
+    issue_user_invite_code,
+    issue_user_join_token,
+    load_bootstrap_config,
+    save_bootstrap_config,
+    session_scope,
+    set_setting,
+)
 from core.models import (
     BillingLedger,
     Node,
@@ -14,15 +25,19 @@ from core.models import (
     Plan,
     RechargeOrder,
     ReferralReward,
+    SyncLog,
+    SyncPolicy,
+    TrafficStat,
     User,
     UserLevel,
     units_to_yuan_str,
     yuan_to_units,
 )
 from core.rate_limit import get_antispam_stats, get_client_ip
-from core.security import require_admin
+from core.security import hash_password, require_admin
 from modules.audit.service import write_audit_log
-from modules.billing.router import _mark_recharge_order_paid_sync
+from modules.billing.payment_gateway import query_alipay_order, query_wechat_order
+from modules.billing.router import _get_alipay_gateway_cfg, _get_wechat_gateway_cfg, _mark_recharge_order_paid_sync
 from modules.billing.service import (
     get_all_channel_fee_bps,
     get_self_reverse_hub_gb_units,
@@ -30,9 +45,11 @@ from modules.billing.service import (
 )
 from modules.nodes.traffic_service import get_traffic_summary
 from modules.nodes.tunnel_manager import tunnel_mgr
+from modules.sync.service import reschedule_all_policies
 from modules.users.level_service import evaluate_all_users_levels_sync, evaluate_user_level_sync
 
 router = APIRouter(tags=["运营管理台（Admin）"])
+_ADMIN_EMAIL_RE = re.compile(r"^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$")
 
 
 class AdminSettingsDTO(BaseModel):
@@ -54,17 +71,45 @@ class AdminSettingsDTO(BaseModel):
     saas_daily_checkin_yuan: Optional[float] = None
     saas_daily_streak_bonus_yuan: Optional[float] = None
     saas_alipay_enabled: Optional[bool] = None
+    saas_alipay_mode: Optional[str] = None
     saas_alipay_app_id: Optional[str] = None
+    saas_alipay_private_key: Optional[str] = None
+    saas_alipay_public_key: Optional[str] = None
+    saas_alipay_gateway_url: Optional[str] = None
+    saas_alipay_notify_url: Optional[str] = None
+    saas_alipay_return_url: Optional[str] = None
     saas_alipay_qr_url: Optional[str] = None
     saas_wechat_enabled: Optional[bool] = None
+    saas_wechat_mode: Optional[str] = None
+    saas_wechat_app_id: Optional[str] = None
     saas_wechat_mch_id: Optional[str] = None
+    saas_wechat_serial_no: Optional[str] = None
+    saas_wechat_private_key: Optional[str] = None
+    saas_wechat_api_v3_key: Optional[str] = None
+    saas_wechat_platform_public_key: Optional[str] = None
+    saas_wechat_gateway_url: Optional[str] = None
+    saas_wechat_notify_url: Optional[str] = None
     saas_wechat_qr_url: Optional[str] = None
     saas_payment_notify_secret: Optional[str] = None
+
+
+class AdminUserCreateDTO(BaseModel):
+    username: str
+    email: str = ""
+    password: str
+    role: str = "user"
+    plan_id: int = 1
+    level_id: int = 1
+    email_verified: bool = True
+    initial_balance_yuan: float = 0.0
 
 
 class AdminUserUpdateDTO(BaseModel):
     role: Optional[str] = None
     status: Optional[str] = None
+    email: Optional[str] = None
+    email_verified: Optional[bool] = None
+    new_password: Optional[str] = None
     plan_id: Optional[int] = None
     level_id: Optional[int] = None
     level_locked: Optional[bool] = None
@@ -120,6 +165,7 @@ def admin_overview(admin: dict = Depends(require_admin)):
         seller_sum = db.query(func.coalesce(func.sum(NodeLease.seller_earned_units), 0)).scalar() or 0
         recent_leases = [l.to_dict() for l in db.query(NodeLease).order_by(NodeLease.id.desc()).limit(50).all()]
         levels = [lv.to_dict() for lv in db.query(UserLevel).order_by(UserLevel.rank_order.asc()).all()]
+        plans = [p.to_dict() for p in db.query(Plan).order_by(Plan.monthly_price_units.asc(), Plan.id.asc()).all()]
         referral_count = db.query(ReferralReward).count()
 
     ch_fees = get_all_channel_fee_bps()
@@ -163,14 +209,33 @@ def admin_overview(admin: dict = Depends(require_admin)):
             "saas_daily_checkin_yuan": float(units_to_yuan_str(int(get_setting("saas_daily_checkin_units", "5000") or 0))),
             "saas_daily_streak_bonus_yuan": float(units_to_yuan_str(int(get_setting("saas_daily_streak_bonus_units", "1000") or 0))),
             "saas_alipay_enabled": get_setting("saas_alipay_enabled", "1") == "1",
+            "saas_alipay_mode": get_setting("saas_alipay_mode", "precreate") or "precreate",
             "saas_alipay_app_id": get_setting("saas_alipay_app_id", ""),
+            "saas_alipay_private_key": "",
+            "saas_alipay_private_key_set": bool(get_setting("saas_alipay_private_key", "").strip()),
+            "saas_alipay_public_key": get_setting("saas_alipay_public_key", ""),
+            "saas_alipay_gateway_url": get_setting("saas_alipay_gateway_url", "https://openapi.alipay.com/gateway.do"),
+            "saas_alipay_notify_url": get_setting("saas_alipay_notify_url", ""),
+            "saas_alipay_return_url": get_setting("saas_alipay_return_url", ""),
             "saas_alipay_qr_url": get_setting("saas_alipay_qr_url", ""),
             "saas_wechat_enabled": get_setting("saas_wechat_enabled", "1") == "1",
+            "saas_wechat_mode": get_setting("saas_wechat_mode", "native_v3") or "native_v3",
+            "saas_wechat_app_id": get_setting("saas_wechat_app_id", ""),
             "saas_wechat_mch_id": get_setting("saas_wechat_mch_id", ""),
+            "saas_wechat_serial_no": get_setting("saas_wechat_serial_no", ""),
+            "saas_wechat_private_key": "",
+            "saas_wechat_private_key_set": bool(get_setting("saas_wechat_private_key", "").strip()),
+            "saas_wechat_api_v3_key": "",
+            "saas_wechat_api_v3_key_set": bool(get_setting("saas_wechat_api_v3_key", "").strip()),
+            "saas_wechat_platform_public_key": get_setting("saas_wechat_platform_public_key", ""),
+            "saas_wechat_gateway_url": get_setting("saas_wechat_gateway_url", "https://api.mch.weixin.qq.com"),
+            "saas_wechat_notify_url": get_setting("saas_wechat_notify_url", ""),
             "saas_wechat_qr_url": get_setting("saas_wechat_qr_url", ""),
-            "saas_payment_notify_secret": get_setting("saas_payment_notify_secret", ""),
+            "saas_payment_notify_secret": "",
+            "saas_payment_notify_secret_set": bool(get_setting("saas_payment_notify_secret", "").strip()),
         },
         "levels": levels,
+        "plans": plans,
         "runtime": {
             "db": get_active_db_info(),
             "cache": cache_mgr.get_status(),
@@ -224,14 +289,42 @@ def admin_update_settings(data: AdminSettingsDTO, request: Request, admin: dict 
         set_setting("saas_daily_streak_bonus_units", str(max(0, yuan_to_units(data.saas_daily_streak_bonus_yuan))))
     if data.saas_alipay_enabled is not None:
         set_setting("saas_alipay_enabled", "1" if data.saas_alipay_enabled else "0")
+    if data.saas_alipay_mode is not None and data.saas_alipay_mode.strip().lower() in {"precreate", "page_pay", "static_qr"}:
+        set_setting("saas_alipay_mode", data.saas_alipay_mode.strip().lower())
     if data.saas_alipay_app_id is not None:
         set_setting("saas_alipay_app_id", data.saas_alipay_app_id.strip())
+    if data.saas_alipay_private_key is not None and data.saas_alipay_private_key.strip():
+        set_setting("saas_alipay_private_key", data.saas_alipay_private_key.strip())
+    if data.saas_alipay_public_key is not None:
+        set_setting("saas_alipay_public_key", data.saas_alipay_public_key.strip())
+    if data.saas_alipay_gateway_url is not None:
+        set_setting("saas_alipay_gateway_url", data.saas_alipay_gateway_url.strip() or "https://openapi.alipay.com/gateway.do")
+    if data.saas_alipay_notify_url is not None:
+        set_setting("saas_alipay_notify_url", data.saas_alipay_notify_url.strip())
+    if data.saas_alipay_return_url is not None:
+        set_setting("saas_alipay_return_url", data.saas_alipay_return_url.strip())
     if data.saas_alipay_qr_url is not None:
         set_setting("saas_alipay_qr_url", data.saas_alipay_qr_url.strip())
     if data.saas_wechat_enabled is not None:
         set_setting("saas_wechat_enabled", "1" if data.saas_wechat_enabled else "0")
+    if data.saas_wechat_mode is not None and data.saas_wechat_mode.strip().lower() in {"native_v3", "static_qr"}:
+        set_setting("saas_wechat_mode", data.saas_wechat_mode.strip().lower())
+    if data.saas_wechat_app_id is not None:
+        set_setting("saas_wechat_app_id", data.saas_wechat_app_id.strip())
     if data.saas_wechat_mch_id is not None:
         set_setting("saas_wechat_mch_id", data.saas_wechat_mch_id.strip())
+    if data.saas_wechat_serial_no is not None:
+        set_setting("saas_wechat_serial_no", data.saas_wechat_serial_no.strip())
+    if data.saas_wechat_private_key is not None and data.saas_wechat_private_key.strip():
+        set_setting("saas_wechat_private_key", data.saas_wechat_private_key.strip())
+    if data.saas_wechat_api_v3_key is not None and data.saas_wechat_api_v3_key.strip():
+        set_setting("saas_wechat_api_v3_key", data.saas_wechat_api_v3_key.strip())
+    if data.saas_wechat_platform_public_key is not None:
+        set_setting("saas_wechat_platform_public_key", data.saas_wechat_platform_public_key.strip())
+    if data.saas_wechat_gateway_url is not None:
+        set_setting("saas_wechat_gateway_url", data.saas_wechat_gateway_url.strip() or "https://api.mch.weixin.qq.com")
+    if data.saas_wechat_notify_url is not None:
+        set_setting("saas_wechat_notify_url", data.saas_wechat_notify_url.strip())
     if data.saas_wechat_qr_url is not None:
         set_setting("saas_wechat_qr_url", data.saas_wechat_qr_url.strip())
     if data.saas_payment_notify_secret is not None and data.saas_payment_notify_secret.strip():
@@ -245,9 +338,17 @@ def admin_update_settings(data: AdminSettingsDTO, request: Request, admin: dict 
         target_id="saas_global",
         ip=get_client_ip(request),
         status="ok",
-        details=data.model_dump(exclude_none=True, exclude={"saas_payment_notify_secret"}),
+        details=data.model_dump(
+            exclude_none=True,
+            exclude={
+                "saas_payment_notify_secret",
+                "saas_alipay_private_key",
+                "saas_wechat_private_key",
+                "saas_wechat_api_v3_key",
+            },
+        ),
     )
-    return {"message": "平台分通道差价、注册认证、邀请奖励与支付策略已更新"}
+    return {"message": "平台策略与支付配置已更新"}
 
 
 @router.get("/api/admin/users", summary="查看全部租户、邮箱认证、推荐关系、等级与钱包情况")
@@ -308,7 +409,91 @@ def admin_list_referrals(admin: dict = Depends(require_admin)):
     }
 
 
-@router.put("/api/admin/users/{uid}", summary="管理员调整租户状态、角色、套餐、等级锁定或后台调账")
+@router.post("/api/admin/users", summary="管理员后台新增租户或子管理员账号")
+def admin_create_user(data: AdminUserCreateDTO, request: Request, admin: dict = Depends(require_admin)):
+    uname = (data.username or "").strip()
+    if not re.match(r"^[a-zA-Z0-9_.-]{3,32}$", uname):
+        raise HTTPException(status_code=400, detail="用户名需为 3~32 位字母、数字、下划线或点号")
+    if len(data.password or "") < 6:
+        raise HTTPException(status_code=400, detail="密码至少需要 6 位")
+    clean_email = (data.email or "").strip().lower()
+    if clean_email and not _ADMIN_EMAIL_RE.match(clean_email):
+        raise HTTPException(status_code=400, detail="邮箱格式不正确")
+    role = data.role if data.role in {"user", "admin"} else "user"
+    init_units = max(0, yuan_to_units(data.initial_balance_yuan or 0.0))
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    with session_scope() as db:
+        if db.query(User).filter(User.username == uname).first() is not None:
+            raise HTTPException(status_code=400, detail="用户名已存在")
+        if clean_email and db.query(User).filter(User.email == clean_email).first() is not None:
+            raise HTTPException(status_code=400, detail="该邮箱已被其他账号使用")
+        if db.get(Plan, int(data.plan_id)) is None:
+            raise HTTPException(status_code=404, detail="目标套餐不存在")
+        if db.get(UserLevel, int(data.level_id)) is None:
+            raise HTTPException(status_code=404, detail="目标等级不存在")
+
+        u = User(
+            username=uname,
+            email=clean_email or None,
+            email_verified=1 if data.email_verified else 0,
+            password_hash=hash_password(data.password),
+            role=role,
+            status="active",
+            plan_id=int(data.plan_id),
+            level_id=int(data.level_id),
+            invite_code=issue_user_invite_code(),
+            balance_units=init_units,
+            total_recharged_units=init_units,
+            api_key=issue_user_api_key(),
+            cluster_join_token=issue_user_join_token(),
+            created_at=now_str,
+        )
+        db.add(u)
+        db.flush()
+
+        if init_units > 0:
+            db.add(
+                BillingLedger(
+                    user_id=u.id,
+                    tx_type="admin_adjust",
+                    amount_units=init_units,
+                    balance_after_units=init_units,
+                    platform_spread_units=0,
+                    remark=f"管理员 {admin['username']} 建号初始授信",
+                    created_at=now_str,
+                )
+            )
+        db.add(
+            SyncPolicy(
+                owner_id=u.id,
+                name="自有节点智能双向合并",
+                enabled=1,
+                interval_minutes=15,
+                sync_type="smart_merge",
+                source_type="all",
+                target_type="all",
+                created_at=now_str,
+            )
+        )
+        db.flush()
+        out = u.to_dict(include_secrets=False)
+
+    reschedule_all_policies()
+    write_audit_log(
+        action="admin_create_user",
+        actor_id=admin["id"],
+        actor_username=admin["username"],
+        target_type="user",
+        target_id=out["id"],
+        ip=get_client_ip(request),
+        status="ok",
+        details={"username": uname, "role": role, "initial_balance_yuan": units_to_yuan_str(init_units)},
+    )
+    return {"message": f"账号 [{uname}] 创建成功", "user": out}
+
+
+@router.put("/api/admin/users/{uid}", summary="管理员调整租户状态、邮箱认证、密码、角色、套餐、等级或后台调账")
 def admin_update_user(uid: int, data: AdminUserUpdateDTO, request: Request, admin: dict = Depends(require_admin)):
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     with session_scope() as db:
@@ -323,6 +508,23 @@ def admin_update_user(uid: int, data: AdminUserUpdateDTO, request: Request, admi
             if int(u.id) == int(admin["id"]) and data.status != "active":
                 raise HTTPException(status_code=400, detail="不能停用当前登录的管理员自身")
             u.status = data.status
+        if data.email is not None:
+            clean_email = data.email.strip().lower()
+            if clean_email:
+                if not _ADMIN_EMAIL_RE.match(clean_email):
+                    raise HTTPException(status_code=400, detail="邮箱格式不正确")
+                dup = db.query(User).filter(User.email == clean_email, User.id != u.id).first()
+                if dup is not None:
+                    raise HTTPException(status_code=400, detail="该邮箱已被其他账号绑定")
+                u.email = clean_email
+            else:
+                u.email = None
+        if data.email_verified is not None:
+            u.email_verified = 1 if data.email_verified else 0
+        if data.new_password is not None and data.new_password.strip():
+            if len(data.new_password.strip()) < 6:
+                raise HTTPException(status_code=400, detail="重置密码至少需要 6 位")
+            u.password_hash = hash_password(data.new_password.strip())
         if data.plan_id is not None:
             if db.get(Plan, int(data.plan_id)) is None:
                 raise HTTPException(status_code=404, detail="目标套餐不存在")
@@ -356,6 +558,9 @@ def admin_update_user(uid: int, data: AdminUserUpdateDTO, request: Request, admi
         db.flush()
         out = u.to_dict(include_secrets=False)
 
+    audit_details = data.model_dump(exclude_none=True, exclude={"new_password"})
+    if data.new_password and data.new_password.strip():
+        audit_details["password_reset"] = True
     write_audit_log(
         action="admin_update_user",
         actor_id=admin["id"],
@@ -364,9 +569,56 @@ def admin_update_user(uid: int, data: AdminUserUpdateDTO, request: Request, admi
         target_id=uid,
         ip=get_client_ip(request),
         status="ok",
-        details=data.model_dump(exclude_none=True),
+        details=audit_details,
     )
-    return {"message": f"租户 [{out['username']}] 已更新", "user": out}
+    return {"message": f"账号 [{out['username']}] 已更新", "user": out}
+
+
+@router.delete("/api/admin/users/{uid}", summary="管理员安全删除空租户账号")
+def admin_delete_user(uid: int, request: Request, admin: dict = Depends(require_admin)):
+    if int(uid) == int(admin["id"]):
+        raise HTTPException(status_code=400, detail="不能删除当前登录的管理员自身账号")
+
+    with session_scope() as db:
+        u = db.get(User, int(uid))
+        if u is None:
+            raise HTTPException(status_code=404, detail="目标用户不存在")
+        active_leases = (
+            db.query(NodeLease)
+            .filter(
+                NodeLease.status == "active",
+                or_(NodeLease.buyer_id == u.id, NodeLease.seller_id == u.id),
+            )
+            .count()
+        )
+        if active_leases > 0:
+            raise HTTPException(status_code=409, detail="该用户仍有进行中的市场租约，请先在租赁风控中强断结算后再删除")
+        owned_nodes = db.query(Node).filter(Node.owner_id == u.id).count()
+        if owned_nodes > 0:
+            raise HTTPException(status_code=409, detail=f"该用户名下仍绑定 {owned_nodes} 个节点，请先停用封禁或等待节点清理后再删除")
+
+        uname = u.username
+        db.query(User).filter(User.invited_by_id == u.id).update({User.invited_by_id: None}, synchronize_session=False)
+        db.query(SyncPolicy).filter(SyncPolicy.owner_id == u.id).delete(synchronize_session=False)
+        db.query(SyncLog).filter(SyncLog.owner_id == u.id).delete(synchronize_session=False)
+        db.query(BillingLedger).filter(BillingLedger.user_id == u.id).delete(synchronize_session=False)
+        db.query(RechargeOrder).filter(RechargeOrder.user_id == u.id).delete(synchronize_session=False)
+        db.query(TrafficStat).filter(TrafficStat.owner_id == u.id).delete(synchronize_session=False)
+        db.query(ReferralReward).filter(or_(ReferralReward.inviter_id == u.id, ReferralReward.invitee_id == u.id)).delete(synchronize_session=False)
+        db.delete(u)
+
+    reschedule_all_policies()
+    write_audit_log(
+        action="admin_delete_user",
+        actor_id=admin["id"],
+        actor_username=admin["username"],
+        target_type="user",
+        target_id=uid,
+        ip=get_client_ip(request),
+        status="ok",
+        details={"username": uname},
+    )
+    return {"message": f"账号 [{uname}] 已移除"}
 
 
 @router.get("/api/admin/levels", summary="获取全部用户等级及分通道差价配置")
@@ -534,6 +786,60 @@ def admin_confirm_recharge(order_id: int, request: Request, admin: dict = Depend
         "message": "该订单此前已入账（幂等返回）" if res["already_paid"] else f"已确认订单 {res['order']['order_no']} 到账 ¥{res['order']['amount_yuan']}",
         "already_paid": res["already_paid"],
         "order": res["order"],
+    }
+
+
+@router.post("/api/admin/recharges/{order_id}/query", summary="管理员向支付宝 / 微信官方网关主动查单并同步入账")
+async def admin_query_recharge(order_id: int, request: Request, admin: dict = Depends(require_admin)):
+    with session_scope() as db:
+        order = db.get(RechargeOrder, int(order_id))
+        if order is None:
+            raise HTTPException(status_code=404, detail="充值订单不存在")
+        order_payload = order.to_dict()
+
+    if order_payload["status"] == "paid":
+        return {"message": "该订单早已完成入账", "order": order_payload, "paid": True}
+
+    ch = order_payload["channel"]
+    try:
+        if ch == "alipay":
+            q_res = await query_alipay_order(order_payload["order_no"], _get_alipay_gateway_cfg())
+        else:
+            q_res = await query_wechat_order(order_payload["order_no"], _get_wechat_gateway_cfg())
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"官方查单失败: {exc}")
+
+    if not q_res.get("supported"):
+        raise HTTPException(status_code=400, detail=f"尚未配置 {ch.upper()} 官方 API 查单密钥")
+
+    if not q_res.get("paid"):
+        status_hint = q_res.get("trade_status") or q_res.get("trade_state") or q_res.get("sub_msg") or "未支付"
+        return {"message": f"官方网关返回当前未支付 ({status_hint})", "order": order_payload, "paid": False}
+
+    ext_no = q_res.get("trade_no") or f"{ch.upper()}-{order_payload['order_no']}"
+    with session_scope() as db:
+        res = _mark_recharge_order_paid_sync(
+            db,
+            order_no=order_payload["order_no"],
+            expected_channel=ch,
+            external_trade_no=ext_no,
+            paid_remark=f"管理员 {admin['username']} 触发 {ch.upper()} 查单同步到账 ({order_payload['order_no']})",
+        )
+    if not res["already_paid"]:
+        write_audit_log(
+            action="admin_query_recharge_paid",
+            actor_id=admin["id"],
+            actor_username=admin["username"],
+            target_type="recharge_order",
+            target_id=res["order"]["order_no"],
+            ip=get_client_ip(request),
+            status="ok",
+            details={"channel": ch, "amount_yuan": res["order"]["amount_yuan"], "trade_no": ext_no},
+        )
+    return {
+        "message": f"官方网关确认已支付，订单 {res['order']['order_no']} 已入账 ¥{res['order']['amount_yuan']}",
+        "order": res["order"],
+        "paid": True,
     }
 
 

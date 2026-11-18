@@ -7,7 +7,7 @@ export async function apiFetch(path, options = {}) {
   if (options.body && !(options.body instanceof FormData) && !headers['Content-Type']) {
     headers['Content-Type'] = 'application/json'
   }
-  const res = await fetch(path, { ...options, headers })
+  const res = await fetch(path, { cache: 'no-store', ...options, headers })
   const text = await res.text()
   let data = null
   try {

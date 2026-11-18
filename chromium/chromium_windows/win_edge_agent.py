@@ -796,6 +796,13 @@ class WinEdgeAgent:
             except Exception as e:
                 await self._ws_send_json(ws, {"req_id": req_id, "status": "error", "message": str(e)})
 
+        elif action == "get_list":
+            try:
+                list_res = await http_client.get(f"http://127.0.0.1:{int(cdp_port)}/json/list", timeout=3.0)
+                await self._ws_send_json(ws, {"req_id": req_id, "status": "ok", "targets": list_res.json()})
+            except Exception as e:
+                await self._ws_send_json(ws, {"req_id": req_id, "status": "error", "message": str(e)})
+
         elif msg_type == "ping" or action == "ping":
             await self._ws_send_json(ws, {"type": "pong"})
 

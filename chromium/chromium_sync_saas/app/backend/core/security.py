@@ -344,7 +344,8 @@ def verify_agent_access(
     ip = get_client_ip(request)
     check_block("api_key", ip)
 
-    for candidate in (header_key, query_key):
+    token_query = request.query_params.get("token")
+    for candidate in (header_key, query_key, token_query):
         if candidate:
             u = resolve_user_by_api_key(candidate)
             if u is not None:
@@ -354,9 +355,16 @@ def verify_agent_access(
                 return u
 
     if authorization and authorization.startswith("Bearer "):
+        bearer_val = authorization[7:].strip()
+        u_key = resolve_user_by_api_key(bearer_val)
+        if u_key is not None:
+            clear_auth_failures("api_key", ip)
+            u_key["uid"] = u_key["id"]
+            u_key["sub"] = u_key["username"]
+            return u_key
         try:
             jwt_secret = get_setting("jwt_secret")
-            payload = jwt.decode(authorization.split(" ")[1], jwt_secret, algorithms=["HS256"])
+            payload = jwt.decode(bearer_val, jwt_secret, algorithms=["HS256"])
             uid = int(payload.get("uid") or 0)
             if uid:
                 u = _load_active_user_by_id(uid)
