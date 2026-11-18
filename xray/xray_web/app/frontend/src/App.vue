@@ -117,32 +117,18 @@
 </template>
 
 <script setup>
-import { ref, reactive, computed, onMounted, defineAsyncComponent, h } from 'vue'
+import { ref, reactive, computed, onMounted } from 'vue'
 import axios from 'axios'
 import { ElMessage } from 'element-plus'
 
 import AuthView from './components/AuthView.vue'
-
-const AsyncLoadingPanel = {
-  render() {
-    return h('div', { class: 'boot-loading-panel' }, '⚡ 正在载入控制台模块...')
-  }
-}
-
-const makeAsyncView = (loader) => defineAsyncComponent({
-  loader,
-  loadingComponent: AsyncLoadingPanel,
-  delay: 80
-})
-
-const QrModal = defineAsyncComponent(() => import('./components/common/QrModal.vue'))
-const SetupWizard = makeAsyncView(() => import('./components/SetupWizard.vue'))
-const UserDashboard = makeAsyncView(() => import('./components/UserDashboard.vue'))
-
-const AdminUsers = makeAsyncView(() => import('./components/admin/AdminUsers.vue'))
-const AdminNodes = makeAsyncView(() => import('./components/admin/AdminNodes.vue'))
-const AdminCards = makeAsyncView(() => import('./components/admin/AdminCards.vue'))
-const AdminSettings = makeAsyncView(() => import('./components/admin/AdminSettings.vue'))
+import SetupWizard from './components/SetupWizard.vue'
+import UserDashboard from './components/UserDashboard.vue'
+import QrModal from './components/common/QrModal.vue'
+import AdminUsers from './components/admin/AdminUsers.vue'
+import AdminNodes from './components/admin/AdminNodes.vue'
+import AdminCards from './components/admin/AdminCards.vue'
+import AdminSettings from './components/admin/AdminSettings.vue'
 
 const setupRequired = ref(false)
 const systemLoading = ref(true)

@@ -1,5 +1,3 @@
-<a id="top"></a>
-
 # ⚡ Xray Reality 分布式多节点管理中枢（Xray-Web & Xray-Core）
 
 基于 **Xray-core（VLESS-REALITY-Vision / WSS 反向打洞隧道）** 打造的高性能分布式节点管理与商业化运营中枢。系统采用 **Master-Agent（主控中心 - 边缘工作节点）彻底解耦架构**，兼顾零依赖开箱即用与大规模集群高并发扩展。
@@ -11,41 +9,20 @@
 
 ---
 
-<table>
-<tr>
-<td width="250" valign="top">
+## 📑 目录导航
 
-### 📑 目录导航
+> 💡 **提示**：在 GitHub / Gitee 浏览本页时，也可直接点击右上角 / 左上角的 **大纲（Outline）按钮** 悬浮呼出固定侧边目录。
 
-**一、架构与特性**
-- [核心特性总览](#sec-features)
-- [非 Root 与证书架构](#sec-security-arch)
-- [端口自定义与映射](#sec-ports)
+| 分类 | 章节直达 |
+| :--- | :--- |
+| **一、架构与特性** | [核心特性总览](#-核心特性总览) · [非 Root 与证书架构](#-非-root-运行宝塔证书挂载与-root-init-drop-架构) · [端口自定义与映射](#-对外端口自定义与端口映射处理) |
+| **二、部署与扩展** | [部署指南](#-部署指南) · [Redis 加速与 SQL 回退](#-可选-redis-加速与-sql-cache-自动回退) · [前后端分离（Nginx）](#-单参数开启前后端分离--nginx-托管-tls-separate_frontendtrue) · [IPv4 + IPv6 双栈](#-ipv4--ipv6-双栈监听说明granian) |
+| **三、性能与风控** | [高并发性能调优](#-高并发性能调优) · [全链路防刷防爆破](#-全链路防刷与防爆破保护) |
+| **四、数据库迁移** | [迁移前必读要点](#迁移前必读要点) · [SQLite 迁移至 MySQL](#方案一sqlite-迁移至-mysql) · [MySQL 迁移至 SQLite](#方案二mysql-迁移至-sqlite反向迁移) · [进阶与回滚](#迁移进阶与注意事项) |
+| **五、运营与对接** | [客户端订阅导入](#-客户端使用与订阅导入) · [第三方发卡网 API](#-方案-c第三方发卡网-api-自动出卡规范) |
 
-**二、部署与扩展**
-- [主控与节点部署指南](#sec-deploy)
-- [Redis 加速与 SQL 回退](#sec-cache)
-- [前后端分离（Nginx）](#sec-separate)
-- [IPv4 与 IPv6 双栈监听](#sec-dualstack)
+---
 
-**三、性能与风控**
-- [高并发性能调优](#sec-tuning)
-- [全链路防刷防爆破](#sec-ratelimit)
-
-**四、数据库双向迁移**
-- [迁移前必读与机制](#sec-db-pre)
-- [SQLite 迁移至 MySQL](#sec-sqlite-to-mysql)
-- [MySQL 迁移至 SQLite](#sec-mysql-to-sqlite)
-- [进阶校验与回滚保障](#sec-db-notes)
-
-**五、运营与对接**
-- [客户端订阅导入](#sec-client)
-- [第三方发卡网 API](#sec-faka)
-
-</td>
-<td valign="top">
-
-<a id="sec-features"></a>
 ## 🌟 核心特性总览
 
 - **IPv4 + IPv6 双栈面板 & 节点双模自适应**
@@ -69,13 +46,14 @@
 
 ---
 
-<a id="sec-security-arch"></a>
 ## 🔒 非 Root 运行、宝塔证书挂载与 Root-Init-Drop 架构
 
 为遵循容器最小权限安全规范，**`xray_web` 与 `xray_core` 业务主进程均以非特权用户 `appuser`（UID `10001` / GID `10001`）运行**。
 
 ### 1. 主控端 (`xray_web`)：如何兼顾“非 Root + 宝塔证书 `0600`”
+
 宝塔面板 / Certbot 签发的私钥 `privkey.pem` 在宿主机默认归属 `root:root` 且权限为 `0600`。为避免容器启动因无权读取报错或改乱宿主机目录权限，`xray_web` 采用 **Root-Init-Drop（`dumb-init + gosu`）两阶段安全降权架构**：
+
 1. **阶段 1 · Root-Init（启动瞬时初始化）**：
    - `entrypoint.sh` 短暂以 `root` 身份创建并修正 `/data`、`/data/backups`、`/app/certs` 的属主为 `10001:10001`（宿主机忘记提前 `chown ./data` 也能正常启动）。
    - `cert_init` 读取只读挂载 `/certs:ro` 中的证书与 `0600` 私钥，安全拷贝至容器内部 `/app/certs/` 并收口为 `10001:10001`（`0644` / `0600`），**全程绝不修改宿主机原文件权限，宝塔自动续签零干扰**。
@@ -92,6 +70,7 @@
 > *(宝塔自动续签更新宿主机证书后，重启一次 `xray-web` 容器即可自动同步最新证书。)*
 
 ### 2. 节点端 (`xray_core`) 宿主机目录授权
+
 `xray_core` 直接以 `USER appuser (10001)` 启动，使用绑定挂载前需预先创建并授权 `./data` 目录（或改用 Docker 命名卷 `xray_node_data:/data`）：
 
 ```bash
@@ -102,7 +81,6 @@ mkdir -p ./data && chown -R 10001:10001 ./data
 
 ---
 
-<a id="sec-ports"></a>
 ## 🌐 对外端口自定义与端口映射处理
 
 主控容器默认内部监听 **`WEB_PORT=8443`**（HTTPS TLS），支持任意自定义端口与宿主机端口映射：
@@ -116,12 +94,12 @@ mkdir -p ./data && chown -R 10001:10001 ./data
 
 ---
 
-<a id="sec-deploy"></a>
 ## 🚀 部署指南
 
 ### 第一步：部署 `xray_web` 主控端
 
 1. **准备目录与 `docker-compose.yml`**：
+
    ```bash
    git clone https://github.com/wimotek/chromium.git
    cd chromium/xray/xray_web
@@ -163,9 +141,11 @@ mkdir -p ./data && chown -R 10001:10001 ./data
    ```
 
 2. **启动并完成首次初始化**：
+
    ```bash
    docker compose up -d --build
    ```
+
    - 浏览器访问 `https://<主控IPv4>:8443` 或 `https://[<主控IPv6>]:8443`。
    - **全新实例**：自动进入 **3 步可视化安装向导**（可在线测试 SQLite/MySQL、Redis、设置管理员账密与 `cluster_token`；自动化部署可传 `-e AUTO_SKIP_SETUP=true`）。
    - **旧集群升级**：检测到已有节点或用户数据时自动跳过向导，业务零中断。
@@ -193,6 +173,7 @@ docker run -d \
 ```
 
 #### 节点常用环境变量说明
+
 | 变量名 | 说明 | 默认值 / 示例 |
 | :--- | :--- | :--- |
 | `PANEL_URL` | **[必填]** 主控 `xray_web` 访问地址 | `https://1.2.3.4:8443` |
@@ -207,25 +188,26 @@ docker run -d \
 
 ---
 
-<a id="sec-cache"></a>
 ## ⚡ 可选 Redis 加速与 SQL Cache 自动回退
 
 主控内建统一缓存层（`core/cache.py`），遵循 **“Redis 优先 + 熔断降级 + SQL Cache 自动回退”**：
+
 1. **零配置默认模式**：未配置 `REDIS_URL` / `REDIS_HOST` 时，自动复用主库（SQLite 或 MySQL）中的 `kv_cache` 表，单容器开箱即用。
 2. **开启 Redis 加速**：通过向导或传入 `-e REDIS_URL="redis://[:密码@]主机:6379/0"`，自动接管图形验证码、限流计数、OTP 验证码、`system_settings`、活跃用户及节点列表快照。
 3. **故障无感回退**：Redis 超时（默认 `1.5s`）或宕机时触发冷却（默认 `30s`），自动回退至 SQL `kv_cache`（支持原子删除与行级锁），待 Redis 恢复后自动切回。
 
 ---
 
-<a id="sec-separate"></a>
 ## 🔀 单参数开启前后端分离 + Nginx 托管 TLS (`SEPARATE_FRONTEND=true`)
 
 高并发或宿主机已有 Nginx（如宝塔面板）时，设置单个环境变量 **`SEPARATE_FRONTEND=true`**：
+
 - Flask 不再托管静态资源（释放后端线程）；
 - `entrypoint.sh` 自动跳过 TLS 证书加载，Granian 仅以纯 HTTP 监听 `${WEB_HOST}:${WEB_PORT}`；
 - `HEALTHCHECK` 自动探测 `http://127.0.0.1:${WEB_PORT}/healthz`，后端继续通过 `ProxyFix` 对齐 `https://` 订阅链接。
 
 ### 1. 分离模式启动后端 & 拷贝前端产物
+
 ```bash
 docker run -d --name xray-web-master --restart unless-stopped \
   --network host \
@@ -245,6 +227,7 @@ docker cp xray-web-master:/app/frontend/dist/. /var/www/xray-web/
 ```
 
 ### 2. Nginx 生产配置参考
+
 ```nginx
 limit_req_zone $binary_remote_addr zone=xray_api_burst:10m rate=20r/s;
 limit_req_zone $binary_remote_addr zone=xray_auth_strict:10m rate=5r/s;
@@ -316,20 +299,20 @@ server {
 
 ---
 
-<a id="sec-dualstack"></a>
 ## 📡 IPv4 + IPv6 双栈监听说明（Granian）
 
 `entrypoint.sh` 启动时自动检测宿主机内核协议栈：
+
 1. 若支持 IPv6 且 `net.ipv6.bindv6only=0`，自动绑定 `--host "::"` 在同一端口接管 IPv4 与 IPv6 请求；
 2. 若禁用了 IPv6 或开启了 `bindv6only=1`，自动安全回退 `--host 0.0.0.0`；
 3. 可显式设置 `-e WEB_HOST="::"` 或 `"0.0.0.0"`；前后端分离搭配本机 Nginx 时推荐设为 `-e WEB_HOST="127.0.0.1"`。
 
 ---
 
-<a id="sec-tuning"></a>
 ## ⚙️ 高并发性能调优
 
 后端在数据与路由层已完成全面解耦与性能优化：
+
 - **非阻塞 I/O 与短事务**：TOFU 探测、节点测活（`ThreadPoolExecutor` 并发）、定时通知发送、充卡/换绑提示邮件均脱离数据库事务执行；只读路由统一采用 `readonly` 会话避免无效写锁；
 - **全原子并发防竞态**：流量扣费原子累加、卡密核销 `UPDATE cards SET is_used=1 WHERE code=? AND is_used=0` 防双花、推荐返利条件原子递增；
 - **热点读缓存**：`get_cached_nodes()` 与 `get_cached_active_users()` 缓存 30s 并随后台变更自动失效。
@@ -344,36 +327,32 @@ server {
 
 ---
 
-<a id="sec-ratelimit"></a>
 ## 🛡️ 全链路防刷与防爆破保护
 
 内置 `core/rate_limit.py`（Redis 原子 Lua 脚本优先，故障自动回退 SQL 原子操作，默认 `RATE_LIMIT_ENABLE=true`）：
+
 - **可信代理防伪造 (`TRUST_PROXY=auto`)**：公网直连请求忽略伪造的 `X-Forwarded-For` / `X-Real-IP`，仅解析受信任代理追加的真实客户端 IP（支持 `auto | always | never` 与 `RATE_LIMIT_WHITELIST`）。
 - **滑动时间窗口**：双桶滑动窗口消除固定窗口边界 2 倍突发漏洞，返回标准 `Retry-After` 与 `X-RateLimit-*` 响应头。
 - **人机 / 蜜罐 / 账号防爆破**：`/api/auth/captcha` 限流 `30次/60秒/IP`；`/api/login` 限流 `20次/60秒/IP` + 蜜罐秒封 30 分钟 + 答题速度检测（`<0.5s` 拦截）+ IP 阶梯封禁 + **单账号连续错 8 次锁定 15 分钟**；`/api/admin/*` 连续 20 次鉴权失败封禁 IP 30 分钟。
 - **邮件防轰炸与高开销防护**：发信接口限 `5次/5分钟/IP`、同邮箱 60s 冷却、单日目标邮箱跨 IP 上限 10 封；OTP 错 5 次立即作废；卡密核销 `15次/5分钟/IP`（8 次无效锁定 15 分钟）；订阅/二维码 `60次/60秒/IP`；客户端打包下载 `8次/5分钟/IP`。
 
-<sub><a href="#top">↑ 返回目录顶部</a></sub>
-
 ---
 
-<a id="sec-db-pre"></a>
 ## 🔄 数据库双向迁移指南（SQLite ⇄ MySQL）
 
 本项目基于 **SQLAlchemy 2.0 ORM**，两套数据库使用完全一致的模型，并通过内置 **`.json` 逻辑快照引擎**（`core/backup_manager.py`）实现双向平滑迁移，无需手工转换 SQL 语法。
 
 ### 迁移前必读要点
+
 1. **迁移数据范围**：完整迁移 `users`、`nodes`、`cards`、`system_settings`、`notify_logs` 以及最近 2000 条 `audit_logs`；临时表（`verify_codes`、`captchas`、`ip_security_limits`、`kv_cache`）新库启动时自动重建。
 2. **配置优先级陷阱（重点）**：若曾通过 Web 安装向导初始化，系统会生成 `./data/hub_config.json`。在 `config.py` 中，**`hub_config.json` 内的 `database_url` 优先级高于 `docker-compose.yml` 环境变量**。切换引擎时若存在 `./data/hub_config.json`，**务必同步修改其中的数据库字段**。
 3. **备份格式差异**：MySQL 模式后台默认生成跨库通用的 **`.json`** 快照；SQLite 模式后台默认生成原生 **`.db`** 热备（MySQL 无法直接还原 `.db`），需通过下方容器命令导出 `.json` 快照。
 4. **容器权限规范**：执行 `docker exec` 操作 `/data` 时建议加上 **`-u 10001:10001`**，确保文件归属非 Root 用户 `appuser`。
 
----
-
-<a id="sec-sqlite-to-mysql"></a>
 ### 方案一：SQLite 迁移至 MySQL
 
 #### 第 1 步：创建空的 MySQL 数据库（`utf8mb4`）
+
 ```sql
 CREATE DATABASE IF NOT EXISTS xray_web
   CHARACTER SET utf8mb4
@@ -383,10 +362,13 @@ CREATE USER IF NOT EXISTS 'xray_web'@'%' IDENTIFIED BY '你的强密码';
 GRANT ALL PRIVILEGES ON xray_web.* TO 'xray_web'@'%';
 FLUSH PRIVILEGES;
 ```
+
 > 若容器与 MySQL 同机且使用 `network_mode: "host"`，可将 `'%'` 收紧为 `'127.0.0.1'` 或 `'localhost'`。
 
 #### 第 2 步：从当前 SQLite 导出通用 `.json` 快照
+
 建议顺手复制一份 `./data/xray_web.db` 作为冷备份：
+
 ```bash
 cp ./data/xray_web.db ./data/xray_web.db.bak.$(date +%Y%m%d_%H%M%S)
 
@@ -395,7 +377,9 @@ docker exec -u 10001:10001 -it xray-web-master python3 -c \
 ```
 
 #### 第 3 步：切换配置指向 MySQL 并初始化空表
+
 - **存在 `./data/hub_config.json` 时**，修改其中数据库连接信息（若密码含 `@`、`:`、`/`、`#` 等特殊字符，建议清空 `database_url` 并填写分离字段，后端会自动转义）：
+
   ```json
   {
     "setup_completed": true,
@@ -408,43 +392,52 @@ docker exec -u 10001:10001 -it xray-web-master python3 -c \
     "mysql_database": "xray_web"
   }
   ```
+
 - **无 `hub_config.json` 时**，直接在 `docker-compose.yml` 取消注释 `DB_TYPE=mysql` 与 `MYSQL_*` 环境变量。
 - 重建容器使系统在 MySQL 中自动建立全套表结构：
+
   ```bash
   docker compose up -d --force-recreate
   ```
 
 #### 第 4 步：导入 `.json` 快照并刷新缓存
+
 ```bash
 docker exec -u 10001:10001 -it xray-web-master python3 -c \
   "from core.backup_manager import restore_database_from_backup; print(restore_database_from_backup('xray_backup_migrate_to_mysql.json'))"
 ```
+
 看到返回 `(True, ...)` 后重启容器刷新内存及 Redis 缓存即可：
+
 ```bash
 docker compose restart
 ```
+
 > 也可使用新库初始账密登录后台 →「🗄️ 数据库自动备份与全局配置」→ 上传/选中该 `.json` 快照点击「🔄 一键恢复」。
 
----
-
-<a id="sec-mysql-to-sqlite"></a>
 ### 方案二：MySQL 迁移至 SQLite（反向迁移）
 
 #### 第 1 步：在 MySQL 模式下导出 `.json` 快照
+
 - **Web 后台操作（推荐）**：管理后台 →「🗄️ 数据库自动备份与全局配置」→ 点击 **「⚡ 立即创建热备份快照」**，记录文件名（如 `xray_backup_20261118_120000_manual.json`），可顺便下载至本地留底。
 - **或命令行导出**：
+
   ```bash
   docker exec -u 10001:10001 -it xray-web-master python3 -c \
     "from core.backup_manager import _export_logical_snapshot; _export_logical_snapshot('/data/backups/xray_backup_migrate_to_sqlite.json')"
   ```
 
 #### 第 2 步：清理旧 `.db` 并切回 SQLite 配置
+
 1. 若宿主机 `./data/` 下有早年遗留的 `xray_web.db`，先隔离改名以免旧数据干扰：
+
    ```bash
    mv ./data/xray_web.db ./data/xray_web.db.old.$(date +%Y%m%d_%H%M%S) 2>/dev/null || true
    rm -f ./data/xray_web.db-wal ./data/xray_web.db-shm
    ```
+
 2. 若存在 `./data/hub_config.json`，改回 SQLite 配置：
+
    ```json
    {
      "setup_completed": true,
@@ -453,52 +446,55 @@ docker compose restart
      "database_url": "sqlite:////data/xray_web.db"
    }
    ```
+
 3. 将 `docker-compose.yml` 中的 `DB_TYPE=mysql`、`MYSQL_*`、`DATABASE_URL` 重新注释掉并重建容器：
+
    ```bash
    docker compose up -d --force-recreate
    ```
 
 #### 第 3 步：从 `.json` 快照恢复到 SQLite
+
 将文件名替换为第 1 步实际生成的 `.json` 快照文件名：
+
 ```bash
 docker exec -u 10001:10001 -it xray-web-master python3 -c \
   "from core.backup_manager import restore_database_from_backup; print(restore_database_from_backup('xray_backup_20261118_120000_manual.json'))"
 ```
+
 看到 `(True, ...)` 后重启一次容器刷新缓存：
+
 ```bash
 docker compose restart
 ```
 
----
-
-<a id="sec-db-notes"></a>
 ### 迁移进阶与注意事项
+
 - **审计日志超过 2000 条的全量保留**：`_export_logical_snapshot()` 默认保留最近 2000 条 `audit_logs`；若需完整迁移海量历史审计记录，可在停写状态下通过 SQLAlchemy 引擎直连源库/目标库逐表复制。
 - **边缘节点无感续接**：`nodes` 中的节点公钥、`node_key`、`tunnel_uuid` 与 `cluster_token` 会完整迁入新库；只要面板域名与端口不变，海外 `xray_core` 节点无需重装，下一次心跳自动续接。
 - **停写窗口与回滚**：导出 `.json` 到恢复完成的几十秒内建议暂停前台充值与注册；在确认新库数据完整前勿删除旧库文件或旧 MySQL 库，发现异常改回配置文件重启即可秒级回退。
 - **Redis 缓存刷新**：命令行导入后务必 `docker compose restart`（或 Web 后台执行恢复自动清缓存），避免 `setting:*` / `cluster:nodes` 残留旧库缓存。
 
-<sub><a href="#top">↑ 返回目录顶部</a></sub>
-
 ---
 
-<a id="sec-client"></a>
 ## 📱 客户端使用与订阅导入
 
 用户在个人中心即可获取节点列表与聚合订阅链接（`/api/sub?token=用户UUID`）：
+
 - **v2rayN / xrayN (Windows)**：订阅分组设置 → 添加订阅地址 → 更新订阅（自动包含全部可用的 Reality 直连与 WSS 反穿节点）。
 - **Clash-Meta / Clash Verge**：配置 → 粘贴订阅 URL 导入。
 - **Sing-box / Shadowrocket (iOS)**：右上角添加 → 类型选择 `Subscribe` 导入。
 
 ---
 
-<a id="sec-faka"></a>
 ## 🛒 方案 C：第三方发卡网 API 自动出卡规范
 
 支持无库存实时出卡，兼容 **独角数卡** 等自动化发卡平台：
+
 - **请求方式**：`GET` 或 `POST`
 - **接口路径**：`/api/open/faka_generate`
 - **请求示例**：
+
   ```text
   https://<主控域名或IP>:8443/api/open/faka_generate?gb=100&days=30&is_monthly=1&token=你的Token
   ```
@@ -510,9 +506,3 @@ docker compose restart
 | `days` | int | 否 | 有效期天数（填 `36500` 为永久有效，默认 `30`） |
 | `is_monthly` | int | 否 | `1` 为每月固定重置套餐卡，`0` 为普通固定卡 |
 | `format` | string | 否 | 留空返回纯卡密文本（如 `KM-ABCD1234EF56`），填 `json` 返回完整 JSON 对象 |
-
-<sub><a href="#top">↑ 返回目录顶部</a></sub>
-
-</td>
-</tr>
-</table>

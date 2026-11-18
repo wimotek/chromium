@@ -207,21 +207,6 @@ onMounted(() => {
     }
   } catch (_) {}
 
-  // 空闲时预加载登录后界面分包，确保点击登录通过后零卡顿秒切换
-  const preloadDashboardChunks = () => {
-    if (!props.isPureAdmin) {
-      import('./UserDashboard.vue').catch(() => {})
-    }
-    import('./admin/AdminUsers.vue').catch(() => {})
-  }
-  if (typeof window !== 'undefined') {
-    if (typeof window.requestIdleCallback === 'function') {
-      window.requestIdleCallback(preloadDashboardChunks, { timeout: 1500 })
-    } else {
-      setTimeout(preloadDashboardChunks, 300)
-    }
-  }
-
   if (!usedInitialCaptcha && props.initialCaptcha && applyCaptchaData(authMode.value, props.initialCaptcha)) {
     usedInitialCaptcha = true
     return
