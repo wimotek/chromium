@@ -2,7 +2,7 @@
   <div>
     <div class="card">
       <div class="card-title">
-        <span>共享算力市场（分通道差价 · 卖家等级动态定价）</span>
+        <span>共享算力市场（分通道差价 · 卖家等级与质量动态定价）</span>
         <div class="row">
           <span class="tag tag-info">
             基准加价: WSS反穿 {{ (channelFees.reverse / 100).toFixed(1) }}% · 公网WSS直连 {{ (channelFees.public_wss / 100).toFixed(1) }}%
@@ -11,6 +11,94 @@
             您共减免 {{ (discountBps / 100).toFixed(1) }}% (套餐 {{ (planDiscountBps / 100).toFixed(1) }}% + 等级 {{ (levelDiscountBps / 100).toFixed(1) }}%)
           </span>
           <button class="btn btn-sm" @click="loadAll">刷新市场</button>
+        </div>
+      </div>
+
+      <!-- 租用方式导览 & 当前在租入口 -->
+      <div class="banner banner-info" style="margin-bottom: 14px">
+        <div class="row" style="justify-content: space-between; align-items: center; gap: 10px">
+          <div style="font-size: 13px; line-height: 1.6">
+            <strong>租用方式：</strong>支持下方 <strong>「一键随机按数量租用」</strong>（自动挑选在线空闲节点），也可在市场列表中点击单个节点 <strong>「立即租用」</strong> 手动挑选。<br />
+            <strong>查看位置：</strong>已租用的节点可直接在页面下方 <strong>「我的租用订单」</strong> 或顶部 <strong>「我的节点与凭据 → 我的节点 → 我租用的共享节点」</strong> 查看、复制 CDP WS 与退租结算（当前在租 <span class="mono"><strong>{{ activeBuyerLeases.length }}</strong> / {{ quotas.max_active_leases || '-' }}</span>）。
+          </div>
+          <div class="row" style="flex-shrink: 0">
+            <button class="btn btn-sm" @click="scrollToMyLeases">查看下方租用订单 ({{ activeBuyerLeases.length }})</button>
+            <button class="btn btn-sm btn-primary" @click="emit('go-my-nodes')">去「我的节点」查看 →</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- 一键随机按数量租用栏 -->
+      <div class="subcard" style="margin-bottom: 16px">
+        <div class="card-title" style="font-size: 14px; margin-bottom: 10px">
+          <span>一键随机按数量租用</span>
+          <span class="muted mono" style="font-size: 12px">当前全市场可租在线槽位：{{ rentableNodeCount }} 个节点</span>
+        </div>
+        <div class="row" style="align-items: flex-end; gap: 10px; flex-wrap: wrap">
+          <div class="field" style="margin-bottom: 0; min-width: 190px">
+            <label>租用数量 (1 ~ 20 个)</label>
+            <div class="row" style="gap: 6px">
+              <input class="input mono" type="number" min="1" max="20" style="width: 78px" v-model.number="batchForm.count" />
+              <button
+                v-for="preset in [1, 2, 3, 5]"
+                :key="preset"
+                type="button"
+                class="btn btn-sm"
+                :class="{ 'btn-primary': batchForm.count === preset }"
+                @click="batchForm.count = preset"
+              >
+                {{ preset }}个
+              </button>
+            </div>
+          </div>
+
+          <div class="field" style="margin-bottom: 0; min-width: 140px">
+            <label>地区筛选</label>
+            <select class="select" v-model="batchForm.region">
+              <option value="">全部地区</option>
+              <option v-for="r in availableRegions" :key="r" :value="r">{{ r }}</option>
+            </select>
+          </div>
+
+          <div class="field" style="margin-bottom: 0; min-width: 150px">
+            <label>通道筛选</label>
+            <select class="select" v-model="batchForm.channel_type">
+              <option value="">全部通道</option>
+              <option value="reverse">WSS反向穿透</option>
+              <option value="public_wss">公网WSS直连</option>
+            </select>
+          </div>
+
+          <div class="field" style="margin-bottom: 0; width: 150px">
+            <label>最高时租预算 (元/h)</label>
+            <input class="input mono" type="number" step="0.1" min="0" placeholder="不限" v-model="batchForm.max_buyer_hour_yuan" />
+          </div>
+
+          <label class="row" style="cursor: pointer; font-size: 12px; color: var(--muted); padding-bottom: 8px">
+            <input type="checkbox" v-model="batchForm.exclude_already_leased" />
+            <span>避开我在租节点</span>
+          </label>
+
+          <button
+            class="btn btn-emerald"
+            :disabled="batchLoading || rentableNodeCount === 0"
+            @click="rentBatchRandom"
+          >
+            {{ batchLoading ? '正在随机分配...' : `一键随机租用 ${batchForm.count || 1} 个节点` }}
+          </button>
+        </div>
+
+        <div v-if="lastBatchResult.length > 0" class="banner banner-success" style="margin-top: 12px; margin-bottom: 0">
+          <div class="row" style="justify-content: space-between; margin-bottom: 6px">
+            <strong>本次已为您随机分配 {{ lastBatchResult.length }} 个共享节点：</strong>
+            <button class="btn btn-sm" @click="copyAllBatchWs">复制全部 CDP WS 地址</button>
+          </div>
+          <div class="mono" style="font-size: 12px; line-height: 1.7">
+            <div v-for="l in lastBatchResult" :key="l.id">
+              • 租约 #{{ l.id }} · {{ l.node_name }} ({{ l.isolation_profile_id }}) —
+              <a href="#" style="color: var(--primary)" @click.prevent="copy(l.cdp_ws_url)">复制 CDP WS</a>
+            </div>
+          </div>
         </div>
       </div>
 
@@ -23,10 +111,10 @@
           <thead>
             <tr>
               <th>共享节点名称 / 卖家等级</th>
-              <th>通道 / 状态 / 速度质量</th>
+              <th>通道 / 状态 / 质量评级</th>
               <th>剩余可租槽位</th>
               <th>买家时租 / 流量单价 (已计通道差价)</th>
-              <th>操作</th>
+              <th>操作 (手动单租)</th>
             </tr>
           </thead>
           <tbody>
@@ -43,6 +131,7 @@
                   <span class="tag tag-info">{{ channelLabel(m.channel_type || m.conn_type) }}</span>
                   <span class="tag" :class="m.status === 'connected' ? 'tag-ok' : 'tag-warn'" style="margin-left: 4px">{{ m.status }}</span>
                   <span class="tag" style="margin-left: 4px">{{ m.region }}</span>
+                  <span class="tag" :class="qualityTagClass(m.quality_grade)" style="margin-left: 4px">{{ m.quality_grade || 'C' }}级</span>
                 </div>
                 <div class="muted mono" style="font-size: 11px; margin-top: 4px">
                   延迟 {{ m.avg_latency_ms > 0 ? `${m.avg_latency_ms}ms` : '--' }} · 速率 {{ m.avg_speed_kbps || 0 }}KB/s · {{ m.isolation_mode === 'ephemeral_profile' ? '隔离临时 Profile' : '独占槽位' }}
@@ -73,9 +162,12 @@
       </div>
     </div>
 
-    <div class="grid-2">
+    <div ref="leasesSectionRef" class="grid-2">
       <div class="card">
-        <div class="card-title">我的租用订单（作为买家接入 CDP）</div>
+        <div class="card-title">
+          <span>我的租用订单（作为买家接入 CDP）</span>
+          <span class="tag tag-ok">在租 {{ activeBuyerLeases.length }}</span>
+        </div>
         <div v-if="buyerLeases.length === 0" class="muted">暂无购买租约。</div>
         <div v-else class="table-wrap">
           <table>
@@ -152,10 +244,13 @@
 </template>
 
 <script setup>
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, reactive, ref } from 'vue'
 import { apiFetch, fmtBytes, fmtDuration } from '../../api'
 
-const emit = defineEmits(['notify', 'refresh-profile'])
+defineProps({
+  quotas: { type: Object, default: () => ({}) },
+})
+const emit = defineEmits(['notify', 'refresh-profile', 'go-my-nodes'])
 
 const marketNodes = ref([])
 const platformFeeBps = ref(2500)
@@ -165,10 +260,45 @@ const levelDiscountBps = ref(0)
 const discountBps = ref(0)
 const buyerLeases = ref([])
 const sellerLeases = ref([])
+const leasesSectionRef = ref(null)
+
+const batchLoading = ref(false)
+const lastBatchResult = ref([])
+const batchForm = reactive({
+  count: 1,
+  region: '',
+  channel_type: '',
+  max_buyer_hour_yuan: '',
+  exclude_already_leased: true,
+})
+
+const activeBuyerLeases = computed(() => buyerLeases.value.filter((l) => l.status === 'active'))
+
+const rentableNodeCount = computed(
+  () => marketNodes.value.filter((m) => !m.is_mine && m.status === 'connected' && Number(m.available_slots || 0) > 0).length,
+)
+
+const availableRegions = computed(() => {
+  const set = new Set()
+  for (const m of marketNodes.value) {
+    if (m.region) set.add(m.region)
+  }
+  return Array.from(set)
+})
 
 function channelLabel(ch) {
   if (ch === 'public_wss' || ch === 'wss_direct') return '公网WSS直连'
   return 'WSS反向穿透'
+}
+
+function qualityTagClass(grade) {
+  if (grade === 'S' || grade === 'A') return 'tag-ok'
+  if (grade === 'B') return 'tag-info'
+  return 'tag-warn'
+}
+
+function scrollToMyLeases() {
+  leasesSectionRef.value?.scrollIntoView({ behavior: 'smooth', block: 'start' })
 }
 
 async function loadAll() {
@@ -196,6 +326,45 @@ async function rentNode(nodeId) {
   } catch (e) {
     emit('notify', e.message)
   }
+}
+
+async function rentBatchRandom() {
+  const count = Math.max(1, Math.min(20, Number(batchForm.count || 1)))
+  batchForm.count = count
+  batchLoading.value = true
+  try {
+    const payload = {
+      count,
+      region: batchForm.region,
+      channel_type: batchForm.channel_type,
+      exclude_already_leased: batchForm.exclude_already_leased,
+    }
+    if (batchForm.max_buyer_hour_yuan !== '' && batchForm.max_buyer_hour_yuan !== null) {
+      const budget = Number(batchForm.max_buyer_hour_yuan)
+      if (!Number.isNaN(budget) && budget >= 0) {
+        payload.max_buyer_hour_yuan = budget
+      }
+    }
+    const res = await apiFetch('/api/market/lease/batch-random', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    })
+    lastBatchResult.value = res.leases || []
+    emit('notify', res.message)
+    emit('refresh-profile')
+    await loadAll()
+  } catch (e) {
+    emit('notify', e.message)
+  } finally {
+    batchLoading.value = false
+  }
+}
+
+function copyAllBatchWs() {
+  const urls = lastBatchResult.value.map((l) => l.cdp_ws_url).filter(Boolean).join('\n')
+  if (!urls) return
+  navigator.clipboard?.writeText(urls)
+  emit('notify', `已复制 ${lastBatchResult.value.length} 条 CDP WebSocket 地址`)
 }
 
 async function stopLease(leaseId) {

@@ -67,6 +67,105 @@ def get_self_reverse_hub_gb_units() -> int:
         return 2000
 
 
+def get_market_base_hour_units() -> int:
+    try:
+        return max(0, int(get_setting("saas_market_base_hour_units", "5000") or 5000))
+    except ValueError:
+        return 5000
+
+
+def get_market_base_gb_units() -> int:
+    try:
+        return max(0, int(get_setting("saas_market_base_gb_units", "10000") or 10000))
+    except ValueError:
+        return 10000
+
+
+def evaluate_node_quality_tier(avg_latency_ms: int, avg_speed_kbps: int) -> Dict[str, Any]:
+    lat = max(0, int(avg_latency_ms or 0))
+    spd = max(0, int(avg_speed_kbps or 0))
+    if 0 < lat <= 120 and spd >= 300:
+        grade, label, bonus_bps = "S", "S级 · 极速优质", 2500
+    elif (0 < lat <= 250 and spd >= 100) or (0 < lat <= 120 and spd == 0):
+        grade, label, bonus_bps = "A", "A级 · 高速稳定", 1500
+    elif (0 < lat <= 500) or spd >= 40:
+        grade, label, bonus_bps = "B", "B级 · 标准可用", 500
+    else:
+        grade, label, bonus_bps = "C", "C级 · 基础/待测", 0
+    return {
+        "grade": grade,
+        "label": label,
+        "bonus_bps": bonus_bps,
+        "avg_latency_ms": lat,
+        "avg_speed_kbps": spd,
+    }
+
+
+def get_seller_level_gb_bonus_bps(seller_level: Optional[UserLevel]) -> int:
+    rank = int(seller_level.rank_order or 1) if seller_level else 1
+    if rank <= 1:
+        return 0
+    if rank == 2:
+        return 1000
+    if rank == 3:
+        return 2000
+    if rank == 4:
+        return 3500
+    return min(5000, (rank - 1) * 1000)
+
+
+def _round_to_fen_units(raw_units: int) -> int:
+    return ((raw_units + 50) // 100) * 100 if raw_units > 0 else 0
+
+
+def compute_node_seller_pricing(
+    node: Node,
+    seller_level: Optional[UserLevel] = None,
+    base_hour_units: Optional[int] = None,
+    base_gb_units: Optional[int] = None,
+) -> Dict[str, Any]:
+    base_hr = get_market_base_hour_units() if base_hour_units is None else max(0, int(base_hour_units))
+    base_gb = get_market_base_gb_units() if base_gb_units is None else max(0, int(base_gb_units))
+    level_bonus_bps = get_seller_level_gb_bonus_bps(seller_level)
+    quality = evaluate_node_quality_tier(
+        getattr(node, "avg_latency_ms", 0),
+        getattr(node, "avg_speed_kbps", 0),
+    )
+    quality_bonus_bps = int(quality["bonus_bps"])
+    total_bonus_bps = level_bonus_bps + quality_bonus_bps
+    mult = (10000 + total_bonus_bps) / 10000.0
+    seller_hour_units = _round_to_fen_units(int(round(base_hr * mult)))
+    seller_gb_units = _round_to_fen_units(int(round(base_gb * mult)))
+    return {
+        "base_hour_units": base_hr,
+        "base_hour_yuan": units_to_yuan_str(base_hr),
+        "base_gb_units": base_gb,
+        "base_gb_yuan": units_to_yuan_str(base_gb),
+        "seller_level_code": seller_level.code if seller_level else "lv1",
+        "seller_level_name": seller_level.name if seller_level else "Lv.1 青铜节点主",
+        "seller_level_rank": int(seller_level.rank_order or 1) if seller_level else 1,
+        "level_bonus_bps": level_bonus_bps,
+        "quality_grade": quality["grade"],
+        "quality_label": quality["label"],
+        "quality_bonus_bps": quality_bonus_bps,
+        "total_bonus_bps": total_bonus_bps,
+        "seller_hour_units": seller_hour_units,
+        "seller_hour_yuan": units_to_yuan_str(seller_hour_units),
+        "seller_gb_units": seller_gb_units,
+        "seller_gb_yuan": units_to_yuan_str(seller_gb_units),
+        "avg_latency_ms": quality["avg_latency_ms"],
+        "avg_speed_kbps": quality["avg_speed_kbps"],
+    }
+
+
+def compute_node_seller_gb_pricing(
+    node: Node,
+    seller_level: Optional[UserLevel] = None,
+    base_gb_units: Optional[int] = None,
+) -> Dict[str, Any]:
+    return compute_node_seller_pricing(node, seller_level=seller_level, base_gb_units=base_gb_units)
+
+
 def resolve_channel_platform_fee_bps(
     conn_type: Optional[str],
     seller_level: Optional[UserLevel] = None,
@@ -126,6 +225,8 @@ def compute_lease_cost_deltas(
 def start_lease_sync(buyer_id: int, node_id: int, client_ip: str = "unknown") -> Dict[str, Any]:
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     ch_fees = get_all_channel_fee_bps()
+    base_hour_units = get_market_base_hour_units()
+    base_gb_units = get_market_base_gb_units()
 
     with session_scope() as db:
         buyer = db.get(User, int(buyer_id))
@@ -168,11 +269,24 @@ def start_lease_sync(buyer_id: int, node_id: int, client_ip: str = "unknown") ->
         channel_name = normalize_billing_channel(node.conn_type)
         channel_fee_bps = resolve_channel_platform_fee_bps(node.conn_type, seller_level, fallback_fees=ch_fees)
 
+        pricing = compute_node_seller_pricing(
+            node,
+            seller_level,
+            base_hour_units=base_hour_units,
+            base_gb_units=base_gb_units,
+        )
+        seller_hour_units = int(pricing["seller_hour_units"])
+        seller_gb_units = int(pricing["seller_gb_units"])
+        if int(node.seller_price_per_hour_units or 0) != seller_hour_units:
+            node.seller_price_per_hour_units = seller_hour_units
+        if int(node.seller_price_per_gb_units or 0) != seller_gb_units:
+            node.seller_price_per_gb_units = seller_gb_units
+
         buyer_hour, eff_bps, _ = compute_buyer_price_units(
-            int(node.seller_price_per_hour_units or 0), channel_fee_bps, discount_bps
+            seller_hour_units, channel_fee_bps, discount_bps
         )
         buyer_gb, _, _ = compute_buyer_price_units(
-            int(node.seller_price_per_gb_units or 0), channel_fee_bps, discount_bps
+            seller_gb_units, channel_fee_bps, discount_bps
         )
 
         min_reserve = max(1, buyer_hour // 60) if (buyer_hour > 0 or buyer_gb > 0) else 0
@@ -189,9 +303,9 @@ def start_lease_sync(buyer_id: int, node_id: int, client_ip: str = "unknown") ->
             isolation_profile_id="pending",
             channel_type=channel_name,
             seller_level_code=seller_level.code if seller_level else "lv1",
-            seller_hour_units=int(node.seller_price_per_hour_units or 0),
+            seller_hour_units=seller_hour_units,
             buyer_hour_units=buyer_hour,
-            seller_gb_units=int(node.seller_price_per_gb_units or 0),
+            seller_gb_units=seller_gb_units,
             buyer_gb_units=buyer_gb,
             platform_fee_bps=eff_bps,
             started_at=now_str,

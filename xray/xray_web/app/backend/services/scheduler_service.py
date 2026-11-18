@@ -26,12 +26,22 @@ def run_scheduled_check(force: bool = False) -> tuple[int, int, str]:
 
     traffic_sent, expire_sent = 0, 0
     did_reset = False
+    reset_notify_jobs: list[tuple[dict, str, str, str]] = []
+    traffic_notify_jobs: list[tuple[dict, str, str, str, str]] = []
+    expire_notify_jobs: list[tuple[dict, str, str, str, str]] = []
 
     with db_session() as s:
         users = s.scalars(
             select(User).where(User.status == 1, User.is_verified == 1, User.role == "user")
         ).all()
 
+        existing_logs: set[tuple[str, str]] = set()
+        if not force and users:
+            existing_logs = set(
+                s.execute(select(NotifyLog.username, NotifyLog.warn_type)).all()
+            )
+
+        now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         for u_obj in users:
             u = u_obj.to_dict()
             uname = u["username"]
@@ -41,26 +51,21 @@ def run_scheduled_check(force: bool = False) -> tuple[int, int, str]:
                 reset_day = int(u.get("reset_day", 1) or 1)
                 if current_day >= reset_day or force:
                     monthly_warn_key = f"monthly_reset_{current_year_month}"
-                    exists = s.scalar(
-                        select(NotifyLog.id).where(
-                            NotifyLog.username == uname,
-                            NotifyLog.warn_type == monthly_warn_key,
-                        ).limit(1)
-                    )
-                    if not exists or force:
+                    if force or (uname, monthly_warn_key) not in existing_logs:
                         u_obj.used_mb = 0.0
+                        u["used_mb"] = 0.0
                         s.add(
                             NotifyLog(
                                 username=uname,
                                 warn_type=monthly_warn_key,
-                                sent_date=datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                sent_date=now_str,
                             )
                         )
-                        s.commit()
+                        existing_logs.add((uname, monthly_warn_key))
                         did_reset = True
                         title = "【流量已重置】您的每月固定流量套餐已刷新"
                         content = f"您好 {uname}，今天是您的每月固定套餐重置日（每月 {reset_day} 号），已用流量已恢复满格！"
-                        notify_user(u, title, f"<h3>{title}</h3><p>{content}</p>", content)
+                        reset_notify_jobs.append((u, title, f"<h3>{title}</h3><p>{content}</p>", content))
 
             # 2. 流量不足预警防骚扰
             used_mb = u.get("used_mb", 0) or 0
@@ -74,26 +79,12 @@ def run_scheduled_check(force: bool = False) -> tuple[int, int, str]:
                         if u.get("is_monthly") == 1
                         else f"traffic_warn_{limit_mb}"
                     )
-                    exists = s.scalar(
-                        select(NotifyLog.id).where(
-                            NotifyLog.username == uname,
-                            NotifyLog.warn_type == traffic_warn_key,
-                        ).limit(1)
-                    )
-                    if not exists or force:
+                    if force or (uname, traffic_warn_key) not in existing_logs:
                         title = "【流量预警】您的节点可用流量已不足"
                         content = f"您好 {uname}，当前已用流量已达 {round(used_mb, 1)}MB / {limit_mb}MB ({used_percent}%)。请及时充值续费。"
-                        ok, _ = notify_user(u, title, f"<h3>{title}</h3><p>{content}</p>", content)
-                        if ok:
-                            traffic_sent += 1
-                            s.add(
-                                NotifyLog(
-                                    username=uname,
-                                    warn_type=traffic_warn_key,
-                                    sent_date=datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                                )
-                            )
-                            s.commit()
+                        traffic_notify_jobs.append(
+                            (u, traffic_warn_key, title, f"<h3>{title}</h3><p>{content}</p>", content)
+                        )
 
             # 3. 套餐到期预警防骚扰
             exp_str = (u.get("expire_date") or "").strip()
@@ -103,31 +94,40 @@ def run_scheduled_check(force: bool = False) -> tuple[int, int, str]:
                     days_left = (exp_date - today).days
                     if 0 <= days_left <= expire_threshold_days:
                         expire_warn_key = f"expire_warn_{exp_str[:10]}_days_{days_left}"
-                        exists = s.scalar(
-                            select(NotifyLog.id).where(
-                                NotifyLog.username == uname,
-                                NotifyLog.warn_type == expire_warn_key,
-                            ).limit(1)
-                        )
-                        if not exists or force:
+                        if force or (uname, expire_warn_key) not in existing_logs:
                             title = "【到期提醒】您的节点套餐即将到期"
                             content = f"您好 {uname}，您的节点服务套餐将于 {exp_str} 到期 (仅剩 {days_left} 天)。到期后服务将自动暂停。"
-                            ok, _ = notify_user(u, title, f"<h3>{title}</h3><p>{content}</p>", content)
-                            if ok:
-                                expire_sent += 1
-                                s.add(
-                                    NotifyLog(
-                                        username=uname,
-                                        warn_type=expire_warn_key,
-                                        sent_date=datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                                    )
-                                )
-                                s.commit()
+                            expire_notify_jobs.append(
+                                (u, expire_warn_key, title, f"<h3>{title}</h3><p>{content}</p>", content)
+                            )
                 except Exception:
                     pass
 
     if did_reset:
         invalidate_users_cache()
+
+    # 所有外部网络推送均在释放数据库连接后执行，彻底避免占用 SQLite 锁或连接池
+    for u, title, html, content in reset_notify_jobs:
+        notify_user(u, title, html, content)
+
+    logs_to_insert: list[tuple[str, str]] = []
+    for u, warn_key, title, html, content in traffic_notify_jobs:
+        ok, _ = notify_user(u, title, html, content)
+        if ok:
+            traffic_sent += 1
+            logs_to_insert.append((u["username"], warn_key))
+
+    for u, warn_key, title, html, content in expire_notify_jobs:
+        ok, _ = notify_user(u, title, html, content)
+        if ok:
+            expire_sent += 1
+            logs_to_insert.append((u["username"], warn_key))
+
+    if logs_to_insert:
+        sent_at = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        with db_session() as s:
+            for uname, warn_key in logs_to_insert:
+                s.add(NotifyLog(username=uname, warn_type=warn_key, sent_date=sent_at))
 
     # 4. 检查隔离区待审批节点超时告警
     try:
@@ -150,9 +150,17 @@ def check_pending_nodes_timeout(force: bool = False):
 
     timeout_minutes = int(get_setting("pending_node_timeout_min", "10") or 10)
     now = datetime.datetime.now()
+    alert_jobs: list[tuple[str, str, str, int, str, str, str]] = []
 
-    with db_session() as s:
+    with db_session(readonly=True) as s:
         pending_nodes = s.scalars(select(Node).where(Node.is_approved == 0)).all()
+        if not pending_nodes:
+            return
+        existing_admin_warns: set[str] = set()
+        if not force:
+            existing_admin_warns = set(
+                s.scalars(select(NotifyLog.warn_type).where(NotifyLog.username == "ADMIN")).all()
+            )
 
         for node_obj in pending_nodes:
             node = node_obj.to_dict()
@@ -174,13 +182,7 @@ def check_pending_nodes_timeout(force: bool = False):
 
             if waiting_minutes >= timeout_minutes or force:
                 warn_key = f"pending_timeout_{nid}"
-                exists = s.scalar(
-                    select(NotifyLog.id).where(
-                        NotifyLog.username == "ADMIN",
-                        NotifyLog.warn_type == warn_key,
-                    ).limit(1)
-                )
-                if not exists or force:
+                if force or warn_key not in existing_admin_warns:
                     title = f"⚠️【待审批节点超时告警】节点 {nname} 滞留隔离区超 {waiting_minutes} 分钟！"
                     html_body = f"""
                     <div style="font-family: sans-serif; line-height: 1.6; color: #222;">
@@ -197,26 +199,37 @@ def check_pending_nodes_timeout(force: bool = False):
                     </div>
                     """
                     text_body = f"【待审批节点超时告警】\n节点: {nname}\nID: {nid}\n来源: {nip}:{node.get('port', 443)}\n模式: {nmode}\n滞留等待: {waiting_minutes}分钟 (超限 {timeout_minutes}m)\n请登录管理控制台进行审批！"
+                    alert_jobs.append((nid, nip, warn_key, waiting_minutes, title, html_body, text_body))
 
-                    ok, log_msg = notify_admin(title, html_body, text_body)
-                    if ok:
-                        s.add(
-                            NotifyLog(
-                                username="ADMIN",
-                                warn_type=warn_key,
-                                sent_date=datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                            )
-                        )
-                        s.add(
-                            AuditLog(
-                                level="warn",
-                                event_type="PENDING_NODE_TIMEOUT_ALERT",
-                                node_id=nid,
-                                ip=nip,
-                                message=f"待审批节点滞留超限 ({waiting_minutes}m)，已向管理员发送通知: {log_msg}",
-                            )
-                        )
-                        s.commit()
+    if not alert_jobs:
+        return
+
+    sent_alerts: list[tuple[str, str, str, int, str]] = []
+    for nid, nip, warn_key, waiting_minutes, title, html_body, text_body in alert_jobs:
+        ok, log_msg = notify_admin(title, html_body, text_body)
+        if ok:
+            sent_alerts.append((nid, nip, warn_key, waiting_minutes, log_msg))
+
+    if sent_alerts:
+        sent_at = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        with db_session() as s:
+            for nid, nip, warn_key, waiting_minutes, log_msg in sent_alerts:
+                s.add(
+                    NotifyLog(
+                        username="ADMIN",
+                        warn_type=warn_key,
+                        sent_date=sent_at,
+                    )
+                )
+                s.add(
+                    AuditLog(
+                        level="warn",
+                        event_type="PENDING_NODE_TIMEOUT_ALERT",
+                        node_id=nid,
+                        ip=nip,
+                        message=f"待审批节点滞留超限 ({waiting_minutes}m)，已向管理员发送通知: {log_msg}",
+                    )
+                )
 
 
 def check_and_run_auto_backup():

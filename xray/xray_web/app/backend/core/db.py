@@ -61,11 +61,16 @@ def _create_sqlalchemy_engine(db_url: str):
         @event.listens_for(eng, "connect")
         def _set_sqlite_pragmas(dbapi_conn, _conn_record):
             cur = dbapi_conn.cursor()
-            cur.execute("PRAGMA journal_mode=WAL;")
             cur.execute("PRAGMA busy_timeout=30000;")
             cur.execute("PRAGMA synchronous=NORMAL;")
             cur.execute("PRAGMA temp_store=MEMORY;")
             cur.close()
+
+        try:
+            with eng.connect() as conn:
+                conn.execute(text("PRAGMA journal_mode=WAL;"))
+        except Exception:
+            pass
 
         return eng
 
@@ -118,13 +123,16 @@ def reset_engine():
 
 
 @contextmanager
-def db_session():
-    """统一事务会话管理器：自动 commit / rollback / close"""
+def db_session(readonly: bool = False):
+    """统一事务会话管理器：自动 commit / rollback / close（readonly=True 时跳过无效 commit）"""
     get_engine()
     session = _SessionLocal()
     try:
         yield session
-        session.commit()
+        if readonly:
+            session.rollback()
+        else:
+            session.commit()
     except Exception:
         session.rollback()
         raise
@@ -381,7 +389,7 @@ def get_setting(key: str, default: str = "") -> str:
         return cached
 
     val = None
-    with db_session() as s:
+    with db_session(readonly=True) as s:
         row = s.get(SystemSetting, key)
         if row is not None and row.value is not None:
             val = str(row.value)
@@ -404,7 +412,7 @@ def get_cached_active_users() -> list[dict]:
     from core.cache import cache
 
     def _load():
-        with db_session() as s:
+        with db_session(readonly=True) as s:
             rows = s.execute(
                 select(User.username, User.email, User.uuid, User.user_group, User.role).where(
                     User.status == 1, User.is_verified == 1
@@ -433,7 +441,7 @@ def get_cached_nodes() -> list[dict]:
     from core.cache import cache
 
     def _load():
-        with db_session() as s:
+        with db_session(readonly=True) as s:
             rows = s.scalars(select(Node).order_by(Node.id.asc())).all()
             return [n.to_dict() for n in rows]
 

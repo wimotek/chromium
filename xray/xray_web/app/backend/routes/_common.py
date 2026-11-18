@@ -10,7 +10,7 @@ BACKEND_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if BACKEND_DIR not in sys.path:
     sys.path.insert(0, BACKEND_DIR)
 
-from flask import has_request_context
+from flask import g, has_request_context
 from sqlalchemy import or_, select
 from config import Config
 from core.cache import cache
@@ -22,6 +22,11 @@ from core.rate_limit import ban_ip, check_ip_ban, get_client_ip, is_whitelisted_
 def check_admin(u: str, p: str) -> bool:
     if not u or not p:
         return False
+
+    if has_request_context():
+        admin_cache = getattr(g, "_admin_auth_cache", None)
+        if isinstance(admin_cache, dict) and (u, p) in admin_cache:
+            return admin_cache[(u, p)]
 
     ip = get_client_ip() if has_request_context() else ""
     whitelisted = bool(ip and is_whitelisted_ip(ip))
@@ -39,7 +44,7 @@ def check_admin(u: str, p: str) -> bool:
         except Exception:
             pass
 
-    with db_session() as s:
+    with db_session(readonly=True) as s:
         role = s.scalar(
             select(User.role).where(
                 or_(User.username == u, User.email == u),
@@ -57,6 +62,12 @@ def check_admin(u: str, p: str) -> bool:
                     ban_ip(ip, duration_seconds=1800, reason="后台管理接口高频鉴权失败")
         except Exception:
             pass
+    if has_request_context():
+        admin_cache = getattr(g, "_admin_auth_cache", None)
+        if not isinstance(admin_cache, dict):
+            admin_cache = {}
+            g._admin_auth_cache = admin_cache
+        admin_cache[(u, p)] = ok
     return ok
 
 

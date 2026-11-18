@@ -159,7 +159,7 @@
           <span>通道差价与自用流量定价策略</span>
           <button class="btn btn-sm btn-primary" @click="saveSettings">保存差价与评级策略</button>
         </div>
-        <div class="grid-4">
+        <div class="grid-3">
           <div class="subcard">
             <div class="field" style="margin-bottom: 0">
               <label>WSS 反向穿透基准加价 (bps, 1000=10%)</label>
@@ -176,6 +176,20 @@
             <div class="field" style="margin-bottom: 0">
               <label>自用 WSS 反穿 Hub 流量单价 (元/GB)</label>
               <input class="input mono" type="number" step="0.05" min="0" v-model.number="settings.saas_self_reverse_hub_gb_yuan" />
+            </div>
+          </div>
+        </div>
+        <div class="grid-3" style="margin-top: 12px">
+          <div class="subcard">
+            <div class="field" style="margin-bottom: 0">
+              <label>共享市场平台时租基准底价 (元/小时 · 卖家不可改)</label>
+              <input class="input mono" type="number" step="0.05" min="0" v-model.number="settings.saas_market_base_hour_yuan" />
+            </div>
+          </div>
+          <div class="subcard">
+            <div class="field" style="margin-bottom: 0">
+              <label>共享市场平台流量基准底价 (元/GB · 卖家不可改)</label>
+              <input class="input mono" type="number" step="0.05" min="0" v-model.number="settings.saas_market_base_gb_yuan" />
             </div>
           </div>
           <div class="subcard">
@@ -1239,6 +1253,8 @@ function togglePaymentHelp(key) {
 const settings = reactive({
   saas_reverse_fee_bps: 2500,
   saas_public_wss_fee_bps: 1000,
+  saas_market_base_hour_yuan: 0.5,
+  saas_market_base_gb_yuan: 1.0,
   saas_self_reverse_hub_gb_yuan: 0.2,
   saas_auto_level_enabled: true,
   saas_allow_public_register: true,

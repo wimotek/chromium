@@ -13,7 +13,7 @@ import math
 import time
 from typing import Callable, Optional
 
-from flask import has_request_context, jsonify, request
+from flask import g, has_request_context, jsonify, request
 
 from config import Config
 from core.cache import cache
@@ -94,10 +94,15 @@ def get_client_ip(req=None) -> str:
     if target_req is None:
         if not has_request_context():
             return "127.0.0.1"
+        cached_ip = getattr(g, "_cached_client_ip", None)
+        if cached_ip:
+            return cached_ip
         target_req = request
 
     peer_ip = (target_req.remote_addr or "").strip() or "127.0.0.1"
     if not is_trusted_proxy_peer(peer_ip):
+        if req is None and has_request_context():
+            g._cached_client_ip = peer_ip
         return peer_ip
 
     forwarded = (target_req.headers.get("X-Forwarded-For") or "").strip()
@@ -116,12 +121,18 @@ def get_client_ip(req=None) -> str:
             return cf_ip
 
     if rightmost_fwd:
+        if req is None and has_request_context():
+            g._cached_client_ip = rightmost_fwd
         return rightmost_fwd
 
     real_ip = (target_req.headers.get("X-Real-IP") or "").strip()
     if is_valid_ip_literal(real_ip):
+        if req is None and has_request_context():
+            g._cached_client_ip = real_ip
         return real_ip
 
+    if req is None and has_request_context():
+        g._cached_client_ip = peer_ip
     return peer_ip
 
 
@@ -141,6 +152,10 @@ def ban_ip(ip: str, duration_seconds: int = 1800, reason: str = "异常高频请
             {"until": time.time() + duration_seconds, "reason": reason},
             ttl=max(60, int(duration_seconds)),
         )
+        if has_request_context():
+            ban_cache = getattr(g, "_ip_ban_cache", None)
+            if isinstance(ban_cache, dict):
+                ban_cache[clean] = (True, max(1, int(duration_seconds)), reason)
     except Exception:
         pass
 
@@ -150,16 +165,28 @@ def check_ip_ban(ip: str) -> tuple[bool, int, str]:
     if not Config.RATE_LIMIT_ENABLE or not ip or is_whitelisted_ip(ip):
         return False, 0, ""
     clean = ip.strip()[:120]
+    if has_request_context():
+        ban_cache = getattr(g, "_ip_ban_cache", None)
+        if isinstance(ban_cache, dict) and clean in ban_cache:
+            return ban_cache[clean]
+
+    result = (False, 0, "")
     try:
         data = cache.get_json(f"ip_ban:{clean}")
         if isinstance(data, dict):
             until = float(data.get("until") or 0.0)
             now = time.time()
             if until > now:
-                return True, max(1, int(math.ceil(until - now))), str(data.get("reason") or "异常请求拦截")
+                result = (True, max(1, int(math.ceil(until - now))), str(data.get("reason") or "异常请求拦截"))
     except Exception:
         pass
-    return False, 0, ""
+    if has_request_context():
+        ban_cache = getattr(g, "_ip_ban_cache", None)
+        if not isinstance(ban_cache, dict):
+            ban_cache = {}
+            g._ip_ban_cache = ban_cache
+        ban_cache[clean] = result
+    return result
 
 
 def consume_rate_limit(
@@ -239,10 +266,13 @@ def set_cooldown(scope: str, identifier: str, seconds: int):
         pass
 
 
-def reset_rate_counter(scope: str, identifier: str):
+def reset_rate_counter(scope: str, identifier: str, sliding: bool = True):
     safe_id = (identifier or "unknown").strip()[:120]
     try:
-        cache.delete_prefix(f"rl:{scope}:{safe_id}")
+        if not sliding:
+            cache.delete(f"rl:{scope}:{safe_id}")
+        else:
+            cache.delete_prefix(f"rl:{scope}:{safe_id}")
     except Exception:
         pass
 

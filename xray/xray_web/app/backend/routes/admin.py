@@ -3,6 +3,7 @@ import re
 import secrets
 import threading
 import time
+import urllib.parse
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 
@@ -36,7 +37,7 @@ def admin_data():
     if not check_admin(data.get("admin_user"), data.get("admin_pwd")):
         return jsonify({"code": 403, "msg": "无权限"})
 
-    with db_session() as s:
+    with db_session(readonly=True) as s:
         cards = [c.to_dict() for c in s.scalars(select(Card).order_by(Card.created_at.desc()).limit(200)).all()]
         active_nodes = [n.to_dict() for n in s.scalars(select(Node).order_by(Node.id.asc())).all()]
         audit_logs = [a.to_dict() for a in s.scalars(select(AuditLog).order_by(AuditLog.id.desc()).limit(150)).all()]
@@ -44,49 +45,79 @@ def admin_data():
         user_dicts = [u.to_dict() for u in raw_users]
 
     hub_host, hub_port, host_prefix = resolve_public_endpoint(request)
+
+    # 预构建每个节点的链接前缀与后缀模板，避免在 N_users x M_nodes 循环中重复解析 SNI 与 URL 编码
+    node_templates = []
+    for n in active_nodes:
+        if len(n.get("pbk", "")) != 43:
+            continue
+        snis = get_node_snis(n)
+        chosen_sni = snis[0]
+        if n.get("net_mode") == "reverse_wss":
+            ws_path = urllib.parse.quote(f"/api/tunnel/bridge/{n['node_id']}")
+            quoted_remark = urllib.parse.quote(f"{n['name']} [WSS反穿]")
+            link_suffix = (
+                f"@{hub_host}:{hub_port}"
+                f"?security=tls&encryption=none&headerType=none&type=ws&host={hub_host}&path={ws_path}&sni={hub_host}#{quoted_remark}"
+            )
+        else:
+            clean_sni = chosen_sni.split(":")[0]
+            raw_host = str(n["ip"]).strip()
+            formatted_host = f"[{raw_host}]" if (":" in raw_host and not raw_host.startswith("[")) else raw_host
+            quoted_remark = urllib.parse.quote(f"{n['name']}")
+            link_suffix = (
+                f"@{formatted_host}:{n['port']}"
+                f"?security=reality&encryption=none&pbk={n['pbk']}&headerType=none&fp=chrome"
+                f"&type=tcp&flow=xtls-rprx-vision&sni={clean_sni}&sid={n['sid']}#{quoted_remark}"
+            )
+        node_templates.append({
+            "id": n["id"],
+            "node_id": n["node_id"],
+            "name": n["name"],
+            "ip": n["ip"],
+            "port": n["port"],
+            "pbk": n["pbk"],
+            "sid": n["sid"],
+            "sni": chosen_sni,
+            "server_names": snis,
+            "selected_sni": chosen_sni,
+            "link_suffix": link_suffix,
+        })
+
     users = []
     for d in user_dicts:
-        user_item = {
+        u_uuid = d["uuid"]
+        users.append({
             "username": d["username"],
             "email": d["email"],
             "traffic_limit_mb": d["traffic_limit_mb"],
             "used_mb": round(d.get("used_mb", 0), 2),
             "expire_date": d["expire_date"],
             "role": d["role"],
-            "uuid": d["uuid"],
+            "uuid": u_uuid,
             "status": d["status"],
             "notify_type": d["notify_type"],
             "is_monthly": d["is_monthly"],
             "reset_day": d["reset_day"],
             "user_group": d["user_group"],
-            "sub_url": f"{host_prefix}/api/sub?token={d['uuid']}",
-            "node_links": [],
-        }
-        for n in active_nodes:
-            if len(n.get("pbk", "")) == 43:
-                snis = get_node_snis(n)
-                chosen_sni = snis[0]
-                user_item["node_links"].append({
-                    "id": n["id"],
-                    "node_id": n["node_id"],
-                    "name": n["name"],
-                    "ip": n["ip"],
-                    "port": n["port"],
-                    "pbk": n["pbk"],
-                    "sid": n["sid"],
-                    "sni": chosen_sni,
-                    "server_names": snis,
-                    "selected_sni": chosen_sni,
-                    "link": build_node_link(
-                        d["uuid"],
-                        n,
-                        f"{n['name']}",
-                        chosen_sni=chosen_sni,
-                        hub_domain=hub_host,
-                        hub_port=hub_port,
-                    ),
-                })
-        users.append(user_item)
+            "sub_url": f"{host_prefix}/api/sub?token={u_uuid}",
+            "node_links": [
+                {
+                    "id": nt["id"],
+                    "node_id": nt["node_id"],
+                    "name": nt["name"],
+                    "ip": nt["ip"],
+                    "port": nt["port"],
+                    "pbk": nt["pbk"],
+                    "sid": nt["sid"],
+                    "sni": nt["sni"],
+                    "server_names": nt["server_names"],
+                    "selected_sni": nt["selected_sni"],
+                    "link": f"vless://{u_uuid}{nt['link_suffix']}",
+                }
+                for nt in node_templates
+            ],
+        })
 
     cluster_token = get_setting("cluster_token", "")
     auto_approve = get_setting("node_auto_approve", "true").lower() == "true"
@@ -235,7 +266,7 @@ def admin_list_nodes():
     if not check_admin(data.get("admin_user"), data.get("admin_pwd")):
         return jsonify({"code": 403, "msg": "无权限"})
 
-    with db_session() as s:
+    with db_session(readonly=True) as s:
         nodes = [n.to_dict() for n in s.scalars(select(Node).order_by(Node.id.asc())).all()]
     return jsonify({"code": 200, "data": nodes})
 
@@ -420,7 +451,11 @@ def admin_reset_user_uuid():
     if user_dict:
         title = "【安全通知】管理员已重置您的节点连接凭证 (UUID)"
         content = f"您好 {target_user}，管理员已为您重置节点连接凭证。旧凭证已彻底失效断网，请登录控制台复制最新订阅地址重新导入！"
-        notify_user(user_dict, title, f"<h3>{title}</h3><p>{content}</p>", content)
+        threading.Thread(
+            target=notify_user,
+            args=(user_dict, title, f"<h3>{title}</h3><p>{content}</p>", content),
+            daemon=True,
+        ).start()
 
     return jsonify({"code": 200, "msg": f"用户 [{target_user}] 凭证 (UUID) 已重置为: {new_uuid}"})
 

@@ -207,6 +207,21 @@ onMounted(() => {
     }
   } catch (_) {}
 
+  // 空闲时预加载登录后界面分包，确保点击登录通过后零卡顿秒切换
+  const preloadDashboardChunks = () => {
+    if (!props.isPureAdmin) {
+      import('./UserDashboard.vue').catch(() => {})
+    }
+    import('./admin/AdminUsers.vue').catch(() => {})
+  }
+  if (typeof window !== 'undefined') {
+    if (typeof window.requestIdleCallback === 'function') {
+      window.requestIdleCallback(preloadDashboardChunks, { timeout: 1500 })
+    } else {
+      setTimeout(preloadDashboardChunks, 300)
+    }
+  }
+
   if (!usedInitialCaptcha && props.initialCaptcha && applyCaptchaData(authMode.value, props.initialCaptcha)) {
     usedInitialCaptcha = true
     return
@@ -218,7 +233,7 @@ const extractErrMsg = (err, fallback) => err?.response?.data?.msg || fallback
 
 const refreshCaptcha = async (type) => {
   try {
-    const res = await axios.get('/api/auth/captcha')
+    const res = await axios.get('/api/auth/captcha', { timeout: 15000 })
     if (res.data?.code === 200 && applyCaptchaData(type, res.data?.data)) {
       return
     }
@@ -264,7 +279,7 @@ const sendRegisterCode = async () => {
       captcha_id: registerCaptcha.id,
       captcha_ans: registerCaptchaAns.value,
       bot_honey_token: botHoneyToken.value
-    })
+    }, { timeout: 15000 })
     if (res.data.code === 200) {
       ElMessage.success(res.data.msg)
       startCountdown()
@@ -291,7 +306,7 @@ const sendForgotCode = async () => {
       captcha_id: forgotCaptcha.id,
       captcha_ans: forgotCaptchaAns.value,
       bot_honey_token: botHoneyToken.value
-    })
+    }, { timeout: 15000 })
     if (res.data.code === 200) {
       ElMessage.success(res.data.msg)
       startCountdown()
@@ -308,6 +323,7 @@ const sendForgotCode = async () => {
 }
 
 const submitForgotPassword = async () => {
+  if (loading.value) return
   if (!forgotForm.email || !forgotForm.code || !forgotForm.new_password) return ElMessage.warning('请填写完整重置信息')
   if (forgotForm.new_password.length < 6) return ElMessage.warning('新密码长度不能少于 6 位')
 
@@ -316,7 +332,7 @@ const submitForgotPassword = async () => {
     const res = await axios.post('/api/auth/reset_password', {
       ...forgotForm,
       bot_honey_token: botHoneyToken.value
-    })
+    }, { timeout: 15000 })
     if (res.data.code === 200) {
       ElMessage.success(res.data.msg)
       switchAuthMode('login')
@@ -333,6 +349,7 @@ const submitForgotPassword = async () => {
 }
 
 const handleAuth = async () => {
+  if (loading.value) return
   if (!authForm.username || !authForm.password) return ElMessage.warning('请填写账号与密码')
   if (authMode.value === 'login' && !loginCaptchaAns.value) return ElMessage.warning('请输入人机安全验证码答案')
   if (authMode.value === 'register' && !registerCaptchaAns.value) return ElMessage.warning('请输入人机安全验证码答案')
@@ -348,7 +365,7 @@ const handleAuth = async () => {
       captcha_id: capId,
       captcha_ans: capAns,
       bot_honey_token: botHoneyToken.value
-    })
+    }, { timeout: 15000 })
     if (res.data.code === 200) {
       if (authMode.value === 'register') {
         ElMessage.success(res.data.msg)

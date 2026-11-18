@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 
 from config import logger
 from core.db import get_setting, session_scope
-from core.models import Node, NodeLease, Plan, TrafficStat, User, UserLevel, yuan_to_units
+from core.models import Node, NodeLease, Plan, TrafficStat, User, UserLevel
 from core.rate_limit import (
     JOIN_TOKEN_BLOCK_SECONDS,
     JOIN_TOKEN_FAIL_WINDOW_SEC,
@@ -35,7 +35,10 @@ from core.security import verify_token
 from modules.audit.service import write_audit_log
 from modules.billing.service import (
     compute_buyer_price_units,
+    compute_node_seller_pricing,
     get_all_channel_fee_bps,
+    get_market_base_gb_units,
+    get_market_base_hour_units,
     is_shareable_conn_type,
     normalize_billing_channel,
     resolve_channel_platform_fee_bps,
@@ -336,8 +339,6 @@ class NodeShareConfigDTO(BaseModel):
     share_title: str = ""
     share_region: str = "Global"
     share_tags: str = ""
-    seller_price_per_hour_yuan: float = 0.5
-    seller_price_per_gb_yuan: float = 1.0
     max_concurrent_leases: int = 1
     isolation_mode: str = "exclusive_slot"
 
@@ -358,21 +359,36 @@ def get_node_groups(user: dict = Depends(verify_token)):
 @router.get("/api/nodes", summary="查询当前租户名下的自有节点与共享上架状态")
 def list_my_nodes(user: dict = Depends(verify_token)):
     ch_fees = get_all_channel_fee_bps()
+    base_hour_units = get_market_base_hour_units()
+    base_gb_units = get_market_base_gb_units()
     with session_scope() as db:
         owner = db.get(User, int(user["id"]))
         seller_level = db.get(UserLevel, int(owner.level_id or 1)) if owner else None
         level_code = seller_level.code if seller_level else "lv1"
         level_name = seller_level.name if seller_level else "Lv.1 青铜节点主"
-        rows = [
-            n.to_dict()
-            for n in db.query(Node).filter(Node.owner_id == int(user["id"])).order_by(Node.id.desc()).all()
-        ]
-        for r in rows:
+        node_objs = db.query(Node).filter(Node.owner_id == int(user["id"])).order_by(Node.id.desc()).all()
+        rows = []
+        for n in node_objs:
+            r = n.to_dict()
             ch = normalize_billing_channel(r.get("conn_type"))
             shareable = is_shareable_conn_type(r.get("conn_type"))
             fee_bps = resolve_channel_platform_fee_bps(r.get("conn_type"), seller_level, fallback_fees=ch_fees)
-            b_hr, _, spread_hr = compute_buyer_price_units(int(r.get("seller_price_per_hour_units") or 0), fee_bps, 0)
-            b_gb, _, spread_gb = compute_buyer_price_units(int(r.get("seller_price_per_gb_units") or 0), fee_bps, 0)
+            pricing = compute_node_seller_pricing(
+                n,
+                seller_level,
+                base_hour_units=base_hour_units,
+                base_gb_units=base_gb_units,
+            )
+            seller_hr_units = int(pricing["seller_hour_units"])
+            seller_gb_units = int(pricing["seller_gb_units"])
+            b_hr, _, spread_hr = compute_buyer_price_units(seller_hr_units, fee_bps, 0)
+            b_gb, _, spread_gb = compute_buyer_price_units(seller_gb_units, fee_bps, 0)
+            r["seller_price_per_hour_units"] = seller_hr_units
+            r["seller_price_per_gb_units"] = seller_gb_units
+            r["market_pricing"] = pricing
+            r["gb_pricing"] = pricing
+            r["quality_grade"] = pricing["quality_grade"]
+            r["quality_label"] = pricing["quality_label"]
             r["channel_type"] = ch
             r["is_shareable"] = shareable
             r["platform_fee_bps"] = fee_bps
@@ -382,6 +398,7 @@ def list_my_nodes(user: dict = Depends(verify_token)):
             r["buyer_preview_gb_units"] = b_gb
             r["platform_spread_hour_units"] = spread_hr
             r["platform_spread_gb_units"] = spread_gb
+            rows.append(r)
 
     overlay = get_live_node_traffic_overlay([r["id"] for r in rows])
     for r in rows:
@@ -457,9 +474,11 @@ async def update_node(node_id: int, data: dict, request: Request, user: dict = D
     return {"message": "节点配置已更新"}
 
 
-@router.post("/api/nodes/{node_id}/share", summary="上架/定价/下架共享节点到 SaaS 交易市场")
+@router.post("/api/nodes/{node_id}/share", summary="上架/下架共享节点到 SaaS 交易市场（定价统一由平台核定）")
 def configure_node_sharing(node_id: int, data: NodeShareConfigDTO, request: Request, user: dict = Depends(verify_token)):
     ch_fees = get_all_channel_fee_bps()
+    base_hour_units = get_market_base_hour_units()
+    base_gb_units = get_market_base_gb_units()
 
     with session_scope() as db:
         owner = db.get(User, int(user["id"]))
@@ -478,8 +497,16 @@ def configure_node_sharing(node_id: int, data: NodeShareConfigDTO, request: Requ
                     detail="SaaS 版仅支持公网 WSS 直连或 WSS 反向穿透节点上架共享",
                 )
 
-        seller_hr = max(0, yuan_to_units(data.seller_price_per_hour_yuan))
-        seller_gb = max(0, yuan_to_units(data.seller_price_per_gb_yuan))
+        # 时租与流量底价均统一由平台确定（平台基准 + 用户等级 + 节点质量评级），严禁卖家自行修改
+        pricing = compute_node_seller_pricing(
+            node,
+            seller_level,
+            base_hour_units=base_hour_units,
+            base_gb_units=base_gb_units,
+        )
+        seller_hr = int(pricing["seller_hour_units"])
+        seller_gb = int(pricing["seller_gb_units"])
+
         iso_mode = data.isolation_mode if data.isolation_mode in {"exclusive_slot", "ephemeral_profile"} else "exclusive_slot"
         max_leases = max(1, min(8, int(data.max_concurrent_leases or 1)))
         if iso_mode == "exclusive_slot":
@@ -495,6 +522,8 @@ def configure_node_sharing(node_id: int, data: NodeShareConfigDTO, request: Requ
         node.max_concurrent_leases = max_leases
         db.flush()
         saved = node.to_dict()
+        saved["market_pricing"] = pricing
+        saved["gb_pricing"] = pricing
         fee_bps = resolve_channel_platform_fee_bps(saved.get("conn_type"), seller_level, fallback_fees=ch_fees)
         seller_lv_code = seller_level.code if seller_level else "lv1"
 
@@ -517,6 +546,7 @@ def configure_node_sharing(node_id: int, data: NodeShareConfigDTO, request: Requ
             "platform_fee_bps": fee_bps,
             "seller_hr_units": saved["seller_price_per_hour_units"],
             "seller_gb_units": saved["seller_price_per_gb_units"],
+            "market_pricing": pricing,
             "isolation_mode": iso_mode,
             "max_concurrent_leases": max_leases,
         },
@@ -524,6 +554,8 @@ def configure_node_sharing(node_id: int, data: NodeShareConfigDTO, request: Requ
     return {
         "message": "已上架至共享交易市场" if saved["share_enabled"] else "已从共享交易市场下架",
         "node": saved,
+        "market_pricing": pricing,
+        "gb_pricing": pricing,
         "pricing_preview": {
             "channel_type": channel_type,
             "seller_level_code": seller_lv_code,

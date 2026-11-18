@@ -86,6 +86,10 @@
           </button>
         </div>
 
+        <div v-if="adminDataLoading && adminUsers.length === 0" class="admin-sync-hint">
+          ⏳ 正在同步全站用户、节点与卡密数据...
+        </div>
+
         <component
           :is="currentAdminComponent"
           :adminUsers="adminUsers"
@@ -113,23 +117,36 @@
 </template>
 
 <script setup>
-import { ref, reactive, computed, onMounted, defineAsyncComponent } from 'vue'
+import { ref, reactive, computed, onMounted, defineAsyncComponent, h } from 'vue'
 import axios from 'axios'
 import { ElMessage } from 'element-plus'
 
 import AuthView from './components/AuthView.vue'
 
-const QrModal = defineAsyncComponent(() => import('./components/common/QrModal.vue'))
-const SetupWizard = defineAsyncComponent(() => import('./components/SetupWizard.vue'))
-const UserDashboard = defineAsyncComponent(() => import('./components/UserDashboard.vue'))
+const AsyncLoadingPanel = {
+  render() {
+    return h('div', { class: 'boot-loading-panel' }, '⚡ 正在载入控制台模块...')
+  }
+}
 
-const AdminUsers = defineAsyncComponent(() => import('./components/admin/AdminUsers.vue'))
-const AdminNodes = defineAsyncComponent(() => import('./components/admin/AdminNodes.vue'))
-const AdminCards = defineAsyncComponent(() => import('./components/admin/AdminCards.vue'))
-const AdminSettings = defineAsyncComponent(() => import('./components/admin/AdminSettings.vue'))
+const makeAsyncView = (loader) => defineAsyncComponent({
+  loader,
+  loadingComponent: AsyncLoadingPanel,
+  delay: 80
+})
+
+const QrModal = defineAsyncComponent(() => import('./components/common/QrModal.vue'))
+const SetupWizard = makeAsyncView(() => import('./components/SetupWizard.vue'))
+const UserDashboard = makeAsyncView(() => import('./components/UserDashboard.vue'))
+
+const AdminUsers = makeAsyncView(() => import('./components/admin/AdminUsers.vue'))
+const AdminNodes = makeAsyncView(() => import('./components/admin/AdminNodes.vue'))
+const AdminCards = makeAsyncView(() => import('./components/admin/AdminCards.vue'))
+const AdminSettings = makeAsyncView(() => import('./components/admin/AdminSettings.vue'))
 
 const setupRequired = ref(false)
 const systemLoading = ref(true)
+const adminDataLoading = ref(false)
 const isPureAdmin = ref(false)
 const systemNotice = ref('')
 const prefetchedCaptcha = ref(null)
@@ -206,13 +223,15 @@ onMounted(async () => {
       if (parsed.user && parsed.user.username) {
         Object.assign(currentUser, parsed.user)
         adminPassword.value = parsed.password || ''
+        systemLoading.value = false
 
-        // 核心修复：F5 刷新后无论普通用户还是管理员，一律通过 API 拉取数据库真实最新邮箱，绝不依赖陈旧缓存！
-        await refreshUserInfo()
-
+        // 后台静默同步最新数据库状态，不阻塞首屏渲染
+        const syncTasks = [refreshUserInfo()]
         if (currentUser.role === 'admin') {
-          reloadAllAdminData()
+          syncTasks.push(loadAdminData())
         }
+        Promise.all(syncTasks)
+        return
       }
     } catch (_) {
       localStorage.removeItem('xray_auth_session')
@@ -233,10 +252,10 @@ const onLoginSuccess = ({ user, password }) => {
   adminPassword.value = password
   localStorage.setItem('xray_auth_session', JSON.stringify({ user, password }))
 
+  // /api/login 已返回完整最新用户信息与节点列表：
+  // 管理员只需单次拉取集群数据，普通用户无需重复请求 refresh_info
   if (currentUser.role === 'admin') {
-    reloadAllAdminData()
-  } else {
-    refreshUserInfo()
+    loadAdminData()
   }
 }
 
@@ -256,37 +275,29 @@ const refreshUserInfo = async () => {
 }
 
 const reloadAllAdminData = async () => {
-  await Promise.all([refreshUserInfo(), loadAdminData(), fetchNodesData()])
+  await loadAdminData()
 }
 
 const loadAdminData = async () => {
+  adminDataLoading.value = true
   try {
     const res = await axios.post('/api/admin/data', {
       admin_user: currentUser.username,
       admin_pwd: adminPassword.value
-    })
+    }, { timeout: 20000 })
     if (res.data.code === 200) {
-      adminCards.value = res.data.cards
-      adminUsers.value = res.data.users
+      adminCards.value = res.data.cards || []
+      adminUsers.value = res.data.users || []
+      adminNodes.value = res.data.nodes || []
     }
   } catch (_) {}
+  finally {
+    adminDataLoading.value = false
+  }
 }
 
-const fetchNodesData = async () => {
-  try {
-    const res = await axios.post('/api/admin/nodes/list', {
-      admin_user: currentUser.username,
-      admin_pwd: adminPassword.value
-    })
-    if (res.data.code === 200) {
-      adminNodes.value = res.data.data
-    }
-  } catch (_) {}
-}
-
-const openNodesTab = async () => {
+const openNodesTab = () => {
   activeTab.value = 'nodes'
-  await fetchNodesData()
 }
 
 const openSettingsTab = () => {
@@ -613,6 +624,16 @@ const logout = () => {
 .modal-tip { font-size: 12px; color: #94a3b8; margin: 4px 0 10px 0; }
 
 .admin-wrapper { width: 100%; }
+.admin-sync-hint {
+  margin-bottom: 14px;
+  padding: 10px 16px;
+  border-radius: 8px;
+  background: rgba(14, 165, 233, 0.12);
+  border: 1px solid rgba(56, 189, 248, 0.35);
+  color: #7dd3fc;
+  font-size: 13px;
+  font-weight: 600;
+}
 .card-tabs-nav { display: flex; gap: 16px; margin-bottom: 20px; }
 .tab-card-btn {
   flex: 1; display: flex; align-items: center; gap: 14px; background: #0f172a;

@@ -40,6 +40,8 @@ from modules.billing.payment_gateway import query_alipay_order, query_wechat_ord
 from modules.billing.router import _get_alipay_gateway_cfg, _get_wechat_gateway_cfg, _mark_recharge_order_paid_sync
 from modules.billing.service import (
     get_all_channel_fee_bps,
+    get_market_base_gb_units,
+    get_market_base_hour_units,
     get_self_reverse_hub_gb_units,
     settle_single_lease_sync,
 )
@@ -56,6 +58,8 @@ class AdminSettingsDTO(BaseModel):
     saas_platform_fee_bps: Optional[int] = None
     saas_reverse_fee_bps: Optional[int] = None
     saas_public_wss_fee_bps: Optional[int] = None
+    saas_market_base_hour_yuan: Optional[float] = None
+    saas_market_base_gb_yuan: Optional[float] = None
     saas_self_reverse_hub_gb_yuan: Optional[float] = None
     saas_auto_level_enabled: Optional[bool] = None
     saas_allow_public_register: Optional[bool] = None
@@ -203,6 +207,8 @@ def admin_overview(admin: dict = Depends(require_admin)):
             "saas_platform_fee_bps": ch_fees["reverse"],
             "saas_reverse_fee_bps": ch_fees["reverse"],
             "saas_public_wss_fee_bps": ch_fees["public_wss"],
+            "saas_market_base_hour_yuan": float(units_to_yuan_str(get_market_base_hour_units())),
+            "saas_market_base_gb_yuan": float(units_to_yuan_str(get_market_base_gb_units())),
             "saas_self_reverse_hub_gb_yuan": float(units_to_yuan_str(self_rev_units)),
             "saas_auto_level_enabled": get_setting("saas_auto_level_enabled", "1") == "1",
             "saas_allow_public_register": get_setting("saas_allow_public_register", "1") == "1",
@@ -277,6 +283,10 @@ def admin_update_settings(data: AdminSettingsDTO, request: Request, admin: dict 
 
     if data.saas_public_wss_fee_bps is not None:
         set_setting("saas_public_wss_fee_bps", str(max(0, min(10000, int(data.saas_public_wss_fee_bps)))))
+    if data.saas_market_base_hour_yuan is not None:
+        set_setting("saas_market_base_hour_units", str(max(0, yuan_to_units(data.saas_market_base_hour_yuan))))
+    if data.saas_market_base_gb_yuan is not None:
+        set_setting("saas_market_base_gb_units", str(max(0, yuan_to_units(data.saas_market_base_gb_yuan))))
     if data.saas_self_reverse_hub_gb_yuan is not None:
         set_setting("saas_self_reverse_hub_gb_units", str(max(0, yuan_to_units(data.saas_self_reverse_hub_gb_yuan))))
     if data.saas_auto_level_enabled is not None:

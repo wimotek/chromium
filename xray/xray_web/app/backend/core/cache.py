@@ -30,6 +30,7 @@ class CacheManager:
         self._client_url: str = ""
         self._cooldown_until: float = 0.0
         self._was_degraded: bool = False
+        self._sql_dirty: bool = False
 
     def _prefixed(self, key: str) -> str:
         return f"{Config.REDIS_KEY_PREFIX}{key}"
@@ -83,6 +84,7 @@ class CacheManager:
         with self._lock:
             self._client = None
             self._cooldown_until = time.monotonic() + max(5, Config.REDIS_COOLDOWN_SECONDS)
+            self._sql_dirty = True
             if not self._was_degraded:
                 print(f"==> [Cache] Redis 不可用 ({exc})，已自动降级回退至 SQL Cache", flush=True)
                 self._was_degraded = True
@@ -98,17 +100,23 @@ class CacheManager:
 
     def _sql_get(self, key: str) -> Optional[str]:
         now = time.time()
-        with db_session() as s:
+        expired = False
+        with db_session(readonly=True) as s:
             row = s.get(KvCache, key)
             if not row:
                 return None
             exp = float(row.expire_at or 0.0)
             if exp > 0 and exp <= now:
-                s.delete(row)
-                return None
-            return row.cache_val
+                expired = True
+            else:
+                return row.cache_val
+        if expired:
+            with db_session() as s:
+                s.execute(delete(KvCache).where(KvCache.cache_key == key, KvCache.expire_at > 0, KvCache.expire_at <= now))
+        return None
 
     def _sql_set(self, key: str, value: str, ttl: int = 0) -> bool:
+        self._sql_dirty = True
         expire_at = (time.time() + ttl) if ttl > 0 else 0.0
         with db_session() as s:
             upsert_kv_cache(s, key, value, expire_at)
@@ -117,18 +125,45 @@ class CacheManager:
     def _sql_delete(self, *keys: str) -> int:
         if not keys:
             return 0
+        key_list = list(keys)
+        with db_session(readonly=True) as s:
+            has_any = s.scalar(select(KvCache.cache_key).where(KvCache.cache_key.in_(key_list)).limit(1))
+        if not has_any:
+            return 0
         with db_session() as s:
-            res = s.execute(delete(KvCache).where(KvCache.cache_key.in_(list(keys))))
+            res = s.execute(delete(KvCache).where(KvCache.cache_key.in_(key_list)))
             return int(res.rowcount or 0)
 
     def _sql_delete_prefix(self, prefix: str) -> int:
+        like_pattern = f"{prefix}%"
+        with db_session(readonly=True) as s:
+            has_any = s.scalar(select(KvCache.cache_key).where(KvCache.cache_key.like(like_pattern)).limit(1))
+        if not has_any:
+            return 0
         with db_session() as s:
-            res = s.execute(delete(KvCache).where(KvCache.cache_key.like(f"{prefix}%")))
+            res = s.execute(delete(KvCache).where(KvCache.cache_key.like(like_pattern)))
             return int(res.rowcount or 0)
 
     def _sql_pop(self, key: str) -> Optional[str]:
         now = time.time()
         with db_session() as s:
+            bind = s.get_bind()
+            dialect = bind.dialect.name.lower() if bind else "sqlite"
+            if dialect == "sqlite":
+                try:
+                    row = s.execute(
+                        text("DELETE FROM kv_cache WHERE cache_key = :k RETURNING cache_val, expire_at"),
+                        {"k": key},
+                    ).first()
+                    if not row:
+                        return None
+                    val, exp_raw = row[0], row[1]
+                    exp = float(exp_raw or 0.0)
+                    if exp > 0 and exp <= now:
+                        return None
+                    return val
+                except Exception:
+                    pass
             stmt = select(KvCache).where(KvCache.cache_key == key).with_for_update()
             row = s.scalar(stmt)
             if not row:
@@ -227,10 +262,11 @@ class CacheManager:
                 prefixed = [self._prefixed(k) for k in keys]
                 res = int(r.delete(*prefixed))
                 self._mark_redis_ok()
-                try:
-                    self._sql_delete(*keys)
-                except Exception:
-                    pass
+                if self._sql_dirty:
+                    try:
+                        self._sql_delete(*keys)
+                    except Exception:
+                        pass
                 return res
             except Exception as exc:
                 self._trip_breaker(exc)
@@ -251,10 +287,11 @@ class CacheManager:
                 if batch:
                     total += int(r.delete(*batch))
                 self._mark_redis_ok()
-                try:
-                    self._sql_delete_prefix(prefix)
-                except Exception:
-                    pass
+                if self._sql_dirty:
+                    try:
+                        self._sql_delete_prefix(prefix)
+                    except Exception:
+                        pass
                 return total
             except Exception as exc:
                 self._trip_breaker(exc)

@@ -93,9 +93,15 @@ async def global_antispam_middleware(request: Request, call_next):
     if path.startswith("/assets/"):
         response.headers.setdefault("Cache-Control", "public, max-age=31536000, immutable")
     elif path.startswith("/api/") or path.startswith("/cdp/"):
-        response.headers.setdefault("Cache-Control", "no-store")
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, private, max-age=0"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["CDN-Cache-Control"] = "no-store"
+        response.headers["Cloudflare-CDN-Cache-Control"] = "no-store"
+        response.headers.setdefault("Vary", "Authorization, Accept-Encoding")
     elif request.method == "GET":
-        response.headers.setdefault("Cache-Control", "no-cache, must-revalidate")
+        response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["CDN-Cache-Control"] = "no-store"
     return response
 
 

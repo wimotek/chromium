@@ -295,6 +295,7 @@ def setup_complete():
         for k, v in prev_cfg_snapshot.items():
             setattr(Config, k, v)
         Config._loaded_mtime = -1.0
+        Config._last_stat_check = 0.0
         try:
             reset_engine()
             cache.reset_client()

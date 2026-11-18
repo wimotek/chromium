@@ -1,12 +1,15 @@
 import json
 import os
 import threading
+import time
 import urllib.parse
 
 
 class Config:
     _config_lock = threading.Lock()
     _loaded_mtime: float = -1.0
+    _last_stat_check: float = 0.0
+    _STAT_CHECK_INTERVAL: float = 1.0
 
     HUB_CONFIG_PATH = os.getenv("HUB_CONFIG_PATH", "/data/hub_config.json")
 
@@ -116,29 +119,40 @@ class Config:
     @classmethod
     def reload_if_changed(cls, force: bool = False) -> bool:
         """检查 /data/hub_config.json 是否更新（支持多 Worker 进程间热同步安装向导配置）"""
+        now_mono = time.monotonic()
+        if not force and (now_mono - cls._last_stat_check) < cls._STAT_CHECK_INTERVAL:
+            return False
+
         path = os.getenv("HUB_CONFIG_PATH", cls.HUB_CONFIG_PATH)
         cls.HUB_CONFIG_PATH = path
         if not path or not os.path.exists(path):
+            cls._last_stat_check = now_mono
             return False
         try:
             mtime = os.path.getmtime(path)
         except OSError:
+            cls._last_stat_check = now_mono
             return False
 
         if not force and mtime == cls._loaded_mtime:
+            cls._last_stat_check = now_mono
             return False
 
         with cls._config_lock:
+            now_mono = time.monotonic()
             if not force and mtime == cls._loaded_mtime:
+                cls._last_stat_check = now_mono
                 return False
             try:
                 with open(path, "r", encoding="utf-8") as f:
                     data = json.load(f)
                 cls._apply_hub_config_dict(data)
                 cls._loaded_mtime = mtime
+                cls._last_stat_check = now_mono
                 return True
             except Exception as e:
                 print(f"[Config] 读取 {path} 失败: {e}", flush=True)
+                cls._last_stat_check = now_mono
                 return False
 
     @classmethod

@@ -77,7 +77,7 @@ def login():
     if not ok:
         return jsonify({"code": 400, "msg": c_msg})
 
-    with db_session() as s:
+    with db_session(readonly=True) as s:
         user_obj = s.scalar(
             select(User).where(
                 or_(User.username == account, User.email == account),
@@ -104,7 +104,7 @@ def login():
 
         user_dict = user_obj.to_dict()
 
-    reset_rate_counter("login_acct_fail", acct_key)
+    reset_rate_counter("login_acct_fail", acct_key, sliding=False)
 
     all_nodes = get_cached_nodes()
     visible_nodes = [n for n in all_nodes if is_user_allowed_for_node(user_dict, n)]
@@ -204,7 +204,7 @@ def send_register_code():
     if not allowed_target_daily:
         return rate_limit_response("该邮箱今日接收验证码次数已达上限，请明天再试", retry_after=3600)
 
-    with db_session() as s:
+    with db_session(readonly=True) as s:
         if s.scalar(select(User.id).where(User.email == email).limit(1)):
             return jsonify({"code": 400, "msg": "该邮箱已被注册"})
 
@@ -401,7 +401,7 @@ def send_reset_code():
     if not allowed_target_daily:
         return rate_limit_response("该邮箱今日接收验证码次数已达上限，请明天再试", retry_after=3600)
 
-    with db_session() as s:
+    with db_session(readonly=True) as s:
         user_obj = s.scalar(select(User).where(User.email == email))
         if not user_obj:
             return jsonify({"code": 404, "msg": "该邮箱尚未绑定任何账号"})
@@ -457,5 +457,5 @@ def reset_password():
             user_obj.password_hash = hash_pwd(new_pwd)
     cache.delete(f"vcode:reset:{email}")
     reset_rate_counter("otp_fail_reset", email)
-    reset_rate_counter("login_acct_fail", email)
+    reset_rate_counter("login_acct_fail", email, sliding=False)
     return jsonify({"code": 200, "msg": "密码已成功重置，请登录"})

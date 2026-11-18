@@ -1,6 +1,7 @@
 import datetime
 import random
 import re
+import threading
 import uuid
 
 from flask import Blueprint, abort, jsonify, request, send_file
@@ -39,7 +40,7 @@ EMAIL_RE = re.compile(r"^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$")
 def user_refresh_info():
     data = request.json or {}
     username = data.get("username")
-    with db_session() as s:
+    with db_session(readonly=True) as s:
         user_obj = s.scalar(select(User).where(or_(User.username == username, User.email == username)))
         if not user_obj:
             return jsonify({"code": 404, "msg": "用户不存在"})
@@ -262,7 +263,11 @@ def user_change_email():
     invalidate_users_cache()
 
     notice_content = f"您好 {real_username}，您的账号绑定邮箱已成功更换为 {new_email}。"
-    notify_user(user_dict, "【安全通知】账号绑定邮箱已成功修改", f"<p>{notice_content}</p>", notice_content)
+    threading.Thread(
+        target=notify_user,
+        args=(user_dict, "【安全通知】账号绑定邮箱已成功修改", f"<p>{notice_content}</p>", notice_content),
+        daemon=True,
+    ).start()
 
     return jsonify({"code": 200, "msg": "绑定邮箱修改成功！", "new_email": new_email})
 
@@ -341,7 +346,7 @@ def download_windows_client():
     if not account:
         abort(400)
 
-    with db_session() as s:
+    with db_session(readonly=True) as s:
         user_obj = s.scalar(select(User).where(or_(User.username == account, User.email == account)))
         if not user_obj:
             abort(404)
@@ -491,7 +496,11 @@ def recharge():
         res_msg += f" (跳过了 {len(used_cards) + len(invalid_codes)} 张已被使用或无效的卡密)"
 
     title = "【充值成功】您的套餐配额已更新"
-    notify_user(user_dict, title, f"<p>{res_msg}</p>", res_msg)
+    threading.Thread(
+        target=notify_user,
+        args=(user_dict, title, f"<p>{res_msg}</p>", res_msg),
+        daemon=True,
+    ).start()
 
     return jsonify({
         "code": 200,

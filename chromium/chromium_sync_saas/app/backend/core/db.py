@@ -541,6 +541,8 @@ def init_db_and_jwt(cfg: Optional[Dict[str, Any]] = None, mark_setup_completed: 
             "saas_platform_fee_bps": str(SAAS_DEFAULT_PLATFORM_FEE_BPS),
             "saas_reverse_fee_bps": "2500",
             "saas_public_wss_fee_bps": "1000",
+            "saas_market_base_hour_units": "5000",
+            "saas_market_base_gb_units": "10000",
             "saas_self_reverse_hub_gb_units": "2000",
             "saas_auto_level_enabled": "1",
             "saas_welcome_bonus_units": str(SAAS_WELCOME_BONUS_UNITS),

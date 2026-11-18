@@ -2,6 +2,13 @@
   <div class="layout">
     <SetupWizard v-if="setupRequired" @completed="onSetupDone" />
 
+    <div v-else-if="authBooting" class="auth-wrap">
+      <div class="card auth-card" style="text-align: center; padding: 36px 24px">
+        <h2 style="margin: 0 0 8px">Chromium Sync SaaS</h2>
+        <div class="muted" style="font-size: 13px">正在验证登录会话与节点环境，请稍候...</div>
+      </div>
+    </div>
+
     <AuthGate v-else-if="!authed" :status="authStatus" @authenticated="onAuthed" />
 
     <template v-else>
@@ -68,11 +75,14 @@
           :user-level="level"
           @notify="showToast"
           @refresh-profile="refreshProfile"
+          @go-market="selectTab('market')"
         />
         <MarketView
           v-else-if="tab === 'market'"
+          :quotas="quotas"
           @notify="showToast"
           @refresh-profile="refreshProfile"
+          @go-my-nodes="selectTab('nodes')"
         />
         <SyncPolicyView v-else-if="tab === 'sync'" @notify="showToast" />
         <BillingView v-else-if="tab === 'billing'" @notify="showToast" @refresh-profile="refreshProfile" />
@@ -87,7 +97,7 @@
 </template>
 
 <script setup>
-import { defineAsyncComponent, onMounted, ref } from 'vue'
+import { defineAsyncComponent, onMounted, onUnmounted, ref } from 'vue'
 import { apiFetch } from './api'
 import AnnouncementBanner from './modules/announcements/AnnouncementBanner.vue'
 import AuthGate from './modules/users/AuthGate.vue'
@@ -102,6 +112,7 @@ const AuditView = defineAsyncComponent(() => import('./modules/audit/AuditView.v
 const AdminView = defineAsyncComponent(() => import('./modules/system/AdminView.vue'))
 
 const setupRequired = ref(false)
+const authBooting = ref(true)
 const authed = ref(false)
 const authStatus = ref({})
 const user = ref({})
@@ -144,24 +155,43 @@ async function refreshProfile(updatedUser = null) {
 }
 
 async function boot() {
+  authBooting.value = true
   try {
-    const st = await apiFetch('/api/auth/status')
-    authStatus.value = st
-    if (st.channel_fees) channelFees.value = st.channel_fees
-    setupRequired.value = Boolean(st.setup_required)
-    if (setupRequired.value) return
-    if (localStorage.getItem('saas_token')) {
-      const prof = await apiFetch('/api/billing/overview')
+    const hasToken = Boolean(localStorage.getItem('saas_token'))
+    const [stResult, profResult] = await Promise.allSettled([
+      apiFetch('/api/auth/status'),
+      hasToken ? apiFetch('/api/profile') : Promise.resolve(null),
+    ])
+
+    if (stResult.status === 'fulfilled' && stResult.value) {
+      const st = stResult.value
+      authStatus.value = st
+      if (st.channel_fees) channelFees.value = st.channel_fees
+      setupRequired.value = Boolean(st.setup_required)
+      if (setupRequired.value) return
+    }
+
+    if (hasToken && profResult.status === 'fulfilled' && profResult.value?.user) {
+      const prof = profResult.value
       user.value = prof.user || {}
       plan.value = prof.plan || null
       level.value = prof.level || null
-      if (prof.channel_fees) channelFees.value = prof.channel_fees
-      quotas.value = prof.quotas || {}
       authed.value = true
+      refreshProfile()
+    } else {
+      authed.value = false
     }
   } catch {
     authed.value = false
+  } finally {
+    authBooting.value = false
   }
+}
+
+function onUnauthorized() {
+  authed.value = false
+  mobileMenuOpen.value = false
+  user.value = {}
 }
 
 async function onSetupDone(res) {
@@ -169,6 +199,7 @@ async function onSetupDone(res) {
   plan.value = res.plan || null
   level.value = res.level || null
   setupRequired.value = false
+  authBooting.value = false
   authed.value = true
   try {
     const st = await apiFetch('/api/auth/status')
@@ -185,6 +216,7 @@ async function onAuthed(res) {
   user.value = res.user || {}
   plan.value = res.plan || null
   level.value = res.level || null
+  authBooting.value = false
   authed.value = true
   await refreshProfile()
 }
@@ -196,5 +228,12 @@ function logout() {
   user.value = {}
 }
 
-onMounted(boot)
+onMounted(() => {
+  window.addEventListener('saas:unauthorized', onUnauthorized)
+  boot()
+})
+
+onUnmounted(() => {
+  window.removeEventListener('saas:unauthorized', onUnauthorized)
+})
 </script>

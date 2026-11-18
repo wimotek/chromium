@@ -1,13 +1,40 @@
 export async function apiFetch(path, options = {}) {
   const token = localStorage.getItem('saas_token') || ''
-  const headers = { ...(options.headers || {}) }
+  const headers = {
+    'Cache-Control': 'no-cache',
+    Pragma: 'no-cache',
+    ...(options.headers || {}),
+  }
   if (token) {
     headers.Authorization = `Bearer ${token}`
   }
   if (options.body && !(options.body instanceof FormData) && !headers['Content-Type']) {
     headers['Content-Type'] = 'application/json'
   }
-  const res = await fetch(path, { cache: 'no-store', ...options, headers })
+
+  const timeoutMs = Number(options.timeoutMs ?? 15000)
+  const controller = new AbortController()
+  const timer = timeoutMs > 0 ? setTimeout(() => controller.abort(), timeoutMs) : null
+  const fetchOptions = { ...options }
+  delete fetchOptions.timeoutMs
+
+  let res
+  try {
+    res = await fetch(path, {
+      cache: 'no-store',
+      ...fetchOptions,
+      headers,
+      signal: options.signal || controller.signal,
+    })
+  } catch (err) {
+    if (err?.name === 'AbortError') {
+      throw new Error('请求超时，请检查网络连接或 CDN 节点状态后重试')
+    }
+    throw err
+  } finally {
+    if (timer) clearTimeout(timer)
+  }
+
   const text = await res.text()
   let data = null
   try {
@@ -18,6 +45,9 @@ export async function apiFetch(path, options = {}) {
   if (!res.ok) {
     if (res.status === 401 && !path.includes('/login') && !path.includes('/register')) {
       localStorage.removeItem('saas_token')
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(new CustomEvent('saas:unauthorized'))
+      }
     }
     throw new Error(data?.detail || data?.message || `HTTP ${res.status}`)
   }
