@@ -19,6 +19,7 @@
     "profile_mode": "isolated",
     "custom_profile_dir": "",
     "isolate_os_signin": true,
+    "background_mode": "hidden_window",
     "homepage": "about:blank",
     "extra_args": "",
     "launch_browser_on_start": true,

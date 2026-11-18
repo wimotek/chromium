@@ -9,8 +9,12 @@
 1. **现代 Windows 11 Fluent 桌面界面**
    - 基于 `PySide6` + `PySide6-Fluent-Widgets`（`FluentWindow` 深色主题、侧边栏导航、圆角设置卡片、Fluent Switch 开关、非阻塞 `InfoBar` 提示及 High-DPI 高分屏自动适配）。
 
-2. **零 Docker 依赖，直接复用系统浏览器**
+2. **零 Docker 依赖，默认后台静默运行且支持手动唤出窗口**
    - 自动通过 Windows 注册表 (`App Paths`) 与标准安装路径探测本机 `msedge.exe` / `chrome.exe`，亦支持手动指定自定义 Chromium 内核 `.exe` 路径。
+   - **默认后台静默运行（不弹窗、不抢焦点、不占任务栏）**：支持在「浏览器与 CDP 隔离 → 窗口运行模式」中选择 3 种模式：
+     - `hidden_window`（**默认推荐**）：以真实桌面 Edge/Chrome 内核在后台隐藏窗口运行（保留完整桌面指纹且支持不断连切换）；需要手动登录网站或过验证码时，点击主界面 **「唤出浏览器窗口」**（或右键托盘菜单 **「唤出调试浏览器窗口」**）即可秒级显示，用完点击 **「隐藏浏览器到后台」** 恢复静默，全程不断开正在运行的 CDP 会话。
+     - `headless`：原生 `--headless=new` 纯无头运行；需要手动操作时点击 **「唤出浏览器窗口」** 自动保留同 Profile 数据目录切换到可见窗口，完成后可切回无头。
+     - `visible`：传统前台启动模式，打开即显示窗口。
    - 自动配置 `--remote-debugging-port=9222 --remote-debugging-address=127.0.0.1`。
 
 3. **双方案 Profile 隔离与快捷预设（解决 Windows 自动关联本机微软账号问题）**

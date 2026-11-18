@@ -73,6 +73,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "launch_browser_on_start": True,
         "auto_connect_on_launch": False,
         "isolate_os_signin": True,
+        "background_mode": "hidden_window",
     },
     "cookie_guard": {
         "mode": "whitelist",
@@ -131,6 +132,7 @@ def run_headless(config_path: Optional[Path] = None):
                 homepage=b["homepage"],
                 extra_args=b["extra_args"],
                 isolate_os_signin=bool(b.get("isolate_os_signin", True)),
+                background_mode=b.get("background_mode", "hidden_window"),
             )
             if browser_mgr.last_launch_warning:
                 print(f"[Browser][Privacy/Notice] {browser_mgr.last_launch_warning}", flush=True)
@@ -509,12 +511,14 @@ def _run_gui(config_path: Optional[Path] = None):
             self.btn_stop = PushButton(_icon("CLOSE", FIF.PAUSE), "停止运行", hero)
             self.btn_stop.setEnabled(False)
             self.btn_launch_only = PushButton(_icon("GLOBE"), "仅拉起调试浏览器", hero)
+            self.btn_toggle_browser_win = PushButton(_icon("VIEW", FIF.GLOBE), "唤出浏览器窗口", hero)
             self.btn_cookie_inventory = PushButton(_icon("SEARCH"), "本机 Cookie 清单", hero)
             self.btn_save_hub = PushButton(_icon("SAVE"), "保存配置", hero)
 
             ctrl_row.addWidget(self.btn_start)
             ctrl_row.addWidget(self.btn_stop)
             ctrl_row.addWidget(self.btn_launch_only)
+            ctrl_row.addWidget(self.btn_toggle_browser_win)
             ctrl_row.addWidget(self.btn_cookie_inventory)
             ctrl_row.addStretch()
             ctrl_row.addWidget(self.btn_save_hub)
@@ -731,8 +735,16 @@ def _run_gui(config_path: Optional[Path] = None):
             self.in_extra_args = LineEdit(br_card)
             self.in_extra_args.setPlaceholderText("例如 --proxy-server=http://127.0.0.1:7890")
 
+            self.cmb_background_mode = ComboBox(br_card)
+            self.cmb_background_mode.addItems([
+                "hidden_window（默认推荐：后台隐身运行，支持不断连瞬时唤出）",
+                "headless（纯无头 --headless=new，彻底无窗省内存，唤出需重启窗口）",
+                "visible（常规前台窗口，启动即显示浏览器界面）",
+            ])
+
             form.addRow(BodyLabel("浏览器引擎", br_card), self.cmb_browser_choice)
             form.addRow(BodyLabel("自定义浏览器 (.exe)", br_card), exe_row)
+            form.addRow(BodyLabel("窗口运行模式", br_card), self.cmb_background_mode)
             form.addRow(BodyLabel("数据目录隔离", br_card), self.cmb_profile_mode)
             form.addRow(BodyLabel("自定义数据目录", br_card), prof_row)
             form.addRow(BodyLabel("启动首页 URL", br_card), self.in_homepage)
@@ -948,18 +960,21 @@ def _run_gui(config_path: Optional[Path] = None):
 
             self.tray_menu = QMenu(self)
             self._act_tray_show = QAction("显示主窗口", self)
+            self._act_tray_toggle_browser = QAction("唤出调试浏览器窗口", self)
             self._act_tray_cookies = QAction("查看本机 Cookie 清单", self)
             self._act_tray_start = QAction("启动并接入 Hub", self)
             self._act_tray_stop = QAction("停止 Hub 接入", self)
             self._act_tray_quit = QAction("退出程序", self)
 
             self._act_tray_show.triggered.connect(self._restore_from_tray)
+            self._act_tray_toggle_browser.triggered.connect(self.toggle_browser_window_visibility)
             self._act_tray_cookies.triggered.connect(self._open_inventory_from_tray)
             self._act_tray_start.triggered.connect(self.start_all)
             self._act_tray_stop.triggered.connect(self.stop_all)
             self._act_tray_quit.triggered.connect(self._quit_application)
 
             self.tray_menu.addAction(self._act_tray_show)
+            self.tray_menu.addAction(self._act_tray_toggle_browser)
             self.tray_menu.addAction(self._act_tray_cookies)
             self.tray_menu.addSeparator()
             self.tray_menu.addAction(self._act_tray_start)
@@ -993,6 +1008,7 @@ def _run_gui(config_path: Optional[Path] = None):
             self._log_event("INFO", "用户从系统托盘退出客户端...")
             if self.agent:
                 self.agent.request_stop()
+            self.browser_mgr.stop()
             if self.tray_icon is not None:
                 self.tray_icon.hide()
             QApplication.quit()
@@ -1012,6 +1028,7 @@ def _run_gui(config_path: Optional[Path] = None):
             self.btn_start.clicked.connect(self.start_all)
             self.btn_stop.clicked.connect(self.stop_all)
             self.btn_launch_only.clicked.connect(self.launch_browser_only)
+            self.btn_toggle_browser_win.clicked.connect(self.toggle_browser_window_visibility)
             self.btn_cookie_inventory.clicked.connect(self.open_cookie_inventory)
             self.btn_save_hub.clicked.connect(self.save_ui_config)
             self.sw_close_to_tray.checkedChanged.connect(self._on_close_to_tray_toggled)
@@ -1048,8 +1065,10 @@ def _run_gui(config_path: Optional[Path] = None):
 
                 b = self.config["browser"]
                 br_map = {"auto": 0, "edge": 1, "chrome": 2, "custom": 3}
+                bg_map = {"hidden_window": 0, "headless": 1, "visible": 2}
                 self.cmb_browser_choice.setCurrentIndex(br_map.get(b.get("browser_choice", "auto"), 0))
                 self.in_custom_browser.setText(b.get("custom_browser_path", ""))
+                self.cmb_background_mode.setCurrentIndex(bg_map.get(b.get("background_mode", "hidden_window"), 0))
                 self.cmb_profile_mode.setCurrentIndex(1 if b.get("profile_mode") == "system_default" else 0)
                 self.in_custom_profile.setText(b.get("custom_profile_dir", ""))
                 self.in_homepage.setText(b.get("homepage", "about:blank"))
@@ -1100,9 +1119,11 @@ def _run_gui(config_path: Optional[Path] = None):
                 "public_ipv6": self.in_pub_v6.text().strip(),
             })
 
+            bg_rev_map = {0: "hidden_window", 1: "headless", 2: "visible"}
             cfg["browser"].update({
                 "browser_choice": br_map.get(self.cmb_browser_choice.currentIndex(), "auto"),
                 "custom_browser_path": self.in_custom_browser.text().strip(),
+                "background_mode": bg_rev_map.get(self.cmb_background_mode.currentIndex(), "hidden_window"),
                 "profile_mode": "system_default" if self.cmb_profile_mode.currentIndex() == 1 else "isolated",
                 "custom_profile_dir": self.in_custom_profile.text().strip(),
                 "homepage": self.in_homepage.text().strip() or "about:blank",
@@ -1279,12 +1300,26 @@ def _run_gui(config_path: Optional[Path] = None):
             self.txt_blacklist.setPlainText("\n".join(DEFAULT_SENSITIVE_BLACKLIST))
             self._toast("info", "已恢复默认列表", "已重置默认敏感网银/邮箱/统计黑名单（记得点击应用保存）")
 
-        def launch_browser_only(self):
+        def _sync_browser_window_controls(self):
+            is_hidden = self.browser_mgr.is_running() and (self.browser_mgr.window_hidden or self.browser_mgr.is_headless_active)
+            is_visible = self.browser_mgr.is_running() and not is_hidden and not self.browser_mgr._is_reused_external
+            if is_visible:
+                self.btn_toggle_browser_win.setText("隐藏浏览器到后台")
+                if hasattr(self, "_act_tray_toggle_browser"):
+                    self._act_tray_toggle_browser.setText("隐藏调试浏览器到后台")
+            else:
+                self.btn_toggle_browser_win.setText("唤出浏览器窗口")
+                if hasattr(self, "_act_tray_toggle_browser"):
+                    self._act_tray_toggle_browser.setText("唤出调试浏览器窗口")
+
+        def launch_browser_only(self, force_visible: bool = False):
             try:
                 self.config = self._collect_config_from_vars()
                 save_config(self.config, self.config_path)
                 b = self.config["browser"]
                 cdp_port = int(self.config["hub"]["cdp_port"])
+                bg_mode = b.get("background_mode", "hidden_window")
+                extra_overrides = {"_override_headless": False, "_override_hidden": False} if force_visible else {}
                 label, cmd = self.browser_mgr.launch(
                     browser_choice=b["browser_choice"],
                     custom_browser_path=b["custom_browser_path"],
@@ -1294,18 +1329,41 @@ def _run_gui(config_path: Optional[Path] = None):
                     homepage=b["homepage"],
                     extra_args=b["extra_args"],
                     isolate_os_signin=bool(b.get("isolate_os_signin", True)),
+                    background_mode=bg_mode,
+                    **extra_overrides,
                 )
-                msg = f"已启动 {label} (CDP 127.0.0.1:{cdp_port})" if cmd else f"{label} 已在运行中"
+                mode_note = "后台隐身" if (self.browser_mgr.window_hidden and not self.browser_mgr.is_headless_active) else ("纯无头" if self.browser_mgr.is_headless_active else "可见窗口")
+                msg = f"已启动 {label} ({mode_note} | CDP 127.0.0.1:{cdp_port})" if cmd else f"{label} 已在运行中"
                 self._log_event("INFO", msg)
                 if self.browser_mgr.last_launch_warning:
                     self._log_event("WARNING", self.browser_mgr.last_launch_warning)
                     self._toast("warning", "安全与端口提醒", self.browser_mgr.last_launch_warning)
                 else:
                     self._toast("success", "浏览器就绪", msg)
+                self._sync_browser_window_controls()
                 QTimer.singleShot(1200, self._poll_cdp_health)
             except Exception as e:
                 self._log_event("ERROR", f"启动浏览器失败: {e}")
                 self._toast("error", "启动浏览器失败", str(e))
+
+        def toggle_browser_window_visibility(self):
+            try:
+                if not self.browser_mgr.is_running() and not self.browser_mgr._is_reused_external:
+                    self.launch_browser_only(force_visible=True)
+                    return
+
+                currently_hidden = self.browser_mgr.window_hidden or self.browser_mgr.is_headless_active
+                if currently_hidden:
+                    ok, msg = self.browser_mgr.show_window()
+                else:
+                    ok, msg = self.browser_mgr.hide_window()
+                self._sync_browser_window_controls()
+                self._log_event("INFO" if ok else "WARNING", msg)
+                self._toast("success" if ok else "warning", "浏览器窗口控制", msg)
+                QTimer.singleShot(600, self._poll_cdp_health)
+            except Exception as e:
+                self._log_event("ERROR", f"切换浏览器窗口失败: {e}")
+                self._toast("error", "切换窗口失败", str(e))
 
         def start_all(self):
             try:
@@ -1508,10 +1566,20 @@ def _run_gui(config_path: Optional[Path] = None):
             self._last_cdp_ok = ok
             bg = "#065f46" if ok else "#334155"
             fg = "#d1fae5" if ok else "#e2e8f0"
-            self.badge_cdp.setText(f"CDP {port}: {'就绪' if ok else '未启动'}")
+            if ok:
+                if self.browser_mgr.is_headless_active:
+                    win_state = "就绪(无头)"
+                elif self.browser_mgr.window_hidden:
+                    win_state = "就绪(后台)"
+                else:
+                    win_state = "就绪(可见)"
+            else:
+                win_state = "未启动"
+            self.badge_cdp.setText(f"CDP {port}: {win_state}")
             self.badge_cdp.setStyleSheet(
                 f"QLabel {{ background-color: {bg}; color: {fg}; border-radius: 6px; padding: 5px 12px; font-weight: 600; font-size: 12px; }}"
             )
+            self._sync_browser_window_controls()
             if not ok:
                 self.badge_cookies.setText("本机 Cookie: 等待浏览器")
                 self.badge_cookies.setStyleSheet(
@@ -1689,6 +1757,7 @@ def _run_gui(config_path: Optional[Path] = None):
 
             if self.agent:
                 self.agent.request_stop()
+            self.browser_mgr.stop()
             if self.tray_icon is not None:
                 self.tray_icon.hide()
             super().closeEvent(event)
