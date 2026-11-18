@@ -1,6 +1,8 @@
 import base64
 from datetime import datetime
+import hashlib
 import json
+import re
 import secrets
 from typing import Any, Dict, Optional
 from urllib.parse import urlencode, urlparse
@@ -69,12 +71,53 @@ def _load_rsa_public_key(raw: str):
     raise ValueError(f"无法解析 RSA 公钥或证书: {last_err}")
 
 
+def _get_alipay_cert_sn(cert_pem: str) -> str:
+    txt = (cert_pem or "").strip()
+    if not txt:
+        return ""
+    cert = x509.load_pem_x509_certificate(txt.encode("utf-8"))
+    issuer_str = cert.issuer.rfc4514_string()
+    raw = (issuer_str + str(cert.serial_number)).encode("utf-8")
+    return hashlib.md5(raw).hexdigest()
+
+
+def _get_alipay_root_cert_sn(root_cert_pem: str) -> str:
+    txt = (root_cert_pem or "").strip()
+    if not txt:
+        return ""
+    blocks = re.findall(r"-----BEGIN CERTIFICATE-----.*?-----END CERTIFICATE-----", txt, flags=re.DOTALL)
+    sns = []
+    for block in blocks:
+        try:
+            cert = x509.load_pem_x509_certificate(block.encode("utf-8"))
+            oid_dotted = cert.signature_algorithm_oid.dotted_string
+            oid_name = (getattr(cert.signature_algorithm_oid, "_name", "") or "").lower()
+            if oid_dotted in {"1.2.840.113549.1.1.4", "1.2.840.113549.1.1.5", "1.2.840.113549.1.1.11"} or "rsa" in oid_name:
+                sns.append(_get_alipay_cert_sn(block))
+        except Exception:
+            continue
+    return "_".join(sns)
+
+
+def get_effective_alipay_public_key(cfg: Dict[str, Any]) -> str:
+    sign_mode = (cfg.get("sign_mode") or "public_key").strip().lower()
+    if sign_mode == "cert" and str(cfg.get("cert_public_key") or "").strip():
+        return str(cfg.get("cert_public_key") or "").strip()
+    return str(cfg.get("public_key") or "").strip() or str(cfg.get("cert_public_key") or "").strip()
+
+
 def is_alipay_api_configured(cfg: Dict[str, Any]) -> bool:
-    return bool(
-        str(cfg.get("app_id") or "").strip()
-        and str(cfg.get("private_key") or "").strip()
-        and str(cfg.get("public_key") or "").strip()
-    )
+    has_base = bool(str(cfg.get("app_id") or "").strip() and str(cfg.get("private_key") or "").strip())
+    if not has_base:
+        return False
+    sign_mode = (cfg.get("sign_mode") or "public_key").strip().lower()
+    if sign_mode == "cert":
+        return bool(
+            str(cfg.get("app_cert") or "").strip()
+            and str(cfg.get("cert_public_key") or "").strip()
+            and str(cfg.get("root_cert") or "").strip()
+        )
+    return bool(str(cfg.get("public_key") or "").strip())
 
 
 def is_wechat_v3_configured(cfg: Dict[str, Any]) -> bool:
@@ -175,15 +218,28 @@ async def create_alipay_order(
     base_url: str,
 ) -> Dict[str, Any]:
     mode = (cfg.get("mode") or "precreate").strip().lower()
+    sign_mode = (cfg.get("sign_mode") or "public_key").strip().lower()
     app_id = str(cfg.get("app_id") or "").strip()
     priv_key = str(cfg.get("private_key") or "").strip()
-    pub_key = str(cfg.get("public_key") or "").strip()
+    pub_key = get_effective_alipay_public_key(cfg)
+    app_cert = str(cfg.get("app_cert") or "").strip()
+    root_cert = str(cfg.get("root_cert") or "").strip()
     gateway = str(cfg.get("gateway_url") or "https://openapi.alipay.com/gateway.do").strip()
     notify_url = str(cfg.get("notify_url") or "").strip() or f"{base_url}/api/billing/recharge/notify/alipay"
     return_url = str(cfg.get("return_url") or "").strip() or f"{base_url}/"
     static_qr = str(cfg.get("qr_url") or "").strip()
 
-    if mode != "static_qr" and app_id and priv_key:
+    if mode == "static_qr":
+        if static_qr:
+            return {
+                "gateway_used": "alipay_static_qr",
+                "pay_url": static_qr,
+                "qr_code_text": static_qr,
+                "persisted": True,
+                "simulated": False,
+                "message": "已创建支付宝充值订单，请使用手机支付宝扫码转账，付款后等待管理员核账入账",
+            }
+    elif app_id and priv_key:
         total_amount = f"{float(amount_yuan_str):.2f}"
         common_params: Dict[str, Any] = {
             "app_id": app_id,
@@ -193,6 +249,11 @@ async def create_alipay_order(
             "version": "1.0",
             "notify_url": notify_url,
         }
+        if sign_mode == "cert":
+            if not (app_cert and root_cert):
+                raise RuntimeError("当前支付宝已选「证书模式」，请先在后台填写或上传应用公钥证书与支付宝根证书")
+            common_params["app_cert_sn"] = _get_alipay_cert_sn(app_cert)
+            common_params["alipay_root_cert_sn"] = _get_alipay_root_cert_sn(root_cert)
         if mode == "page_pay":
             common_params["method"] = "alipay.trade.page.pay"
             common_params["return_url"] = return_url
@@ -212,10 +273,12 @@ async def create_alipay_order(
                 "gateway_used": "alipay_page_pay",
                 "pay_url": pay_url,
                 "qr_code_text": pay_url,
+                "persisted": True,
+                "simulated": False,
                 "message": "已生成支付宝收银台支付链接，请点击跳转到支付宝完成付款",
             }
 
-        # Default: alipay.trade.precreate (当面付扫码)
+        # 当面付扫码 (alipay.trade.precreate：客户用手机扫网页生成的动态二维码)
         common_params["method"] = "alipay.trade.precreate"
         common_params["biz_content"] = json.dumps(
             {
@@ -245,15 +308,9 @@ async def create_alipay_order(
             "gateway_used": "alipay_precreate",
             "pay_url": qr_code,
             "qr_code_text": qr_code,
-            "message": "已向支付宝发起当面付下单，请使用支付宝 App 扫码支付",
-        }
-
-    if static_qr:
-        return {
-            "gateway_used": "alipay_static_qr",
-            "pay_url": static_qr,
-            "qr_code_text": static_qr,
-            "message": "已创建支付宝充值订单（静态收款码模式），扫码付款后等待管理员核账到账",
+            "persisted": True,
+            "simulated": False,
+            "message": "已向支付宝发起当面付下单，请使用手机支付宝扫一扫支付",
         }
 
     fallback_uri = f"alipay://pay?order_no={order_no}&amount={float(amount_yuan_str):.2f}"
@@ -261,14 +318,19 @@ async def create_alipay_order(
         "gateway_used": "sandbox_fallback",
         "pay_url": "",
         "qr_code_text": fallback_uri,
-        "message": "订单已创建（管理员尚未配置支付宝官方密钥，可使用沙盒通道测试或人工核账）",
+        "persisted": False,
+        "simulated": True,
+        "message": "已生成支付宝沙盒模拟订单（数据未落盘，不会修改数据库与真实余额）",
     }
 
 
 async def query_alipay_order(order_no: str, cfg: Dict[str, Any]) -> Dict[str, Any]:
     app_id = str(cfg.get("app_id") or "").strip()
     priv_key = str(cfg.get("private_key") or "").strip()
-    pub_key = str(cfg.get("public_key") or "").strip()
+    pub_key = get_effective_alipay_public_key(cfg)
+    sign_mode = (cfg.get("sign_mode") or "public_key").strip().lower()
+    app_cert = str(cfg.get("app_cert") or "").strip()
+    root_cert = str(cfg.get("root_cert") or "").strip()
     gateway = str(cfg.get("gateway_url") or "https://openapi.alipay.com/gateway.do").strip()
     if not app_id or not priv_key:
         return {"supported": False, "paid": False}
@@ -282,6 +344,9 @@ async def query_alipay_order(order_no: str, cfg: Dict[str, Any]) -> Dict[str, An
         "version": "1.0",
         "biz_content": json.dumps({"out_trade_no": order_no}, separators=(",", ":")),
     }
+    if sign_mode == "cert" and app_cert and root_cert:
+        params["app_cert_sn"] = _get_alipay_cert_sn(app_cert)
+        params["alipay_root_cert_sn"] = _get_alipay_root_cert_sn(root_cert)
     params["sign"] = _alipay_sign(params, priv_key)
     async with httpx.AsyncClient(timeout=10.0) as client:
         resp = await client.post(gateway, data=params)
@@ -340,7 +405,17 @@ async def create_wechat_native_order(
     notify_url = str(cfg.get("notify_url") or "").strip() or f"{base_url}/api/billing/recharge/notify/wechat"
     static_qr = str(cfg.get("qr_url") or "").strip()
 
-    if mode != "static_qr" and app_id and mch_id and serial_no and priv_key:
+    if mode == "static_qr":
+        if static_qr:
+            return {
+                "gateway_used": "wechat_static_qr",
+                "pay_url": static_qr,
+                "qr_code_text": static_qr,
+                "persisted": True,
+                "simulated": False,
+                "message": "已创建微信充值订单，请使用手机微信扫码转账，付款后等待管理员核账入账",
+            }
+    elif app_id and mch_id and serial_no and priv_key:
         url_path = "/v3/pay/transactions/native"
         total_fen = max(1, int(round(int(amount_units or 0) / 100)))
         payload = {
@@ -376,15 +451,9 @@ async def create_wechat_native_order(
             "gateway_used": "wechat_native_v3",
             "pay_url": code_url,
             "qr_code_text": code_url,
+            "persisted": True,
+            "simulated": False,
             "message": "已向微信支付 V3 发起 Native 下单，请打开微信扫一扫付款",
-        }
-
-    if static_qr:
-        return {
-            "gateway_used": "wechat_static_qr",
-            "pay_url": static_qr,
-            "qr_code_text": static_qr,
-            "message": "已创建微信充值订单（静态收款码模式），扫码付款后等待管理员核账到账",
         }
 
     yuan_str = f"{int(amount_units or 0) / 10000:.2f}"
@@ -393,7 +462,9 @@ async def create_wechat_native_order(
         "gateway_used": "sandbox_fallback",
         "pay_url": "",
         "qr_code_text": fallback_uri,
-        "message": "订单已创建（管理员尚未配置微信支付 V3 商户证书，可使用沙盒通道测试或人工核账）",
+        "persisted": False,
+        "simulated": True,
+        "message": "已生成微信沙盒模拟订单（数据未落盘，不会修改数据库与真实余额）",
     }
 
 

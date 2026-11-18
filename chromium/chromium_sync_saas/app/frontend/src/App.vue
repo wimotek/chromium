@@ -28,7 +28,12 @@
             <span v-if="level" class="tag" :style="{ color: level.badge_color, borderColor: level.badge_color }">{{ level.name }}</span>
             <span class="tag tag-info">{{ user.username }} · {{ plan?.name || 'Starter' }}</span>
           </div>
-          <button class="btn btn-sm mobile-menu-btn" @click="mobileMenuOpen = !mobileMenuOpen">
+          <button
+            class="btn btn-sm mobile-menu-btn"
+            :aria-expanded="mobileMenuOpen"
+            title="窄屏 / 移动端页面切换菜单"
+            @click="mobileMenuOpen = !mobileMenuOpen"
+          >
             {{ mobileMenuOpen ? '收起菜单' : '导航菜单' }}
           </button>
           <button class="btn btn-sm" @click="logout">退出</button>
@@ -36,6 +41,10 @@
       </header>
 
       <div v-if="mobileMenuOpen" class="mobile-nav-drawer">
+        <div class="row" style="padding: 4px 2px 8px; border-bottom: 1px solid var(--border); margin-bottom: 4px">
+          <span v-if="level" class="tag" :style="{ color: level.badge_color, borderColor: level.badge_color }">{{ level.name }}</span>
+          <span class="tag tag-info">{{ user.username }} · {{ plan?.name || 'Starter' }}</span>
+        </div>
         <button class="nav-btn" :class="{ active: tab === 'nodes' }" @click="selectTab('nodes')">我的节点与凭据</button>
         <button class="nav-btn" :class="{ active: tab === 'market' }" @click="selectTab('market')">共享交易市场</button>
         <button class="nav-btn" :class="{ active: tab === 'sync' }" @click="selectTab('sync')">Cookie 同步</button>

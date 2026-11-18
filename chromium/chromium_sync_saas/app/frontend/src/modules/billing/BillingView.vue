@@ -166,42 +166,45 @@
 
       <div class="card">
         <div class="card-title">
-          <span>支付宝 / 微信支付官方收银台充值</span>
-          <span class="tag tag-info">{{ paymentChannels.alipay_configured || paymentChannels.wechat_configured ? '官方网关已就绪' : '静态码 / 沙盒模式' }}</span>
+          <span>在线钱包充值收银台</span>
+          <span class="tag" :class="headerChannelBadge.cls">
+            {{ headerChannelBadge.label }}
+          </span>
         </div>
-        <div class="banner banner-info">
-          下单后系统自动调用官方支付网关生成真实付款二维码或支付宝电脑收银台链接；扫码或跳转支付成功后，异步回调与 3 秒自动查单将实时入账您的钱包余额。
+        <div v-if="enabledPaymentMethods.length === 0" class="banner banner-warn" style="margin-bottom: 12px">
+          管理员当前已关闭全部线上支付渠道，前台已自动隐藏充值入口。如需充值，请联系平台管理员人工入账。
         </div>
+        <template v-else>
+          <div class="banner banner-info">
+            {{ activePayMethod?.description || '下单后自动生成收款二维码或跳转官方收银台；支付成功后异步回调与 3 秒自动查单将实时入账您的钱包余额。' }}
+          </div>
 
-        <div class="row" style="margin-bottom: 12px; gap: 8px">
-          <button
-            class="btn btn-sm"
-            :class="{ 'btn-primary': payChannel === 'alipay' }"
-            :disabled="!paymentChannels.alipay_enabled"
-            @click="payChannel = 'alipay'"
-          >
-            支付宝 · {{ alipayChannelBadge }}
-          </button>
-          <button
-            class="btn btn-sm"
-            :class="{ 'btn-emerald': payChannel === 'wechat' }"
-            :disabled="!paymentChannels.wechat_enabled"
-            @click="payChannel = 'wechat'"
-          >
-            微信支付 · {{ wechatChannelBadge }}
-          </button>
-        </div>
+          <div class="row" style="margin-bottom: 12px; gap: 8px">
+            <button
+              v-for="m in enabledPaymentMethods"
+              :key="m.id"
+              class="btn btn-sm"
+              :class="selectedPayMethod === m.id ? (m.channel === 'wechat' ? 'btn-emerald' : 'btn-primary') : ''"
+              @click="selectedPayMethod = m.id"
+            >
+              <span>{{ m.name }}</span>
+              <span class="tag" :class="m.configured ? 'tag-ok' : 'tag-info'" style="margin-left: 6px">
+                {{ m.badge }}
+              </span>
+            </button>
+          </div>
 
-        <div class="row" style="margin-bottom: 14px">
-          <input class="input mono" type="number" step="10" min="0.01" v-model.number="rechargeYuan" style="max-width: 140px" />
-          <button class="btn btn-sm" @click="rechargeYuan = 10">¥10</button>
-          <button class="btn btn-sm" @click="rechargeYuan = 50">¥50</button>
-          <button class="btn btn-sm" @click="rechargeYuan = 100">¥100</button>
-          <button class="btn btn-sm" @click="rechargeYuan = 500">¥500</button>
-          <button class="btn btn-primary" :disabled="creatingOrder" @click="createRechargeOrder">
-            {{ creatingOrder ? '正在下单...' : `立即充值 ¥${rechargeYuan}` }}
-          </button>
-        </div>
+          <div class="row" style="margin-bottom: 14px">
+            <input class="input mono" type="number" step="10" min="0.01" v-model.number="rechargeYuan" style="max-width: 140px" />
+            <button class="btn btn-sm" @click="rechargeYuan = 10">¥10</button>
+            <button class="btn btn-sm" @click="rechargeYuan = 50">¥50</button>
+            <button class="btn btn-sm" @click="rechargeYuan = 100">¥100</button>
+            <button class="btn btn-sm" @click="rechargeYuan = 500">¥500</button>
+            <button class="btn btn-primary" :disabled="creatingOrder || !activePayMethod" @click="createRechargeOrder">
+              {{ creatingOrder ? '正在下单...' : `立即充值 ¥${rechargeYuan}` }}
+            </button>
+          </div>
+        </template>
 
         <div v-if="rechargeOrders.length > 0" class="table-wrap" style="max-height: 240px; overflow-y: auto">
           <table>
@@ -213,10 +216,13 @@
                 <td class="mono">{{ o.order_no }}</td>
                 <td>{{ o.channel === 'alipay' ? '支付宝' : '微信支付' }}</td>
                 <td class="mono">¥{{ o.amount_yuan }}</td>
-                <td><span class="tag" :class="o.status === 'paid' ? 'tag-ok' : 'tag-warn'">{{ o.status === 'paid' ? '已支付' : '待支付' }}</span></td>
+                <td><span class="tag" :class="orderStatusMeta(o.status).cls">{{ orderStatusMeta(o.status).label }}</span></td>
                 <td>
                   <div class="row" style="gap: 6px">
-                    <button v-if="o.status === 'pending'" class="btn btn-sm btn-primary" @click="openCashierModal(o)">去付款 / 核验</button>
+                    <template v-if="o.status === 'pending'">
+                      <button class="btn btn-sm btn-primary" @click="openCashierModal(o)">去付款 / 核验</button>
+                      <button class="btn btn-sm" @click="cancelRechargeOrder(o.order_no)">取消订单</button>
+                    </template>
                     <span v-else class="muted mono" style="font-size: 11px">{{ o.paid_at || o.created_at }}</span>
                   </div>
                 </td>
@@ -268,27 +274,59 @@
         <div class="subcard" style="margin-bottom: 14px">
           <div class="row" style="justify-content: space-between; margin-bottom: 8px">
             <span class="muted">订单号：<span class="mono">{{ cashierOrder.order_no }}</span></span>
-            <span class="tag" :class="cashierOrder.status === 'paid' ? 'tag-ok' : 'tag-warn'">
-              {{ cashierOrder.status === 'paid' ? '支付成功已入账' : '等待付款中（每3秒自动核验）' }}
+            <span class="tag" :class="cashierOrder.simulated ? 'tag-warn' : orderStatusMeta(cashierOrder.status).cls">
+              {{
+                cashierOrder.simulated
+                  ? (cashierOrder.status === 'paid' ? '模拟支付完成（未落盘）' : '沙盒模拟订单（不落盘）')
+                  : cashierOrder.status === 'pending'
+                    ? (isStaticQrOrder ? '待扫码转账 · 人工核账' : '等待付款中（每3秒自动核验）')
+                    : orderStatusMeta(cashierOrder.status).label
+              }}
             </span>
           </div>
           <div class="kpi-val" style="font-size: 28px; color: var(--primary)">¥{{ cashierOrder.amount_yuan }}</div>
           <div v-if="cashierOrder.remark" class="muted mono" style="font-size: 11px; margin-top: 4px">{{ cashierOrder.remark }}</div>
         </div>
 
-        <div v-if="cashierOrder.status === 'paid'" class="banner banner-success">
+        <div v-if="cashierOrder.simulated && cashierOrder.status === 'paid'" class="banner banner-info">
+          沙盒模拟演练通过！注意：本次为纯模拟操作，<strong>数据库订单记录、账单流水与真实钱包余额均未改动</strong>。
+        </div>
+        <div v-else-if="cashierOrder.status === 'paid'" class="banner banner-success">
           款项已核验到账！当前可用余额：<strong class="mono">¥{{ user.balance_yuan || '0.00' }}</strong>
+        </div>
+        <div v-else-if="cashierOrder.status === 'cancelled'" class="banner banner-warn">
+          该充值订单已取消/关闭。如需充值请关闭本窗口后重新下单。
+        </div>
+        <div v-else-if="cashierOrder.status === 'refunded'" class="banner banner-info">
+          该订单已完成冲正退款处理。
         </div>
 
         <template v-else>
-          <div v-if="cashierQrSvg" style="text-align: center; margin: 14px 0">
-            <div class="qr-frame" v-html="cashierQrSvg"></div>
+          <div v-if="cashierOrder.simulated" class="banner banner-warn">
+            管理员当前开启了沙盒模拟演练，且所选渠道尚未配置官方密钥或收款码。下方「模拟支付」<strong>不会写入数据库，也不会变动您的真实余额</strong>。
+          </div>
+
+          <div v-if="isQrImageUrl" style="text-align: center; margin: 14px 0">
+            <div class="qr-frame" style="display: inline-block; padding: 10px; background: #fff; border-radius: 10px">
+              <img :src="cashierOrder.qr_code_text" alt="收款二维码" style="width: 204px; height: 204px; object-fit: contain; display: block" />
+            </div>
             <div class="muted" style="font-size: 12px; margin-top: 8px">
-              请打开手机{{ cashierOrder.channel === 'alipay' ? '支付宝' : '微信' }}扫一扫完成付款
+              请打开手机{{ cashierOrder.channel === 'alipay' ? '支付宝' : '微信' }}扫一扫完成转账，付款后等待管理员核账确认入账
             </div>
           </div>
 
-          <div v-if="isHttpPayUrl" class="row" style="justify-content: center; margin: 12px 0">
+          <div v-else-if="cashierQrSvg" style="text-align: center; margin: 14px 0">
+            <div class="qr-frame" v-html="cashierQrSvg"></div>
+            <div class="muted" style="font-size: 12px; margin-top: 8px">
+              {{
+                isStaticQrOrder
+                  ? `请打开手机${cashierOrder.channel === 'alipay' ? '支付宝' : '微信'}扫一扫完成转账，付款后等待管理员核账确认入账`
+                  : `请打开手机${cashierOrder.channel === 'alipay' ? '支付宝' : '微信'}扫一扫完成付款`
+              }}
+            </div>
+          </div>
+
+          <div v-if="isHttpPayUrl && !isStaticQrOrder" class="row" style="justify-content: center; margin: 12px 0">
             <a
               :href="cashierOrder.pay_url"
               target="_blank"
@@ -299,11 +337,11 @@
             </a>
           </div>
 
-          <div v-if="!cashierQrSvg && !isHttpPayUrl" class="banner banner-warn">
-            {{ cashierOrder.pay_url || cashierOrder.qr_code_text || '管理员尚未配置官方商户密钥，请联系管理员或使用沙盒测试入账。' }}
+          <div v-if="!isQrImageUrl && !cashierQrSvg && (!isHttpPayUrl || isStaticQrOrder)" class="banner banner-warn">
+            {{ cashierOrder.pay_url || cashierOrder.qr_code_text || '管理员尚未配置收款参数，请联系管理员处理。' }}
           </div>
 
-          <div v-if="cashierOrder.qr_code_text || isHttpPayUrl" class="field">
+          <div v-if="(cashierOrder.qr_code_text || isHttpPayUrl) && !isQrImageUrl" class="field">
             <label>原始支付链接 / 二维码数据串</label>
             <div class="row">
               <input class="input mono" :value="cashierOrder.qr_code_text || cashierOrder.pay_url" readonly style="flex: 1" />
@@ -312,11 +350,14 @@
           </div>
 
           <div class="row" style="justify-content: flex-end; margin-top: 14px">
-            <button v-if="allowSelfRecharge" class="btn btn-emerald" @click="sandboxPay(cashierOrder.order_no)">
-              沙盒测试立即入账
+            <button v-if="!cashierOrder.simulated" class="btn" @click="cancelRechargeOrder(cashierOrder.order_no)">
+              取消订单
             </button>
-            <button class="btn btn-primary" :disabled="checkingOrder" @click="checkOrderStatusNow(cashierOrder.order_no)">
-              {{ checkingOrder ? '核验中...' : '我已完成支付 · 立即核验' }}
+            <button v-if="cashierOrder.simulated" class="btn btn-emerald" @click="sandboxPay(cashierOrder)">
+              模拟支付成功（不落盘）
+            </button>
+            <button v-else class="btn btn-primary" :disabled="checkingOrder" @click="checkOrderStatusNow(cashierOrder.order_no)">
+              {{ checkingOrder ? '核验中...' : (isStaticQrOrder ? '刷新入账状态' : '我已完成支付 · 立即核验') }}
             </button>
           </div>
         </template>
@@ -343,10 +384,11 @@ const paymentChannels = ref({
   wechat_enabled: true,
   wechat_mode: 'native_v3',
   wechat_configured: false,
+  methods: [],
 })
 const rechargeOrders = ref([])
 const cashierOrder = ref(null)
-const payChannel = ref('alipay')
+const selectedPayMethod = ref('alipay_f2f')
 const plans = ref([])
 const ledger = ref([])
 const allowSelfRecharge = ref(true)
@@ -358,25 +400,44 @@ const creatingOrder = ref(false)
 const checkingOrder = ref(false)
 let pollTimer = null
 
-const alipayChannelBadge = computed(() => {
-  if (!paymentChannels.value.alipay_enabled) return '已停用'
-  if (paymentChannels.value.alipay_configured) {
-    return paymentChannels.value.alipay_mode === 'page_pay' ? '电脑收银台' : '官方当面付'
-  }
-  return '静态码/沙盒'
+const enabledPaymentMethods = computed(() => {
+  const list = paymentChannels.value.methods || []
+  return list.filter((m) => Boolean(m.enabled))
 })
 
-const wechatChannelBadge = computed(() => {
-  if (!paymentChannels.value.wechat_enabled) return '已停用'
-  if (paymentChannels.value.wechat_configured && paymentChannels.value.wechat_mode === 'native_v3') {
-    return '官方 V3 扫码'
+const activePayMethod = computed(() => {
+  return enabledPaymentMethods.value.find((m) => m.id === selectedPayMethod.value) || enabledPaymentMethods.value[0] || null
+})
+
+const headerChannelBadge = computed(() => {
+  const list = enabledPaymentMethods.value
+  if (list.length === 0) return { label: '线上充值已关闭', cls: 'tag-warn' }
+  if (paymentChannels.value.alipay_configured || paymentChannels.value.wechat_configured) {
+    return { label: '官方网关已就绪', cls: 'tag-ok' }
   }
-  return '静态码/沙盒'
+  if (list.some((m) => Boolean(m.configured))) {
+    return { label: '人工收款通道已就绪', cls: 'tag-info' }
+  }
+  if (allowSelfRecharge.value) {
+    return { label: '演练模式（模拟不落盘）', cls: 'tag-warn' }
+  }
+  return { label: '待管理员配置收款', cls: 'tag-warn' }
+})
+
+const isStaticQrOrder = computed(() => {
+  const rmk = cashierOrder.value?.remark || ''
+  return rmk.includes('static_qr')
+})
+
+const isQrImageUrl = computed(() => {
+  const txt = (cashierOrder.value?.qr_code_text || '').trim()
+  if (!txt) return false
+  return /^data:image\//i.test(txt) || /\.(png|jpe?g|webp|gif|svg)(\?.*)?$/i.test(txt)
 })
 
 const cashierQrSvg = computed(() => {
   const txt = cashierOrder.value?.qr_code_text || ''
-  if (!txt || txt.startsWith('sandbox://') || txt.startsWith('unconfigured://')) return ''
+  if (!txt || isQrImageUrl.value || txt.startsWith('sandbox://') || txt.startsWith('unconfigured://')) return ''
   try {
     return renderQrSvg(txt, { size: 204 })
   } catch {
@@ -389,6 +450,19 @@ const isHttpPayUrl = computed(() => {
   return /^https?:\/\//i.test(u)
 })
 
+function orderStatusMeta(status) {
+  switch (status) {
+    case 'paid':
+      return { label: '已支付', cls: 'tag-ok' }
+    case 'cancelled':
+      return { label: '已取消', cls: 'tag-danger' }
+    case 'refunded':
+      return { label: '已退款', cls: 'tag-info' }
+    default:
+      return { label: '待支付', cls: 'tag-warn' }
+  }
+}
+
 function stopOrderPolling() {
   if (pollTimer) {
     clearInterval(pollTimer)
@@ -399,7 +473,7 @@ function stopOrderPolling() {
 function startOrderPolling(orderNo) {
   stopOrderPolling()
   pollTimer = setInterval(async () => {
-    if (!cashierOrder.value || cashierOrder.value.order_no !== orderNo || cashierOrder.value.status === 'paid') {
+    if (!cashierOrder.value || cashierOrder.value.order_no !== orderNo || cashierOrder.value.status !== 'pending') {
       stopOrderPolling()
       return
     }
@@ -413,6 +487,9 @@ function startOrderPolling(orderNo) {
           emit('notify', `订单 ${orderNo} 支付成功，已入账 ¥${res.order.amount_yuan}`)
           emit('refresh-profile', res.user || null)
           await loadAll()
+        } else if (res.order.status !== 'pending') {
+          stopOrderPolling()
+          await loadAll()
         }
       }
     } catch {
@@ -423,7 +500,7 @@ function startOrderPolling(orderNo) {
 
 function openCashierModal(order) {
   cashierOrder.value = { ...order }
-  if (order.status === 'pending') {
+  if (order.status === 'pending' && !order.simulated) {
     startOrderPolling(order.order_no)
   }
 }
@@ -448,8 +525,9 @@ async function loadAll() {
     promo.value = bRes.promo || {}
     paymentChannels.value = bRes.payment_channels || paymentChannels.value
     rechargeOrders.value = bRes.recharge_orders || []
-    if (!paymentChannels.value.alipay_enabled && paymentChannels.value.wechat_enabled) {
-      payChannel.value = 'wechat'
+    const enabledList = (paymentChannels.value.methods || []).filter((m) => Boolean(m.enabled))
+    if (!enabledList.find((m) => m.id === selectedPayMethod.value)) {
+      selectedPayMethod.value = enabledList[0]?.id || ''
     }
     ledger.value = bRes.ledger || []
     allowSelfRecharge.value = Boolean(bRes.allow_self_recharge)
@@ -503,17 +581,23 @@ async function claimDaily() {
 }
 
 async function createRechargeOrder() {
-  if (creatingOrder.value) return
+  if (creatingOrder.value || !activePayMethod.value) return
   creatingOrder.value = true
   try {
     const res = await apiFetch('/api/billing/recharge/create', {
       method: 'POST',
-      body: JSON.stringify({ channel: payChannel.value, amount_yuan: rechargeYuan.value }),
+      body: JSON.stringify({
+        channel: activePayMethod.value.channel,
+        pay_method: activePayMethod.value.id,
+        amount_yuan: rechargeYuan.value,
+      }),
     })
     emit('notify', res.message)
-    await loadAll()
+    if (!res.simulated) {
+      await loadAll()
+    }
     if (res.order) {
-      openCashierModal(res.order)
+      openCashierModal({ ...res.order, simulated: Boolean(res.simulated || res.order.simulated) })
     }
   } catch (e) {
     emit('notify', e.message)
@@ -544,14 +628,29 @@ async function checkOrderStatusNow(orderNo) {
   }
 }
 
-async function sandboxPay(orderNo) {
+async function sandboxPay(order) {
   try {
-    const res = await apiFetch(`/api/billing/recharge/${orderNo}/sandbox-pay`, { method: 'POST' })
-    if (res.order) cashierOrder.value = res.order
+    const q = new URLSearchParams({
+      channel: order.channel || 'alipay',
+      amount_yuan: String(order.amount_yuan || rechargeYuan.value || 50),
+    })
+    const res = await apiFetch(`/api/billing/recharge/${order.order_no}/sandbox-pay?${q.toString()}`, { method: 'POST' })
+    if (res.order) cashierOrder.value = { ...res.order, simulated: true }
     stopOrderPolling()
-    if (res.user) user.value = { ...user.value, ...res.user }
     emit('notify', res.message)
-    emit('refresh-profile', res.user || null)
+  } catch (e) {
+    emit('notify', e.message)
+  }
+}
+
+async function cancelRechargeOrder(orderNo) {
+  try {
+    const res = await apiFetch(`/api/billing/recharge/orders/${orderNo}/cancel`, { method: 'POST' })
+    stopOrderPolling()
+    if (cashierOrder.value && cashierOrder.value.order_no === orderNo && res.order) {
+      cashierOrder.value = res.order
+    }
+    emit('notify', res.message)
     await loadAll()
   } catch (e) {
     emit('notify', e.message)

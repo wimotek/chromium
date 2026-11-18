@@ -381,22 +381,25 @@
     <template v-else-if="activeSection === 'payments'">
       <div class="card">
         <div class="card-title">
-          <span>全局支付收银台与回调地址</span>
+          <span>全局支付收银台与风控参数</span>
           <button class="btn btn-sm btn-primary" @click="saveSettings">保存全部支付网关参数</button>
         </div>
 
         <div class="grid-2" style="margin-bottom: 14px">
           <div class="subcard">
-            <div class="field">
-              <label>沙盒自助演示支付</label>
+            <div class="field" style="margin-bottom: 0">
+              <label>沙盒模拟演练开关（仅在未配置官方密钥与收款码时作为演示通道 · 数据不落盘）</label>
               <select class="select" v-model="settings.saas_allow_self_recharge">
-                <option :value="true">允许沙盒一键入账（测试模式）</option>
-                <option :value="false">关闭沙盒（生产模式：仅官方扫码 / 回调 / 查单确认）</option>
+                <option :value="true">开启沙盒演练（纯模拟流程，不写入数据库与真实余额）</option>
+                <option :value="false">关闭沙盒（生产模式：仅允许已配置的官方网关或人工收款码）</option>
               </select>
             </div>
+          </div>
+
+          <div class="subcard">
             <div class="field" style="margin-bottom: 0">
               <div class="row" style="justify-content: space-between; margin-bottom: 4px">
-                <label style="margin: 0">通用 JSON Webhook HMAC-SHA256 验签密钥</label>
+                <label style="margin: 0">通用 JSON Webhook HMAC-SHA256 验签密钥（仅第三方聚合/测试用，直连官方留空）</label>
                 <span class="tag" :class="settings.saas_payment_notify_secret_set ? 'tag-ok' : ''">
                   {{ settings.saas_payment_notify_secret_set ? '已配置' : '未设置' }}
                 </span>
@@ -404,47 +407,83 @@
               <input class="input mono" type="password" placeholder="留空保持不变" v-model="settings.saas_payment_notify_secret" />
             </div>
           </div>
+        </div>
 
-          <div class="subcard">
-            <div class="kpi-label" style="margin-bottom: 8px">异步通知回调 URL（填至支付宝开放平台 / 微信商户后台）</div>
-            <div class="field">
-              <label>支付宝官方回调地址 (notify_url)</label>
-              <div class="row">
-                <input class="input mono" :value="defaultAlipayNotifyUrl" readonly style="flex: 1" />
-                <button class="btn btn-sm" @click="copyText(defaultAlipayNotifyUrl)">复制</button>
-              </div>
-            </div>
-            <div class="field" style="margin-bottom: 0">
-              <label>微信支付 V3 官方回调地址 (notify_url)</label>
-              <div class="row">
-                <input class="input mono" :value="defaultWechatNotifyUrl" readonly style="flex: 1" />
-                <button class="btn btn-sm" @click="copyText(defaultWechatNotifyUrl)">复制</button>
-              </div>
-            </div>
+        <div class="subcard" style="margin-bottom: 14px">
+          <div class="row" style="justify-content: space-between; margin-bottom: 10px">
+            <strong style="font-size: 13px; color: var(--text-strong)">前台可用支付方式开关（支持手动多选开放或逐项关闭，未勾选项前台自动隐藏）</strong>
+            <span class="muted" style="font-size: 12px">勾选几项，租户端「在线钱包充值收银台」就显示几项；修改后请点击右上角「保存全部支付网关参数」</span>
+          </div>
+          <div class="grid-3">
+            <label class="row" style="cursor: pointer; justify-content: space-between; padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px">
+              <span>
+                <strong style="display: block; font-size: 13px">支付宝当面付</strong>
+                <span class="muted" style="font-size: 11px">官方 `precreate` 网页动态出码 · 自动到账</span>
+              </span>
+              <input type="checkbox" v-model="settings.saas_alipay_f2f_enabled" />
+            </label>
+            <label class="row" style="cursor: pointer; justify-content: space-between; padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px">
+              <span>
+                <strong style="display: block; font-size: 13px">支付宝电脑网站支付</strong>
+                <span class="muted" style="font-size: 11px">官方 `page.pay` 跳转网页收银台</span>
+              </span>
+              <input type="checkbox" v-model="settings.saas_alipay_page_enabled" />
+            </label>
+            <label class="row" style="cursor: pointer; justify-content: space-between; padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px">
+              <span>
+                <strong style="display: block; font-size: 13px">支付宝扫码转账（人工核账）</strong>
+                <span class="muted" style="font-size: 11px">展示固定收款码 · 人工确认入账</span>
+              </span>
+              <input type="checkbox" v-model="settings.saas_alipay_static_enabled" />
+            </label>
+            <label class="row" style="cursor: pointer; justify-content: space-between; padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px">
+              <span>
+                <strong style="display: block; font-size: 13px">微信支付 Native V3</strong>
+                <span class="muted" style="font-size: 11px">官方直连 V3 动态扫码 · 自动到账</span>
+              </span>
+              <input type="checkbox" v-model="settings.saas_wechat_native_enabled" />
+            </label>
+            <label class="row" style="cursor: pointer; justify-content: space-between; padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px">
+              <span>
+                <strong style="display: block; font-size: 13px">微信扫码转账（人工核账）</strong>
+                <span class="muted" style="font-size: 11px">展示固定收款码 · 人工确认入账</span>
+              </span>
+              <input type="checkbox" v-model="settings.saas_wechat_static_enabled" />
+            </label>
           </div>
         </div>
 
         <div class="grid-2">
           <!-- 支付宝开放平台子卡 -->
           <div class="subcard">
-            <div class="card-title" style="font-size: 14px; margin-bottom: 12px">
-              <span>支付宝开放平台配置 (RSA2)</span>
-              <span class="tag" :class="settings.saas_alipay_enabled ? 'tag-ok' : ''">{{ settings.saas_alipay_enabled ? '已启用' : '已关闭' }}</span>
+            <div class="card-title" style="font-size: 14px; margin-bottom: 10px">
+              <span>支付宝开放平台配置 (当面付 / 电脑网站 / 人工收款码)</span>
+              <span class="tag" :class="settings.saas_alipay_enabled ? 'tag-ok' : ''">{{ settings.saas_alipay_enabled ? '总开关已启用' : '总开关已关闭' }}</span>
             </div>
-            <div class="grid-2">
+            <div class="banner banner-info" style="font-size: 12px; margin-bottom: 12px">
+              <strong>开放平台对接提示：</strong>支付宝开放平台里的「授权回调地址」「应用网关」「接口内容加密方式 (AES)」均<strong>留空/未设置</strong>即可；支付所需的 <code>notify_url</code> 会在每次下单时由本系统自动携带。加签方式如在开放平台选了<strong>「密钥/普通公钥」</strong>请选公钥模式，选了<strong>「证书」</strong>请切换为公钥证书模式并读取 3 个 <code>.crt</code> 证书文件。
+            </div>
+            <div class="grid-3">
               <div class="field">
-                <label>通道开关</label>
+                <label>支付宝总开关（关闭则隐藏全部支付宝方式）</label>
                 <select class="select" v-model="settings.saas_alipay_enabled">
-                  <option :value="true">启用支付宝</option>
-                  <option :value="false">停用支付宝</option>
+                  <option :value="true">启用支付宝通道</option>
+                  <option :value="false">关闭全部支付宝</option>
                 </select>
               </div>
               <div class="field">
-                <label>接入下单模式</label>
+                <label>默认下单模式（三选一）</label>
                 <select class="select" v-model="settings.saas_alipay_mode">
-                  <option value="precreate">当面付扫码 (precreate)</option>
+                  <option value="precreate">当面付扫码 (precreate · 客户扫网页动态码)</option>
                   <option value="page_pay">电脑网站跳转收银台 (page.pay)</option>
-                  <option value="static_qr">静态收款码 / 沙盒兜底</option>
+                  <option value="static_qr">人工收款码转账（扫码付款 · 人工核账）</option>
+                </select>
+              </div>
+              <div class="field">
+                <label>开放平台接口加签方式（二选一）</label>
+                <select class="select" v-model="settings.saas_alipay_sign_mode">
+                  <option value="public_key">普通公钥加签 (RSA2 公钥)</option>
+                  <option value="cert">公钥证书加签 (3 个 .crt 证书)</option>
                 </select>
               </div>
             </div>
@@ -454,26 +493,74 @@
                 <input class="input mono" placeholder="202100..." v-model="settings.saas_alipay_app_id" />
               </div>
               <div class="field">
-                <label>网关地址 (沙盒可改 openapi-sandbox)</label>
+                <label>网关地址 (官方沙盒可改 openapi-sandbox)</label>
                 <input class="input mono" v-model="settings.saas_alipay_gateway_url" />
               </div>
             </div>
             <div class="grid-2">
               <div class="field">
-                <label>自定义异步回调 URL（留空用默认）</label>
+                <div class="label-with-help">
+                  <span>异步回调 URL（一般留空自动使用当前域名默认地址）</span>
+                  <button
+                    type="button"
+                    class="help-icon-btn"
+                    :class="{ active: activePaymentHelp === 'alipay_notify' }"
+                    title="点击查看说明"
+                    aria-label="查看支付宝异步回调 URL 说明"
+                    @click="togglePaymentHelp('alipay_notify')"
+                  >
+                    ?
+                  </button>
+                </div>
                 <input class="input mono" :placeholder="defaultAlipayNotifyUrl" v-model="settings.saas_alipay_notify_url" />
               </div>
               <div class="field">
-                <label>电脑支付同步回跳 Return URL（可选）</label>
-                <input class="input mono" placeholder="https://your-domain.com/" v-model="settings.saas_alipay_return_url" />
+                <div class="label-with-help">
+                  <span>电脑支付同步回跳 Return URL（可选）</span>
+                  <button
+                    type="button"
+                    class="help-icon-btn"
+                    :class="{ active: activePaymentHelp === 'alipay_return' }"
+                    title="点击查看说明"
+                    aria-label="查看电脑支付同步回跳 Return URL 说明"
+                    @click="togglePaymentHelp('alipay_return')"
+                  >
+                    ?
+                  </button>
+                </div>
+                <input class="input mono" :placeholder="defaultReturnUrl" v-model="settings.saas_alipay_return_url" />
               </div>
+            </div>
+            <div v-if="activePaymentHelp === 'alipay_notify'" class="banner banner-info" style="font-size: 12px">
+              <div class="row" style="justify-content: space-between; margin-bottom: 4px">
+                <strong>异步回调 URL (notify_url) 说明：什么时候需要改？</strong>
+                <button type="button" class="btn btn-sm" @click="activePaymentHelp = ''">收起</button>
+              </div>
+              <div>• <strong>怎么工作：</strong>用户付款成功后，支付宝官方服务器向该地址推送签名的入账通知，每次下单由本系统自动随参数上传，<strong>无需填到支付宝开放平台后台</strong>。</div>
+              <div>• <strong>什么时候留空（推荐）：</strong>默认留空即可，系统会自动识别当前访问域名拼接 <code>{{ defaultAlipayNotifyUrl }}</code>。</div>
+              <div>• <strong>什么时候需要改：</strong>仅当后台管理访问域名与公网真实回调入口不一致（如多级反代、CDN 转发或指定独立回调域名）时，才需手动填写完整 <code>https://...</code> 地址。</div>
+            </div>
+            <div v-if="activePaymentHelp === 'alipay_return'" class="banner banner-info" style="font-size: 12px">
+              <div class="row" style="justify-content: space-between; margin-bottom: 4px">
+                <strong>电脑支付同步回跳 Return URL 说明：什么时候需要改？</strong>
+                <button type="button" class="btn btn-sm" @click="activePaymentHelp = ''">收起</button>
+              </div>
+              <div>• <strong>作用：</strong>仅在启用 <strong>「支付宝电脑网站支付 (page.pay)」</strong> 时生效。用户在支付宝网页收银台付款完成后，浏览器会自动跳回该地址（不负责入账，实际入账仍靠异步回调/查单）。</div>
+              <div>• <strong>什么时候留空（推荐）：</strong>日常使用直接留空即可，留空会自动跳回当前站点首页 <code>{{ defaultReturnUrl }}</code>；若只使用「当面付扫码」或「人工收款码」，此项完全不会用到。</div>
+              <div>• <strong>什么时候需要改：</strong>① 希望用户电脑端付完款后跳到指定的自定义落地页/公告页；② 前面挂了多层反代或子路径，导致系统自动识别的首页域名与用户真实访问域名不一致时，手动填入完整 <code>https://...</code> 即可。</div>
             </div>
             <div class="field">
               <div class="row" style="justify-content: space-between; margin-bottom: 4px">
                 <label style="margin: 0">应用私钥 (RSA2 PKCS8 / PKCS1)</label>
-                <span class="tag" :class="settings.saas_alipay_private_key_set ? 'tag-ok' : ''">
-                  {{ settings.saas_alipay_private_key_set ? '数据库已加密保存（留空保留）' : '未配置' }}
-                </span>
+                <div class="row" style="gap: 6px">
+                  <label class="btn btn-sm" style="cursor: pointer; margin: 0">
+                    读取私钥文件
+                    <input type="file" accept=".pem,.txt,.key" style="display: none" @change="(e) => loadTextFile(e, 'saas_alipay_private_key')" />
+                  </label>
+                  <span class="tag" :class="settings.saas_alipay_private_key_set ? 'tag-ok' : ''">
+                    {{ settings.saas_alipay_private_key_set ? '数据库已加密保存（留空保留）' : '未配置' }}
+                  </span>
+                </div>
               </div>
               <textarea
                 class="textarea mono"
@@ -482,8 +569,9 @@
                 v-model="settings.saas_alipay_private_key"
               ></textarea>
             </div>
-            <div class="field">
-              <label>支付宝公钥（用于校验支付宝返回及异步通知 RSA2 签名）</label>
+
+            <div v-if="settings.saas_alipay_sign_mode !== 'cert'" class="field">
+              <label>支付宝公钥（选择「公钥/密钥」加签时，粘贴开放平台给出的支付宝公钥字符串）</label>
               <textarea
                 class="textarea mono"
                 rows="3"
@@ -491,37 +579,114 @@
                 v-model="settings.saas_alipay_public_key"
               ></textarea>
             </div>
+
+            <template v-else>
+              <div class="field">
+                <div class="row" style="justify-content: space-between; margin-bottom: 4px">
+                  <label style="margin: 0">1) 应用公钥证书 (appCertPublicKey_*.crt)</label>
+                  <label class="btn btn-sm" style="cursor: pointer; margin: 0">
+                    选择 .crt 文件
+                    <input type="file" accept=".crt,.pem" style="display: none" @change="(e) => loadTextFile(e, 'saas_alipay_app_cert')" />
+                  </label>
+                </div>
+                <textarea
+                  class="textarea mono"
+                  rows="2"
+                  placeholder="-----BEGIN CERTIFICATE----- ...（用于自动计算 app_cert_sn）"
+                  v-model="settings.saas_alipay_app_cert"
+                ></textarea>
+              </div>
+              <div class="field">
+                <div class="row" style="justify-content: space-between; margin-bottom: 4px">
+                  <label style="margin: 0">2) 支付宝公钥证书 (alipayCertPublicKey_RSA2.crt)</label>
+                  <label class="btn btn-sm" style="cursor: pointer; margin: 0">
+                    选择 .crt 文件
+                    <input type="file" accept=".crt,.pem" style="display: none" @change="(e) => loadTextFile(e, 'saas_alipay_cert_public_key')" />
+                  </label>
+                </div>
+                <textarea
+                  class="textarea mono"
+                  rows="2"
+                  placeholder="-----BEGIN CERTIFICATE----- ...（用于校验支付宝网关响应与异步通知签名）"
+                  v-model="settings.saas_alipay_cert_public_key"
+                ></textarea>
+              </div>
+              <div class="field">
+                <div class="row" style="justify-content: space-between; margin-bottom: 4px">
+                  <label style="margin: 0">3) 支付宝根证书 (alipayRootCert.crt)</label>
+                  <label class="btn btn-sm" style="cursor: pointer; margin: 0">
+                    选择 .crt 文件
+                    <input type="file" accept=".crt,.pem" style="display: none" @change="(e) => loadTextFile(e, 'saas_alipay_root_cert')" />
+                  </label>
+                </div>
+                <textarea
+                  class="textarea mono"
+                  rows="2"
+                  placeholder="-----BEGIN CERTIFICATE----- ...（含多个根证书块，用于自动计算 alipay_root_cert_sn）"
+                  v-model="settings.saas_alipay_root_cert"
+                ></textarea>
+              </div>
+            </template>
+
             <div class="field" style="margin-bottom: 0">
-              <label>静态收款码兜底链接（当模式为静态码时使用）</label>
-              <input class="input mono" placeholder="https://qr.alipay.com/..." v-model="settings.saas_alipay_qr_url" />
+              <div class="label-with-help">
+                <span>静态收款码兜底链接（当模式为静态码时使用）</span>
+                <button
+                  type="button"
+                  class="help-icon-btn"
+                  :class="{ active: activePaymentHelp === 'alipay_static_qr' }"
+                  title="点击查看说明"
+                  aria-label="查看支付宝静态收款码获取方法"
+                  @click="togglePaymentHelp('alipay_static_qr')"
+                >
+                  ?
+                </button>
+              </div>
+              <input
+                class="input mono"
+                placeholder="https://qr.alipay.com/... 或图片直链（不使用静态码请留空）"
+                v-model="settings.saas_alipay_qr_url"
+              />
+            </div>
+            <div v-if="activePaymentHelp === 'alipay_static_qr'" class="banner banner-info" style="font-size: 12px; margin-top: 10px; margin-bottom: 0">
+              <div class="row" style="justify-content: space-between; margin-bottom: 4px">
+                <strong>支付宝静态收款码兜底链接：需要填吗？怎么获取？</strong>
+                <button type="button" class="btn btn-sm" @click="activePaymentHelp = ''">收起</button>
+              </div>
+              <div>• <strong>是否必填：</strong>如果只用官方 <strong>当面付 (precreate)</strong> 或 <strong>电脑网站支付 (page.pay)</strong>，<strong>留空即可</strong>；仅当开启「支付宝扫码转账（人工核账）」时才需要填写。</div>
+              <div>• <strong>获取文本链接（推荐，自动生成矢量二维码）：</strong>在手机支付宝保存您的个人收款码图片，使用二维码识别/解码工具扫一下该图片，会得到一串类似 <code>https://qr.alipay.com/fkx...</code> 的文本。填在这里后，前台会自动渲染为高清黑白矢量二维码，与原图扫码效果完全一致。</div>
+              <div>• <strong>或填图片直链：</strong>也可以填写您已托管在图床上的图片直链（以 <code>.png/.jpg/.webp</code> 结尾），前台将直接显示该图片；切勿填写普通网页 URL。</div>
             </div>
           </div>
 
           <!-- 微信支付 V3 子卡 -->
           <div class="subcard">
-            <div class="card-title" style="font-size: 14px; margin-bottom: 12px">
-              <span>微信支付商户平台配置 (API V3)</span>
+            <div class="card-title" style="font-size: 14px; margin-bottom: 10px">
+              <span>微信支付商户平台配置 (API V3 / 人工收款码)</span>
               <span class="tag" :class="settings.saas_wechat_enabled ? 'tag-ok' : ''">{{ settings.saas_wechat_enabled ? '已启用' : '已关闭' }}</span>
+            </div>
+            <div class="banner banner-info" style="font-size: 12px; margin-bottom: 12px">
+              <strong>微信商户平台所需 6 项核心信息：</strong>① 绑定的公众号/小程序/开放平台 <strong>AppID</strong>；② <strong>商户号 MchID</strong>；③ <strong>APIv3 密钥（32位）</strong>；④ <strong>商户 API 证书序列号</strong>；⑤ <strong>商户 API 私钥 (`apiclient_key.pem`)</strong>；⑥ <strong>微信支付公钥或平台证书</strong>（强烈建议填写，用于校验微信回调签名防伪造）。
             </div>
             <div class="grid-2">
               <div class="field">
-                <label>通道开关</label>
+                <label>微信总开关（关闭则隐藏全部微信方式）</label>
                 <select class="select" v-model="settings.saas_wechat_enabled">
                   <option :value="true">启用微信支付</option>
                   <option :value="false">停用微信支付</option>
                 </select>
               </div>
               <div class="field">
-                <label>接入下单模式</label>
+                <label>默认下单模式（二选一）</label>
                 <select class="select" v-model="settings.saas_wechat_mode">
                   <option value="native_v3">Native V3 扫码下单 (官方推荐)</option>
-                  <option value="static_qr">静态收款码 / 沙盒兜底</option>
+                  <option value="static_qr">人工收款码转账（扫码付款 · 人工核账）</option>
                 </select>
               </div>
             </div>
             <div class="grid-2">
               <div class="field">
-                <label>绑定 AppID</label>
+                <label>绑定 AppID（公众号/开放平台/小程序）</label>
                 <input class="input mono" placeholder="wx..." v-model="settings.saas_wechat_app_id" />
               </div>
               <div class="field">
@@ -550,16 +715,43 @@
                 <input class="input mono" v-model="settings.saas_wechat_gateway_url" />
               </div>
               <div class="field">
-                <label>自定义异步回调 URL（留空用默认）</label>
+                <div class="label-with-help">
+                  <span>异步回调 URL（一般留空自动使用当前域名默认地址）</span>
+                  <button
+                    type="button"
+                    class="help-icon-btn"
+                    :class="{ active: activePaymentHelp === 'wechat_notify' }"
+                    title="点击查看说明"
+                    aria-label="查看微信异步回调 URL 说明"
+                    @click="togglePaymentHelp('wechat_notify')"
+                  >
+                    ?
+                  </button>
+                </div>
                 <input class="input mono" :placeholder="defaultWechatNotifyUrl" v-model="settings.saas_wechat_notify_url" />
               </div>
+            </div>
+            <div v-if="activePaymentHelp === 'wechat_notify'" class="banner banner-info" style="font-size: 12px">
+              <div class="row" style="justify-content: space-between; margin-bottom: 4px">
+                <strong>微信 V3 异步回调 URL (notify_url) 说明：什么时候需要改？</strong>
+                <button type="button" class="btn btn-sm" @click="activePaymentHelp = ''">收起</button>
+              </div>
+              <div>• <strong>怎么工作：</strong>调用微信 Native V3 下单时由系统自动随请求传给微信（需公网 HTTPS 可达），付款后微信服务器向该地址推送加密回调自动入账。</div>
+              <div>• <strong>什么时候留空（推荐）：</strong>正常直接留空即可，系统会自动拼接 <code>{{ defaultWechatNotifyUrl }}</code>。</div>
+              <div>• <strong>什么时候需要改：</strong>仅当后台域名与公网 HTTPS 回调域名不同（如内网访问后台但公网用反代域名收回调）时，手动填写公网完整 <code>https://...</code> 地址。</div>
             </div>
             <div class="field">
               <div class="row" style="justify-content: space-between; margin-bottom: 4px">
                 <label style="margin: 0">商户 API 私钥 (apiclient_key.pem)</label>
-                <span class="tag" :class="settings.saas_wechat_private_key_set ? 'tag-ok' : ''">
-                  {{ settings.saas_wechat_private_key_set ? '数据库已加密保存（留空保留）' : '未配置' }}
-                </span>
+                <div class="row" style="gap: 6px">
+                  <label class="btn btn-sm" style="cursor: pointer; margin: 0">
+                    读取 .pem 文件
+                    <input type="file" accept=".pem,.key,.txt" style="display: none" @change="(e) => loadTextFile(e, 'saas_wechat_private_key')" />
+                  </label>
+                  <span class="tag" :class="settings.saas_wechat_private_key_set ? 'tag-ok' : ''">
+                    {{ settings.saas_wechat_private_key_set ? '数据库已加密保存（留空保留）' : '未配置' }}
+                  </span>
+                </div>
               </div>
               <textarea
                 class="textarea mono"
@@ -569,7 +761,13 @@
               ></textarea>
             </div>
             <div class="field">
-              <label>微信支付平台公钥 / 证书公钥（可选，用于回调验签）</label>
+              <div class="row" style="justify-content: space-between; margin-bottom: 4px">
+                <label style="margin: 0">微信支付公钥 / 平台证书公钥（用于回调验签）</label>
+                <label class="btn btn-sm" style="cursor: pointer; margin: 0">
+                  读取公钥/证书文件
+                  <input type="file" accept=".pem,.crt,.txt" style="display: none" @change="(e) => loadTextFile(e, 'saas_wechat_platform_public_key')" />
+                </label>
+              </div>
               <textarea
                 class="textarea mono"
                 rows="3"
@@ -578,8 +776,33 @@
               ></textarea>
             </div>
             <div class="field" style="margin-bottom: 0">
-              <label>静态收款码兜底链接（当模式为静态码时使用）</label>
-              <input class="input mono" placeholder="weixin://..." v-model="settings.saas_wechat_qr_url" />
+              <div class="label-with-help">
+                <span>静态收款码兜底链接（当模式为静态码时使用）</span>
+                <button
+                  type="button"
+                  class="help-icon-btn"
+                  :class="{ active: activePaymentHelp === 'wechat_static_qr' }"
+                  title="点击查看说明"
+                  aria-label="查看微信静态收款码获取方法"
+                  @click="togglePaymentHelp('wechat_static_qr')"
+                >
+                  ?
+                </button>
+              </div>
+              <input
+                class="input mono"
+                placeholder="wxp://... 或图片直链（不使用静态码请留空）"
+                v-model="settings.saas_wechat_qr_url"
+              />
+            </div>
+            <div v-if="activePaymentHelp === 'wechat_static_qr'" class="banner banner-info" style="font-size: 12px; margin-top: 10px; margin-bottom: 0">
+              <div class="row" style="justify-content: space-between; margin-bottom: 4px">
+                <strong>微信静态收款码兜底链接：需要填吗？怎么获取？</strong>
+                <button type="button" class="btn btn-sm" @click="activePaymentHelp = ''">收起</button>
+              </div>
+              <div>• <strong>是否必填：</strong>如果只用官方 <strong>Native V3 扫码下单</strong>，<strong>留空即可</strong>；仅当开启「微信扫码转账（人工核账）」时才需要填写。</div>
+              <div>• <strong>获取文本链接（推荐，自动生成矢量二维码）：</strong>在手机微信保存您的个人收款码图片，用二维码识别/解码工具读取其中的文本内容，会得到一串类似 <code>wxp://f2f0...</code> 的协议串。填在这里后，前台会自动渲染为高清黑白矢量二维码，与原图扫码效果完全一致。</div>
+              <div>• <strong>或填图片直链：</strong>也可填写公开可访问的收款码图片直链（以 <code>.png/.jpg/.webp</code> 结尾）；切勿填写普通网页 URL。</div>
             </div>
           </div>
         </div>
@@ -588,9 +811,18 @@
       <div class="card">
         <div class="card-title">
           <span>全网支付宝 / 微信充值订单管理、官方主动查单与人工核账</span>
-          <button class="btn btn-sm" @click="load">刷新订单列表</button>
+          <div class="row" style="gap: 8px">
+            <select v-model="rechargeStatusFilter" class="select" style="width: auto; min-width: 130px; padding: 6px 10px">
+              <option value="">全部状态 ({{ recharges.length }})</option>
+              <option value="pending">待支付</option>
+              <option value="paid">已支付入账</option>
+              <option value="cancelled">已取消</option>
+              <option value="refunded">已冲正退款</option>
+            </select>
+            <button class="btn btn-sm" @click="load">刷新订单列表</button>
+          </div>
         </div>
-        <div v-if="recharges.length === 0" class="muted">暂无充值订单。</div>
+        <div v-if="filteredRecharges.length === 0" class="muted">暂无匹配的充值订单。</div>
         <div v-else class="table-wrap">
           <table>
             <thead>
@@ -605,13 +837,16 @@
               </tr>
             </thead>
             <tbody>
-              <tr v-for="o in recharges" :key="o.id">
-                <td class="mono">{{ o.order_no }}</td>
+              <tr v-for="o in filteredRecharges" :key="o.id">
+                <td class="mono">
+                  <div>{{ o.order_no }}</div>
+                  <div v-if="o.remark" class="muted" style="font-size: 11px">{{ o.remark }}</div>
+                </td>
                 <td>{{ o.username }} (#{{ o.user_id }})</td>
                 <td>{{ o.channel === 'alipay' ? '支付宝' : '微信支付' }}</td>
                 <td class="mono">¥{{ o.amount_yuan }}</td>
                 <td>
-                  <span class="tag" :class="o.status === 'paid' ? 'tag-ok' : 'tag-warn'">{{ o.status }}</span>
+                  <span class="tag" :class="rechargeStatusMeta(o.status).cls">{{ rechargeStatusMeta(o.status).label }}</span>
                   <span class="muted mono" style="margin-left: 6px; font-size: 11px">{{ o.external_trade_no || '-' }}</span>
                 </td>
                 <td class="mono muted">{{ o.paid_at || o.created_at }}</td>
@@ -619,8 +854,17 @@
                   <div class="row" v-if="o.status === 'pending'" style="gap: 6px">
                     <button class="btn btn-sm btn-primary" @click="queryRecharge(o.id)">官方查单</button>
                     <button class="btn btn-sm btn-emerald" @click="confirmRecharge(o.id)">人工确认到账</button>
+                    <button class="btn btn-sm btn-warn" @click="pendingRechargeAction = { type: 'cancel', order: o }">取消/关闭</button>
                   </div>
-                  <span v-else class="muted">已入账</span>
+                  <div class="row" v-else-if="o.status === 'paid'" style="gap: 6px">
+                    <span class="muted" style="font-size: 12px">已入账</span>
+                    <button class="btn btn-sm btn-danger" @click="pendingRechargeAction = { type: 'refund', order: o }">冲正退款</button>
+                  </div>
+                  <div class="row" v-else-if="o.status === 'cancelled'" style="gap: 6px">
+                    <button class="btn btn-sm" @click="queryRecharge(o.id)">官方查单</button>
+                    <button class="btn btn-sm btn-danger" @click="pendingRechargeAction = { type: 'delete', order: o }">删除记录</button>
+                  </div>
+                  <span v-else class="muted">已冲正退款</span>
                 </td>
               </tr>
             </tbody>
@@ -842,6 +1086,37 @@
         </div>
       </div>
     </div>
+    <!-- 弹窗：充值订单操作确认（取消/冲正退款/删除） -->
+    <div v-if="pendingRechargeAction" class="modal-backdrop" @click.self="pendingRechargeAction = null">
+      <div class="modal-box">
+        <h3 class="card-title">
+          <span v-if="pendingRechargeAction.type === 'cancel'">确认取消/关闭未支付订单 {{ pendingRechargeAction.order.order_no }}？</span>
+          <span v-else-if="pendingRechargeAction.type === 'refund'">确认对已入账订单 {{ pendingRechargeAction.order.order_no }} 执行冲正退款？</span>
+          <span v-else>确认删除已取消订单记录 {{ pendingRechargeAction.order.order_no }}？</span>
+        </h3>
+        <p class="muted" style="margin: 0 0 18px">
+          <template v-if="pendingRechargeAction.type === 'cancel'">
+            关闭后订单状态将变更为「已取消 (cancelled)」。若用户实际已在支付宝/微信扫码支付，后续仍可通过「官方查单」或异步回调自动补单入账。
+          </template>
+          <template v-else-if="pendingRechargeAction.type === 'refund'">
+            将从租户「{{ pendingRechargeAction.order.username }}」余额中扣回 ¥{{ pendingRechargeAction.order.amount_yuan }} 并生成冲正流水（仅在租户余额充足时允许执行，平台内不做第三方原路打款）。
+          </template>
+          <template v-else>
+            仅清理该笔已取消的无效订单记录，不影响已入账与已退款财务流水。
+          </template>
+        </p>
+        <div class="row" style="justify-content: flex-end">
+          <button class="btn" @click="pendingRechargeAction = null">返回</button>
+          <button
+            class="btn"
+            :class="pendingRechargeAction.type === 'cancel' ? 'btn-warn' : 'btn-danger'"
+            @click="executeRechargeAction"
+          >
+            {{ pendingRechargeAction.type === 'cancel' ? '确认关闭订单' : pendingRechargeAction.type === 'refund' ? '确认冲正扣回' : '确认删除' }}
+          </button>
+        </div>
+      </div>
+    </div>
   </div>
 </template>
 
@@ -863,6 +1138,8 @@ const levels = ref([])
 const plans = ref([])
 const recentLeases = ref([])
 const recharges = ref([])
+const rechargeStatusFilter = ref('')
+const pendingRechargeAction = ref(null)
 const referralSummary = ref({})
 const referralRewards = ref([])
 const runtimeInfo = ref({})
@@ -927,6 +1204,24 @@ const filteredUsers = computed(() => {
   return list
 })
 
+const filteredRecharges = computed(() => {
+  if (!rechargeStatusFilter.value) return recharges.value
+  return recharges.value.filter((o) => o.status === rechargeStatusFilter.value)
+})
+
+function rechargeStatusMeta(status) {
+  switch (status) {
+    case 'paid':
+      return { label: '已入账', cls: 'tag-ok' }
+    case 'cancelled':
+      return { label: '已取消', cls: 'tag-danger' }
+    case 'refunded':
+      return { label: '已退款', cls: 'tag-info' }
+    default:
+      return { label: '待支付', cls: 'tag-warn' }
+  }
+}
+
 const baseOrigin = computed(() => {
   if (typeof window !== 'undefined' && window.location?.origin) return window.location.origin
   return 'https://your-saas-hub.example.com'
@@ -934,6 +1229,12 @@ const baseOrigin = computed(() => {
 
 const defaultAlipayNotifyUrl = computed(() => `${baseOrigin.value}/api/billing/recharge/notify/alipay`)
 const defaultWechatNotifyUrl = computed(() => `${baseOrigin.value}/api/billing/recharge/notify/wechat`)
+const defaultReturnUrl = computed(() => `${baseOrigin.value}/`)
+
+const activePaymentHelp = ref('')
+function togglePaymentHelp(key) {
+  activePaymentHelp.value = activePaymentHelp.value === key ? '' : key
+}
 
 const settings = reactive({
   saas_reverse_fee_bps: 2500,
@@ -954,16 +1255,25 @@ const settings = reactive({
   saas_daily_streak_bonus_yuan: 0.1,
   saas_alipay_enabled: true,
   saas_alipay_mode: 'precreate',
+  saas_alipay_sign_mode: 'public_key',
+  saas_alipay_f2f_enabled: true,
+  saas_alipay_page_enabled: true,
+  saas_alipay_static_enabled: false,
   saas_alipay_app_id: '',
   saas_alipay_private_key: '',
   saas_alipay_private_key_set: false,
   saas_alipay_public_key: '',
+  saas_alipay_app_cert: '',
+  saas_alipay_cert_public_key: '',
+  saas_alipay_root_cert: '',
   saas_alipay_gateway_url: 'https://openapi.alipay.com/gateway.do',
   saas_alipay_notify_url: '',
   saas_alipay_return_url: '',
   saas_alipay_qr_url: '',
   saas_wechat_enabled: true,
   saas_wechat_mode: 'native_v3',
+  saas_wechat_native_enabled: true,
+  saas_wechat_static_enabled: false,
   saas_wechat_app_id: '',
   saas_wechat_mch_id: '',
   saas_wechat_serial_no: '',
@@ -979,9 +1289,16 @@ const settings = reactive({
   saas_payment_notify_secret_set: false,
 })
 
-function copyText(text) {
-  navigator.clipboard?.writeText(text || '')
-  emit('notify', '已复制到剪贴板')
+function loadTextFile(event, targetKey) {
+  const file = event?.target?.files?.[0]
+  if (!file) return
+  const reader = new FileReader()
+  reader.onload = () => {
+    settings[targetKey] = String(reader.result || '').trim()
+    emit('notify', `已读取文件 ${file.name}，请点击「保存全部支付网关参数」生效`)
+  }
+  reader.readAsText(file)
+  event.target.value = ''
 }
 
 async function load() {
@@ -1072,6 +1389,26 @@ async function queryRecharge(orderId) {
 async function confirmRecharge(orderId) {
   try {
     const res = await apiFetch(`/api/admin/recharges/${orderId}/confirm`, { method: 'POST' })
+    emit('notify', res.message)
+    await load()
+  } catch (e) {
+    emit('notify', e.message)
+  }
+}
+
+async function executeRechargeAction() {
+  const act = pendingRechargeAction.value
+  if (!act?.order) return
+  pendingRechargeAction.value = null
+  try {
+    let res
+    if (act.type === 'cancel') {
+      res = await apiFetch(`/api/admin/recharges/${act.order.id}/cancel`, { method: 'POST' })
+    } else if (act.type === 'refund') {
+      res = await apiFetch(`/api/admin/recharges/${act.order.id}/refund`, { method: 'POST' })
+    } else {
+      res = await apiFetch(`/api/admin/recharges/${act.order.id}`, { method: 'DELETE' })
+    }
     emit('notify', res.message)
     await load()
   } catch (e) {

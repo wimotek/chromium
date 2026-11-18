@@ -4,7 +4,7 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
-from sqlalchemy import func, or_
+from sqlalchemy import case, func, or_
 
 from core.cache import cache_mgr
 from core.db import (
@@ -72,15 +72,24 @@ class AdminSettingsDTO(BaseModel):
     saas_daily_streak_bonus_yuan: Optional[float] = None
     saas_alipay_enabled: Optional[bool] = None
     saas_alipay_mode: Optional[str] = None
+    saas_alipay_sign_mode: Optional[str] = None
+    saas_alipay_f2f_enabled: Optional[bool] = None
+    saas_alipay_page_enabled: Optional[bool] = None
+    saas_alipay_static_enabled: Optional[bool] = None
     saas_alipay_app_id: Optional[str] = None
     saas_alipay_private_key: Optional[str] = None
     saas_alipay_public_key: Optional[str] = None
+    saas_alipay_app_cert: Optional[str] = None
+    saas_alipay_cert_public_key: Optional[str] = None
+    saas_alipay_root_cert: Optional[str] = None
     saas_alipay_gateway_url: Optional[str] = None
     saas_alipay_notify_url: Optional[str] = None
     saas_alipay_return_url: Optional[str] = None
     saas_alipay_qr_url: Optional[str] = None
     saas_wechat_enabled: Optional[bool] = None
     saas_wechat_mode: Optional[str] = None
+    saas_wechat_native_enabled: Optional[bool] = None
+    saas_wechat_static_enabled: Optional[bool] = None
     saas_wechat_app_id: Optional[str] = None
     saas_wechat_mch_id: Optional[str] = None
     saas_wechat_serial_no: Optional[str] = None
@@ -210,16 +219,25 @@ def admin_overview(admin: dict = Depends(require_admin)):
             "saas_daily_streak_bonus_yuan": float(units_to_yuan_str(int(get_setting("saas_daily_streak_bonus_units", "1000") or 0))),
             "saas_alipay_enabled": get_setting("saas_alipay_enabled", "1") == "1",
             "saas_alipay_mode": get_setting("saas_alipay_mode", "precreate") or "precreate",
+            "saas_alipay_sign_mode": get_setting("saas_alipay_sign_mode", "public_key") or "public_key",
+            "saas_alipay_f2f_enabled": get_setting("saas_alipay_f2f_enabled", "1") == "1",
+            "saas_alipay_page_enabled": get_setting("saas_alipay_page_enabled", "1") == "1",
+            "saas_alipay_static_enabled": get_setting("saas_alipay_static_enabled", "0") == "1",
             "saas_alipay_app_id": get_setting("saas_alipay_app_id", ""),
             "saas_alipay_private_key": "",
             "saas_alipay_private_key_set": bool(get_setting("saas_alipay_private_key", "").strip()),
             "saas_alipay_public_key": get_setting("saas_alipay_public_key", ""),
+            "saas_alipay_app_cert": get_setting("saas_alipay_app_cert", ""),
+            "saas_alipay_cert_public_key": get_setting("saas_alipay_cert_public_key", ""),
+            "saas_alipay_root_cert": get_setting("saas_alipay_root_cert", ""),
             "saas_alipay_gateway_url": get_setting("saas_alipay_gateway_url", "https://openapi.alipay.com/gateway.do"),
             "saas_alipay_notify_url": get_setting("saas_alipay_notify_url", ""),
             "saas_alipay_return_url": get_setting("saas_alipay_return_url", ""),
             "saas_alipay_qr_url": get_setting("saas_alipay_qr_url", ""),
             "saas_wechat_enabled": get_setting("saas_wechat_enabled", "1") == "1",
             "saas_wechat_mode": get_setting("saas_wechat_mode", "native_v3") or "native_v3",
+            "saas_wechat_native_enabled": get_setting("saas_wechat_native_enabled", "1") == "1",
+            "saas_wechat_static_enabled": get_setting("saas_wechat_static_enabled", "0") == "1",
             "saas_wechat_app_id": get_setting("saas_wechat_app_id", ""),
             "saas_wechat_mch_id": get_setting("saas_wechat_mch_id", ""),
             "saas_wechat_serial_no": get_setting("saas_wechat_serial_no", ""),
@@ -291,12 +309,26 @@ def admin_update_settings(data: AdminSettingsDTO, request: Request, admin: dict 
         set_setting("saas_alipay_enabled", "1" if data.saas_alipay_enabled else "0")
     if data.saas_alipay_mode is not None and data.saas_alipay_mode.strip().lower() in {"precreate", "page_pay", "static_qr"}:
         set_setting("saas_alipay_mode", data.saas_alipay_mode.strip().lower())
+    if data.saas_alipay_sign_mode is not None and data.saas_alipay_sign_mode.strip().lower() in {"public_key", "cert"}:
+        set_setting("saas_alipay_sign_mode", data.saas_alipay_sign_mode.strip().lower())
+    if data.saas_alipay_f2f_enabled is not None:
+        set_setting("saas_alipay_f2f_enabled", "1" if data.saas_alipay_f2f_enabled else "0")
+    if data.saas_alipay_page_enabled is not None:
+        set_setting("saas_alipay_page_enabled", "1" if data.saas_alipay_page_enabled else "0")
+    if data.saas_alipay_static_enabled is not None:
+        set_setting("saas_alipay_static_enabled", "1" if data.saas_alipay_static_enabled else "0")
     if data.saas_alipay_app_id is not None:
         set_setting("saas_alipay_app_id", data.saas_alipay_app_id.strip())
     if data.saas_alipay_private_key is not None and data.saas_alipay_private_key.strip():
         set_setting("saas_alipay_private_key", data.saas_alipay_private_key.strip())
     if data.saas_alipay_public_key is not None:
         set_setting("saas_alipay_public_key", data.saas_alipay_public_key.strip())
+    if data.saas_alipay_app_cert is not None:
+        set_setting("saas_alipay_app_cert", data.saas_alipay_app_cert.strip())
+    if data.saas_alipay_cert_public_key is not None:
+        set_setting("saas_alipay_cert_public_key", data.saas_alipay_cert_public_key.strip())
+    if data.saas_alipay_root_cert is not None:
+        set_setting("saas_alipay_root_cert", data.saas_alipay_root_cert.strip())
     if data.saas_alipay_gateway_url is not None:
         set_setting("saas_alipay_gateway_url", data.saas_alipay_gateway_url.strip() or "https://openapi.alipay.com/gateway.do")
     if data.saas_alipay_notify_url is not None:
@@ -309,6 +341,10 @@ def admin_update_settings(data: AdminSettingsDTO, request: Request, admin: dict 
         set_setting("saas_wechat_enabled", "1" if data.saas_wechat_enabled else "0")
     if data.saas_wechat_mode is not None and data.saas_wechat_mode.strip().lower() in {"native_v3", "static_qr"}:
         set_setting("saas_wechat_mode", data.saas_wechat_mode.strip().lower())
+    if data.saas_wechat_native_enabled is not None:
+        set_setting("saas_wechat_native_enabled", "1" if data.saas_wechat_native_enabled else "0")
+    if data.saas_wechat_static_enabled is not None:
+        set_setting("saas_wechat_static_enabled", "1" if data.saas_wechat_static_enabled else "0")
     if data.saas_wechat_app_id is not None:
         set_setting("saas_wechat_app_id", data.saas_wechat_app_id.strip())
     if data.saas_wechat_mch_id is not None:
@@ -330,6 +366,20 @@ def admin_update_settings(data: AdminSettingsDTO, request: Request, admin: dict 
     if data.saas_payment_notify_secret is not None and data.saas_payment_notify_secret.strip():
         set_setting("saas_payment_notify_secret", data.saas_payment_notify_secret.strip())
 
+    audit_details = data.model_dump(
+        exclude_none=True,
+        exclude={
+            "saas_payment_notify_secret",
+            "saas_alipay_private_key",
+            "saas_wechat_private_key",
+            "saas_wechat_api_v3_key",
+        },
+    )
+    for k in ("saas_alipay_qr_url", "saas_wechat_qr_url", "saas_alipay_app_cert", "saas_alipay_cert_public_key", "saas_alipay_root_cert", "saas_alipay_public_key", "saas_wechat_platform_public_key"):
+        v = audit_details.get(k)
+        if isinstance(v, str) and len(v) > 256:
+            audit_details[k] = f"[{len(v)} chars]"
+
     write_audit_log(
         action="admin_update_settings",
         actor_id=admin["id"],
@@ -338,15 +388,7 @@ def admin_update_settings(data: AdminSettingsDTO, request: Request, admin: dict 
         target_id="saas_global",
         ip=get_client_ip(request),
         status="ok",
-        details=data.model_dump(
-            exclude_none=True,
-            exclude={
-                "saas_payment_notify_secret",
-                "saas_alipay_private_key",
-                "saas_wechat_private_key",
-                "saas_wechat_api_v3_key",
-            },
-        ),
+        details=audit_details,
     )
     return {"message": "平台策略与支付配置已更新"}
 
@@ -789,7 +831,7 @@ def admin_confirm_recharge(order_id: int, request: Request, admin: dict = Depend
     }
 
 
-@router.post("/api/admin/recharges/{order_id}/query", summary="管理员向支付宝 / 微信官方网关主动查单并同步入账")
+@router.post("/api/admin/recharges/{order_id}/query", summary="管理员向支付宝 / 微信官方网关主动查单并同步入账/关单")
 async def admin_query_recharge(order_id: int, request: Request, admin: dict = Depends(require_admin)):
     with session_scope() as db:
         order = db.get(RechargeOrder, int(order_id))
@@ -799,6 +841,8 @@ async def admin_query_recharge(order_id: int, request: Request, admin: dict = De
 
     if order_payload["status"] == "paid":
         return {"message": "该订单早已完成入账", "order": order_payload, "paid": True}
+    if order_payload["status"] == "refunded":
+        return {"message": "该订单已冲正退款，无法继续查单入账", "order": order_payload, "paid": False}
 
     ch = order_payload["channel"]
     try:
@@ -814,6 +858,15 @@ async def admin_query_recharge(order_id: int, request: Request, admin: dict = De
 
     if not q_res.get("paid"):
         status_hint = q_res.get("trade_status") or q_res.get("trade_state") or q_res.get("sub_msg") or "未支付"
+        if status_hint in {"TRADE_CLOSED", "CLOSED"} and order_payload["status"] == "pending":
+            with session_scope() as db:
+                row = db.get(RechargeOrder, int(order_id))
+                if row is not None and row.status == "pending":
+                    row.status = "cancelled"
+                    row.remark = f"{(row.remark + ' | ') if row.remark else ''}官方网关状态 {status_hint} 自动关闭"[:255]
+                    db.flush()
+                    order_payload = row.to_dict()
+            return {"message": f"官方网关返回交易已关闭 ({status_hint})，订单已同步标记为已取消", "order": order_payload, "paid": False}
         return {"message": f"官方网关返回当前未支付 ({status_hint})", "order": order_payload, "paid": False}
 
     ext_no = q_res.get("trade_no") or f"{ch.upper()}-{order_payload['order_no']}"
@@ -824,6 +877,7 @@ async def admin_query_recharge(order_id: int, request: Request, admin: dict = De
             expected_channel=ch,
             external_trade_no=ext_no,
             paid_remark=f"管理员 {admin['username']} 触发 {ch.upper()} 查单同步到账 ({order_payload['order_no']})",
+            allow_cancelled=True,
         )
     if not res["already_paid"]:
         write_audit_log(
@@ -841,6 +895,135 @@ async def admin_query_recharge(order_id: int, request: Request, admin: dict = De
         "order": res["order"],
         "paid": True,
     }
+
+
+@router.post("/api/admin/recharges/{order_id}/cancel", summary="管理员关闭/取消未支付充值订单")
+def admin_cancel_recharge(order_id: int, request: Request, admin: dict = Depends(require_admin)):
+    with session_scope() as db:
+        order = db.get(RechargeOrder, int(order_id))
+        if order is None:
+            raise HTTPException(status_code=404, detail="充值订单不存在")
+        if order.status == "paid":
+            raise HTTPException(status_code=400, detail="该订单已入账，如需撤回请使用「冲正退款」")
+        if order.status == "cancelled":
+            return {"message": f"订单 {order.order_no} 已处于取消状态", "order": order.to_dict()}
+        if order.status != "pending":
+            raise HTTPException(status_code=400, detail=f"订单状态为 {order.status}，无法取消")
+
+        order.status = "cancelled"
+        order.remark = f"{(order.remark + ' | ') if order.remark else ''}管理员 {admin['username']} 手动关闭"[:255]
+        db.flush()
+        order_payload = order.to_dict()
+
+    write_audit_log(
+        action="admin_cancel_recharge",
+        actor_id=admin["id"],
+        actor_username=admin["username"],
+        target_type="recharge_order",
+        target_id=order_payload["order_no"],
+        ip=get_client_ip(request),
+        status="ok",
+        details={"amount_yuan": order_payload["amount_yuan"], "channel": order_payload["channel"]},
+    )
+    return {"message": f"已关闭未支付订单 {order_payload['order_no']}", "order": order_payload}
+
+
+@router.post("/api/admin/recharges/{order_id}/refund", summary="管理员对已入账充值订单执行冲正退款")
+def admin_refund_recharge(order_id: int, request: Request, admin: dict = Depends(require_admin)):
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    with session_scope() as db:
+        order = db.get(RechargeOrder, int(order_id))
+        if order is None:
+            raise HTTPException(status_code=404, detail="充值订单不存在")
+        if order.status == "refunded":
+            raise HTTPException(status_code=400, detail="该订单已完成冲正退款，请勿重复操作")
+        if order.status != "paid":
+            raise HTTPException(status_code=400, detail=f"仅已入账 (paid) 订单可执行冲正退款，当前状态: {order.status}")
+
+        deduct_units = int(order.amount_units or 0)
+        affected_order = (
+            db.query(RechargeOrder)
+            .filter(RechargeOrder.id == int(order_id), RechargeOrder.status == "paid")
+            .update({RechargeOrder.status: "refunded"}, synchronize_session=False)
+        )
+        if affected_order == 0:
+            raise HTTPException(status_code=409, detail="订单状态已变化，请刷新后重试")
+
+        affected_user = (
+            db.query(User)
+            .filter(User.id == int(order.user_id), User.balance_units >= deduct_units)
+            .update(
+                {
+                    User.balance_units: User.balance_units - deduct_units,
+                    User.total_recharged_units: case(
+                        (User.total_recharged_units >= deduct_units, User.total_recharged_units - deduct_units),
+                        else_=0,
+                    ),
+                },
+                synchronize_session=False,
+            )
+        )
+        if affected_user == 0:
+            raise HTTPException(
+                status_code=400,
+                detail="该租户当前可用余额不足以全额冲正（可能已部分消费），请在「用户管理」中人工调账",
+            )
+
+        db.expire_all()
+        order = db.get(RechargeOrder, int(order_id))
+        u = db.get(User, int(order.user_id))
+        order.remark = f"{(order.remark + ' | ') if order.remark else ''}管理员 {admin['username']} 冲正退款"[:255]
+        db.add(
+            BillingLedger(
+                user_id=u.id,
+                tx_type="recharge_refund",
+                amount_units=-deduct_units,
+                balance_after_units=int(u.balance_units or 0),
+                platform_spread_units=0,
+                remark=f"管理员 {admin['username']} 冲正退款充值订单 ({order.order_no})",
+                created_at=now_str,
+            )
+        )
+        db.flush()
+        order_payload = order.to_dict()
+
+    write_audit_log(
+        action="admin_refund_recharge",
+        actor_id=admin["id"],
+        actor_username=admin["username"],
+        target_type="recharge_order",
+        target_id=order_payload["order_no"],
+        ip=get_client_ip(request),
+        status="ok",
+        details={"amount_yuan": order_payload["amount_yuan"], "channel": order_payload["channel"]},
+    )
+    return {"message": f"已完成订单 {order_payload['order_no']} 冲正退款（-¥{order_payload['amount_yuan']}）", "order": order_payload}
+
+
+@router.delete("/api/admin/recharges/{order_id}", summary="管理员清理已取消的无效充值订单记录")
+def admin_delete_cancelled_recharge(order_id: int, request: Request, admin: dict = Depends(require_admin)):
+    with session_scope() as db:
+        order = db.get(RechargeOrder, int(order_id))
+        if order is None:
+            raise HTTPException(status_code=404, detail="充值订单不存在")
+        if order.status != "cancelled":
+            raise HTTPException(status_code=400, detail="出于财务审计安全，仅允许删除「已取消 (cancelled)」的无效订单记录")
+        order_no = order.order_no
+        amount_yuan = units_to_yuan_str(order.amount_units or 0)
+        db.delete(order)
+        db.flush()
+
+    write_audit_log(
+        action="admin_delete_recharge",
+        actor_id=admin["id"],
+        actor_username=admin["username"],
+        target_type="recharge_order",
+        target_id=order_no,
+        ip=get_client_ip(request),
+        status="ok",
+        details={"amount_yuan": amount_yuan},
+    )
+    return {"message": f"已删除已取消的订单记录 {order_no}"}
 
 
 @router.post("/api/system/cache/reload", summary="热更新 Redis 缓存配置（Admin）")
