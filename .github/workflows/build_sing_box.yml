@@ -1,0 +1,135 @@
+name: Build and Push Sing-box Core Image
+
+on:
+  push:
+    paths:
+      - 'xray/sing-box/**'
+      - '.github/workflows/build_sing_box.yml'
+    branches:
+      - main
+  schedule:
+    - cron: '0 0 * * 0'
+  workflow_dispatch:
+    inputs:
+      singbox_version:
+        description: 'Sing-box 核心版本 (默认 auto 自动获取最新正式版)'
+        required: false
+        default: 'auto'
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Prepare Environment & Version
+        id: prep
+        env:
+          DH_USER: ${{ secrets.DOCKERHUB_USERNAME }}
+          DH_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          if [ -n "$DH_USER" ] && [ -n "$DH_TOKEN" ]; then
+            echo "has_dockerhub=true" >> $GITHUB_OUTPUT
+            echo "dh_user=$(echo "$DH_USER" | tr '[:upper:]' '[:lower:]')" >> $GITHUB_OUTPUT
+            echo "Docker Hub credentials configured."
+          else
+            echo "has_dockerhub=false" >> $GITHUB_OUTPUT
+            echo "dh_user=" >> $GITHUB_OUTPUT
+            echo "Docker Hub credentials missing, skipping Docker Hub push."
+          fi
+
+          REPO_OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          echo "owner_lc=$REPO_OWNER" >> $GITHUB_OUTPUT
+
+          RAW_VER=$(curl -sSL -H "Authorization: Bearer ${{ github.token }}" https://api.github.com/repos/SagerNet/sing-box/releases/latest | jq -r .tag_name)
+          if [ -z "$RAW_VER" ] || [ "$RAW_VER" = "null" ]; then
+            RAW_VER=$(curl -sSI https://github.com/SagerNet/sing-box/releases/latest | grep -i "^location:" | sed -n 's/.*tag\/\([^\r\n]*\).*/\1/p' | tr -d '\r\n')
+          fi
+
+          INPUT_VER="${{ github.event.inputs.singbox_version }}"
+          if [ -n "$INPUT_VER" ] && [ "$INPUT_VER" != "auto" ]; then
+            RAW_VER="$INPUT_VER"
+          fi
+
+          case "$RAW_VER" in
+            v*) TAG_NAME="$RAW_VER"; CLEAN_VER="${RAW_VER#v}" ;;
+            *)  TAG_NAME="v$RAW_VER"; CLEAN_VER="$RAW_VER" ;;
+          esac
+
+          echo "Target Sing-box Version: $TAG_NAME"
+          echo "download_tag=$TAG_NAME" >> $GITHUB_OUTPUT
+          echo "version=$CLEAN_VER" >> $GITHUB_OUTPUT
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Log in to Docker Hub
+        if: steps.prep.outputs.has_dockerhub == 'true'
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Compute Image Tags
+        id: tags
+        run: |
+          OWNER="${{ steps.prep.outputs.owner_lc }}"
+          VER="${{ steps.prep.outputs.version }}"
+          HAS_DH="${{ steps.prep.outputs.has_dockerhub }}"
+          DH_USER="${{ steps.prep.outputs.dh_user }}"
+
+          # GHCR 镜像标签 (与 xray_core 对齐: :latest / :core / :${VER} / :core-${VER})
+          TAG_LIST="ghcr.io/${OWNER}/sing-box:latest,ghcr.io/${OWNER}/sing-box:core"
+          if [ -n "$VER" ] && [ "$VER" != "latest" ]; then
+            TAG_LIST="${TAG_LIST},ghcr.io/${OWNER}/sing-box:${VER},ghcr.io/${OWNER}/sing-box:core-${VER}"
+          fi
+
+          # Docker Hub 镜像标签 (推送至 wimotek/sing-box)
+          if [ "$HAS_DH" = "true" ]; then
+            TAG_LIST="${TAG_LIST},${DH_USER}/sing-box:latest,${DH_USER}/sing-box:core"
+            if [ -n "$VER" ] && [ "$VER" != "latest" ]; then
+              TAG_LIST="${TAG_LIST},${DH_USER}/sing-box:${VER},${DH_USER}/sing-box:core-${VER}"
+            fi
+          fi
+
+          echo "Computed Tags: $TAG_LIST"
+          echo "tags=$TAG_LIST" >> $GITHUB_OUTPUT
+
+      - name: Build and Push Multi-Arch Image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./xray/sing-box
+          file: ./xray/sing-box/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.tags.outputs.tags }}
+          build-args: |
+            SINGBOX_VERSION=${{ steps.prep.outputs.download_tag }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Update Docker Hub Description
+        if: steps.prep.outputs.has_dockerhub == 'true'
+        uses: peter-evans/dockerhub-description@v4
+        continue-on-error: true
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          repository: ${{ steps.prep.outputs.dh_user }}/sing-box
+          readme-filepath: ./xray/sing-box/README.md
+          short-description: "Sing-box Dual-Protocol Edge Core: VLESS-REALITY (TCP) + Hysteria2 (UDP), Non-Root & Hub Ready"

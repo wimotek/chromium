@@ -42,6 +42,19 @@
       </button>
       <button
         class="sub-tab-btn"
+        :class="{ active: settingsSubTab === 'cache' }"
+        @click="openCacheSubTab"
+      >
+        ⚡ 缓存引擎 (Redis / SQL)
+        <span
+          class="badge-count"
+          :class="cacheState.status.backend === 'redis' ? 'badge-cache-redis' : (cacheState.status.configured && !cacheState.status.redis_healthy ? 'badge-cache-warn' : 'badge-cache-sql')"
+        >
+          {{ cacheState.status.backend === 'redis' ? 'Redis' : (cacheState.status.configured && !cacheState.status.redis_healthy ? '已降级' : 'SQL') }}
+        </span>
+      </button>
+      <button
+        class="sub-tab-btn"
         :class="{ active: settingsSubTab === 'cert' }"
         @click="settingsSubTab = 'cert'"
       >
@@ -145,7 +158,7 @@
                 </tr>
                 <tr v-for="item in backupList" :key="item.filename">
                   <td>
-                    <span style="font-family: monospace; font-size: 12px; font-weight: 600; color: #e2e8f0;">
+                    <span class="font-mono" style="font-size: 12px; font-weight: 600; color: #e2e8f0;">
                       {{ item.filename }}
                     </span>
                   </td>
@@ -487,7 +500,240 @@
       </div>
     </div>
 
-    <!-- ==================== 子卡 5：HTTPS 证书与安全凭据 ==================== -->
+    <!-- ==================== 子卡 5：缓存引擎监控与 Redis 热切换 ==================== -->
+    <div v-else-if="settingsSubTab === 'cache'" class="sub-tab-pane">
+      <div class="settings-2col-layout">
+        <!-- 左列：缓存模式切换与 Redis 连接参数 -->
+        <div class="column-stack">
+          <div class="panel-card">
+            <div class="panel-card-header">
+              <div class="panel-title-wrap">
+                <span class="panel-icon">⚡</span>
+                <div>
+                  <strong class="panel-title">缓存引擎模式与 Redis 加速配置</strong>
+                  <div class="panel-sub">保存后持久化至 hub_config.json，多 Worker 进程 1~2 秒内自动热生效，无需重启容器</div>
+                </div>
+              </div>
+            </div>
+
+            <!-- 引擎选择卡片 -->
+            <div class="cache-engine-grid">
+              <label class="cache-engine-card" :class="{ selected: cacheForm.cache_mode === 'sql_cache' }">
+                <input type="radio" value="sql_cache" v-model="cacheForm.cache_mode" />
+                <div class="cache-engine-title">🗄️ 内置 SQL Cache</div>
+                <div class="cache-engine-desc">零外部依赖，复用主库 <code>kv_cache</code> 表（{{ (cacheState.db_dialect || 'sqlite').toUpperCase() }}），开箱即用。</div>
+              </label>
+              <label class="cache-engine-card" :class="{ selected: cacheForm.cache_mode === 'redis' }">
+                <input type="radio" value="redis" v-model="cacheForm.cache_mode" />
+                <div class="cache-engine-title">🚀 Redis 高速加速</div>
+                <div class="cache-engine-desc">毫秒级读写、高并发多 Worker 共享，故障自动熔断降级至 SQL Cache。</div>
+              </label>
+            </div>
+
+            <!-- Redis 连接参数区 -->
+            <div v-if="cacheForm.cache_mode === 'redis'" class="cache-form-section">
+              <div class="inner-divider-title" style="display: flex; justify-content: space-between; align-items: center; margin-top: 14px;">
+                <span>🔌 Redis 连接参数</span>
+                <label class="radio-label" style="margin: 0; font-size: 12px;">
+                  <input type="checkbox" v-model="cacheForm.use_custom_url" />
+                  <span>使用完整 URL（支持 rediss:// TLS / ACL 用户名）</span>
+                </label>
+              </div>
+
+              <div v-if="cacheForm.use_custom_url" class="form-item">
+                <label>完整 Redis 连接 URL</label>
+                <input
+                  v-model="cacheForm.redis_url"
+                  type="text"
+                  class="cyber-input full-w font-mono"
+                  :placeholder="cacheState.config.using_custom_url && cacheState.config.redis_url_masked ? `留空保持当前: ${cacheState.config.redis_url_masked}` : 'redis://:密码@127.0.0.1:6379/0 或 rediss://...'"
+                />
+                <span class="input-hint">如密码含 <code>@</code>、<code>:</code>、<code>#</code> 等特殊字符，建议取消勾选改用下方分项填写（后端自动 URL 转义）。</span>
+              </div>
+
+              <div v-else>
+                <div class="form-row-2">
+                  <div class="form-item">
+                    <label>Redis 主机地址</label>
+                    <input v-model="cacheForm.redis_host" type="text" class="cyber-input full-w font-mono" placeholder="127.0.0.1" />
+                  </div>
+                  <div class="form-item">
+                    <label>端口</label>
+                    <input v-model.number="cacheForm.redis_port" type="number" min="1" max="65535" class="cyber-input full-w font-mono" placeholder="6379" />
+                  </div>
+                </div>
+                <div class="form-row-2">
+                  <div class="form-item">
+                    <label>Redis 密码（无密码留空）</label>
+                    <input
+                      v-model="cacheForm.redis_password"
+                      type="password"
+                      class="cyber-input full-w font-mono"
+                      :disabled="cacheForm.clear_redis_password"
+                      :placeholder="cacheState.config.has_redis_password ? '●●●●●● (留空保持已保存密码)' : '可选，无密码留空'"
+                    />
+                  </div>
+                  <div class="form-item">
+                    <label>库索引 (DB 0~15)</label>
+                    <input v-model.number="cacheForm.redis_db" type="number" min="0" max="15" class="cyber-input full-w font-mono" placeholder="0" />
+                  </div>
+                </div>
+                <div v-if="cacheState.config.has_redis_password" class="form-item" style="margin-top: -8px;">
+                  <label class="radio-label" style="font-size: 12px;">
+                    <input type="checkbox" v-model="cacheForm.clear_redis_password" />
+                    <span>清除已保存的 Redis 密码（切换为无密码 Redis）</span>
+                  </label>
+                </div>
+              </div>
+
+              <div class="inner-divider">
+                <div class="inner-divider-title">⚙️ 前缀与容错熔断调优</div>
+                <div class="form-row-3">
+                  <div class="form-item">
+                    <label>Key 前缀</label>
+                    <input v-model="cacheForm.redis_key_prefix" type="text" class="cyber-input full-w font-mono" placeholder="xray_hub:" />
+                  </div>
+                  <div class="form-item">
+                    <label>连接超时 (秒)</label>
+                    <input v-model.number="cacheForm.redis_timeout" type="number" step="0.1" min="0.3" max="15" class="cyber-input full-w font-mono" />
+                  </div>
+                  <div class="form-item">
+                    <label>熔断冷却 (秒)</label>
+                    <input v-model.number="cacheForm.redis_cooldown_seconds" type="number" min="5" max="600" class="cyber-input full-w font-mono" />
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- 操作按钮栏 -->
+            <div class="cache-action-bar">
+              <button
+                v-if="cacheForm.cache_mode === 'redis'"
+                type="button"
+                class="btn-cyber-action"
+                :disabled="testingCache"
+                @click="handleTestRedis"
+              >
+                {{ testingCache ? '⏳ 正在 PING...' : '🔌 测试 Redis 连通性' }}
+              </button>
+              <button
+                type="button"
+                class="btn-cyber-primary"
+                :disabled="savingCache"
+                @click="handleSaveCacheConfig"
+              >
+                {{ savingCache ? '⏳ 正在校验并热切换...' : '💾 保存并立即热生效' }}
+              </button>
+            </div>
+
+            <div v-if="cacheTestResult.text" class="cache-test-feedback" :class="cacheTestResult.ok ? 'ok' : 'err'">
+              {{ cacheTestResult.ok ? '🟢' : '🔴' }} {{ cacheTestResult.text }}
+            </div>
+          </div>
+        </div>
+
+        <!-- 右列：缓存引擎实时运行遥测 & 生效说明 -->
+        <div class="column-stack">
+          <div class="panel-card">
+            <div class="panel-card-header">
+              <div class="panel-title-wrap">
+                <span class="panel-icon">📡</span>
+                <div>
+                  <strong class="panel-title">当前缓存引擎实时运行状态</strong>
+                  <div class="panel-sub">实时读取后端 CacheManager 实际工作模式与健康探针</div>
+                </div>
+              </div>
+              <div style="display: flex; gap: 8px;">
+                <button class="btn-sm btn-action" :disabled="loadingCache" @click="loadCacheStatus(true)">
+                  {{ loadingCache ? '刷新中...' : '🔄 刷新状态' }}
+                </button>
+                <button class="btn-sm btn-reset" :disabled="flushingCache" @click="handleFlushCache">
+                  {{ flushingCache ? '清理中...' : '🧹 清理业务缓存' }}
+                </button>
+              </div>
+            </div>
+
+            <!-- 实时状态横幅 -->
+            <div
+              class="smtp-status-box"
+              :class="cacheState.status.backend === 'redis' ? 'smtp-ready' : (cacheState.status.configured && !cacheState.status.redis_healthy ? 'cache-degraded-box' : 'smtp-empty')"
+              style="margin-bottom: 14px;"
+            >
+              <div v-if="cacheState.status.backend === 'redis'">
+                🟢 <b>当前运行引擎：Redis 高速缓存（健康运行中）</b>
+                <div style="font-size: 11px; margin-top: 3px;">
+                  目标地址: <code>{{ cacheState.config.redis_url_masked || `${cacheState.config.redis_host}:${cacheState.config.redis_port}/${cacheState.config.redis_db}` }}</code>
+                </div>
+              </div>
+              <div v-else-if="cacheState.status.configured && !cacheState.status.redis_healthy">
+                🟠 <b>当前运行引擎：SQL Cache（Redis 异常，已自动熔断降级）</b>
+                <div style="font-size: 11px; margin-top: 3px;">
+                  冷却倒计时: <b>{{ cacheState.status.cooldown_remaining }}s</b> · 错误: {{ cacheState.status.last_error || '连接超时或认证失败' }}
+                </div>
+              </div>
+              <div v-else>
+                🔵 <b>当前运行引擎：内置 SQL Cache（kv_cache 表）</b>
+                <div style="font-size: 11px; margin-top: 3px;">
+                  复用当前 {{ (cacheState.db_dialect || 'sqlite').toUpperCase() }} 主库共享缓存表，单机零外部依赖。
+                </div>
+              </div>
+            </div>
+
+            <!-- 指标网格 -->
+            <div class="cache-metrics-grid">
+              <div class="cache-metric-item">
+                <div class="cache-metric-label">配置生效来源</div>
+                <div class="cache-metric-val">
+                  {{
+                    cacheState.config.config_source === 'hub_config'
+                      ? 'hub_config.json'
+                      : cacheState.config.config_source === 'env'
+                        ? '容器环境变量'
+                        : '系统默认内置'
+                  }}
+                </div>
+              </div>
+              <div class="cache-metric-item">
+                <div class="cache-metric-label">Key 命名空间前缀</div>
+                <div class="cache-metric-val font-mono">{{ cacheState.config.redis_key_prefix || 'xray_hub:' }}</div>
+              </div>
+              <div class="cache-metric-item" v-if="cacheState.status.backend === 'redis'">
+                <div class="cache-metric-label">Redis PING 延迟</div>
+                <div class="cache-metric-val text-emerald font-mono">
+                  {{ cacheState.status.ping_ms !== null && cacheState.status.ping_ms !== undefined ? `${cacheState.status.ping_ms} ms` : '-' }}
+                </div>
+              </div>
+              <div class="cache-metric-item" v-if="cacheState.status.backend === 'redis'">
+                <div class="cache-metric-label">Redis 版本 / 内存</div>
+                <div class="cache-metric-val font-mono">
+                  {{ cacheState.status.redis_version || '未知' }} / {{ cacheState.status.used_memory_human || '-' }}
+                </div>
+              </div>
+              <div class="cache-metric-item" v-if="cacheState.status.backend === 'redis'">
+                <div class="cache-metric-label">当前 DB 键数 / 连接数</div>
+                <div class="cache-metric-val font-mono">
+                  {{ cacheState.status.dbsize ?? '-' }} keys / {{ cacheState.status.connected_clients ?? '-' }} clients
+                </div>
+              </div>
+              <div class="cache-metric-item">
+                <div class="cache-metric-label">SQL kv_cache 有效条目</div>
+                <div class="cache-metric-val font-mono">{{ cacheState.status.sql_cache_entries ?? 0 }} 条</div>
+              </div>
+            </div>
+
+            <!-- 生效机制与网络说明 -->
+            <div class="backup-tips-box" style="margin-top: 14px;">
+              <strong style="color: #38bdf8; display: block; margin-bottom: 6px;">💡 热切换生效机制与 Docker 网络提示：</strong>
+              <div>• <b>即时热生效（无需重启容器）：</b>点击「保存并立即热生效」后，后端原子写入 <code>{{ cacheState.config.hub_config_path || '/data/hub_config.json' }}</code>，所有 Granian Worker 进程会在 <b>1~2 秒内</b>自动检测文件变化并无缝切换客户端连接。</div>
+              <div>• <b>无需迁移缓存数据：</b>缓存仅存放短期热点（验证码、限流窗口、配置/节点/用户 30 秒快照），切换后自动回源主库重建。</div>
+              <div>• <b>Docker 网络地址：</b><code>network_mode: host</code> 填宿主机 <code>127.0.0.1</code>；若使用 <code>ports</code> 桥接映射，请填写同一 Docker 网络内的 Redis 容器服务名（如 <code>redis</code>）或宿主机内网 IP。</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ==================== 子卡 6：HTTPS 证书与安全凭据 ==================== -->
     <div v-else-if="settingsSubTab === 'cert'" class="sub-tab-pane">
       <div class="settings-2col-layout">
         <div class="column-stack">
@@ -564,7 +810,7 @@
                 <p style="margin: 4px 0 10px 0; color: #94a3b8;">
                   如需使用已有域名证书（如腾讯云/阿里云/Cloudflare/宝塔证书），仅需在启动 Docker 容器时挂载只读目录：
                 </p>
-                <pre class="font-mono" style="padding: 10px; background: rgba(0,0,0,0.4); border-radius: 6px; font-size: 11px; color: #38bdf8; overflow-x: auto; margin-bottom: 10px;">
+                <pre class="font-mono" style="padding: 12px 14px; background: rgba(0,0,0,0.45); border: 1px solid rgba(56,189,248,0.18); border-radius: 6px; font-size: 12.5px; line-height: 1.65; color: #38bdf8; overflow-x: auto; margin-bottom: 10px;">
 docker run -d -p 3000:8443 \
   -v /data/xray:/data \
   -v /www/server/panel/vhost/cert/example.com:/certs:ro \
@@ -596,7 +842,7 @@ docker run -d -p 3000:8443 \
 
         <div style="padding: 12px; background: rgba(245, 158, 11, 0.1); border: 1px solid rgba(245, 158, 11, 0.3); border-radius: 8px; font-size: 12px; color: #fde68a; margin-bottom: 14px; line-height: 1.5;">
           <strong>警告：您即将从以下快照还原整个系统数据库！</strong>
-          <div style="margin-top: 8px; font-family: monospace; font-weight: bold; color: #38bdf8; padding: 6px; background: rgba(0,0,0,0.5); border-radius: 4px;">
+          <div class="font-mono" style="margin-top: 8px; font-weight: bold; color: #38bdf8; padding: 6px; background: rgba(0,0,0,0.5); border-radius: 4px;">
             {{ restoreTargetFilename }}
           </div>
         </div>
@@ -686,6 +932,58 @@ const restoring = ref(false)
 const certInfo = ref({ status: 'none', is_self_signed: true, issuer: '', days_left: 0, cert_path: '', key_path: '' })
 const regeneratingCert = ref(false)
 
+// 缓存引擎（SQL Cache / Redis）相关
+const loadingCache = ref(false)
+const testingCache = ref(false)
+const savingCache = ref(false)
+const flushingCache = ref(false)
+const cacheTestResult = reactive({ ok: false, text: '' })
+const cacheState = reactive({
+  db_dialect: 'sqlite',
+  status: {
+    configured: false,
+    backend: 'sql_cache',
+    redis_healthy: false,
+    cooldown_remaining: 0,
+    last_error: '',
+    redis_lib_available: true,
+    sql_cache_entries: 0,
+    ping_ms: null,
+    redis_version: '',
+    used_memory_human: '',
+    connected_clients: null,
+    dbsize: null
+  },
+  config: {
+    cache_mode: 'sql_cache',
+    config_source: 'default',
+    has_env_redis: false,
+    redis_url_masked: '',
+    using_custom_url: false,
+    redis_host: '127.0.0.1',
+    redis_port: 6379,
+    redis_db: 0,
+    has_redis_password: false,
+    redis_key_prefix: 'xray_hub:',
+    redis_timeout: 1.5,
+    redis_cooldown_seconds: 30,
+    hub_config_path: '/data/hub_config.json'
+  }
+})
+const cacheForm = reactive({
+  cache_mode: 'sql_cache',
+  use_custom_url: false,
+  redis_url: '',
+  redis_host: '127.0.0.1',
+  redis_port: 6379,
+  redis_password: '',
+  clear_redis_password: false,
+  redis_db: 0,
+  redis_key_prefix: 'xray_hub:',
+  redis_timeout: 1.5,
+  redis_cooldown_seconds: 30
+})
+
 const testEmailTo = ref('')
 const testingEmail = ref(false)
 const triggeringTask = ref(false)
@@ -729,6 +1027,7 @@ onMounted(async () => {
 
   loadBackups()
   loadCertInfo()
+  loadCacheStatus(true)
 })
 
 // 加载备份文件列表
@@ -890,6 +1189,128 @@ const loadCertInfo = async () => {
       certInfo.value = res.data.data
     }
   } catch (_) {}
+}
+
+// 缓存引擎状态与配置同步
+const applyCachePayload = (payload, syncForm = true) => {
+  if (!payload) return
+  if (payload.db_dialect) cacheState.db_dialect = payload.db_dialect
+  if (payload.status) Object.assign(cacheState.status, payload.status)
+  if (payload.config) {
+    Object.assign(cacheState.config, payload.config)
+    if (syncForm) {
+      cacheForm.cache_mode = payload.config.cache_mode || 'sql_cache'
+      cacheForm.use_custom_url = Boolean(payload.config.using_custom_url)
+      cacheForm.redis_url = ''
+      cacheForm.redis_host = payload.config.redis_host || '127.0.0.1'
+      cacheForm.redis_port = Number(payload.config.redis_port) || 6379
+      cacheForm.redis_password = ''
+      cacheForm.clear_redis_password = false
+      cacheForm.redis_db = Number(payload.config.redis_db) || 0
+      cacheForm.redis_key_prefix = payload.config.redis_key_prefix || 'xray_hub:'
+      cacheForm.redis_timeout = Number(payload.config.redis_timeout) || 1.5
+      cacheForm.redis_cooldown_seconds = Number(payload.config.redis_cooldown_seconds) || 30
+    }
+  }
+}
+
+const loadCacheStatus = async (syncForm = false) => {
+  loadingCache.value = true
+  try {
+    const res = await axios.post('/api/admin/cache/status', {
+      admin_user: props.currentUser.username,
+      admin_pwd: props.adminPassword
+    })
+    if (res.data.code === 200) {
+      applyCachePayload(res.data.data, syncForm)
+    }
+  } catch (_) {}
+  finally {
+    loadingCache.value = false
+  }
+}
+
+const openCacheSubTab = () => {
+  settingsSubTab.value = 'cache'
+  cacheTestResult.text = ''
+  loadCacheStatus(true)
+}
+
+const buildCacheRequestPayload = () => ({
+  admin_user: props.currentUser.username,
+  admin_pwd: props.adminPassword,
+  cache_mode: cacheForm.cache_mode,
+  redis_url: cacheForm.use_custom_url ? cacheForm.redis_url.trim() : '',
+  use_saved_url: cacheForm.use_custom_url && !cacheForm.redis_url.trim() && Boolean(cacheState.config.using_custom_url),
+  redis_host: cacheForm.use_custom_url ? '' : cacheForm.redis_host.trim(),
+  redis_port: Number(cacheForm.redis_port) || 6379,
+  redis_password: cacheForm.clear_redis_password ? '' : cacheForm.redis_password,
+  clear_redis_password: Boolean(cacheForm.clear_redis_password),
+  redis_db: Number(cacheForm.redis_db) || 0,
+  redis_key_prefix: cacheForm.redis_key_prefix.trim() || 'xray_hub:',
+  redis_timeout: Number(cacheForm.redis_timeout) || 1.5,
+  redis_cooldown_seconds: Number(cacheForm.redis_cooldown_seconds) || 30
+})
+
+const handleTestRedis = async () => {
+  testingCache.value = true
+  cacheTestResult.text = ''
+  try {
+    const res = await axios.post('/api/admin/cache/test', buildCacheRequestPayload())
+    cacheTestResult.ok = res.data.code === 200
+    cacheTestResult.text = res.data.msg
+    if (cacheTestResult.ok) ElMessage.success(res.data.msg)
+    else ElMessage.error(res.data.msg)
+  } catch (err) {
+    cacheTestResult.ok = false
+    cacheTestResult.text = err?.response?.data?.msg || 'Redis 连通性测试请求失败'
+    ElMessage.error(cacheTestResult.text)
+  } finally {
+    testingCache.value = false
+  }
+}
+
+const handleSaveCacheConfig = async () => {
+  savingCache.value = true
+  cacheTestResult.text = ''
+  try {
+    const res = await axios.post('/api/admin/cache/save', buildCacheRequestPayload())
+    if (res.data.code === 200) {
+      ElMessage.success(res.data.msg)
+      applyCachePayload(res.data.data, true)
+    } else {
+      cacheTestResult.ok = false
+      cacheTestResult.text = res.data.msg
+      ElMessage.error(res.data.msg)
+    }
+  } catch (err) {
+    const errMsg = err?.response?.data?.msg || '保存缓存引擎配置失败'
+    cacheTestResult.ok = false
+    cacheTestResult.text = errMsg
+    ElMessage.error(errMsg)
+  } finally {
+    savingCache.value = false
+  }
+}
+
+const handleFlushCache = async () => {
+  flushingCache.value = true
+  try {
+    const res = await axios.post('/api/admin/cache/flush', {
+      admin_user: props.currentUser.username,
+      admin_pwd: props.adminPassword
+    })
+    if (res.data.code === 200) {
+      ElMessage.success(res.data.msg)
+      applyCachePayload(res.data.data, false)
+    } else {
+      ElMessage.error(res.data.msg)
+    }
+  } catch (_) {
+    ElMessage.error('清理缓存失败')
+  } finally {
+    flushingCache.value = false
+  }
 }
 
 const sendUserPushNotification = async () => {
@@ -1240,5 +1661,132 @@ const triggerManualTask = async () => {
   color: #ffffff !important;
   box-shadow: 0 0 10px rgba(239, 68, 68, 0.3);
   transform: translateY(-1px);
+}
+
+/* 缓存引擎（Redis / SQL Cache）面板样式 */
+.badge-cache-redis {
+  background: rgba(16, 185, 129, 0.22);
+  color: #34d399;
+  border-color: rgba(16, 185, 129, 0.4);
+}
+.badge-cache-sql {
+  background: rgba(56, 189, 248, 0.18);
+  color: #38bdf8;
+  border-color: rgba(56, 189, 248, 0.35);
+}
+.badge-cache-warn {
+  background: rgba(245, 158, 11, 0.22);
+  color: #fbbf24;
+  border-color: rgba(245, 158, 11, 0.45);
+}
+
+.cache-engine-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+
+.cache-engine-card {
+  display: block;
+  padding: 14px;
+  border-radius: 8px;
+  border: 1px solid #1e293b;
+  background: #0f172a;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+.cache-engine-card input[type='radio'] {
+  display: none;
+}
+.cache-engine-card.selected {
+  border-color: #38bdf8;
+  background: rgba(14, 165, 233, 0.12);
+  box-shadow: 0 0 14px rgba(56, 189, 248, 0.18);
+}
+.cache-engine-title {
+  font-size: 13px;
+  font-weight: 700;
+  color: #f8fafc;
+  margin-bottom: 4px;
+}
+.cache-engine-desc {
+  font-size: 11px;
+  color: #94a3b8;
+  line-height: 1.5;
+}
+
+.full-w {
+  width: 100% !important;
+  min-width: 0 !important;
+  max-width: 100% !important;
+}
+
+.form-row-3 {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 12px;
+}
+
+.cache-action-bar {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-top: 14px;
+}
+
+.cache-test-feedback {
+  margin-top: 10px;
+  padding: 8px 12px;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 600;
+}
+.cache-test-feedback.ok {
+  background: rgba(16, 185, 129, 0.12);
+  border: 1px solid rgba(16, 185, 129, 0.35);
+  color: #34d399;
+}
+.cache-test-feedback.err {
+  background: rgba(239, 68, 68, 0.12);
+  border: 1px solid rgba(239, 68, 68, 0.35);
+  color: #f87171;
+}
+
+.cache-degraded-box {
+  background: rgba(245, 158, 11, 0.14);
+  border: 1px solid rgba(245, 158, 11, 0.45);
+  color: #fde68a;
+}
+
+.cache-metrics-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+
+.cache-metric-item {
+  padding: 10px 12px;
+  background: rgba(15, 23, 42, 0.75);
+  border: 1px solid rgba(51, 65, 85, 0.6);
+  border-radius: 8px;
+}
+.cache-metric-label {
+  font-size: 11px;
+  color: #94a3b8;
+  margin-bottom: 4px;
+}
+.cache-metric-val {
+  font-size: 13px;
+  font-weight: 700;
+  color: #e2e8f0;
+  word-break: break-all;
+}
+
+@media (max-width: 640px) {
+  .cache-engine-grid,
+  .form-row-3,
+  .cache-metrics-grid {
+    grid-template-columns: 1fr;
+  }
 }
 </style>

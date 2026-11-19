@@ -133,13 +133,13 @@
                   <span class="badge badge-monthly" style="font-weight: 700;">
                     🔄 {{ getMonthlyCardBadge(c.days) }}
                   </span>
-                  <div style="font-size: 11px; color: #38bdf8; margin-top: 3px; font-family: monospace;">
+                  <div style="font-size: 11px; color: #38bdf8; margin-top: 3px; font-family: var(--font-mono);">
                     总服务时限: {{ c.days >= 3650 ? '永久' : c.days + ' 天' }}
                   </div>
                 </div>
                 <div v-else>
                   <span class="badge" style="background: rgba(148, 163, 184, 0.15); color: #94a3b8;">普通固定包</span>
-                  <div style="font-size: 11px; color: #64748b; margin-top: 3px; font-family: monospace;">
+                  <div style="font-size: 11px; color: #64748b; margin-top: 3px; font-family: var(--font-mono);">
                     时限: {{ c.days >= 3650 ? '永久' : c.days + ' 天' }}
                   </div>
                 </div>

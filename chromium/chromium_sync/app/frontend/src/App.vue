@@ -10,7 +10,12 @@ const token = ref(localStorage.getItem('token') || '')
 const setupChecked = ref(false)
 const setupRequired = ref(false)
 const setupDefaults = ref({})
-const runtimeBadge = reactive({ db_type: 'sqlite', cache_backend: 'sqlite_cache' })
+const runtimeBadge = reactive({
+  db_type: 'sqlite',
+  cache_backend: 'sqlite_cache',
+  cache_state: 'sqlite_cache',
+  cache_degraded: false
+})
 
 const activeNav = ref('nodes')
 const captchaSvg = ref('')
@@ -120,6 +125,8 @@ const loadBaseInfo = async () => {
     const rtData = await rtRes.json()
     runtimeBadge.db_type = rtData.db?.db_type || 'sqlite'
     runtimeBadge.cache_backend = rtData.cache?.active_backend || 'sqlite_cache'
+    runtimeBadge.cache_state = rtData.cache?.engine_state || (rtData.cache?.active_backend === 'redis' ? 'redis' : (rtData.cache?.redis_configured ? 'degraded' : 'sqlite_cache'))
+    runtimeBadge.cache_degraded = Boolean(rtData.cache?.degraded || runtimeBadge.cache_state === 'degraded')
   }
 }
 
@@ -132,6 +139,8 @@ const checkSetupAndBoot = async () => {
       setupDefaults.value = data.defaults || {}
       runtimeBadge.db_type = data.db_type || 'sqlite'
       runtimeBadge.cache_backend = data.cache_backend || 'sqlite_cache'
+      runtimeBadge.cache_state = data.cache_state || data.cache_backend || 'sqlite_cache'
+      runtimeBadge.cache_degraded = Boolean(data.cache_degraded || runtimeBadge.cache_state === 'degraded')
     }
   } catch (e) {
     // 静默回退
@@ -149,6 +158,8 @@ const onSetupCompleted = (data) => {
   setupRequired.value = false
   runtimeBadge.db_type = data.db_type || 'sqlite'
   runtimeBadge.cache_backend = data.cache_backend || 'sqlite_cache'
+  runtimeBadge.cache_state = data.cache_state || data.cache_backend || 'sqlite_cache'
+  runtimeBadge.cache_degraded = Boolean(data.cache_degraded || runtimeBadge.cache_state === 'degraded')
   if (data.token) {
     token.value = data.token
     localStorage.setItem('token', data.token)
@@ -231,9 +242,28 @@ onMounted(() => {
         </div>
 
         <div class="header-right">
-          <span style="font-size:11px; color:#38bdf8; background:#09122a; border:1px solid #172554; padding:2px 8px; border-radius:4px; font-family:monospace;">
-            ORM:{{ runtimeBadge.db_type.toUpperCase() }} · {{ runtimeBadge.cache_backend === 'redis' ? '⚡Redis' : '💾SQLite Cache' }}
-          </span>
+          <button
+            type="button"
+            @click="activeNav = 'settings'"
+            title="点击查看缓存引擎状态与热切换配置"
+            :style="{
+              fontSize: '11px',
+              color: runtimeBadge.cache_degraded ? '#fbbf24' : (runtimeBadge.cache_state === 'redis' ? '#34d399' : '#38bdf8'),
+              background: runtimeBadge.cache_degraded ? 'rgba(217, 119, 6, 0.16)' : '#09122a',
+              border: runtimeBadge.cache_degraded ? '1px solid #d97706' : (runtimeBadge.cache_state === 'redis' ? '1px solid #059669' : '1px solid #172554'),
+              padding: '3px 9px',
+              borderRadius: '4px',
+              fontFamily: 'monospace',
+              cursor: 'pointer'
+            }"
+          >
+            ORM:{{ runtimeBadge.db_type.toUpperCase() }} ·
+            {{
+              runtimeBadge.cache_degraded
+                ? '⚠️ 缓存降级 (SQL Cache)'
+                : (runtimeBadge.cache_state === 'redis' ? '⚡ Redis' : '💾 SQL Cache')
+            }}
+          </button>
           <span class="badge-admin">SYSTEM ADMIN</span>
           <span class="username-label">{{ profile.username || 'admin' }}</span>
           <button @click="logout" class="btn-logout">退出</button>

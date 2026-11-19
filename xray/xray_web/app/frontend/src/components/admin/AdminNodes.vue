@@ -149,16 +149,26 @@
           <tbody>
             <tr v-for="node in approvedNodes" :key="node.id" :class="{ 'node-disabled-row': node.status === 0 }">
               <td>
-                <div style="font-weight: 700; color: #f8fafc; display: flex; align-items: center; gap: 6px;">
+                <div style="font-weight: 700; color: #f8fafc; display: flex; align-items: center; gap: 6px; flex-wrap: wrap;">
                   <span>{{ node.name }}</span>
+                  <span v-if="node.core_type === 'singbox'" class="net-mode-pill pill-singbox" title="Sing-box 双协议内核 (VLESS-REALITY + Hysteria2)">
+                    ⚡ Sing-box
+                  </span>
                   <span v-if="node.net_mode === 'reverse_wss'" class="net-mode-pill pill-wss">
                     🔀 WSS反穿
                   </span>
                   <span v-else class="net-mode-pill pill-direct">
                     🌐 公网直连
                   </span>
+                  <span
+                    v-if="node.core_type === 'singbox' && node.hy2_enabled === 1 && node.hy2_port > 0 && node.net_mode !== 'reverse_wss'"
+                    class="net-mode-pill pill-hy2"
+                    :title="`Hysteria2 UDP 已启用 (端口: ${node.hy2_port}, SNI: ${node.hy2_sni || node.sni})`"
+                  >
+                    🌀 Hy2:{{ node.hy2_port }}
+                  </span>
                 </div>
-                <div style="font-size: 11px; color: #38bdf8; font-family: monospace;">{{ node.ip }}:{{ node.port }}</div>
+                <div style="font-size: 11px; color: #38bdf8; font-family: var(--font-mono);">{{ node.ip }}:{{ node.port }}</div>
               </td>
 
               <!-- 准入状态 -->
@@ -170,7 +180,7 @@
 
               <!-- SNI 伪装域名 (恢复展示主 SNI 与多 SNI 数量，端口已在第一列地址中展示) -->
               <td>
-                <div style="font-family: monospace; font-size: 12px; color: #38bdf8; font-weight: 600;">
+                <div style="font-family: var(--font-mono); font-size: 12px; color: #38bdf8; font-weight: 600;">
                   {{ node.sni || 'www.microsoft.com' }}
                 </div>
                 <div v-if="getServerNamesCount(node) > 1" style="font-size: 10px; color: #64748b; margin-top: 2px;">
@@ -286,8 +296,11 @@
           <tbody>
             <tr v-for="node in pendingNodes" :key="node.id" class="node-quarantine-row">
               <td>
-                <div style="font-weight: 700; color: #f8fafc;">{{ node.name }}</div>
-                <div style="font-size: 11px; color: #f59e0b; font-family: monospace;">{{ node.ip }}:{{ node.port }}</div>
+                <div style="font-weight: 700; color: #f8fafc; display: flex; align-items: center; gap: 6px;">
+                  <span>{{ node.name }}</span>
+                  <span v-if="node.core_type === 'singbox'" class="net-mode-pill pill-singbox">⚡ Sing-box</span>
+                </div>
+                <div style="font-size: 11px; color: #f59e0b; font-family: var(--font-mono);">{{ node.ip }}:{{ node.port }}</div>
               </td>
               <td>
                 <span v-if="node.net_mode === 'reverse_wss'" class="net-mode-pill pill-wss">
@@ -303,7 +316,7 @@
                   <button type="button" class="btn-copy-icon" title="点击复制完整公钥" @click.stop.prevent="copyText(node.pbk, '节点公钥')">📋</button>
                 </div>
               </td>
-              <td style="font-size: 12px; color: #94a3b8; font-family: monospace;">
+              <td style="font-size: 12px; color: #94a3b8; font-family: var(--font-mono);">
                 {{ node.last_heartbeat || '刚刚' }}
               </td>
               <td>
@@ -358,7 +371,7 @@
           </thead>
           <tbody>
             <tr v-for="log in auditLogsList" :key="log.id">
-              <td style="font-size: 11px; font-family: monospace; color: #94a3b8;">
+              <td style="font-size: 11px; font-family: var(--font-mono); color: #94a3b8;">
                 {{ log.created_at }}
               </td>
               <td>
@@ -366,10 +379,10 @@
                   {{ log.level }}
                 </span>
               </td>
-              <td style="font-size: 11px; font-family: monospace; color: #38bdf8;">
+              <td style="font-size: 11px; font-family: var(--font-mono); color: #38bdf8;">
                 {{ log.event_type }}
               </td>
-              <td style="font-size: 11px; font-family: monospace; color: #cbd5e1;">
+              <td style="font-size: 11px; font-family: var(--font-mono); color: #cbd5e1;">
                 {{ log.node_id || log.ip || '-' }}
               </td>
               <td style="font-size: 12px; color: #e2e8f0;">
@@ -391,12 +404,41 @@
     <!-- ========================================================================= -->
     <div v-else-if="currentSubTab === 'deploy'">
       <div class="deploy-tab-container">
+        <!-- 内核镜像切换条 -->
+        <div class="deploy-core-switcher">
+          <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
+            <span style="font-size: 12px; font-weight: 600; color: #cbd5e1;">选择节点内核镜像：</span>
+            <button
+              type="button"
+              class="core-switch-btn"
+              :class="{ active: deployCoreType === 'xray' }"
+              @click="deployCoreType = 'xray'"
+            >
+              🚀 Xray-Core (VLESS-REALITY)
+            </button>
+            <button
+              type="button"
+              class="core-switch-btn core-switch-singbox"
+              :class="{ active: deployCoreType === 'singbox' }"
+              @click="deployCoreType = 'singbox'"
+            >
+              ⚡ Sing-box (VLESS-REALITY + Hysteria2 UDP)
+            </button>
+          </div>
+          <span v-if="deployCoreType === 'singbox'" class="deploy-core-hint">
+            支持 TCP + UDP 双协议（含游戏/视频/QUIC 弱网加速），宿主机需同时放行 443/TCP 与 443/UDP，并执行 <code>chown -R 10001:10001 ./data</code>
+          </span>
+          <span v-else class="deploy-core-hint">
+            经典 Xray-Core 极简镜像，原生支持 VLESS-REALITY-Vision 与 WSS 反向穿透
+          </span>
+        </div>
+
         <!-- 1. Docker 极简单行命令秒级部署 -->
         <div class="docker-minimal-section">
           <div class="docker-minimal-header">
             <div>
               <h4 style="color: #f8fafc; margin: 0; display: flex; align-items: center; gap: 8px;">
-                <span style="color: #fbbf24;">⚡</span> Docker 极简最小命令秒级部署 (免写文件，一键直启)
+                <span style="color: #fbbf24;">⚡</span> Docker 极简最小命令秒级部署 ({{ deployCoreType === 'singbox' ? 'wimotek/sing-box' : 'ghcr.io/wimotek/xray' }})
               </h4>
               <p class="modal-tip" style="margin: 4px 0 0 0;">
                 无需创建 docker-compose.yml 文件，在海外 VPS 终端粘贴下方单行指令回车即可完成节点自动握手与上线：
@@ -409,7 +451,10 @@
               <button class="btn-cyber-action" @click="copyText(generatedDockerOneLiner, '带注释部署命令模板')">
                 📋 复制带注释命令模板
               </button>
-              <button class="btn-cyber-action" @click="copyText('docker logs -f xray-node', '容器日志命令')">
+              <button
+                class="btn-cyber-action"
+                @click="copyText(deployCoreType === 'singbox' ? 'docker logs -f singbox-node' : 'docker logs -f xray-node', '容器日志命令')"
+              >
                 📋 复制日志监控命令
               </button>
             </div>
@@ -420,7 +465,7 @@
           <div class="docker-args-grid">
             <div class="docker-arg-card">
               <div class="docker-arg-name">--network=host</div>
-              <div class="docker-arg-desc">直通网卡绑定物理 443 端口，性能无损耗</div>
+              <div class="docker-arg-desc">直通网卡绑定物理 443 TCP/UDP 端口，性能无损耗</div>
             </div>
             <div class="docker-arg-card">
               <div class="docker-arg-name">CLUSTER_TOKEN</div>
@@ -428,9 +473,13 @@
             </div>
             <div class="docker-arg-card">
               <div class="docker-arg-name">-v ./data:/data</div>
-              <div class="docker-arg-desc">挂载持久化目录，保护私钥与节点ID永不丢失</div>
+              <div class="docker-arg-desc">非 Root (UID 10001) 持久化密钥、证书与节点 ID</div>
             </div>
-            <div class="docker-arg-card">
+            <div class="docker-arg-card" v-if="deployCoreType === 'singbox'">
+              <div class="docker-arg-name">HY2_ENABLED=true</div>
+              <div class="docker-arg-desc">同端口并行开启 Hysteria2 UDP，订阅自动双协议下发</div>
+            </div>
+            <div class="docker-arg-card" v-else>
               <div class="docker-arg-name">AUTO_UPDATE=true</div>
               <div class="docker-arg-desc">支持守护进程热重载与看门狗崩溃秒级自愈</div>
             </div>
@@ -439,7 +488,7 @@
 
         <!-- 2. Docker Compose 编排标准文件 -->
         <div class="deploy-tab-box">
-          <h4 style="color: #38bdf8; margin-top: 0;">💻 边缘节点 Docker Compose 生产编排部署文件</h4>
+          <h4 style="color: #38bdf8; margin-top: 0;">💻 边缘节点 Docker Compose 生产编排部署文件 ({{ deployCoreType === 'singbox' ? 'Sing-box 双协议' : 'Xray-Core' }})</h4>
           <p class="modal-tip">
             在需要接入的海外 VPS 或内网主机上新建 <code>docker-compose.yml</code> 并粘贴如下配置，执行 <code>docker compose up -d</code>：
           </p>
@@ -508,6 +557,32 @@
         <div class="form-item">
           <label>多 SNI 域名轮换池 (逗号隔开)</label>
           <input v-model="configForm.server_names" type="text" class="cyber-input modal-input" placeholder="例如: www.amazon.com,aws.amazon.com" />
+        </div>
+        <!-- Sing-box 专属：Hysteria2 UDP 双协议配置区 -->
+        <div v-if="configForm.core_type === 'singbox'" class="hy2-config-box">
+          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+            <span style="font-size: 12px; font-weight: 700; color: #c084fc;">🌀 Sing-box Hysteria2 UDP 策略</span>
+            <label style="display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: #e2e8f0; cursor: pointer;">
+              <input type="checkbox" v-model="configForm.hy2_enabled" />
+              <span>启用 Hysteria2 (UDP)</span>
+            </label>
+          </div>
+          <div v-if="configForm.hy2_enabled" style="display: flex; gap: 10px; align-items: flex-end;">
+            <div class="form-item" style="width: 110px; margin-bottom: 0;">
+              <label>UDP 端口</label>
+              <input v-model.number="configForm.hy2_port" type="number" class="cyber-input modal-input" placeholder="443" />
+            </div>
+            <div class="form-item" style="flex: 1; margin-bottom: 0;">
+              <label>TLS SNI 域名</label>
+              <input v-model="configForm.hy2_sni" type="text" class="cyber-input modal-input" placeholder="www.bing.com" />
+            </div>
+          </div>
+          <div v-if="configForm.hy2_enabled" style="margin-top: 8px; display: flex; justify-content: space-between; align-items: center;">
+            <label style="display: inline-flex; align-items: center; gap: 6px; font-size: 11px; color: #94a3b8; cursor: pointer;">
+              <input type="checkbox" v-model="configForm.hy2_insecure" />
+              <span>客户端跳过自签证书校验 (insecure=1，挂载 CA 域名证书时请取消勾选)</span>
+            </label>
+          </div>
         </div>
         <div class="form-item">
           <div style="display: flex; justify-content: space-between; align-items: center;">
@@ -591,6 +666,7 @@ const props = defineProps({
 const emit = defineEmits(['reload-all', 'copy', 'open-qr'])
 
 const currentSubTab = ref('approved')
+const deployCoreType = ref('xray')
 const adminNodes = ref([])
 const auditLogsList = ref([])
 
@@ -623,7 +699,12 @@ const configForm = reactive({
   dest: '',
   server_names: '',
   sid: '',
-  node_key: ''
+  node_key: '',
+  core_type: 'xray',
+  hy2_enabled: false,
+  hy2_port: 443,
+  hy2_sni: '',
+  hy2_insecure: true
 })
 
 const permForm = reactive({
@@ -644,6 +725,29 @@ const maskedClusterToken = computed(() => {
 const generatedDockerComposeYaml = computed(() => {
   const panelUrl = clusterInfo.panel_url || (typeof window !== 'undefined' ? window.location.origin : '')
   const token = clusterInfo.cluster_token || 'your_cluster_token'
+  if (deployCoreType.value === 'singbox') {
+    return [
+      'services:',
+      '  singbox-node:',
+      '    image: wimotek/sing-box:latest',
+      '    container_name: singbox-node',
+      '    restart: always',
+      '    network_mode: host',
+      '    environment:',
+      `      - PANEL_URL=${panelUrl}`,
+      `      # - CLUSTER_TOKEN=${token} # 选填: 主控已开启免审核可省略`,
+      '      - PORT=443',
+      '      - HY2_ENABLED=true',
+      '      - HY2_PORT=443',
+      '      - HY2_SNI=www.bing.com',
+      '      # - DEST=www.microsoft.com:443 # 选填: REALITY 伪装目标',
+      '      # - SERVER_NAMES=www.microsoft.com,microsoft.com # 选填: REALITY 多 SNI',
+      '      # - HY2_UP_MBPS=200 # 选填: 宿主机上行带宽上限 (Mbps)',
+      '      # - HY2_DOWN_MBPS=500 # 选填: 宿主机下行带宽上限 (Mbps)',
+      '    volumes:',
+      '      - ./data:/data'
+    ].join('\n')
+  }
   return [
     'services:',
     '  xray-node:',
@@ -664,12 +768,34 @@ const generatedDockerComposeYaml = computed(() => {
 
 const generatedDockerPureMinimal = computed(() => {
   const panelUrl = clusterInfo.panel_url || (typeof window !== 'undefined' ? window.location.origin : '')
+  if (deployCoreType.value === 'singbox') {
+    return `mkdir -p ./data && chown -R 10001:10001 ./data && docker run -d --name singbox-node --restart=always --network=host -e PANEL_URL="${panelUrl}" -e HY2_ENABLED=true -e HY2_PORT=443 -v ./data:/data wimotek/sing-box:latest`
+  }
   return `docker run -d --name xray-node --restart=always --network=host -e PANEL_URL="${panelUrl}" -v ./data:/data ghcr.io/wimotek/xray:latest`
 })
 
 const generatedDockerOneLiner = computed(() => {
   const panelUrl = clusterInfo.panel_url || (typeof window !== 'undefined' ? window.location.origin : '')
   const token = clusterInfo.cluster_token || 'ctk_aebaa4b470ee12c6b5d97e23da17d9f1'
+  if (deployCoreType.value === 'singbox') {
+    return [
+      'mkdir -p ./data && chown -R 10001:10001 ./data',
+      'docker run -d \\',
+      '  --name singbox-node \\',
+      '  --restart=always \\',
+      '  --network=host \\',
+      `  -e PANEL_URL="${panelUrl}" \\`,
+      `  # -e CLUSTER_TOKEN="${token}" \\`,
+      '  -e PORT=443 \\',
+      '  -e HY2_ENABLED=true \\',
+      '  -e HY2_PORT=443 \\',
+      '  -e HY2_SNI=www.bing.com \\',
+      '  # -e DEST=www.microsoft.com:443 \\',
+      '  # -e SERVER_NAMES=www.microsoft.com,microsoft.com \\',
+      '  -v ./data:/data \\',
+      '  wimotek/sing-box:latest'
+    ].join('\n')
+  }
   return [
     'docker run -d \\',
     '  --name xray-node \\',
@@ -906,10 +1032,15 @@ const getHeartbeatTooltip = (node) => {
     lines.push('订阅状态: 正常收录下发')
   }
   if (agentHealth) {
+    const coreLabel = node.core_type === 'singbox' ? 'Sing-box' : 'Xray'
     const xrayTxt = agentHealth.xray_alive === false ? '异常' : '正常'
     const portTxt = agentHealth.port_ready === false ? '未监听' : '正常'
     const statsTxt = agentHealth.stats_ready === false ? '异常' : '正常'
-    lines.push(`节点自检: Xray进程[${xrayTxt}] · 业务端口[${portTxt}] · Stats[${statsTxt}]`)
+    let selfCheck = `节点自检: ${coreLabel}进程[${xrayTxt}] · 业务端口[${portTxt}] · Stats[${statsTxt}]`
+    if (agentHealth.hy2_ready !== undefined && agentHealth.hy2_ready !== null) {
+      selfCheck += ` · Hysteria2 UDP[${agentHealth.hy2_ready ? '正常' : '未监听'}]`
+    }
+    lines.push(selfCheck)
   }
   if (ping) {
     if (ping.reason) {
@@ -1119,6 +1250,11 @@ const openConfigModal = (node) => {
   configForm.server_names = node.server_names || node.sni
   configForm.sid = node.sid
   configForm.node_key = node.node_key
+  configForm.core_type = node.core_type || 'xray'
+  configForm.hy2_enabled = Number(node.hy2_enabled || 0) === 1
+  configForm.hy2_port = Number(node.hy2_port || 0) > 0 ? Number(node.hy2_port) : Number(node.port || 443)
+  configForm.hy2_sni = node.hy2_sni || 'www.bing.com'
+  configForm.hy2_insecure = node.hy2_insecure === undefined ? true : Number(node.hy2_insecure) !== 0
   showConfigModal.value = true
 }
 
@@ -1238,7 +1374,7 @@ const handleRevokeDelete = async (nodeId) => {
 }
 
 .cluster-token-code {
-  font-family: monospace;
+  font-family: var(--font-mono);
   font-size: 12px;
   color: #38bdf8;
   background: rgba(0, 0, 0, 0.4);
@@ -1296,7 +1432,7 @@ const handleRevokeDelete = async (nodeId) => {
 
 .sub-tree-prefix {
   color: #64748b;
-  font-family: monospace;
+  font-family: var(--font-mono);
 }
 
 .switch-label-text {
@@ -1556,7 +1692,7 @@ const handleRevokeDelete = async (nodeId) => {
   border: 1px solid rgba(56, 189, 248, 0.25);
   border-radius: 8px;
   padding: 14px 16px;
-  font-family: monospace;
+  font-family: var(--font-mono);
   font-size: 12px;
   line-height: 1.6;
   color: #38bdf8;
@@ -1580,7 +1716,7 @@ const handleRevokeDelete = async (nodeId) => {
 .docker-arg-name {
   color: #f1f5f9;
   font-weight: 600;
-  font-family: monospace;
+  font-family: var(--font-mono);
 }
 .docker-arg-desc {
   color: #94a3b8;
@@ -1820,7 +1956,7 @@ const handleRevokeDelete = async (nodeId) => {
 }
 
 .yaml-code-view {
-  font-family: monospace;
+  font-family: var(--font-mono);
   font-size: 12px;
   color: #38bdf8;
   margin: 0;
@@ -1861,7 +1997,7 @@ const handleRevokeDelete = async (nodeId) => {
 }
 
 .pbk-clean-text {
-  font-family: monospace;
+  font-family: var(--font-mono);
   font-size: 11px;
   color: #38bdf8;
   background: transparent !important;
@@ -1910,5 +2046,65 @@ const handleRevokeDelete = async (nodeId) => {
   border-radius: 6px;
   padding: 12px;
   margin-top: 10px;
+}
+
+.pill-singbox {
+  background: rgba(168, 85, 247, 0.16);
+  color: #c084fc;
+  border: 1px solid rgba(168, 85, 247, 0.35);
+}
+
+.pill-hy2 {
+  background: rgba(6, 182, 212, 0.15);
+  color: #22d3ee;
+  border: 1px solid rgba(6, 182, 212, 0.35);
+}
+
+.deploy-core-switcher {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  background: rgba(15, 23, 42, 0.8);
+  border: 1px solid rgba(56, 189, 248, 0.25);
+  border-radius: 8px;
+  padding: 12px 14px;
+  margin-bottom: 14px;
+}
+
+.core-switch-btn {
+  background: rgba(30, 41, 59, 0.85);
+  color: #94a3b8;
+  border: 1px solid rgba(71, 85, 105, 0.6);
+  border-radius: 6px;
+  padding: 6px 12px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.core-switch-btn.active {
+  background: rgba(56, 189, 248, 0.2);
+  color: #38bdf8;
+  border-color: rgba(56, 189, 248, 0.65);
+}
+
+.core-switch-btn.core-switch-singbox.active {
+  background: rgba(168, 85, 247, 0.22);
+  color: #d8b4fe;
+  border-color: rgba(168, 85, 247, 0.7);
+}
+
+.deploy-core-hint {
+  font-size: 11px;
+  color: #94a3b8;
+}
+
+.hy2-config-box {
+  background: rgba(88, 28, 135, 0.14);
+  border: 1px solid rgba(168, 85, 247, 0.3);
+  border-radius: 6px;
+  padding: 10px 12px;
+  margin-bottom: 12px;
 }
 </style>

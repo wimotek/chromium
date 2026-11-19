@@ -193,8 +193,9 @@ docker run -d \
 主控内建统一缓存层（`core/cache.py`），遵循 **“Redis 优先 + 熔断降级 + SQL Cache 自动回退”**：
 
 1. **零配置默认模式**：未配置 `REDIS_URL` / `REDIS_HOST` 时，自动复用主库（SQLite 或 MySQL）中的 `kv_cache` 表，单容器开箱即用。
-2. **开启 Redis 加速**：通过向导或传入 `-e REDIS_URL="redis://[:密码@]主机:6379/0"`，自动接管图形验证码、限流计数、OTP 验证码、`system_settings`、活跃用户及节点列表快照。
-3. **故障无感回退**：Redis 超时（默认 `1.5s`）或宕机时触发冷却（默认 `30s`），自动回退至 SQL `kv_cache`（支持原子删除与行级锁），待 Redis 恢复后自动切回。
+2. **后台可视化查看与在线热切换（推荐）**：登录管理后台 → **「🗄️ 数据库自动备份与全局配置」→「⚡ 缓存引擎 (Redis / SQL)」**，可实时查看当前缓存引擎模式、PING 延迟、Redis 版本/内存/连接数与熔断降级状态，支持在线测试连通性并**一键保存热生效**（原子落盘 `/data/hub_config.json`，所有 Granian Worker 进程 1~2 秒内自动同步，**无需重启容器**），同时支持一键清理业务缓存。
+3. **环境变量 / 首次向导配置**：也可在首次运行安装向导配置，或通过 `-e REDIS_URL="redis://[:密码@]主机:6379/0"`（及 `REDIS_HOST` / `REDIS_PORT` / `REDIS_PASSWORD` / `REDIS_DB`）声明；旧版向导留空的 `redis_url` 不会覆盖环境变量中的 Redis 配置。
+4. **故障无感回退**：Redis 超时（默认 `1.5s`）或宕机时触发冷却（默认 `30s`），自动回退至 SQL `kv_cache`（支持原子删除与行级锁），待 Redis 恢复后自动切回。
 
 ---
 

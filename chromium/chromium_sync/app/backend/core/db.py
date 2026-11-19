@@ -184,6 +184,17 @@ def get_active_db_info() -> Dict[str, Any]:
     if not _active_db_config:
         get_engine()
     info = dict(_active_db_config)
+    db_type = str(info.get("db_type") or "sqlite").lower()
+    if db_type == "mysql":
+        host = info.get("mysql_host") or DEFAULT_MYSQL_HOST
+        port = info.get("mysql_port") or DEFAULT_MYSQL_PORT
+        database = info.get("mysql_database") or DEFAULT_MYSQL_DATABASE
+        user = info.get("mysql_user") or DEFAULT_MYSQL_USER
+        info["target"] = f"{user}@{host}:{port}/{database}"
+    else:
+        info["target"] = str(info.get("sqlite_path") or DB_PATH)
+    info["dialect"] = db_type
+    info["status"] = "active"
     info["cache_backend"] = cache_mgr.get_status()["active_backend"]
     return info
 

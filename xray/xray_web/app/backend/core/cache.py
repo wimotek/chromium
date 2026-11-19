@@ -11,7 +11,7 @@ import threading
 import time
 from typing import Any, Callable, Optional
 
-from sqlalchemy import delete, select, text
+from sqlalchemy import delete, func, select, text
 
 from config import Config
 from core.db import db_session, upsert_kv_cache
@@ -25,42 +25,76 @@ except ImportError:
 
 class CacheManager:
     def __init__(self):
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self._client = None
         self._client_url: str = ""
+        self._last_attempted_url: str = ""
         self._cooldown_until: float = 0.0
         self._was_degraded: bool = False
+        self._last_error: str = ""
         self._sql_dirty: bool = False
 
     def _prefixed(self, key: str) -> str:
         return f"{Config.REDIS_KEY_PREFIX}{key}"
 
+    def _close_client_locked(self):
+        old = self._client
+        self._client = None
+        self._client_url = ""
+        if old is not None:
+            try:
+                old.close()
+            except Exception:
+                pass
+
     def reset_client(self):
         with self._lock:
-            self._client = None
-            self._client_url = ""
+            self._close_client_locked()
+            self._last_attempted_url = ""
             self._cooldown_until = 0.0
             self._was_degraded = False
+            self._last_error = ""
 
     def _get_redis(self):
         if redis_lib is None:
             return None
         url = Config.effective_redis_url()
         if not url:
+            if self._client is not None or self._client_url or self._last_attempted_url:
+                with self._lock:
+                    self._close_client_locked()
+                    self._last_attempted_url = ""
+                    self._cooldown_until = 0.0
+                    self._was_degraded = False
+                    self._last_error = ""
             return None
+
         now = time.monotonic()
-        if now < self._cooldown_until:
+        if url == self._last_attempted_url and now < self._cooldown_until:
             return None
 
         with self._lock:
             url = Config.effective_redis_url()
             if not url:
+                self._close_client_locked()
+                self._last_attempted_url = ""
+                self._cooldown_until = 0.0
+                self._was_degraded = False
+                self._last_error = ""
                 return None
+
             now = time.monotonic()
-            if now < self._cooldown_until:
+            # 若目标 Redis 地址发生变更，立即清除旧冷却状态以实现多 Worker 秒级热切换
+            if url != self._last_attempted_url:
+                self._cooldown_until = 0.0
+                self._last_error = ""
+            elif now < self._cooldown_until:
                 return None
+
             if self._client is not None and self._client_url == url:
                 return self._client
+
+            self._last_attempted_url = url
             try:
                 client = redis_lib.Redis.from_url(
                     url,
@@ -70,8 +104,11 @@ class CacheManager:
                     health_check_interval=30,
                 )
                 client.ping()
+                self._close_client_locked()
                 self._client = client
                 self._client_url = url
+                self._last_error = ""
+                self._cooldown_until = 0.0
                 if self._was_degraded:
                     print("==> [Cache] Redis 连接已恢复，重新启用 Redis 加速！", flush=True)
                     self._was_degraded = False
@@ -82,16 +119,18 @@ class CacheManager:
 
     def _trip_breaker(self, exc: Exception):
         with self._lock:
-            self._client = None
+            self._close_client_locked()
             self._cooldown_until = time.monotonic() + max(5, Config.REDIS_COOLDOWN_SECONDS)
             self._sql_dirty = True
+            self._last_error = str(exc)[:300]
             if not self._was_degraded:
                 print(f"==> [Cache] Redis 不可用 ({exc})，已自动降级回退至 SQL Cache", flush=True)
                 self._was_degraded = True
 
     def _mark_redis_ok(self):
-        if self._was_degraded:
+        if self._was_degraded or self._last_error:
             with self._lock:
+                self._last_error = ""
                 if self._was_degraded:
                     print("==> [Cache] Redis 连接已恢复，重新启用 Redis 加速！", flush=True)
                     self._was_degraded = False
@@ -393,14 +432,17 @@ class CacheManager:
                 "backend": "sql_cache",
                 "redis_healthy": False,
                 "cooldown_remaining": 0,
+                "last_error": "",
             }
         now = time.monotonic()
-        if now < self._cooldown_until:
+        url = Config.effective_redis_url()
+        if url == self._last_attempted_url and now < self._cooldown_until:
             return {
                 "configured": True,
                 "backend": "sql_cache",
                 "redis_healthy": False,
                 "cooldown_remaining": max(1, int(self._cooldown_until - now)),
+                "last_error": self._last_error,
             }
         healthy = self._get_redis() is not None
         return {
@@ -408,15 +450,82 @@ class CacheManager:
             "backend": "redis" if healthy else "sql_cache",
             "redis_healthy": healthy,
             "cooldown_remaining": 0 if healthy else max(0, int(self._cooldown_until - time.monotonic())),
+            "last_error": "" if healthy else self._last_error,
         }
+
+    def detailed_status(self) -> dict:
+        """返回供管理后台监控面板展示的完整缓存引擎遥测状态"""
+        base = self.status()
+        sql_entries = 0
+        try:
+            now_ts = time.time()
+            with db_session(readonly=True) as s:
+                sql_entries = int(
+                    s.scalar(
+                        select(func.count(KvCache.cache_key)).where(
+                            (KvCache.expire_at == 0) | (KvCache.expire_at > now_ts)
+                        )
+                    )
+                    or 0
+                )
+        except Exception:
+            sql_entries = 0
+
+        details = {
+            **base,
+            "redis_lib_available": redis_lib is not None,
+            "sql_cache_entries": sql_entries,
+            "ping_ms": None,
+            "redis_version": "",
+            "used_memory_human": "",
+            "connected_clients": None,
+            "dbsize": None,
+        }
+
+        if base.get("backend") == "redis":
+            r = self._get_redis()
+            if r is not None:
+                try:
+                    t0 = time.perf_counter()
+                    r.ping()
+                    details["ping_ms"] = round((time.perf_counter() - t0) * 1000, 2)
+                except Exception as exc:
+                    self._trip_breaker(exc)
+                    details["backend"] = "sql_cache"
+                    details["redis_healthy"] = False
+                    details["last_error"] = self._last_error
+                    details["cooldown_remaining"] = max(1, int(self._cooldown_until - time.monotonic()))
+                    return details
+                try:
+                    info_srv = r.info("server")
+                    details["redis_version"] = str(info_srv.get("redis_version") or "")
+                except Exception:
+                    pass
+                try:
+                    info_mem = r.info("memory")
+                    details["used_memory_human"] = str(info_mem.get("used_memory_human") or "")
+                except Exception:
+                    pass
+                try:
+                    info_cli = r.info("clients")
+                    if "connected_clients" in info_cli:
+                        details["connected_clients"] = int(info_cli["connected_clients"])
+                except Exception:
+                    pass
+                try:
+                    details["dbsize"] = int(r.dbsize())
+                except Exception:
+                    pass
+        return details
 
 
 def test_redis_connection(redis_url: str) -> tuple[bool, str]:
-    """供首次安装向导测试 Redis 连通性"""
+    """供安装向导与管理后台测试 Redis 连通性"""
     if not redis_url:
         return False, "请填写有效的 Redis URL 或主机地址"
     if redis_lib is None:
         return False, "当前环境未安装 redis Python 客户端库"
+    client = None
     try:
         client = redis_lib.Redis.from_url(
             redis_url,
@@ -424,10 +533,27 @@ def test_redis_connection(redis_url: str) -> tuple[bool, str]:
             socket_timeout=2.0,
             decode_responses=True,
         )
+        t0 = time.perf_counter()
         pong = client.ping()
-        return (True, "Redis PING 响应成功") if pong else (False, "Redis 未返回 PONG")
+        rtt_ms = round((time.perf_counter() - t0) * 1000, 2)
+        if not pong:
+            return False, "Redis 未返回 PONG"
+        ver_str = ""
+        try:
+            ver = client.info("server").get("redis_version")
+            if ver:
+                ver_str = f"，Redis {ver}"
+        except Exception:
+            pass
+        return True, f"Redis PING 响应成功（延迟 {rtt_ms} ms{ver_str}）"
     except Exception as exc:
         return False, f"Redis 连接测试失败: {exc}"
+    finally:
+        if client is not None:
+            try:
+                client.close()
+            except Exception:
+                pass
 
 
 cache = CacheManager()

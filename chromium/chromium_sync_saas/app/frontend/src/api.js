@@ -49,7 +49,21 @@ export async function apiFetch(path, options = {}) {
         window.dispatchEvent(new CustomEvent('saas:unauthorized'))
       }
     }
-    throw new Error(data?.detail || data?.message || `HTTP ${res.status}`)
+    let detailMsg = ''
+    if (Array.isArray(data?.detail)) {
+      detailMsg = data.detail
+        .map((item) => {
+          if (typeof item === 'string') return item
+          const loc = Array.isArray(item?.loc) ? item.loc.slice(1).join('.') : ''
+          return loc ? `${loc}: ${item?.msg || '参数无效'}` : item?.msg || JSON.stringify(item)
+        })
+        .join('；')
+    } else if (typeof data?.detail === 'string') {
+      detailMsg = data.detail
+    } else if (data?.detail && typeof data.detail === 'object') {
+      detailMsg = data.detail.message || JSON.stringify(data.detail)
+    }
+    throw new Error(detailMsg || data?.message || `请求失败 (HTTP ${res.status})`)
   }
   return data
 }

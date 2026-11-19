@@ -10,7 +10,9 @@
       <div class="card-title">
         <span>多策略 Cookie 自动同步调度中枢（组对组 / 节点对组 / 一对多 / 全网双向合并）</span>
         <div class="row">
-          <button class="btn btn-sm" @click="loadAll">刷新状态</button>
+          <button class="btn btn-sm" :disabled="refreshing" @click="loadAll(true)">
+            {{ refreshing ? '刷新中...' : '刷新状态' }}
+          </button>
           <button class="btn btn-sm" style="border-color: var(--primary); color: var(--primary)" @click="openCookiePolicyModal">
             全局过滤与清理策略
           </button>
@@ -57,10 +59,10 @@
               <button
                 class="btn btn-sm"
                 :class="p.enabled ? '' : 'btn-emerald'"
-                :disabled="runningPolicyId === p.id"
+                :disabled="runningPolicyId === p.id || togglingPolicyId === p.id"
                 @click="togglePolicy(p)"
               >
-                {{ p.enabled ? '停用' : '启用' }}
+                {{ togglingPolicyId === p.id ? '切换中...' : p.enabled ? '停用' : '启用' }}
               </button>
               <button class="btn btn-sm" :disabled="runningPolicyId === p.id" @click="openEditPolicy(p)">编辑</button>
               <button class="btn btn-sm btn-primary" :disabled="runningPolicyId !== null" @click="runPolicy(p.id)">
@@ -142,15 +144,16 @@
         </div>
 
         <form @submit.prevent="saveCookiePolicy">
-          <div class="subcard" style="margin-bottom: 14px">
-            <label class="row" style="cursor: pointer; font-weight: 600; color: var(--primary)">
+          <label class="switch-row" :class="{ active: cookiePolicy.sync_diff_enabled }" style="margin-bottom: 14px">
+            <span>
+              <span class="switch-row-title" style="color: var(--primary)">启用 Cookie 指纹变更差量检测 (Diff / Delta Sync)</span>
+              <span class="switch-row-desc">仅对值或有效期发生实质变更的凭证执行下发，跳过完全一致项，减少全量读写与流量消耗。</span>
+            </span>
+            <span class="switch">
               <input type="checkbox" v-model="cookiePolicy.sync_diff_enabled" />
-              <span>启用 Cookie 指纹变更差量检测 (Diff / Delta Sync)</span>
-            </label>
-            <div class="muted" style="font-size: 12px; margin-top: 6px">
-              仅对值或有效期发生实质变更的凭证执行下发，跳过完全一致项，减少全量读写与流量消耗。
-            </div>
-          </div>
+              <span class="switch-track"></span>
+            </span>
+          </label>
 
           <div class="field">
             <div class="row" style="justify-content: space-between; margin-bottom: 4px">
@@ -182,21 +185,24 @@
 
           <div class="subcard" style="margin-bottom: 14px; border-color: rgba(192, 132, 252, 0.35)">
             <div class="row" style="justify-content: space-between; margin-bottom: 10px">
-              <label class="row" style="cursor: pointer; font-weight: 600; color: #e879f9">
+              <label class="switch" style="font-weight: 600; color: #e879f9">
                 <input type="checkbox" v-model="cookiePolicy.sync_cleanup_enabled" />
+                <span class="switch-track"></span>
                 <span>启用同步时全局 Cookie 删除清理策略（按域名 / 日期 / 关键词）</span>
               </label>
               <span class="muted" style="font-size: 11px">全网合并 / 组对组 / 节点对组 / 一对多 均先剔除再清理源与目标空闲节点</span>
             </div>
 
             <div class="row" style="margin-bottom: 10px; gap: 18px">
-              <label class="row" style="cursor: pointer; font-size: 13px">
+              <label class="switch switch-sm">
                 <input type="checkbox" v-model="cookiePolicy.sync_cleanup_expired" />
-                <span>清理已过期 Cookie</span>
+                <span class="switch-track"></span>
+                <span class="switch-state" :class="{ on: cookiePolicy.sync_cleanup_expired }">清理已过期 Cookie</span>
               </label>
-              <label class="row" style="cursor: pointer; font-size: 13px">
+              <label class="switch switch-sm">
                 <input type="checkbox" v-model="cookiePolicy.sync_cleanup_session_only" />
-                <span>清理会话级 Cookie（无有效期）</span>
+                <span class="switch-track"></span>
+                <span class="switch-state" :class="{ on: cookiePolicy.sync_cleanup_session_only }">清理会话级 Cookie（无有效期）</span>
               </label>
             </div>
 
@@ -264,8 +270,10 @@
           </div>
 
           <div class="row" style="justify-content: flex-end">
-            <button type="button" class="btn" @click="showCookiePolicyModal = false">取消</button>
-            <button type="submit" class="btn btn-primary">保存全局策略</button>
+            <button type="button" class="btn" :disabled="savingCookiePolicy" @click="showCookiePolicyModal = false">取消</button>
+            <button type="submit" class="btn btn-primary" :disabled="savingCookiePolicy">
+              {{ savingCookiePolicy ? '保存中...' : '保存全局策略' }}
+            </button>
           </div>
         </form>
       </div>
@@ -292,9 +300,12 @@
           </div>
 
           <div class="field">
-            <label class="row" style="cursor: pointer">
-              <input type="checkbox" v-model="policyForm.enabled" />
-              <span>保存后立即启用该定时调度策略</span>
+            <label class="switch-row" :class="{ active: policyForm.enabled }">
+              <span class="switch-row-title">保存后立即启用该定时调度策略</span>
+              <span class="switch">
+                <input type="checkbox" v-model="policyForm.enabled" />
+                <span class="switch-track"></span>
+              </span>
             </label>
           </div>
 
@@ -397,8 +408,10 @@
           </div>
 
           <div class="row" style="justify-content: flex-end">
-            <button type="button" class="btn" @click="showPolicyModal = false">取消</button>
-            <button type="submit" class="btn btn-primary">保存调度策略</button>
+            <button type="button" class="btn" :disabled="savingPolicy" @click="showPolicyModal = false">取消</button>
+            <button type="submit" class="btn btn-primary" :disabled="savingPolicy">
+              {{ savingPolicy ? '保存中...' : '保存调度策略' }}
+            </button>
           </div>
         </form>
       </div>
@@ -421,8 +434,14 @@
         <h3 class="card-title">确认删除调度策略「{{ confirmDeletePolicyTarget.name }}」？</h3>
         <p class="muted" style="margin: 0 0 18px">删除后定时调度器将立即下线该策略，历史执行流水仍会保留供审计。</p>
         <div class="row" style="justify-content: flex-end">
-          <button class="btn" @click="confirmDeletePolicyTarget = null">取消</button>
-          <button class="btn btn-danger" @click="deletePolicy(confirmDeletePolicyTarget.id)">确认删除</button>
+          <button class="btn" :disabled="deletingPolicyId !== null" @click="confirmDeletePolicyTarget = null">取消</button>
+          <button
+            class="btn btn-danger"
+            :disabled="deletingPolicyId !== null"
+            @click="deletePolicy(confirmDeletePolicyTarget.id)"
+          >
+            {{ deletingPolicyId !== null ? '删除中...' : '确认删除' }}
+          </button>
         </div>
       </div>
     </div>
@@ -433,8 +452,10 @@
         <h3 class="card-title">确认清空全部同步执行流水？</h3>
         <p class="muted" style="margin: 0 0 18px">仅清除当前租户名下的 Cookie 同步历史流水，不影响策略配置及平台安全审计。</p>
         <div class="row" style="justify-content: flex-end">
-          <button class="btn" @click="confirmClearLogs = false">取消</button>
-          <button class="btn btn-danger" @click="clearAllLogs">确认清空</button>
+          <button class="btn" :disabled="clearingLogs" @click="confirmClearLogs = false">取消</button>
+          <button class="btn btn-danger" :disabled="clearingLogs" @click="clearAllLogs">
+            {{ clearingLogs ? '清空中...' : '确认清空' }}
+          </button>
         </div>
       </div>
     </div>
@@ -453,6 +474,12 @@ const groups = ref(['默认分组'])
 const logs = ref([])
 
 const runningPolicyId = ref(null)
+const refreshing = ref(false)
+const savingCookiePolicy = ref(false)
+const savingPolicy = ref(false)
+const togglingPolicyId = ref(null)
+const deletingPolicyId = ref(null)
+const clearingLogs = ref(false)
 const showPolicyModal = ref(false)
 const isEditPolicy = ref(false)
 const editingPolicyId = ref(null)
@@ -555,7 +582,9 @@ function formatRouteText(p) {
   return `[${srcName}] → ${count} 个指定目标`
 }
 
-async function loadAll() {
+async function loadAll(showFeedback = false) {
+  if (refreshing.value) return
+  refreshing.value = true
   try {
     const [p, n, g, l, c] = await Promise.all([
       apiFetch('/api/sync/policies'),
@@ -569,8 +598,13 @@ async function loadAll() {
     groups.value = Array.isArray(g) && g.length > 0 ? g : ['默认分组']
     logs.value = Array.isArray(l) ? l : []
     if (c && typeof c === 'object') Object.assign(cookiePolicy, c)
+    if (showFeedback) {
+      emit('notify', { message: '同步策略与流水已刷新', type: 'info' })
+    }
   } catch (e) {
-    emit('notify', e.message)
+    emit('notify', { message: e.message, type: 'error' })
+  } finally {
+    refreshing.value = false
   }
 }
 
@@ -639,6 +673,8 @@ function removeTargetNode(id) {
 }
 
 async function submitPolicy() {
+  if (savingPolicy.value) return
+  savingPolicy.value = true
   try {
     const url = isEditPolicy.value ? `/api/sync/policies/${editingPolicyId.value}` : '/api/sync/policies'
     const method = isEditPolicy.value ? 'PUT' : 'POST'
@@ -647,31 +683,41 @@ async function submitPolicy() {
       body: JSON.stringify(policyForm),
     })
     showPolicyModal.value = false
-    emit('notify', res.message || '同步策略已保存')
-    await loadAll()
+    emit('notify', { message: res.message || '同步策略已保存', type: 'ok' })
+    await loadAll(false)
   } catch (e) {
-    emit('notify', e.message)
+    emit('notify', { message: e.message, type: 'error' })
+  } finally {
+    savingPolicy.value = false
   }
 }
 
 async function togglePolicy(p) {
+  if (togglingPolicyId.value !== null) return
+  togglingPolicyId.value = p.id
   try {
     const res = await apiFetch(`/api/sync/policies/${p.id}/toggle`, { method: 'POST' })
     p.enabled = res.enabled
-    emit('notify', res.message || '策略状态已更新')
+    emit('notify', { message: res.message || '策略状态已更新', type: 'ok' })
   } catch (e) {
-    emit('notify', e.message)
+    emit('notify', { message: e.message, type: 'error' })
+  } finally {
+    togglingPolicyId.value = null
   }
 }
 
 async function deletePolicy(id) {
-  confirmDeletePolicyTarget.value = null
+  if (deletingPolicyId.value !== null) return
+  deletingPolicyId.value = id
   try {
     const res = await apiFetch(`/api/sync/policies/${id}`, { method: 'DELETE' })
-    emit('notify', res.message || '策略已删除')
-    await loadAll()
+    confirmDeletePolicyTarget.value = null
+    emit('notify', { message: res.message || '策略已删除', type: 'ok' })
+    await loadAll(false)
   } catch (e) {
-    emit('notify', e.message)
+    emit('notify', { message: e.message, type: 'error' })
+  } finally {
+    deletingPolicyId.value = null
   }
 }
 
@@ -680,10 +726,10 @@ async function runPolicy(id) {
   runningPolicyId.value = id
   try {
     const res = await apiFetch(`/api/sync/policies/${id}/run`, { method: 'POST' })
-    emit('notify', res.message || '策略同步已完成')
-    await loadAll()
+    emit('notify', { message: res.message || '策略同步已完成', type: 'ok' })
+    await loadAll(false)
   } catch (e) {
-    emit('notify', e.message)
+    emit('notify', { message: e.message, type: 'error' })
   } finally {
     runningPolicyId.value = null
   }
@@ -696,15 +742,19 @@ function openCookiePolicyModal() {
 }
 
 async function saveCookiePolicy() {
+  if (savingCookiePolicy.value) return
+  savingCookiePolicy.value = true
   try {
     const res = await apiFetch('/api/cookie-policy', {
       method: 'POST',
       body: JSON.stringify(cookiePolicy),
     })
-    emit('notify', res.message || '全局过滤与清理策略已保存')
+    emit('notify', { message: res.message || '全局过滤与清理策略已保存', type: 'ok' })
     showCookiePolicyModal.value = false
   } catch (e) {
-    emit('notify', e.message)
+    emit('notify', { message: e.message, type: 'error' })
+  } finally {
+    savingCookiePolicy.value = false
   }
 }
 
@@ -717,32 +767,36 @@ async function runGlobalCleanup(dryRun) {
     })
     cleanupSummary.value = data
     if (dryRun) {
-      emit('notify', `试算完成：覆盖 ${data.node_count} 个在线节点，命中 ${data.matched_total} 条`)
+      emit('notify', { message: `试算完成：覆盖 ${data.node_count} 个在线节点，命中 ${data.matched_total} 条`, type: 'info' })
     } else {
-      emit('notify', `全网清理完成：实删 ${data.purged_total} 条 Cookie`)
-      await loadAll()
+      emit('notify', { message: `全网清理完成：实删 ${data.purged_total} 条 Cookie`, type: 'ok' })
+      await loadAll(false)
     }
   } catch (e) {
-    emit('notify', e.message)
+    emit('notify', { message: e.message, type: 'error' })
   } finally {
     cleanupBusy.value = false
   }
 }
 
 async function clearAllLogs() {
-  confirmClearLogs.value = false
+  if (clearingLogs.value) return
+  clearingLogs.value = true
   try {
     const res = await apiFetch('/api/sync/logs', { method: 'DELETE' })
-    emit('notify', res.message || '流水已清空')
-    await loadAll()
+    confirmClearLogs.value = false
+    emit('notify', { message: res.message || '流水已清空', type: 'ok' })
+    await loadAll(false)
   } catch (e) {
-    emit('notify', e.message)
+    emit('notify', { message: e.message, type: 'error' })
+  } finally {
+    clearingLogs.value = false
   }
 }
 
 onMounted(() => {
-  loadAll()
-  refreshTimer = setInterval(loadAll, 20000)
+  loadAll(false)
+  refreshTimer = setInterval(() => loadAll(false), 20000)
 })
 
 onUnmounted(() => {

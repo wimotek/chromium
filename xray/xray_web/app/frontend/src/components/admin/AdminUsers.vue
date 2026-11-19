@@ -107,7 +107,7 @@
                   <button class="btn-sm btn-edit" @click="$emit('open-qr', { link: nl.link, name: nl.name })">二维码</button>
                 </div>
               </div>
-              <div style="font-size: 11px; color: #64748b; font-family: monospace; word-break: break-all;">{{ nl.link }}</div>
+              <div class="font-mono" style="font-size: 12px; color: #64748b; word-break: break-all;">{{ nl.link }}</div>
             </div>
           </div>
         </div>

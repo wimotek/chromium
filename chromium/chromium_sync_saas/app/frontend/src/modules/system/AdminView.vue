@@ -44,6 +44,7 @@
       </button>
       <button class="subnav-btn" :class="{ active: activeSection === 'governance' }" @click="activeSection = 'governance'">
         租赁风控与引擎
+        <span v-if="cacheState === 'degraded'" class="tag tag-danger" style="margin-left: 6px; padding: 1px 6px">缓存降级</span>
       </button>
     </div>
 
@@ -53,7 +54,7 @@
         <div class="card-title">
           <span>用户管理 · 新增 / 资料认证 / 密码重置 / 调账 / 封禁与删除</span>
           <div class="row">
-            <button class="btn btn-sm" @click="load">刷新列表</button>
+            <button class="btn btn-sm" :disabled="refreshing" @click="load(true)">{{ refreshing ? '刷新中...' : '刷新列表' }}</button>
             <button class="btn btn-sm btn-primary" @click="openCreateUserModal">+ 新增用户账号</button>
           </div>
         </div>
@@ -128,14 +129,14 @@
                     <button
                       class="btn btn-sm"
                       :class="u.status === 'active' ? 'btn-warn' : 'btn-emerald'"
-                      :disabled="Number(u.id) === Number(currentUserId)"
+                      :disabled="Number(u.id) === Number(currentUserId) || busyUserId === u.id"
                       @click="toggleUserStatus(u)"
                     >
-                      {{ u.status === 'active' ? '封禁' : '解封' }}
+                      {{ busyUserId === u.id ? '处理中...' : u.status === 'active' ? '封禁' : '解封' }}
                     </button>
                     <button
                       class="btn btn-sm btn-danger"
-                      :disabled="Number(u.id) === Number(currentUserId)"
+                      :disabled="Number(u.id) === Number(currentUserId) || busyUserId === u.id"
                       @click="confirmDeleteUserTarget = u"
                     >
                       删除
@@ -157,7 +158,18 @@
       <div class="card">
         <div class="card-title">
           <span>通道差价与自用流量定价策略</span>
-          <button class="btn btn-sm btn-primary" @click="saveSettings">保存差价与评级策略</button>
+          <div class="row" style="gap: 8px">
+            <span
+              v-if="settingsSaveFeedback.section === 'rates' && settingsSaveFeedback.text"
+              class="save-status"
+              :class="settingsSaveFeedback.ok ? 'save-status-ok' : 'save-status-error'"
+            >
+              {{ settingsSaveFeedback.text }}
+            </span>
+            <button class="btn btn-sm btn-primary" :disabled="savingSettings" @click="saveSettings('rates')">
+              {{ savingSettings ? '保存中...' : '保存差价与评级策略' }}
+            </button>
+          </div>
         </div>
         <div class="grid-3">
           <div class="subcard">
@@ -193,13 +205,16 @@
             </div>
           </div>
           <div class="subcard">
-            <div class="field" style="margin-bottom: 0">
-              <label>自动评级 / 降级调度</label>
-              <select class="select" v-model="settings.saas_auto_level_enabled">
-                <option :value="true">开启 60s 自动升降级</option>
-                <option :value="false">暂停自动升降级</option>
-              </select>
-            </div>
+            <label class="switch-row" :class="{ active: settings.saas_auto_level_enabled }" style="height: 100%">
+              <span>
+                <span class="switch-row-title">自动评级 / 降级调度</span>
+                <span class="switch-row-desc">{{ settings.saas_auto_level_enabled ? '已开启 60s 自动升降级考核' : '已暂停自动升降级' }}</span>
+              </span>
+              <span class="switch">
+                <input type="checkbox" v-model="settings.saas_auto_level_enabled" />
+                <span class="switch-track"></span>
+              </span>
+            </label>
           </div>
         </div>
       </div>
@@ -207,7 +222,9 @@
       <div class="card">
         <div class="card-title">
           <span>用户等级自动升降级门槛 & 分级差价策略</span>
-          <button class="btn btn-sm btn-emerald" @click="evaluateAllLevels">立即执行全网自动评级 / 降级</button>
+          <button class="btn btn-sm btn-emerald" :disabled="evaluatingLevels" @click="evaluateAllLevels">
+            {{ evaluatingLevels ? '全网评级中...' : '立即执行全网自动评级 / 降级' }}
+          </button>
         </div>
         <div class="table-wrap">
           <table>
@@ -234,7 +251,16 @@
                 <td><input class="input mono" type="number" min="0" max="10000" style="width: 78px" v-model.number="lv.reverse_fee_bps" /></td>
                 <td><input class="input mono" type="number" min="0" max="10000" style="width: 78px" v-model.number="lv.public_wss_fee_bps" /></td>
                 <td><input class="input mono" type="number" min="0" max="10000" style="width: 78px" v-model.number="lv.buyer_discount_bps" /></td>
-                <td><button class="btn btn-sm btn-primary" @click="saveLevel(lv)">保存</button></td>
+                <td>
+                  <button
+                    class="btn btn-sm"
+                    :class="savedLevelId === lv.id ? 'btn-emerald' : 'btn-primary'"
+                    :disabled="savingLevelId === lv.id"
+                    @click="saveLevel(lv)"
+                  >
+                    {{ savingLevelId === lv.id ? '保存中...' : savedLevelId === lv.id ? '✓ 已保存' : '保存' }}
+                  </button>
+                </td>
               </tr>
             </tbody>
           </table>
@@ -269,12 +295,22 @@
                 <td><input class="input mono" type="number" min="1" style="width: 96px" v-model.number="p.edit_traffic_gb" /></td>
                 <td><input class="input mono" type="number" min="0" max="10000" style="width: 88px" v-model.number="p.platform_fee_discount_bps" /></td>
                 <td>
-                  <select class="select" style="width: 86px" v-model="p.edit_can_share">
-                    <option :value="true">允许</option>
-                    <option :value="false">禁止</option>
-                  </select>
+                  <label class="switch switch-sm">
+                    <input type="checkbox" v-model="p.edit_can_share" />
+                    <span class="switch-track"></span>
+                    <span class="switch-state" :class="{ on: p.edit_can_share }">{{ p.edit_can_share ? '允许' : '禁止' }}</span>
+                  </label>
                 </td>
-                <td><button class="btn btn-sm btn-primary" @click="savePlan(p)">保存</button></td>
+                <td>
+                  <button
+                    class="btn btn-sm"
+                    :class="savedPlanId === p.id ? 'btn-emerald' : 'btn-primary'"
+                    :disabled="savingPlanId === p.id"
+                    @click="savePlan(p)"
+                  >
+                    {{ savingPlanId === p.id ? '保存中...' : savedPlanId === p.id ? '✓ 已保存' : '保存' }}
+                  </button>
+                </td>
               </tr>
             </tbody>
           </table>
@@ -287,25 +323,46 @@
       <div class="card">
         <div class="card-title">
           <span>注册安全风控 · 推荐邀请返利 · 月补与签到配置</span>
-          <button class="btn btn-sm btn-primary" @click="saveSettings">保存成长与补贴配置</button>
+          <div class="row" style="gap: 8px">
+            <span
+              v-if="settingsSaveFeedback.section === 'growth' && settingsSaveFeedback.text"
+              class="save-status"
+              :class="settingsSaveFeedback.ok ? 'save-status-ok' : 'save-status-error'"
+            >
+              {{ settingsSaveFeedback.text }}
+            </span>
+            <button class="btn btn-sm btn-primary" :disabled="savingSettings" @click="saveSettings('growth')">
+              {{ savingSettings ? '保存中...' : '保存成长与补贴配置' }}
+            </button>
+          </div>
         </div>
 
         <div class="grid-3">
           <div class="subcard">
             <div class="card-title" style="font-size: 14px; margin-bottom: 10px">注册风控与体验金</div>
             <div class="field">
-              <label>公开注册开关</label>
-              <select class="select" v-model="settings.saas_allow_public_register">
-                <option :value="true">开放公开注册</option>
-                <option :value="false">仅限管理员分配</option>
-              </select>
+              <label class="switch-row" :class="{ active: settings.saas_allow_public_register }">
+                <span>
+                  <span class="switch-row-title">公开注册开关</span>
+                  <span class="switch-row-desc">{{ settings.saas_allow_public_register ? '开放首页公开注册' : '关闭公开注册（仅限管理员建号）' }}</span>
+                </span>
+                <span class="switch">
+                  <input type="checkbox" v-model="settings.saas_allow_public_register" />
+                  <span class="switch-track"></span>
+                </span>
+              </label>
             </div>
             <div class="field">
-              <label>新用户注册邮箱验证码认证</label>
-              <select class="select" v-model="settings.saas_require_email_verify">
-                <option :value="true">强制验证邮箱验证码</option>
-                <option :value="false">关闭邮箱验证码校验</option>
-              </select>
+              <label class="switch-row" :class="{ active: settings.saas_require_email_verify }">
+                <span>
+                  <span class="switch-row-title">注册邮箱验证码认证</span>
+                  <span class="switch-row-desc">{{ settings.saas_require_email_verify ? '强制验证 6 位邮箱验证码' : '关闭邮箱验证码校验' }}</span>
+                </span>
+                <span class="switch">
+                  <input type="checkbox" v-model="settings.saas_require_email_verify" />
+                  <span class="switch-track"></span>
+                </span>
+              </label>
             </div>
             <div class="field" style="margin-bottom: 0">
               <label>新用户注册体验赠金 (元)</label>
@@ -316,11 +373,16 @@
           <div class="subcard">
             <div class="card-title" style="font-size: 14px; margin-bottom: 10px">推荐邀请返利策略</div>
             <div class="field">
-              <label>推荐邀请奖励开关</label>
-              <select class="select" v-model="settings.saas_referral_enabled">
-                <option :value="true">开启邀请返利系统</option>
-                <option :value="false">关闭邀请返利</option>
-              </select>
+              <label class="switch-row" :class="{ active: settings.saas_referral_enabled }">
+                <span>
+                  <span class="switch-row-title">推荐邀请奖励开关</span>
+                  <span class="switch-row-desc">{{ settings.saas_referral_enabled ? '已开启推荐邀请双方赠金' : '已关闭邀请返利活动' }}</span>
+                </span>
+                <span class="switch">
+                  <input type="checkbox" v-model="settings.saas_referral_enabled" />
+                  <span class="switch-track"></span>
+                </span>
+              </label>
             </div>
             <div class="field">
               <label>邀请人返利金额 (元)</label>
@@ -337,20 +399,22 @@
             <div class="field">
               <label>每月固定补贴开关 & 金额 (元)</label>
               <div class="row">
-                <select class="select" style="width: 90px" v-model="settings.saas_monthly_claim_enabled">
-                  <option :value="true">开启</option>
-                  <option :value="false">关闭</option>
-                </select>
+                <label class="switch">
+                  <input type="checkbox" v-model="settings.saas_monthly_claim_enabled" />
+                  <span class="switch-track"></span>
+                  <span class="switch-state" :class="{ on: settings.saas_monthly_claim_enabled }">{{ settings.saas_monthly_claim_enabled ? '已开启' : '已关闭' }}</span>
+                </label>
                 <input class="input mono" type="number" step="1" min="0" style="flex: 1" v-model.number="settings.saas_monthly_claim_yuan" />
               </div>
             </div>
             <div class="field">
               <label>每日签到开关 & 基础奖励 (元)</label>
               <div class="row">
-                <select class="select" style="width: 90px" v-model="settings.saas_daily_checkin_enabled">
-                  <option :value="true">开启</option>
-                  <option :value="false">关闭</option>
-                </select>
+                <label class="switch">
+                  <input type="checkbox" v-model="settings.saas_daily_checkin_enabled" />
+                  <span class="switch-track"></span>
+                  <span class="switch-state" :class="{ on: settings.saas_daily_checkin_enabled }">{{ settings.saas_daily_checkin_enabled ? '已开启' : '已关闭' }}</span>
+                </label>
                 <input class="input mono" type="number" step="0.1" min="0" style="flex: 1" v-model.number="settings.saas_daily_checkin_yuan" />
               </div>
             </div>
@@ -396,18 +460,41 @@
       <div class="card">
         <div class="card-title">
           <span>全局支付收银台与风控参数</span>
-          <button class="btn btn-sm btn-primary" @click="saveSettings">保存全部支付网关参数</button>
+          <div class="row" style="gap: 8px">
+            <span
+              v-if="settingsSaveFeedback.section === 'payments' && settingsSaveFeedback.text"
+              class="save-status"
+              :class="settingsSaveFeedback.ok ? 'save-status-ok' : 'save-status-error'"
+            >
+              {{ settingsSaveFeedback.text }}
+            </span>
+            <button class="btn btn-sm btn-primary" :disabled="savingSettings" @click="saveSettings('payments')">
+              {{ savingSettings ? '保存中...' : '保存全部支付网关参数' }}
+            </button>
+          </div>
         </div>
 
         <div class="grid-2" style="margin-bottom: 14px">
           <div class="subcard">
-            <div class="field" style="margin-bottom: 0">
-              <label>沙盒模拟演练开关（仅在未配置官方密钥与收款码时作为演示通道 · 数据不落盘）</label>
-              <select class="select" v-model="settings.saas_allow_self_recharge">
-                <option :value="true">开启沙盒演练（纯模拟流程，不写入数据库与真实余额）</option>
-                <option :value="false">关闭沙盒（生产模式：仅允许已配置的官方网关或人工收款码）</option>
-              </select>
-            </div>
+            <label class="switch-row" :class="{ active: settings.saas_allow_self_recharge }">
+              <span>
+                <span class="switch-row-title">沙盒模拟演练开关</span>
+                <span class="switch-row-desc">
+                  {{
+                    settings.saas_allow_self_recharge
+                      ? '已开启：未配置官方密钥或收款码时允许纯模拟演示（数据不落盘，不改真实余额）'
+                      : '已关闭（生产模式）：仅允许已配置的官方网关或人工收款码下单'
+                  }}
+                </span>
+              </span>
+              <span class="switch">
+                <input type="checkbox" v-model="settings.saas_allow_self_recharge" />
+                <span class="switch-track"></span>
+                <span class="switch-state" :class="{ on: settings.saas_allow_self_recharge }">
+                  {{ settings.saas_allow_self_recharge ? '开启' : '关闭' }}
+                </span>
+              </span>
+            </label>
           </div>
 
           <div class="subcard">
@@ -425,44 +512,59 @@
 
         <div class="subcard" style="margin-bottom: 14px">
           <div class="row" style="justify-content: space-between; margin-bottom: 10px">
-            <strong style="font-size: 13px; color: var(--text-strong)">前台可用支付方式开关（支持手动多选开放或逐项关闭，未勾选项前台自动隐藏）</strong>
-            <span class="muted" style="font-size: 12px">勾选几项，租户端「在线钱包充值收银台」就显示几项；修改后请点击右上角「保存全部支付网关参数」</span>
+            <strong style="font-size: 13px; color: var(--text-strong)">前台可用支付方式开关（唯一开关入口 · 关闭项在前台自动隐藏）</strong>
+            <span class="muted" style="font-size: 12px">开启几项，租户端「在线钱包充值收银台」就显示几项；全部关闭则自动隐藏线上充值入口</span>
           </div>
           <div class="grid-3">
-            <label class="row" style="cursor: pointer; justify-content: space-between; padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px">
+            <label class="switch-row" :class="{ active: settings.saas_alipay_f2f_enabled }">
               <span>
-                <strong style="display: block; font-size: 13px">支付宝当面付</strong>
-                <span class="muted" style="font-size: 11px">官方 `precreate` 网页动态出码 · 自动到账</span>
+                <span class="switch-row-title">支付宝当面付</span>
+                <span class="switch-row-desc">官方 `precreate` 网页动态出码 · 自动到账</span>
               </span>
-              <input type="checkbox" v-model="settings.saas_alipay_f2f_enabled" />
+              <span class="switch">
+                <input type="checkbox" v-model="settings.saas_alipay_f2f_enabled" />
+                <span class="switch-track"></span>
+              </span>
             </label>
-            <label class="row" style="cursor: pointer; justify-content: space-between; padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px">
+            <label class="switch-row" :class="{ active: settings.saas_alipay_page_enabled }">
               <span>
-                <strong style="display: block; font-size: 13px">支付宝电脑网站支付</strong>
-                <span class="muted" style="font-size: 11px">官方 `page.pay` 跳转网页收银台</span>
+                <span class="switch-row-title">支付宝电脑网站支付</span>
+                <span class="switch-row-desc">官方 `page.pay` 跳转网页收银台</span>
               </span>
-              <input type="checkbox" v-model="settings.saas_alipay_page_enabled" />
+              <span class="switch">
+                <input type="checkbox" v-model="settings.saas_alipay_page_enabled" />
+                <span class="switch-track"></span>
+              </span>
             </label>
-            <label class="row" style="cursor: pointer; justify-content: space-between; padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px">
+            <label class="switch-row" :class="{ active: settings.saas_alipay_static_enabled }">
               <span>
-                <strong style="display: block; font-size: 13px">支付宝扫码转账（人工核账）</strong>
-                <span class="muted" style="font-size: 11px">展示固定收款码 · 人工确认入账</span>
+                <span class="switch-row-title">支付宝扫码转账（人工核账）</span>
+                <span class="switch-row-desc">展示固定收款码 · 人工确认入账</span>
               </span>
-              <input type="checkbox" v-model="settings.saas_alipay_static_enabled" />
+              <span class="switch">
+                <input type="checkbox" v-model="settings.saas_alipay_static_enabled" />
+                <span class="switch-track"></span>
+              </span>
             </label>
-            <label class="row" style="cursor: pointer; justify-content: space-between; padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px">
+            <label class="switch-row" :class="{ active: settings.saas_wechat_native_enabled }">
               <span>
-                <strong style="display: block; font-size: 13px">微信支付 Native V3</strong>
-                <span class="muted" style="font-size: 11px">官方直连 V3 动态扫码 · 自动到账</span>
+                <span class="switch-row-title">微信支付 Native V3</span>
+                <span class="switch-row-desc">官方直连 V3 动态扫码 · 自动到账</span>
               </span>
-              <input type="checkbox" v-model="settings.saas_wechat_native_enabled" />
+              <span class="switch">
+                <input type="checkbox" v-model="settings.saas_wechat_native_enabled" />
+                <span class="switch-track"></span>
+              </span>
             </label>
-            <label class="row" style="cursor: pointer; justify-content: space-between; padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px">
+            <label class="switch-row" :class="{ active: settings.saas_wechat_static_enabled }">
               <span>
-                <strong style="display: block; font-size: 13px">微信扫码转账（人工核账）</strong>
-                <span class="muted" style="font-size: 11px">展示固定收款码 · 人工确认入账</span>
+                <span class="switch-row-title">微信扫码转账（人工核账）</span>
+                <span class="switch-row-desc">展示固定收款码 · 人工确认入账</span>
               </span>
-              <input type="checkbox" v-model="settings.saas_wechat_static_enabled" />
+              <span class="switch">
+                <input type="checkbox" v-model="settings.saas_wechat_static_enabled" />
+                <span class="switch-track"></span>
+              </span>
             </label>
           </div>
         </div>
@@ -472,19 +574,14 @@
           <div class="subcard">
             <div class="card-title" style="font-size: 14px; margin-bottom: 10px">
               <span>支付宝开放平台配置 (当面付 / 电脑网站 / 人工收款码)</span>
-              <span class="tag" :class="settings.saas_alipay_enabled ? 'tag-ok' : ''">{{ settings.saas_alipay_enabled ? '总开关已启用' : '总开关已关闭' }}</span>
+              <span class="tag" :class="enabledAlipayMethodCount > 0 ? 'tag-ok' : 'tag-warn'">
+                {{ enabledAlipayMethodCount > 0 ? `已开放 ${enabledAlipayMethodCount}/3 项` : '未开放' }}
+              </span>
             </div>
             <div class="banner banner-info" style="font-size: 12px; margin-bottom: 12px">
               <strong>开放平台对接提示：</strong>支付宝开放平台里的「授权回调地址」「应用网关」「接口内容加密方式 (AES)」均<strong>留空/未设置</strong>即可；支付所需的 <code>notify_url</code> 会在每次下单时由本系统自动携带。加签方式如在开放平台选了<strong>「密钥/普通公钥」</strong>请选公钥模式，选了<strong>「证书」</strong>请切换为公钥证书模式并读取 3 个 <code>.crt</code> 证书文件。
             </div>
-            <div class="grid-3">
-              <div class="field">
-                <label>支付宝总开关（关闭则隐藏全部支付宝方式）</label>
-                <select class="select" v-model="settings.saas_alipay_enabled">
-                  <option :value="true">启用支付宝通道</option>
-                  <option :value="false">关闭全部支付宝</option>
-                </select>
-              </div>
+            <div class="grid-2">
               <div class="field">
                 <label>默认下单模式（三选一）</label>
                 <select class="select" v-model="settings.saas_alipay_mode">
@@ -677,26 +774,19 @@
           <div class="subcard">
             <div class="card-title" style="font-size: 14px; margin-bottom: 10px">
               <span>微信支付商户平台配置 (API V3 / 人工收款码)</span>
-              <span class="tag" :class="settings.saas_wechat_enabled ? 'tag-ok' : ''">{{ settings.saas_wechat_enabled ? '已启用' : '已关闭' }}</span>
+              <span class="tag" :class="enabledWechatMethodCount > 0 ? 'tag-ok' : 'tag-warn'">
+                {{ enabledWechatMethodCount > 0 ? `已开放 ${enabledWechatMethodCount}/2 项` : '未开放' }}
+              </span>
             </div>
             <div class="banner banner-info" style="font-size: 12px; margin-bottom: 12px">
               <strong>微信商户平台所需 6 项核心信息：</strong>① 绑定的公众号/小程序/开放平台 <strong>AppID</strong>；② <strong>商户号 MchID</strong>；③ <strong>APIv3 密钥（32位）</strong>；④ <strong>商户 API 证书序列号</strong>；⑤ <strong>商户 API 私钥 (`apiclient_key.pem`)</strong>；⑥ <strong>微信支付公钥或平台证书</strong>（强烈建议填写，用于校验微信回调签名防伪造）。
             </div>
-            <div class="grid-2">
-              <div class="field">
-                <label>微信总开关（关闭则隐藏全部微信方式）</label>
-                <select class="select" v-model="settings.saas_wechat_enabled">
-                  <option :value="true">启用微信支付</option>
-                  <option :value="false">停用微信支付</option>
-                </select>
-              </div>
-              <div class="field">
-                <label>默认下单模式（二选一）</label>
-                <select class="select" v-model="settings.saas_wechat_mode">
-                  <option value="native_v3">Native V3 扫码下单 (官方推荐)</option>
-                  <option value="static_qr">人工收款码转账（扫码付款 · 人工核账）</option>
-                </select>
-              </div>
+            <div class="field">
+              <label>默认下单模式（二选一）</label>
+              <select class="select" v-model="settings.saas_wechat_mode">
+                <option value="native_v3">Native V3 扫码下单 (官方推荐)</option>
+                <option value="static_qr">人工收款码转账（扫码付款 · 人工核账）</option>
+              </select>
             </div>
             <div class="grid-2">
               <div class="field">
@@ -820,6 +910,19 @@
             </div>
           </div>
         </div>
+
+        <div class="row" style="justify-content: flex-end; margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--border)">
+          <span
+            v-if="settingsSaveFeedback.section === 'payments' && settingsSaveFeedback.text"
+            class="save-status"
+            :class="settingsSaveFeedback.ok ? 'save-status-ok' : 'save-status-error'"
+          >
+            {{ settingsSaveFeedback.text }}
+          </span>
+          <button class="btn btn-primary" :disabled="savingSettings" @click="saveSettings('payments')">
+            {{ savingSettings ? '正在保存支付网关参数...' : '保存全部支付网关参数' }}
+          </button>
+        </div>
       </div>
 
       <div class="card">
@@ -833,7 +936,7 @@
               <option value="cancelled">已取消</option>
               <option value="refunded">已冲正退款</option>
             </select>
-            <button class="btn btn-sm" @click="load">刷新订单列表</button>
+            <button class="btn btn-sm" :disabled="refreshing" @click="load(true)">{{ refreshing ? '刷新中...' : '刷新订单列表' }}</button>
           </div>
         </div>
         <div v-if="filteredRecharges.length === 0" class="muted">暂无匹配的充值订单。</div>
@@ -866,17 +969,29 @@
                 <td class="mono muted">{{ o.paid_at || o.created_at }}</td>
                 <td>
                   <div class="row" v-if="o.status === 'pending'" style="gap: 6px">
-                    <button class="btn btn-sm btn-primary" @click="queryRecharge(o.id)">官方查单</button>
-                    <button class="btn btn-sm btn-emerald" @click="confirmRecharge(o.id)">人工确认到账</button>
-                    <button class="btn btn-sm btn-warn" @click="pendingRechargeAction = { type: 'cancel', order: o }">取消/关闭</button>
+                    <button class="btn btn-sm btn-primary" :disabled="busyRechargeId === o.id" @click="queryRecharge(o.id)">
+                      {{ busyRechargeId === o.id && busyRechargeType === 'query' ? '查单中...' : '官方查单' }}
+                    </button>
+                    <button class="btn btn-sm btn-emerald" :disabled="busyRechargeId === o.id" @click="confirmRecharge(o.id)">
+                      {{ busyRechargeId === o.id && busyRechargeType === 'confirm' ? '确认中...' : '人工确认到账' }}
+                    </button>
+                    <button class="btn btn-sm btn-warn" :disabled="busyRechargeId === o.id" @click="pendingRechargeAction = { type: 'cancel', order: o }">
+                      取消/关闭
+                    </button>
                   </div>
                   <div class="row" v-else-if="o.status === 'paid'" style="gap: 6px">
                     <span class="muted" style="font-size: 12px">已入账</span>
-                    <button class="btn btn-sm btn-danger" @click="pendingRechargeAction = { type: 'refund', order: o }">冲正退款</button>
+                    <button class="btn btn-sm btn-danger" :disabled="busyRechargeId === o.id" @click="pendingRechargeAction = { type: 'refund', order: o }">
+                      冲正退款
+                    </button>
                   </div>
                   <div class="row" v-else-if="o.status === 'cancelled'" style="gap: 6px">
-                    <button class="btn btn-sm" @click="queryRecharge(o.id)">官方查单</button>
-                    <button class="btn btn-sm btn-danger" @click="pendingRechargeAction = { type: 'delete', order: o }">删除记录</button>
+                    <button class="btn btn-sm" :disabled="busyRechargeId === o.id" @click="queryRecharge(o.id)">
+                      {{ busyRechargeId === o.id && busyRechargeType === 'query' ? '查单中...' : '官方查单' }}
+                    </button>
+                    <button class="btn btn-sm btn-danger" :disabled="busyRechargeId === o.id" @click="pendingRechargeAction = { type: 'delete', order: o }">
+                      删除记录
+                    </button>
                   </div>
                   <span v-else class="muted">已冲正退款</span>
                 </td>
@@ -921,7 +1036,14 @@
                 <td class="mono" style="color: #34d399">¥{{ l.platform_profit_yuan }}</td>
                 <td><span class="tag" :class="l.status === 'active' ? 'tag-ok' : 'tag-warn'">{{ l.status }}</span></td>
                 <td>
-                  <button v-if="l.status === 'active'" class="btn btn-sm btn-danger" @click="revokeLease(l.id)">风控强断</button>
+                  <button
+                    v-if="l.status === 'active'"
+                    class="btn btn-sm btn-danger"
+                    :disabled="revokingLeaseId === l.id"
+                    @click="revokeLease(l.id)"
+                  >
+                    {{ revokingLeaseId === l.id ? '强断中...' : '风控强断' }}
+                  </button>
                   <span v-else class="muted">{{ l.end_reason }}</span>
                 </td>
               </tr>
@@ -931,17 +1053,188 @@
       </div>
 
       <div class="card" v-if="runtimeInfo.db || runtimeInfo.cache || runtimeInfo.geoip">
-        <div class="card-title">基础设施运行引擎状态 (数据库 / Redis 缓存 / 防爆破防刷 / GeoIP 地区库)</div>
-        <div class="grid-2">
-          <div class="subcard">
-            <div class="kpi-label">关系数据库引擎</div>
-            <div class="mono" style="margin-top: 6px; font-weight: 600">{{ runtimeInfo.db?.dialect || 'sqlite' }} · {{ runtimeInfo.db?.status || 'active' }}</div>
+        <div class="card-title">
+          <span>基础设施运行引擎状态 (数据库 / 缓存引擎 / 防爆破防刷 / GeoIP 地区库)</span>
+          <button class="btn btn-sm" :disabled="refreshingCache" @click="refreshCacheStatus(true)">
+            {{ refreshingCache ? '探测中...' : '刷新缓存状态' }}
+          </button>
+        </div>
+
+        <!-- 缓存引擎全状态监控 + 在线 Redis PING + 一键热切换保存 -->
+        <div class="subcard" style="margin-bottom: 14px">
+          <div class="card-title" style="font-size: 14px; margin-bottom: 12px">
+            <div class="row" style="gap: 8px">
+              <span>缓存引擎状态监控 · 在线 Redis PING 与热切换</span>
+              <span class="tag" :class="cacheBadgeMeta.cls">{{ cacheBadgeMeta.label }}</span>
+            </div>
+            <span class="muted mono" style="font-size: 11px">配置来源：{{ cacheConfigSourceLabel }}</span>
           </div>
+
+          <div class="grid-3" style="margin-bottom: 12px">
+            <div class="subcard" style="padding: 10px 12px">
+              <div class="kpi-label">当前激活后端</div>
+              <div
+                class="mono"
+                style="margin-top: 5px; font-weight: 700; font-size: 13px"
+                :style="{ color: cacheState === 'redis' ? '#34d399' : cacheState === 'degraded' ? '#f87171' : '#38bdf8' }"
+              >
+                {{
+                  cacheState === 'redis'
+                    ? `Redis v${runtimeInfo.cache?.redis_info?.version || '?'}`
+                    : cacheState === 'degraded'
+                      ? 'SQLite WAL Cache (降级兜底)'
+                      : 'SQLite WAL Cache (内置)'
+                }}
+              </div>
+              <div class="muted mono" style="font-size: 11px; margin-top: 4px; word-break: break-all">
+                <template v-if="runtimeInfo.cache?.redis_configured">
+                  目标: {{ runtimeInfo.cache?.redis_url_masked }}
+                </template>
+                <template v-else>
+                  文件: {{ runtimeInfo.cache?.sqlite_cache?.db_path || '/data/cache.db' }}
+                </template>
+              </div>
+            </div>
+
+            <div class="subcard" style="padding: 10px 12px">
+              <div class="kpi-label">实时连通与存储指标</div>
+              <div class="mono" style="margin-top: 5px; font-weight: 600; font-size: 13px; color: var(--text-strong)">
+                <template v-if="cacheState === 'redis'">
+                  PING {{ runtimeInfo.cache?.redis_info?.ping_ms ?? '-' }} ms · 内存 {{ runtimeInfo.cache?.redis_info?.used_memory_human || '-' }}
+                </template>
+                <template v-else>
+                  KV {{ runtimeInfo.cache?.sqlite_cache?.entries ?? 0 }} 条 · 缓冲哈希 {{ runtimeInfo.cache?.sqlite_cache?.buffered_hashes ?? 0 }}
+                </template>
+              </div>
+              <div class="muted mono" style="font-size: 11px; margin-top: 4px">
+                <template v-if="cacheState === 'redis'">
+                  客户端连接数 {{ runtimeInfo.cache?.redis_info?.connected_clients ?? '-' }} · 兜底 KV {{ runtimeInfo.cache?.sqlite_cache?.entries ?? 0 }} 条
+                </template>
+                <template v-else>
+                  WAL 并发安全 · 自动 TTL 清理 · 原子流量计数
+                </template>
+              </div>
+            </div>
+
+            <div class="subcard" style="padding: 10px 12px">
+              <div class="kpi-label">缓存命中率与容灾回退</div>
+              <div class="mono" style="margin-top: 5px; font-weight: 600; font-size: 13px; color: var(--text-strong)">
+                {{ cacheHitRate }}% <span class="muted" style="font-size: 11px">({{ cacheHits }} 命中 / {{ cacheMisses }} 未命中)</span>
+              </div>
+              <div class="muted mono" style="font-size: 11px; margin-top: 4px">
+                累计回退次数: {{ cacheFallbacks }} · 探活冷却: {{ runtimeInfo.cache?.probe_cooldown_sec || 30 }}s
+              </div>
+            </div>
+          </div>
+
+          <div v-if="cacheState === 'degraded'" class="banner banner-warn" style="margin-bottom: 12px; font-size: 12px">
+            <div class="row" style="justify-content: space-between; align-items: center">
+              <div style="flex: 1; min-width: 240px">
+                <strong>Redis 降级告警（已无缝切换至 SQLite WAL Cache 兜底，不影响业务读写）：</strong>
+                <span class="mono">{{ runtimeInfo.cache?.last_error || 'Redis 连接异常' }}</span>
+                <div class="muted mono" style="font-size: 11px; margin-top: 3px; color: #fde68a">
+                  系统每 {{ runtimeInfo.cache?.probe_cooldown_sec || 30 }}s 自动探活恢复
+                  <span v-if="(runtimeInfo.cache?.next_probe_in_sec || 0) > 0">（下次自动探测约 {{ runtimeInfo.cache?.next_probe_in_sec }}s 后）</span>
+                </div>
+              </div>
+              <button class="btn btn-sm btn-warn" :disabled="reconnectingRedis" @click="reconnectRedisNow">
+                {{ reconnectingRedis ? '重连探测中...' : '立即重连 Redis' }}
+              </button>
+            </div>
+          </div>
+
+          <div class="row" style="justify-content: space-between; margin-bottom: 10px">
+            <span style="font-size: 12px; color: var(--muted)">选择目标缓存引擎并一键热切换保存（写入 bootstrap.json，免重启生效）</span>
+            <div class="row" style="gap: 6px">
+              <button
+                type="button"
+                class="btn btn-sm"
+                :class="cacheTargetMode === 'sqlite_cache' ? 'btn-primary' : ''"
+                @click="cacheTargetMode = 'sqlite_cache'"
+              >
+                SQLite WAL Cache (内置)
+              </button>
+              <button
+                type="button"
+                class="btn btn-sm"
+                :class="cacheTargetMode === 'redis' ? 'btn-primary' : ''"
+                @click="cacheTargetMode = 'redis'"
+              >
+                Redis 高速缓存
+              </button>
+            </div>
+          </div>
+
+          <template v-if="cacheTargetMode === 'redis'">
+            <div class="row" style="gap: 8px">
+              <input
+                class="input mono"
+                style="flex: 1; min-width: 240px"
+                :placeholder="
+                  runtimeInfo.cache?.redis_url_masked
+                    ? `当前已保存: ${runtimeInfo.cache.redis_url_masked}（留空可测试/沿用当前连接）`
+                    : 'redis://:password@127.0.0.1:6379/0（支持 rediss:// TLS）'
+                "
+                v-model="redisUrlInput"
+              />
+              <button class="btn btn-sm" :disabled="testingRedis" @click="testRedisPing">
+                {{ testingRedis ? 'PING 中...' : '在线测试 Redis PING' }}
+              </button>
+              <button class="btn btn-sm btn-primary" :disabled="reloadingRedis" @click="reloadRedis(false)">
+                {{ reloadingRedis ? '热切换保存中...' : '一键热切换保存' }}
+              </button>
+              <button
+                v-if="runtimeInfo.cache?.redis_configured"
+                class="btn btn-sm"
+                :disabled="reloadingRedis"
+                @click="reloadRedis(true)"
+              >
+                切回 SQL Cache
+              </button>
+            </div>
+          </template>
+          <template v-else>
+            <div class="row" style="justify-content: space-between; gap: 10px">
+              <span class="muted" style="font-size: 12px">
+                内置 SQLite WAL Cache 将缓存条目与高频计费/流量哈希缓冲保存在 <code class="mono">{{ runtimeInfo.cache?.sqlite_cache?.db_path || '/data/cache.db' }}</code>，无需外部 Redis 服务。
+              </span>
+              <button
+                class="btn btn-sm btn-primary"
+                :disabled="reloadingRedis || (!runtimeInfo.cache?.redis_configured && cacheState === 'sqlite_cache')"
+                @click="reloadRedis(true)"
+              >
+                {{
+                  reloadingRedis
+                    ? '热切换保存中...'
+                    : !runtimeInfo.cache?.redis_configured && cacheState === 'sqlite_cache'
+                      ? '✓ 当前已是 SQL Cache'
+                      : '一键热切换保存为 SQL Cache'
+                }}
+              </button>
+            </div>
+          </template>
+
+          <div
+            v-if="redisPingResult"
+            class="banner mono"
+            :class="redisPingResult.ok ? 'banner-success' : 'banner-danger'"
+            style="margin-top: 10px; margin-bottom: 0; font-size: 12px"
+          >
+            <div class="row" style="justify-content: space-between">
+              <span>{{ redisPingResult.ok ? '✓' : '✕' }} {{ redisPingResult.message }}</span>
+              <span style="opacity: 0.75; font-size: 11px">{{ redisPingResult.testedAt }}</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="grid-3">
           <div class="subcard">
-            <div class="kpi-label">缓存后端 ({{ runtimeInfo.cache?.backend || 'memory' }})</div>
-            <div class="row" style="margin-top: 6px">
-              <input class="input mono" style="flex: 1" placeholder="redis://host:6379/0（留空用内存）" v-model="redisUrlInput" />
-              <button class="btn btn-sm btn-primary" @click="reloadRedis">热切换</button>
+            <div class="kpi-label">关系数据库引擎 (SQLAlchemy ORM)</div>
+            <div class="mono" style="margin-top: 6px; font-weight: 600">
+              {{ (runtimeInfo.db?.db_type || runtimeInfo.db?.dialect || 'sqlite').toUpperCase() }} · {{ runtimeInfo.db?.status || 'active' }}
+            </div>
+            <div class="muted mono" style="font-size: 11px; margin-top: 4px; word-break: break-all">
+              {{ runtimeInfo.db?.target || '/data/app.db' }}
             </div>
           </div>
           <div class="subcard">
@@ -1021,14 +1314,22 @@
             </div>
           </div>
           <div class="field">
-            <label class="row" style="cursor: pointer">
-              <input type="checkbox" v-model="createUserForm.email_verified" />
-              <span>直接标记为已通过邮箱认证</span>
+            <label class="switch-row" :class="{ active: createUserForm.email_verified }">
+              <span>
+                <span class="switch-row-title">直接标记为已通过邮箱认证</span>
+                <span class="switch-row-desc">{{ createUserForm.email_verified ? '创建后免收验证码，直接处于已认证状态' : '创建后需完成邮箱验证' }}</span>
+              </span>
+              <span class="switch">
+                <input type="checkbox" v-model="createUserForm.email_verified" />
+                <span class="switch-track"></span>
+              </span>
             </label>
           </div>
           <div class="row" style="justify-content: flex-end">
-            <button type="button" class="btn" @click="showCreateUserModal = false">取消</button>
-            <button type="submit" class="btn btn-primary">确认创建账号</button>
+            <button type="button" class="btn" :disabled="submittingUser" @click="showCreateUserModal = false">取消</button>
+            <button type="submit" class="btn btn-primary" :disabled="submittingUser">
+              {{ submittingUser ? '创建中...' : '确认创建账号' }}
+            </button>
           </div>
         </form>
       </div>
@@ -1063,10 +1364,13 @@
             </div>
             <div class="field">
               <label>邮箱认证状态</label>
-              <select class="select" v-model="editUserForm.email_verified">
-                <option :value="true">已认证邮箱</option>
-                <option :value="false">未验证邮箱</option>
-              </select>
+              <label class="switch-row" :class="{ active: editUserForm.email_verified }" style="padding: 7px 12px">
+                <span class="switch-row-title" style="font-size: 12px">{{ editUserForm.email_verified ? '已认证邮箱' : '未验证邮箱' }}</span>
+                <span class="switch switch-sm">
+                  <input type="checkbox" v-model="editUserForm.email_verified" />
+                  <span class="switch-track"></span>
+                </span>
+              </label>
             </div>
             <div class="field">
               <label>会员套餐</label>
@@ -1083,9 +1387,15 @@
           </div>
 
           <div class="field">
-            <label class="row" style="cursor: pointer">
-              <input type="checkbox" v-model="editUserForm.level_locked" />
-              <span>锁定该用户的节点主等级（不随自动升降级变动）</span>
+            <label class="switch-row" :class="{ active: editUserForm.level_locked }">
+              <span>
+                <span class="switch-row-title">锁定该用户的节点主等级</span>
+                <span class="switch-row-desc">{{ editUserForm.level_locked ? '已锁定：不随 60s 自动升降级变动' : '未锁定：随节点在线与贡献自动升降级' }}</span>
+              </span>
+              <span class="switch">
+                <input type="checkbox" v-model="editUserForm.level_locked" />
+                <span class="switch-track"></span>
+              </span>
             </label>
           </div>
 
@@ -1107,8 +1417,10 @@
           </div>
 
           <div class="row" style="justify-content: flex-end">
-            <button type="button" class="btn" @click="editingUser = null">取消</button>
-            <button type="submit" class="btn btn-primary">保存用户变更</button>
+            <button type="button" class="btn" :disabled="submittingUser" @click="editingUser = null">取消</button>
+            <button type="submit" class="btn btn-primary" :disabled="submittingUser">
+              {{ submittingUser ? '保存中...' : '保存用户变更' }}
+            </button>
           </div>
         </form>
       </div>
@@ -1184,9 +1496,29 @@ const pendingRechargeAction = ref(null)
 const referralSummary = ref({})
 const referralRewards = ref([])
 const runtimeInfo = ref({})
+const cacheTargetMode = ref('sqlite_cache')
 const redisUrlInput = ref('')
+const refreshingCache = ref(false)
+const testingRedis = ref(false)
+const reconnectingRedis = ref(false)
+const redisPingResult = ref(null)
 const geoipUrlInput = ref('')
 const geoipUpdating = ref(false)
+const refreshing = ref(false)
+const savingSettings = ref(false)
+const settingsSaveFeedback = reactive({ section: '', ok: true, text: '' })
+const savingLevelId = ref(null)
+const savedLevelId = ref(null)
+const evaluatingLevels = ref(false)
+const savingPlanId = ref(null)
+const savedPlanId = ref(null)
+const submittingUser = ref(false)
+const busyUserId = ref(null)
+const busyRechargeId = ref(null)
+const busyRechargeType = ref('')
+const revokingLeaseId = ref(null)
+const reloadingRedis = ref(false)
+let saveFeedbackTimer = null
 
 const userSearch = ref('')
 const userRoleFilter = ref('')
@@ -1334,6 +1666,31 @@ const settings = reactive({
   saas_payment_notify_secret_set: false,
 })
 
+const enabledAlipayMethodCount = computed(
+  () =>
+    (settings.saas_alipay_f2f_enabled ? 1 : 0) +
+    (settings.saas_alipay_page_enabled ? 1 : 0) +
+    (settings.saas_alipay_static_enabled ? 1 : 0),
+)
+
+const enabledWechatMethodCount = computed(
+  () => (settings.saas_wechat_native_enabled ? 1 : 0) + (settings.saas_wechat_static_enabled ? 1 : 0),
+)
+
+function nowTimeStr() {
+  return new Date().toLocaleTimeString('zh-CN', { hour12: false })
+}
+
+function setSaveFeedback(section, ok, text) {
+  settingsSaveFeedback.section = section
+  settingsSaveFeedback.ok = ok
+  settingsSaveFeedback.text = text
+  clearTimeout(saveFeedbackTimer)
+  saveFeedbackTimer = setTimeout(() => {
+    settingsSaveFeedback.text = ''
+  }, ok ? 6000 : 8000)
+}
+
 function loadTextFile(event, targetKey) {
   const file = event?.target?.files?.[0]
   if (!file) return
@@ -1346,7 +1703,8 @@ function loadTextFile(event, targetKey) {
   event.target.value = ''
 }
 
-async function load() {
+async function load(showFeedback = false) {
+  if (showFeedback) refreshing.value = true
   try {
     const [ov, us, rc, refRes] = await Promise.all([
       apiFetch('/api/admin/overview'),
@@ -1370,19 +1728,54 @@ async function load() {
       edit_can_share: Boolean(p.can_share_nodes),
     }))
     runtimeInfo.value = ov.runtime || {}
+    cacheTargetMode.value = runtimeInfo.value?.cache?.redis_configured ? 'redis' : 'sqlite_cache'
     recentLeases.value = ov.recent_leases || []
     users.value = us || []
     recharges.value = rc.orders || []
     referralSummary.value = refRes.summary || {}
     referralRewards.value = refRes.rewards || []
+    if (showFeedback) {
+      emit('notify', { message: '管理台数据已刷新', type: 'ok' })
+    }
   } catch (e) {
-    emit('notify', e.message)
+    emit('notify', { message: e.message || '加载管理台数据失败', type: 'error' })
+  } finally {
+    if (showFeedback) refreshing.value = false
   }
 }
 
-async function saveSettings() {
+const NUMERIC_SETTING_KEYS = [
+  'saas_platform_fee_bps',
+  'saas_reverse_fee_bps',
+  'saas_public_wss_fee_bps',
+  'saas_market_base_hour_yuan',
+  'saas_market_base_gb_yuan',
+  'saas_self_reverse_hub_gb_yuan',
+  'saas_referral_inviter_bonus_yuan',
+  'saas_referral_invitee_bonus_yuan',
+  'saas_welcome_bonus_yuan',
+  'saas_monthly_claim_yuan',
+  'saas_daily_checkin_yuan',
+  'saas_daily_streak_bonus_yuan',
+]
+
+async function saveSettings(section = activeSection.value) {
+  if (savingSettings.value) return
+  savingSettings.value = true
   try {
     const payload = { ...settings }
+    payload.saas_alipay_enabled = enabledAlipayMethodCount.value > 0
+    payload.saas_wechat_enabled = enabledWechatMethodCount.value > 0
+
+    for (const k of NUMERIC_SETTING_KEYS) {
+      const val = payload[k]
+      if (val === '' || val === null || val === undefined || Number.isNaN(Number(val))) {
+        delete payload[k]
+      } else {
+        payload[k] = Number(val)
+      }
+    }
+
     if (!payload.saas_alipay_private_key) delete payload.saas_alipay_private_key
     if (!payload.saas_wechat_private_key) delete payload.saas_wechat_private_key
     if (!payload.saas_wechat_api_v3_key) delete payload.saas_wechat_api_v3_key
@@ -1393,58 +1786,86 @@ async function saveSettings() {
     delete payload.saas_payment_notify_secret_set
 
     const res = await apiFetch('/api/admin/settings', { method: 'POST', body: JSON.stringify(payload) })
-    emit('notify', res.message)
-    await load()
+    const msg = res?.message || '设置已保存生效'
+    setSaveFeedback(section, true, `✓ 已保存 ${nowTimeStr()}`)
+    emit('notify', { message: msg, type: 'ok' })
+    await load(false)
   } catch (e) {
-    emit('notify', e.message)
+    const errMsg = e?.message || '保存设置失败'
+    setSaveFeedback(section, false, `✕ 保存失败`)
+    emit('notify', { message: `保存失败：${errMsg}`, type: 'error' })
+  } finally {
+    savingSettings.value = false
   }
 }
 
 async function savePlan(p) {
+  if (savingPlanId.value !== null) return
+  savingPlanId.value = p.id
   try {
     const res = await apiFetch(`/api/admin/plans/${p.id}`, {
       method: 'PUT',
       body: JSON.stringify({
         name: p.name,
-        monthly_price_yuan: p.edit_price_yuan,
-        max_nodes: p.max_nodes,
-        max_active_leases: p.max_active_leases,
-        max_monthly_traffic_gb: p.edit_traffic_gb,
-        platform_fee_discount_bps: p.platform_fee_discount_bps,
-        can_share_nodes: p.edit_can_share,
+        monthly_price_yuan: Number(p.edit_price_yuan || 0),
+        max_nodes: Number(p.max_nodes || 1),
+        max_active_leases: Number(p.max_active_leases || 1),
+        max_monthly_traffic_gb: Number(p.edit_traffic_gb || 1),
+        platform_fee_discount_bps: Number(p.platform_fee_discount_bps || 0),
+        can_share_nodes: Boolean(p.edit_can_share),
       }),
     })
-    emit('notify', res.message)
-    await load()
+    savedPlanId.value = p.id
+    setTimeout(() => {
+      if (savedPlanId.value === p.id) savedPlanId.value = null
+    }, 2400)
+    emit('notify', { message: res?.message || '套餐配置已保存', type: 'ok' })
+    await load(false)
   } catch (e) {
-    emit('notify', e.message)
+    emit('notify', { message: e.message || '保存套餐失败', type: 'error' })
+  } finally {
+    savingPlanId.value = null
   }
 }
 
 async function queryRecharge(orderId) {
+  if (busyRechargeId.value !== null) return
+  busyRechargeId.value = orderId
+  busyRechargeType.value = 'query'
   try {
     const res = await apiFetch(`/api/admin/recharges/${orderId}/query`, { method: 'POST' })
-    emit('notify', res.message)
-    await load()
+    emit('notify', res.message || '查单已完成')
+    await load(false)
   } catch (e) {
-    emit('notify', e.message)
+    emit('notify', { message: e.message || '查单失败', type: 'error' })
+  } finally {
+    busyRechargeId.value = null
+    busyRechargeType.value = ''
   }
 }
 
 async function confirmRecharge(orderId) {
+  if (busyRechargeId.value !== null) return
+  busyRechargeId.value = orderId
+  busyRechargeType.value = 'confirm'
   try {
     const res = await apiFetch(`/api/admin/recharges/${orderId}/confirm`, { method: 'POST' })
-    emit('notify', res.message)
-    await load()
+    emit('notify', { message: res.message || '已确认到账', type: 'ok' })
+    await load(false)
   } catch (e) {
-    emit('notify', e.message)
+    emit('notify', { message: e.message || '确认到账失败', type: 'error' })
+  } finally {
+    busyRechargeId.value = null
+    busyRechargeType.value = ''
   }
 }
 
 async function executeRechargeAction() {
   const act = pendingRechargeAction.value
-  if (!act?.order) return
+  if (!act?.order || busyRechargeId.value !== null) return
   pendingRechargeAction.value = null
+  busyRechargeId.value = act.order.id
+  busyRechargeType.value = act.type
   try {
     let res
     if (act.type === 'cancel') {
@@ -1454,41 +1875,56 @@ async function executeRechargeAction() {
     } else {
       res = await apiFetch(`/api/admin/recharges/${act.order.id}`, { method: 'DELETE' })
     }
-    emit('notify', res.message)
-    await load()
+    emit('notify', { message: res.message || '操作已完成', type: 'ok' })
+    await load(false)
   } catch (e) {
-    emit('notify', e.message)
+    emit('notify', { message: e.message || '订单操作失败', type: 'error' })
+  } finally {
+    busyRechargeId.value = null
+    busyRechargeType.value = ''
   }
 }
 
 async function saveLevel(lv) {
+  if (savingLevelId.value !== null) return
+  savingLevelId.value = lv.id
   try {
     const res = await apiFetch(`/api/admin/levels/${lv.id}`, {
       method: 'PUT',
       body: JSON.stringify({
-        min_online_hours: lv.min_online_hours,
-        min_contributed_gb: lv.min_contributed_gb,
-        max_avg_latency_ms: lv.max_avg_latency_ms,
-        min_speed_kbps: lv.min_speed_kbps,
-        reverse_fee_bps: lv.reverse_fee_bps,
-        public_wss_fee_bps: lv.public_wss_fee_bps,
-        buyer_discount_bps: lv.buyer_discount_bps,
+        min_online_hours: Number(lv.min_online_hours || 0),
+        min_contributed_gb: Number(lv.min_contributed_gb || 0),
+        max_avg_latency_ms: Number(lv.max_avg_latency_ms || 0),
+        min_speed_kbps: Number(lv.min_speed_kbps || 0),
+        reverse_fee_bps: Number(lv.reverse_fee_bps || 0),
+        public_wss_fee_bps: Number(lv.public_wss_fee_bps || 0),
+        buyer_discount_bps: Number(lv.buyer_discount_bps || 0),
       }),
     })
-    emit('notify', res.message)
-    await load()
+    savedLevelId.value = lv.id
+    setTimeout(() => {
+      if (savedLevelId.value === lv.id) savedLevelId.value = null
+    }, 2400)
+    emit('notify', { message: res?.message || '等级策略已保存', type: 'ok' })
+    await load(false)
   } catch (e) {
-    emit('notify', e.message)
+    emit('notify', { message: e.message || '保存等级失败', type: 'error' })
+  } finally {
+    savingLevelId.value = null
   }
 }
 
 async function evaluateAllLevels() {
+  if (evaluatingLevels.value) return
+  evaluatingLevels.value = true
   try {
     const res = await apiFetch('/api/admin/levels/evaluate', { method: 'POST' })
-    emit('notify', res.message)
-    await load()
+    emit('notify', { message: res.message || '全网自动评级已完成', type: 'ok' })
+    await load(false)
   } catch (e) {
-    emit('notify', e.message)
+    emit('notify', { message: e.message || '执行评级失败', type: 'error' })
+  } finally {
+    evaluatingLevels.value = false
   }
 }
 
@@ -1507,16 +1943,20 @@ function openCreateUserModal() {
 }
 
 async function submitCreateUser() {
+  if (submittingUser.value) return
+  submittingUser.value = true
   try {
     const res = await apiFetch('/api/admin/users', {
       method: 'POST',
       body: JSON.stringify(createUserForm),
     })
     showCreateUserModal.value = false
-    emit('notify', res.message)
-    await load()
+    emit('notify', { message: res.message || '账号创建成功', type: 'ok' })
+    await load(false)
   } catch (e) {
-    emit('notify', e.message)
+    emit('notify', { message: e.message || '创建账号失败', type: 'error' })
+  } finally {
+    submittingUser.value = false
   }
 }
 
@@ -1537,7 +1977,8 @@ function openEditUserModal(u) {
 }
 
 async function submitEditUser() {
-  if (!editingUser.value) return
+  if (!editingUser.value || submittingUser.value) return
+  submittingUser.value = true
   try {
     const payload = {
       role: editUserForm.role,
@@ -1560,58 +2001,213 @@ async function submitEditUser() {
       body: JSON.stringify(payload),
     })
     editingUser.value = null
-    emit('notify', res.message)
-    await load()
+    emit('notify', { message: res.message || '账号变更已保存', type: 'ok' })
+    await load(false)
   } catch (e) {
-    emit('notify', e.message)
+    emit('notify', { message: e.message || '保存用户变更失败', type: 'error' })
+  } finally {
+    submittingUser.value = false
   }
 }
 
 async function toggleUserStatus(u) {
+  if (busyUserId.value !== null) return
+  busyUserId.value = u.id
   try {
     const next = u.status === 'active' ? 'suspended' : 'active'
     const res = await apiFetch(`/api/admin/users/${u.id}`, {
       method: 'PUT',
       body: JSON.stringify({ status: next }),
     })
-    emit('notify', res.message)
-    await load()
+    emit('notify', { message: res.message || '账号状态已更新', type: 'ok' })
+    await load(false)
   } catch (e) {
-    emit('notify', e.message)
+    emit('notify', { message: e.message || '更新账号状态失败', type: 'error' })
+  } finally {
+    busyUserId.value = null
   }
 }
 
 async function deleteUser(uid) {
   confirmDeleteUserTarget.value = null
+  if (busyUserId.value !== null) return
+  busyUserId.value = uid
   try {
     const res = await apiFetch(`/api/admin/users/${uid}`, { method: 'DELETE' })
-    emit('notify', res.message)
-    await load()
+    emit('notify', { message: res.message || '账号已移除', type: 'ok' })
+    await load(false)
   } catch (e) {
-    emit('notify', e.message)
+    emit('notify', { message: e.message || '删除账号失败', type: 'error' })
+  } finally {
+    busyUserId.value = null
   }
 }
 
 async function revokeLease(id) {
+  if (revokingLeaseId.value !== null) return
+  revokingLeaseId.value = id
   try {
     const res = await apiFetch(`/api/admin/leases/${id}/revoke`, { method: 'POST' })
-    emit('notify', res.message)
-    await load()
+    emit('notify', { message: res.message || '租约已强断结算', type: 'ok' })
+    await load(false)
   } catch (e) {
-    emit('notify', e.message)
+    emit('notify', { message: e.message || '强断租约失败', type: 'error' })
+  } finally {
+    revokingLeaseId.value = null
   }
 }
 
-async function reloadRedis() {
+const cacheState = computed(() => {
+  const c = runtimeInfo.value?.cache || {}
+  if (c.engine_state) return c.engine_state
+  if (c.active_backend === 'redis') return 'redis'
+  return c.redis_configured ? 'degraded' : 'sqlite_cache'
+})
+
+const cacheBadgeMeta = computed(() => {
+  if (cacheState.value === 'redis') return { label: 'Redis 运行中', cls: 'tag-ok' }
+  if (cacheState.value === 'degraded') return { label: 'Redis 已降级 · SQL Cache 兜底', cls: 'tag-danger' }
+  return { label: 'SQLite WAL Cache', cls: 'tag-info' }
+})
+
+const cacheHits = computed(() => Number(runtimeInfo.value?.cache?.hits ?? runtimeInfo.value?.cache?.stats?.hits ?? 0))
+const cacheMisses = computed(() => Number(runtimeInfo.value?.cache?.misses ?? runtimeInfo.value?.cache?.stats?.misses ?? 0))
+const cacheFallbacks = computed(() => Number(runtimeInfo.value?.cache?.fallback_count ?? runtimeInfo.value?.cache?.stats?.fallbacks ?? 0))
+const cacheHitRate = computed(() => {
+  const r = runtimeInfo.value?.cache?.hit_rate
+  if (r !== undefined && r !== null) return Number(r).toFixed(1)
+  const total = cacheHits.value + cacheMisses.value
+  return total > 0 ? ((cacheHits.value / total) * 100).toFixed(1) : '0.0'
+})
+
+const cacheConfigSourceLabel = computed(() => {
+  const src = runtimeInfo.value?.cache?.config_source
+  if (src === 'bootstrap') return '后台持久化 (bootstrap.json)'
+  if (src === 'env') return '环境变量 (REDIS_URL)'
+  return '默认内置'
+})
+
+async function refreshCacheStatus(showNotice = true) {
+  if (refreshingCache.value) return
+  refreshingCache.value = true
+  try {
+    const status = await apiFetch('/api/system/cache/status')
+    runtimeInfo.value = { ...runtimeInfo.value, cache: status }
+    if (showNotice) {
+      emit('notify', { message: `已刷新缓存状态：${status.engine_label || cacheState.value}`, type: 'ok' })
+    }
+  } catch (e) {
+    emit('notify', { message: e.message || '刷新缓存状态失败', type: 'error' })
+  } finally {
+    refreshingCache.value = false
+  }
+}
+
+async function testRedisPing() {
+  if (testingRedis.value) return
+  const rawUrl = redisUrlInput.value.trim()
+  const useCurrent = !rawUrl && Boolean(runtimeInfo.value?.cache?.redis_configured)
+  if (!rawUrl && !useCurrent) {
+    redisPingResult.value = {
+      ok: false,
+      message: '请先输入 Redis 连接串，例如 redis://127.0.0.1:6379/0',
+      testedAt: nowTimeStr(),
+    }
+    return
+  }
+  testingRedis.value = true
+  redisPingResult.value = null
+  try {
+    const res = await apiFetch('/api/system/cache/test', {
+      method: 'POST',
+      body: JSON.stringify({ redis_url: rawUrl, use_current: useCurrent }),
+    })
+    const testedAt = nowTimeStr()
+    if (res.ok) {
+      redisPingResult.value = {
+        ok: true,
+        message: res.message || `PONG · Redis 连接成功 (${res.latency_ms ?? '?'}ms)`,
+        testedAt,
+      }
+      emit('notify', { message: redisPingResult.value.message, type: 'ok' })
+    } else {
+      redisPingResult.value = {
+        ok: false,
+        message: res.detail || res.message || 'Redis PING 失败',
+        testedAt,
+      }
+      emit('notify', { message: redisPingResult.value.message, type: 'error' })
+    }
+  } catch (e) {
+    redisPingResult.value = {
+      ok: false,
+      message: e.message || 'Redis PING 失败',
+      testedAt: nowTimeStr(),
+    }
+    emit('notify', { message: redisPingResult.value.message, type: 'error' })
+  } finally {
+    testingRedis.value = false
+  }
+}
+
+async function reloadRedis(forceSqlite = false) {
+  if (reloadingRedis.value) return
+  const targetMode = forceSqlite ? 'sqlite_cache' : cacheTargetMode.value
+  const rawUrl = redisUrlInput.value.trim()
+  const useCurrent = targetMode === 'redis' && !rawUrl && Boolean(runtimeInfo.value?.cache?.redis_configured)
+  if (targetMode === 'redis' && !rawUrl && !useCurrent) {
+    emit('notify', { message: '请输入 Redis 连接 URL 后再热切换保存', type: 'error' })
+    return
+  }
+
+  reloadingRedis.value = true
   try {
     const res = await apiFetch('/api/system/cache/reload', {
       method: 'POST',
-      body: JSON.stringify({ redis_url: redisUrlInput.value }),
+      body: JSON.stringify({
+        mode: targetMode,
+        redis_url: targetMode === 'redis' ? rawUrl : '',
+        use_current: useCurrent,
+      }),
     })
-    emit('notify', res.message)
-    await load()
+    if (res.cache) {
+      runtimeInfo.value = { ...runtimeInfo.value, cache: res.cache }
+      cacheTargetMode.value = res.cache.redis_configured ? 'redis' : 'sqlite_cache'
+    }
+    if (targetMode === 'sqlite_cache' || res.ok) {
+      redisUrlInput.value = ''
+    }
+    emit('notify', {
+      message: res.message || '缓存后端已热切换并保存',
+      type: res.ok === false || res.degraded ? 'error' : 'ok',
+    })
   } catch (e) {
-    emit('notify', e.message)
+    emit('notify', { message: e.message || '热切换缓存失败', type: 'error' })
+  } finally {
+    reloadingRedis.value = false
+  }
+}
+
+async function reconnectRedisNow() {
+  if (reconnectingRedis.value) return
+  reconnectingRedis.value = true
+  try {
+    const res = await apiFetch('/api/system/cache/reload', {
+      method: 'POST',
+      body: JSON.stringify({ reconnect_only: true }),
+    })
+    if (res.cache) {
+      runtimeInfo.value = { ...runtimeInfo.value, cache: res.cache }
+      cacheTargetMode.value = res.cache.redis_configured ? 'redis' : 'sqlite_cache'
+    }
+    emit('notify', {
+      message: res.message || res.detail || '已完成重连探测',
+      type: res.ok ? 'ok' : 'error',
+    })
+  } catch (e) {
+    emit('notify', { message: e.message || '重连探测失败', type: 'error' })
+  } finally {
+    reconnectingRedis.value = false
   }
 }
 
@@ -1623,14 +2219,14 @@ async function updateGeoip() {
       method: 'POST',
       body: JSON.stringify({ url: geoipUrlInput.value.trim() }),
     })
-    emit('notify', res.message || 'geoip.dat 已更新加载')
-    await load()
+    emit('notify', { message: res.message || 'geoip.dat 已更新加载', type: 'ok' })
+    await load(false)
   } catch (e) {
-    emit('notify', e.message)
+    emit('notify', { message: e.message || 'GeoIP 更新失败', type: 'error' })
   } finally {
     geoipUpdating.value = false
   }
 }
 
-onMounted(load)
+onMounted(() => load(false))
 </script>

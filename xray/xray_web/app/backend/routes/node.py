@@ -39,15 +39,81 @@ node_bp = Blueprint("node_bp", __name__)
 def _serialize_agent_health(raw_health) -> tuple[str, dict | None]:
     if not isinstance(raw_health, dict):
         return "", None
+    core_alive = raw_health.get("xray_alive")
+    if core_alive is None:
+        core_alive = raw_health.get("core_alive", True)
     parsed = {
         "healthy": bool(raw_health.get("healthy", True)),
-        "xray_alive": bool(raw_health.get("xray_alive", True)),
+        "xray_alive": bool(core_alive),
         "port_ready": bool(raw_health.get("port_ready", True)),
         "stats_ready": bool(raw_health.get("stats_ready", True)),
     }
     if "tunnel_connected" in raw_health and raw_health.get("tunnel_connected") is not None:
         parsed["tunnel_connected"] = bool(raw_health.get("tunnel_connected"))
+    if "hy2_ready" in raw_health and raw_health.get("hy2_ready") is not None:
+        parsed["hy2_ready"] = bool(raw_health.get("hy2_ready"))
+    core_type = str(raw_health.get("core_type") or "").strip().lower()
+    if core_type in ("xray", "singbox"):
+        parsed["core_type"] = core_type
     return json.dumps(parsed, separators=(",", ":")), parsed
+
+
+def _parse_bool_int(val, default: int = 0) -> int:
+    if val is None:
+        return default
+    if isinstance(val, bool):
+        return 1 if val else 0
+    s = str(val).strip().lower()
+    if s in ("1", "true", "yes", "on"):
+        return 1
+    if s in ("0", "false", "no", "off"):
+        return 0
+    return default
+
+
+def _parse_core_and_hy2(data: dict) -> tuple[str, int, int, str, int]:
+    raw_core = str(data.get("core_type") or "").strip().lower()
+    core_type = raw_core if raw_core in ("xray", "singbox") else ""
+    hy2_enabled = _parse_bool_int(data.get("hy2_enabled"), default=0) if core_type == "singbox" else 0
+    try:
+        hy2_port = int(data.get("hy2_port") or 0)
+    except Exception:
+        hy2_port = 0
+    if hy2_port < 0 or hy2_port > 65535:
+        hy2_port = 0
+    if core_type != "singbox":
+        hy2_port = 0
+    hy2_sni = str(data.get("hy2_sni") or "").strip()[:255] if core_type == "singbox" else ""
+    hy2_insecure = _parse_bool_int(data.get("hy2_insecure"), default=1)
+    return core_type, hy2_enabled, hy2_port, hy2_sni, hy2_insecure
+
+
+def _build_node_config_payload(
+    *,
+    net_mode: str,
+    port: int,
+    dest: str,
+    snis: list[str],
+    sid: str,
+    core_type: str = "xray",
+    hy2_enabled: int = 0,
+    hy2_port: int = 0,
+    hy2_sni: str = "",
+    hy2_insecure: int = 1,
+) -> dict:
+    return {
+        "net_mode": net_mode,
+        "core_type": core_type or "xray",
+        "port": port,
+        "dest": dest,
+        "sni": snis[0] if snis else "www.microsoft.com",
+        "server_names": snis,
+        "sid": sid,
+        "hy2_enabled": bool(int(hy2_enabled or 0)),
+        "hy2_port": int(hy2_port or 0),
+        "hy2_sni": str(hy2_sni or "").strip(),
+        "hy2_insecure": bool(int(hy2_insecure if hy2_insecure is not None else 1)),
+    }
 
 
 @node_bp.route("/api/node/challenge", methods=["GET", "POST"])
@@ -89,6 +155,8 @@ def node_heartbeat():
         now_ts = time.time()
         now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         agent_health_json, agent_health_dict = _serialize_agent_health(data.get("health"))
+        reported_core_type, reported_hy2_enabled, reported_hy2_port, reported_hy2_sni, reported_hy2_insecure = _parse_core_and_hy2(data)
+        effective_core_type = reported_core_type or "xray"
 
         if not node_id:
             return jsonify({"code": 400, "msg": "缺少 node_id"}), 400
@@ -277,6 +345,11 @@ def node_heartbeat():
                     existing.net_mode = net_mode
                     existing.tunnel_uuid = tunnel_uuid
                     existing.tunnel_status = tunnel_status
+                    existing.core_type = effective_core_type
+                    existing.hy2_enabled = reported_hy2_enabled
+                    existing.hy2_port = reported_hy2_port
+                    existing.hy2_sni = reported_hy2_sni
+                    existing.hy2_insecure = reported_hy2_insecure
                 else:
                     s.add(
                         Node(
@@ -305,6 +378,11 @@ def node_heartbeat():
                             net_mode=net_mode,
                             tunnel_uuid=tunnel_uuid,
                             tunnel_status=tunnel_status,
+                            core_type=effective_core_type,
+                            hy2_enabled=reported_hy2_enabled,
+                            hy2_port=reported_hy2_port,
+                            hy2_sni=reported_hy2_sni,
+                            hy2_insecure=reported_hy2_insecure,
                         )
                     )
 
@@ -333,14 +411,18 @@ def node_heartbeat():
                 "network_mode": det_result.network_mode,
                 "network_detection": det_result.to_dict(),
                 "challenge_nonce": next_challenge_nonce,
-                "node_config": {
-                    "net_mode": net_mode,
-                    "port": node_port,
-                    "dest": dest,
-                    "sni": primary_sni,
-                    "server_names": snis,
-                    "sid": sid,
-                },
+                "node_config": _build_node_config_payload(
+                    net_mode=net_mode,
+                    port=node_port,
+                    dest=dest,
+                    snis=snis,
+                    sid=sid,
+                    core_type=effective_core_type,
+                    hy2_enabled=reported_hy2_enabled,
+                    hy2_port=reported_hy2_port,
+                    hy2_sni=reported_hy2_sni,
+                    hy2_insecure=reported_hy2_insecure,
+                ),
             }
             if net_mode == "reverse_wss":
                 hub_host, hub_port, _ = resolve_public_endpoint(request)
@@ -423,6 +505,14 @@ def node_heartbeat():
                 node_obj.last_challenge_nonce = next_challenge_nonce
                 node_obj.node_public_key = final_pubkey
                 node_obj.key_lock_status = final_lock
+                if reported_core_type:
+                    node_obj.core_type = reported_core_type
+                if (node_obj.core_type or "xray") == "singbox":
+                    if int(node_obj.hy2_port or 0) == 0 and reported_hy2_port > 0:
+                        node_obj.hy2_enabled = reported_hy2_enabled
+                        node_obj.hy2_port = reported_hy2_port
+                        node_obj.hy2_sni = reported_hy2_sni
+                        node_obj.hy2_insecure = reported_hy2_insecure
                 s.flush()
                 resynced_node = node_obj.to_dict()
 
@@ -436,14 +526,18 @@ def node_heartbeat():
                 "net_mode": resync_net_mode,
                 "network_mode": det_result.network_mode,
                 "network_detection": det_result.to_dict(),
-                "node_config": {
-                    "net_mode": resync_net_mode,
-                    "port": resynced_node["port"],
-                    "dest": resync_dest,
-                    "sni": resync_snis[0] if resync_snis else "www.microsoft.com",
-                    "server_names": resync_snis,
-                    "sid": resynced_node["sid"],
-                },
+                "node_config": _build_node_config_payload(
+                    net_mode=resync_net_mode,
+                    port=resynced_node["port"],
+                    dest=resync_dest,
+                    snis=resync_snis,
+                    sid=resynced_node["sid"],
+                    core_type=resynced_node.get("core_type", "xray"),
+                    hy2_enabled=resynced_node.get("hy2_enabled", 0),
+                    hy2_port=resynced_node.get("hy2_port", 0),
+                    hy2_sni=resynced_node.get("hy2_sni", ""),
+                    hy2_insecure=resynced_node.get("hy2_insecure", 1),
+                ),
             }
             if client_key != final_node_key:
                 resync_resp["tofu_assigned_key"] = final_node_key
@@ -472,7 +566,25 @@ def node_heartbeat():
             prev_tunnel = node_obj.tunnel_status or ""
             prev_probe = node_obj.last_probe or ""
             prev_status = int(node_obj.status or 0)
+            prev_core_type = node_obj.core_type or "xray"
+            prev_hy2_sig = (
+                int(node_obj.hy2_enabled or 0),
+                int(node_obj.hy2_port or 0),
+                node_obj.hy2_sni or "",
+                int(node_obj.hy2_insecure if node_obj.hy2_insecure is not None else 1),
+            )
             hb_was_stale = (prev_hb_ts <= 0.0) or ((now_ts - prev_hb_ts) >= 90.0)
+
+            def _sync_core_and_hy2_if_needed(n_obj):
+                if reported_core_type and n_obj.core_type != reported_core_type:
+                    n_obj.core_type = reported_core_type
+                if (n_obj.core_type or "xray") == "singbox":
+                    # 仅在 Hub 尚未配置 Hysteria2 端口时采纳节点首次上报，保证后台编辑配置始终作为权威源
+                    if int(n_obj.hy2_port or 0) == 0 and reported_hy2_port > 0:
+                        n_obj.hy2_enabled = reported_hy2_enabled
+                        n_obj.hy2_port = reported_hy2_port
+                        n_obj.hy2_sni = reported_hy2_sni
+                        n_obj.hy2_insecure = reported_hy2_insecure
 
             def _maybe_clear_recoverable_probe(n_obj, health_dict):
                 lp = parse_last_probe(n_obj.last_probe)
@@ -502,6 +614,7 @@ def node_heartbeat():
                     node_obj.agent_health = agent_health_json
                 if (node_obj.net_mode or "direct") == "reverse_wss" and agent_health_dict and "tunnel_connected" in agent_health_dict:
                     node_obj.tunnel_status = "connected" if agent_health_dict["tunnel_connected"] else "disconnected"
+                _sync_core_and_hy2_if_needed(node_obj)
                 _maybe_clear_recoverable_probe(node_obj, agent_health_dict)
                 node_obj.last_challenge_nonce = next_challenge_nonce
                 need_cache_invalidate = True
@@ -540,6 +653,7 @@ def node_heartbeat():
                         node_obj.agent_health = agent_health_json
                     if (node_obj.net_mode or "direct") == "reverse_wss" and agent_health_dict and "tunnel_connected" in agent_health_dict:
                         node_obj.tunnel_status = "connected" if agent_health_dict["tunnel_connected"] else "disconnected"
+                    _sync_core_and_hy2_if_needed(node_obj)
                     _maybe_clear_recoverable_probe(node_obj, agent_health_dict)
                     node_obj.last_challenge_nonce = next_challenge_nonce
                     node_obj.key_lock_status = update_lock_status
@@ -547,12 +661,20 @@ def node_heartbeat():
                     s.flush()
                     latest_node = node_obj.to_dict()
 
+                    cur_hy2_sig = (
+                        int(node_obj.hy2_enabled or 0),
+                        int(node_obj.hy2_port or 0),
+                        node_obj.hy2_sni or "",
+                        int(node_obj.hy2_insecure if node_obj.hy2_insecure is not None else 1),
+                    )
                     if (
                         hb_was_stale
                         or prev_status != 1
                         or (node_obj.agent_health or "") != prev_health
                         or (node_obj.tunnel_status or "") != prev_tunnel
                         or (node_obj.last_probe or "") != prev_probe
+                        or (node_obj.core_type or "xray") != prev_core_type
+                        or cur_hy2_sig != prev_hy2_sig
                     ):
                         need_cache_invalidate = True
 
@@ -565,14 +687,18 @@ def node_heartbeat():
                         "challenge_nonce": next_challenge_nonce,
                         "key_lock_status": update_lock_status,
                         "net_mode": stage2_net_mode,
-                        "node_config": {
-                            "net_mode": stage2_net_mode,
-                            "port": latest_node["port"],
-                            "dest": clean_dest,
-                            "sni": snis[0] if snis else "www.microsoft.com",
-                            "server_names": snis,
-                            "sid": latest_node["sid"],
-                        },
+                        "node_config": _build_node_config_payload(
+                            net_mode=stage2_net_mode,
+                            port=latest_node["port"],
+                            dest=clean_dest,
+                            snis=snis,
+                            sid=latest_node["sid"],
+                            core_type=latest_node.get("core_type", "xray"),
+                            hy2_enabled=latest_node.get("hy2_enabled", 0),
+                            hy2_port=latest_node.get("hy2_port", 0),
+                            hy2_sni=latest_node.get("hy2_sni", ""),
+                            hy2_insecure=latest_node.get("hy2_insecure", 1),
+                        ),
                     }
                     if stage2_net_mode == "reverse_wss":
                         hub_host, hub_port, _ = resolve_public_endpoint(request)
@@ -621,14 +747,18 @@ def node_sync_users():
             clean_dest = node["dest"] if (node.get("dest") and ":" in node["dest"]) else f"{node.get('dest', 'www.microsoft.com')}:443"
             return jsonify({
                 "code": 200,
-                "node_config": {
-                    "net_mode": node.get("net_mode", "direct"),
-                    "port": node["port"],
-                    "dest": clean_dest,
-                    "sni": snis[0],
-                    "server_names": snis,
-                    "sid": node["sid"],
-                },
+                "node_config": _build_node_config_payload(
+                    net_mode=node.get("net_mode", "direct"),
+                    port=node["port"],
+                    dest=clean_dest,
+                    snis=snis,
+                    sid=node["sid"],
+                    core_type=node.get("core_type", "xray"),
+                    hy2_enabled=node.get("hy2_enabled", 0),
+                    hy2_port=node.get("hy2_port", 0),
+                    hy2_sni=node.get("hy2_sni", ""),
+                    hy2_insecure=node.get("hy2_insecure", 1),
+                ),
                 "users": [],
             })
 
@@ -644,14 +774,18 @@ def node_sync_users():
 
         return jsonify({
             "code": 200,
-            "node_config": {
-                "net_mode": node.get("net_mode", "direct"),
-                "port": node["port"],
-                "dest": clean_dest,
-                "sni": snis[0],
-                "server_names": snis,
-                "sid": node["sid"],
-            },
+            "node_config": _build_node_config_payload(
+                net_mode=node.get("net_mode", "direct"),
+                port=node["port"],
+                dest=clean_dest,
+                snis=snis,
+                sid=node["sid"],
+                core_type=node.get("core_type", "xray"),
+                hy2_enabled=node.get("hy2_enabled", 0),
+                hy2_port=node.get("hy2_port", 0),
+                hy2_sni=node.get("hy2_sni", ""),
+                hy2_insecure=node.get("hy2_insecure", 1),
+            ),
             "users": allowed_users,
         })
     except Exception as e:

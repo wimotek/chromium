@@ -43,7 +43,9 @@
           <label>Redis 缓存连接串（可选，留空自动使用 SQLite Cache）</label>
           <div class="row">
             <input class="input" style="flex: 1" v-model="form.redis_url" placeholder="redis://127.0.0.1:6379/0" />
-            <button class="btn btn-sm" v-if="form.redis_url" @click="testRedis" :disabled="testingRedis">测试 Redis</button>
+            <button class="btn btn-sm" v-if="form.redis_url" @click="testRedis" :disabled="testingRedis">
+              {{ testingRedis ? '探测中...' : '测试 Redis' }}
+            </button>
           </div>
           <div v-if="redisMsg" style="font-size: 12px; margin-top: 4px" :style="{ color: redisOk ? '#34d399' : '#f87171' }">{{ redisMsg }}</div>
         </div>
@@ -113,13 +115,15 @@
 
         <div class="row" style="justify-content: space-between; gap: 16px">
           <div class="row" style="gap: 18px">
-            <label class="row" style="cursor: pointer; gap: 6px">
+            <label class="switch switch-sm">
               <input type="checkbox" v-model="form.saas_allow_public_register" />
-              <span>开放首页公开注册</span>
+              <span class="switch-track"></span>
+              <span class="switch-state" :class="{ on: form.saas_allow_public_register }">开放首页公开注册</span>
             </label>
-            <label class="row" style="cursor: pointer; gap: 6px">
+            <label class="switch switch-sm">
               <input type="checkbox" v-model="form.saas_require_email_verify" />
-              <span>注册强制邮箱验证码认证</span>
+              <span class="switch-track"></span>
+              <span class="switch-state" :class="{ on: form.saas_require_email_verify }">注册强制邮箱验证码认证</span>
             </label>
           </div>
           <button class="btn btn-primary" @click="submit" :disabled="submitting">

@@ -120,17 +120,25 @@
       </div>
 
       <p class="card-desc">
-        每个物理节点精炼输出 1 条线路。系统默认随机挑选伪装 SNI 分散审查，您亦可在下方下拉自选：
+        订阅链接已自动聚合所有健康节点（支持 Sing-box 节点的 VLESS-REALITY + Hysteria2 UDP 双协议自动下发）；您亦可在此单节点切换 SNI 或单独复制：
       </p>
 
       <div class="node-grid">
         <div v-for="node in currentUser.nodes" :key="node.id" class="node-card">
           <div class="node-header">
-            <span class="node-title">{{ node.name }}</span>
+            <div style="display: flex; align-items: center; gap: 6px; flex-wrap: wrap;">
+              <span class="node-title">{{ node.name }}</span>
+              <span v-if="node.hy2_link" class="hy2-node-badge" title="此节点由 Sing-box 驱动，同时提供 VLESS-REALITY (TCP) 与 Hysteria2 (UDP)">
+                ⚡ 双协议 · Hy2
+              </span>
+            </div>
             <span class="badge badge-ready">🟢 在线加速</span>
           </div>
           <div class="node-detail">
             <div>地址: {{ node.ip }}:{{ node.port }}</div>
+            <div v-if="node.hy2_link" style="font-size: 11px; color: #22d3ee; margin-top: 3px;">
+              Hysteria2 UDP: 端口 {{ node.hy2_port || node.port }} · SNI {{ node.hy2_sni || node.selected_sni || '默认' }}
+            </div>
 
             <!-- 多 SNI 下拉选择器 -->
             <div v-if="node.server_names && node.server_names.length > 1" class="sni-select-wrap">
@@ -145,15 +153,35 @@
           </div>
 
           <div class="node-card-footer">
-            <div class="action-btn-right">
-              <button class="btn-sm btn-action" @click="$emit('copy', node.link)">📋 复制</button>
-              <button class="btn-sm btn-edit" @click="$emit('open-qr', { link: node.link, name: node.name })">📱 扫码</button>
+            <div class="action-btn-right" style="flex-wrap: wrap; justify-content: flex-end;">
+              <button class="btn-sm btn-action" @click="$emit('copy', node.link)">
+                {{ node.hy2_link ? '📋 VLESS' : '📋 复制' }}
+              </button>
+              <button class="btn-sm btn-edit" @click="$emit('open-qr', { link: node.link, name: node.name })">
+                {{ node.hy2_link ? '📱 VLESS码' : '📱 扫码' }}
+              </button>
+              <button
+                v-if="node.hy2_link"
+                class="btn-sm btn-hy2-copy"
+                title="复制 Hysteria2 UDP 加速节点链接"
+                @click="$emit('copy', node.hy2_link)"
+              >
+                🌀 Hy2
+              </button>
+              <button
+                v-if="node.hy2_link"
+                class="btn-sm btn-hy2-qr"
+                title="显示 Hysteria2 二维码"
+                @click="$emit('open-qr', { link: node.hy2_link, name: `${node.name} [Hy2-UDP]` })"
+              >
+                📱 Hy2码
+              </button>
             </div>
           </div>
         </div>
 
         <div v-if="!currentUser.nodes || currentUser.nodes.length === 0" class="empty-node-tip">
-          暂无在线节点，请等待管理员启动并接入 xray_core 远程节点。
+          暂无在线节点，请等待管理员启动并接入 xray_core 或 sing-box 远程节点。
         </div>
       </div>
     </div>
@@ -596,7 +624,7 @@ const submitChangePassword = async () => {
 .auto-sync-text {
   font-size: 11px;
   color: #64748b;
-  font-family: monospace;
+  font-family: var(--font-mono);
 }
 
 .btn-client-download-main {
@@ -639,5 +667,35 @@ const submitChangePassword = async () => {
   color: #94a3b8;
   margin-top: 4px;
   line-height: 1.5;
+}
+
+.hy2-node-badge {
+  font-size: 10px;
+  font-weight: 700;
+  padding: 2px 7px;
+  border-radius: 4px;
+  background: rgba(168, 85, 247, 0.18);
+  color: #d8b4fe;
+  border: 1px solid rgba(168, 85, 247, 0.4);
+}
+
+.btn-hy2-copy {
+  background: rgba(168, 85, 247, 0.18);
+  color: #d8b4fe;
+  border: 1px solid rgba(168, 85, 247, 0.45);
+}
+
+.btn-hy2-copy:hover {
+  background: rgba(168, 85, 247, 0.32);
+}
+
+.btn-hy2-qr {
+  background: rgba(6, 182, 212, 0.16);
+  color: #22d3ee;
+  border: 1px solid rgba(6, 182, 212, 0.45);
+}
+
+.btn-hy2-qr:hover {
+  background: rgba(6, 182, 212, 0.3);
 }
 </style>

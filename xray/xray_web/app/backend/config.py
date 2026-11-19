@@ -64,14 +64,26 @@ class Config:
     FAKA_API_TOKEN = os.getenv("FAKA_API_TOKEN", "faka_secret_token_8899")
 
     # 可选 Redis 加速配置（未配置或连接失败时自动透明回退至 SQL kv_cache）
-    REDIS_URL = os.getenv("REDIS_URL", "").strip()
-    REDIS_HOST = os.getenv("REDIS_HOST", "").strip()
-    REDIS_PORT = int(os.getenv("REDIS_PORT", "6379") or 6379)
-    REDIS_PASSWORD = os.getenv("REDIS_PASSWORD", "").strip()
-    REDIS_DB = int(os.getenv("REDIS_DB", "0") or 0)
-    REDIS_KEY_PREFIX = os.getenv("REDIS_KEY_PREFIX", "xray_hub:").strip()
-    REDIS_TIMEOUT = float(os.getenv("REDIS_TIMEOUT", "1.5") or 1.5)
-    REDIS_COOLDOWN_SECONDS = int(os.getenv("REDIS_COOLDOWN_SECONDS", "30") or 30)
+    _ENV_REDIS_URL = os.getenv("REDIS_URL", "").strip()
+    _ENV_REDIS_HOST = os.getenv("REDIS_HOST", "").strip()
+    _ENV_REDIS_PORT = int(os.getenv("REDIS_PORT", "6379") or 6379)
+    _ENV_REDIS_PASSWORD = os.getenv("REDIS_PASSWORD", "").strip()
+    _ENV_REDIS_DB = int(os.getenv("REDIS_DB", "0") or 0)
+    _ENV_REDIS_KEY_PREFIX = os.getenv("REDIS_KEY_PREFIX", "xray_hub:").strip() or "xray_hub:"
+    _ENV_REDIS_TIMEOUT = float(os.getenv("REDIS_TIMEOUT", "1.5") or 1.5)
+    _ENV_REDIS_COOLDOWN_SECONDS = int(os.getenv("REDIS_COOLDOWN_SECONDS", "30") or 30)
+
+    REDIS_URL = _ENV_REDIS_URL
+    REDIS_HOST = _ENV_REDIS_HOST
+    REDIS_PORT = _ENV_REDIS_PORT
+    REDIS_PASSWORD = _ENV_REDIS_PASSWORD
+    REDIS_DB = _ENV_REDIS_DB
+    REDIS_KEY_PREFIX = _ENV_REDIS_KEY_PREFIX
+    REDIS_TIMEOUT = _ENV_REDIS_TIMEOUT
+    REDIS_COOLDOWN_SECONDS = _ENV_REDIS_COOLDOWN_SECONDS
+    # 缓存模式：""(自动判定) | "redis" | "sql_cache"
+    CACHE_MODE = "redis" if (_ENV_REDIS_URL or _ENV_REDIS_HOST) else ""
+    CACHE_CONFIG_SOURCE = "env" if (_ENV_REDIS_URL or _ENV_REDIS_HOST) else "default"
 
     SETUP_COMPLETED = False
 
@@ -98,16 +110,63 @@ class Config:
         if "mysql_database" in data and data["mysql_database"]:
             cls.MYSQL_DATABASE = str(data["mysql_database"]).strip()
 
-        if "redis_url" in data:
-            cls.REDIS_URL = str(data.get("redis_url") or "").strip()
-        if "redis_host" in data:
-            cls.REDIS_HOST = str(data.get("redis_host") or "").strip()
-        if "redis_port" in data and data["redis_port"]:
-            cls.REDIS_PORT = int(data["redis_port"])
-        if "redis_password" in data:
-            cls.REDIS_PASSWORD = str(data.get("redis_password") or "").strip()
-        if "redis_db" in data and data["redis_db"] is not None:
-            cls.REDIS_DB = int(data["redis_db"])
+        raw_cache_mode = str(data.get("cache_mode") or "").strip().lower()
+        hub_redis_url = str(data.get("redis_url") or "").strip()
+        hub_redis_host = str(data.get("redis_host") or "").strip()
+
+        if "redis_key_prefix" in data and str(data.get("redis_key_prefix") or "").strip():
+            cls.REDIS_KEY_PREFIX = str(data.get("redis_key_prefix")).strip()
+        if "redis_timeout" in data and data.get("redis_timeout") not in (None, ""):
+            try:
+                cls.REDIS_TIMEOUT = max(0.3, min(15.0, float(data["redis_timeout"])))
+            except (TypeError, ValueError):
+                pass
+        if "redis_cooldown_seconds" in data and data.get("redis_cooldown_seconds") not in (None, ""):
+            try:
+                cls.REDIS_COOLDOWN_SECONDS = max(5, min(600, int(data["redis_cooldown_seconds"])))
+            except (TypeError, ValueError):
+                pass
+
+        if raw_cache_mode == "sql_cache":
+            cls.CACHE_MODE = "sql_cache"
+            cls.CACHE_CONFIG_SOURCE = "hub_config"
+            # 保留已保存的连接参数以便后台随时切回 Redis
+            if "redis_url" in data:
+                cls.REDIS_URL = hub_redis_url
+            if "redis_host" in data:
+                cls.REDIS_HOST = hub_redis_host
+            if "redis_port" in data and data["redis_port"]:
+                cls.REDIS_PORT = int(data["redis_port"])
+            if "redis_password" in data:
+                cls.REDIS_PASSWORD = str(data.get("redis_password") or "").strip()
+            if "redis_db" in data and data["redis_db"] is not None:
+                cls.REDIS_DB = int(data["redis_db"])
+        elif raw_cache_mode == "redis" or hub_redis_url or hub_redis_host:
+            cls.CACHE_MODE = "redis"
+            cls.CACHE_CONFIG_SOURCE = "hub_config"
+            if "redis_url" in data:
+                cls.REDIS_URL = hub_redis_url
+            if "redis_host" in data:
+                cls.REDIS_HOST = hub_redis_host
+            if "redis_port" in data and data["redis_port"]:
+                cls.REDIS_PORT = int(data["redis_port"])
+            if "redis_password" in data:
+                cls.REDIS_PASSWORD = str(data.get("redis_password") or "").strip()
+            if "redis_db" in data and data["redis_db"] is not None:
+                cls.REDIS_DB = int(data["redis_db"])
+        else:
+            # 兼容旧版安装向导写入的空 redis_url/redis_host：不覆盖环境变量中显式配置的 Redis
+            cls.REDIS_URL = cls._ENV_REDIS_URL
+            cls.REDIS_HOST = cls._ENV_REDIS_HOST
+            cls.REDIS_PORT = cls._ENV_REDIS_PORT
+            cls.REDIS_PASSWORD = cls._ENV_REDIS_PASSWORD
+            cls.REDIS_DB = cls._ENV_REDIS_DB
+            if cls._ENV_REDIS_URL or cls._ENV_REDIS_HOST:
+                cls.CACHE_MODE = "redis"
+                cls.CACHE_CONFIG_SOURCE = "env"
+            else:
+                cls.CACHE_MODE = ""
+                cls.CACHE_CONFIG_SOURCE = "default"
 
         if "public_url" in data:
             cls.PUBLIC_URL = str(data.get("public_url") or "").strip().rstrip("/")
@@ -118,7 +177,7 @@ class Config:
 
     @classmethod
     def reload_if_changed(cls, force: bool = False) -> bool:
-        """检查 /data/hub_config.json 是否更新（支持多 Worker 进程间热同步安装向导配置）"""
+        """检查 /data/hub_config.json 是否更新（支持多 Worker 进程间热同步安装向导与后台配置）"""
         now_mono = time.monotonic()
         if not force and (now_mono - cls._last_stat_check) < cls._STAT_CHECK_INTERVAL:
             return False
@@ -196,6 +255,48 @@ class Config:
         return f"mysql+pymysql://{auth}{host}:{int(port or 3306)}/{db_name}?charset=utf8mb4"
 
     @classmethod
+    def build_redis_url(
+        cls,
+        host: str,
+        port: int = 6379,
+        password: str = "",
+        db: int = 0,
+    ) -> str:
+        clean_host = str(host or "").strip()
+        if not clean_host:
+            return ""
+        formatted_host = (
+            f"[{clean_host}]"
+            if (":" in clean_host and not clean_host.startswith("["))
+            else clean_host
+        )
+        pw = urllib.parse.quote_plus(str(password or "").strip())
+        auth = f":{pw}@" if pw else ""
+        return f"redis://{auth}{formatted_host}:{int(port or 6379)}/{int(db or 0)}"
+
+    @classmethod
+    def mask_redis_url(cls, url: str) -> str:
+        raw = str(url or "").strip()
+        if not raw:
+            return ""
+        try:
+            parsed = urllib.parse.urlparse(raw)
+            if not parsed.scheme or not parsed.hostname:
+                return raw
+            host = f"[{parsed.hostname}]" if ":" in parsed.hostname else parsed.hostname
+            port_part = f":{parsed.port}" if parsed.port else ""
+            if parsed.password is not None:
+                user_part = parsed.username or ""
+                netloc = f"{user_part}:***@{host}{port_part}"
+            elif parsed.username:
+                netloc = f"{parsed.username}@{host}{port_part}"
+            else:
+                netloc = f"{host}{port_part}"
+            return urllib.parse.urlunparse((parsed.scheme, netloc, parsed.path or "/0", "", parsed.query, ""))
+        except Exception:
+            return raw
+
+    @classmethod
     def effective_database_url(cls) -> str:
         cls.reload_if_changed()
         if cls.DATABASE_URL:
@@ -224,13 +325,55 @@ class Config:
     @classmethod
     def effective_redis_url(cls) -> str:
         cls.reload_if_changed()
+        if cls.CACHE_MODE == "sql_cache":
+            return ""
         if cls.REDIS_URL:
             return cls.REDIS_URL
         if cls.REDIS_HOST:
-            pw = urllib.parse.quote_plus(cls.REDIS_PASSWORD) if cls.REDIS_PASSWORD else ""
-            auth = f":{pw}@" if pw else ""
-            return f"redis://{auth}{cls.REDIS_HOST}:{cls.REDIS_PORT}/{cls.REDIS_DB}"
+            return cls.build_redis_url(cls.REDIS_HOST, cls.REDIS_PORT, cls.REDIS_PASSWORD, cls.REDIS_DB)
         return ""
+
+    @classmethod
+    def cache_config_summary(cls) -> dict:
+        """返回供管理后台安全展示的缓存配置摘要（绝不返回明文密码）"""
+        cls.reload_if_changed()
+        effective_url = cls.effective_redis_url()
+        host = cls.REDIS_HOST
+        port = cls.REDIS_PORT or 6379
+        db_idx = cls.REDIS_DB or 0
+        has_password = bool(cls.REDIS_PASSWORD)
+        raw_url_for_parse = cls.REDIS_URL or effective_url
+
+        if raw_url_for_parse:
+            try:
+                parsed = urllib.parse.urlparse(raw_url_for_parse)
+                if not host and parsed.hostname:
+                    host = parsed.hostname
+                if parsed.port:
+                    port = parsed.port
+                if parsed.password:
+                    has_password = True
+                path_db = (parsed.path or "").lstrip("/")
+                if path_db.isdigit():
+                    db_idx = int(path_db)
+            except Exception:
+                pass
+
+        return {
+            "cache_mode": "redis" if effective_url else "sql_cache",
+            "config_source": cls.CACHE_CONFIG_SOURCE,
+            "has_env_redis": bool(cls._ENV_REDIS_URL or cls._ENV_REDIS_HOST),
+            "redis_url_masked": cls.mask_redis_url(effective_url or cls.REDIS_URL),
+            "using_custom_url": bool(cls.REDIS_URL),
+            "redis_host": host or "127.0.0.1",
+            "redis_port": int(port or 6379),
+            "redis_db": int(db_idx or 0),
+            "has_redis_password": has_password,
+            "redis_key_prefix": cls.REDIS_KEY_PREFIX or "xray_hub:",
+            "redis_timeout": float(cls.REDIS_TIMEOUT or 1.5),
+            "redis_cooldown_seconds": int(cls.REDIS_COOLDOWN_SECONDS or 30),
+            "hub_config_path": cls.HUB_CONFIG_PATH,
+        }
 
 
 Config.reload_if_changed(force=True)

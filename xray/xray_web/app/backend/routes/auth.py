@@ -30,6 +30,7 @@ from core.rate_limit import (
     set_cooldown,
 )
 from routes import (
+    build_hy2_link,
     build_node_link,
     get_node_snis,
     is_node_healthy_for_sub,
@@ -132,6 +133,7 @@ def login():
                 hub_domain=hub_host,
                 hub_port=hub_port,
             )
+            hy2_link = build_hy2_link(user_dict["uuid"], n, f"{n['name']}")
             nodes_data.append({
                 "id": n["id"],
                 "name": n["name"],
@@ -142,6 +144,11 @@ def login():
                 "server_names": snis,
                 "selected_sni": random_sni,
                 "link": link,
+                "core_type": n.get("core_type") or "xray",
+                "hy2_enabled": int(n.get("hy2_enabled") or 0),
+                "hy2_port": int(n.get("hy2_port") or 0),
+                "hy2_sni": n.get("hy2_sni") or "",
+                "hy2_link": hy2_link or "",
             })
 
     return jsonify({

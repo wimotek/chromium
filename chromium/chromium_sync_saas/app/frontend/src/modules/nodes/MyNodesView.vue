@@ -30,7 +30,9 @@
             <button class="btn btn-sm" @click="showPublishGuide = !showPublishGuide">
               {{ showPublishGuide ? '收起上架教程' : '如何接入并上架？' }}
             </button>
-            <button class="btn btn-sm" @click="load">刷新状态</button>
+            <button class="btn btn-sm" :disabled="refreshing" @click="load(true)">
+              {{ refreshing ? '刷新中...' : '刷新状态' }}
+            </button>
           </div>
         </div>
 
@@ -143,30 +145,34 @@
                     <button
                       class="btn btn-sm"
                       :class="n.enabled === 0 ? 'btn-emerald' : 'btn-warn'"
-                      :disabled="n.enabled !== 0 && n.active_lease_count > 0"
+                      :disabled="(n.enabled !== 0 && n.active_lease_count > 0) || busyNodeAction === `enabled:${n.id}`"
                       :title="n.enabled !== 0 && n.active_lease_count > 0 ? '节点出租中暂不可禁用' : ''"
                       @click="toggleEnabled(n)"
                     >
-                      {{ n.enabled === 0 ? '启用' : '禁用' }}
+                      {{ busyNodeAction === `enabled:${n.id}` ? '处理中...' : n.enabled === 0 ? '启用' : '禁用' }}
                     </button>
                     <button
                       class="btn btn-sm"
-                      :disabled="n.client_type === 'android'"
+                      :disabled="n.client_type === 'android' || busyNodeAction === `api:${n.id}`"
                       :title="n.client_type === 'android' ? 'Android 节点锁定禁用第三方 API' : '切换第三方 CDP API 开放状态'"
                       @click="toggleApi(n)"
                     >
-                      {{ n.api_enabled === 0 ? 'API开' : 'API禁' }}
-                    </button>
-                    <button class="btn btn-sm" @click="toggleSource(n)">
-                      {{ n.is_source === 1 ? '取消源' : '设为源' }}
+                      {{ busyNodeAction === `api:${n.id}` ? '切换中...' : n.api_enabled === 0 ? 'API开' : 'API禁' }}
                     </button>
                     <button
                       class="btn btn-sm"
-                      :disabled="n.active_lease_count > 0"
+                      :disabled="busyNodeAction === `source:${n.id}`"
+                      @click="toggleSource(n)"
+                    >
+                      {{ busyNodeAction === `source:${n.id}` ? '更新中...' : n.is_source === 1 ? '取消源' : '设为源' }}
+                    </button>
+                    <button
+                      class="btn btn-sm"
+                      :disabled="n.active_lease_count > 0 || loadingCookieNodeId === n.id"
                       :title="n.active_lease_count > 0 ? '出租期间禁止查看实时 Cookie 明细' : ''"
                       @click="openCookieDetails(n)"
                     >
-                      Cookie
+                      {{ loadingCookieNodeId === n.id ? '读取中...' : 'Cookie' }}
                     </button>
                     <button
                       v-if="n.client_type === 'android' || n.api_enabled === 0"
@@ -184,7 +190,9 @@
                     >
                       {{ n.share_enabled ? '定价 / 下架' : '上架到市场' }}
                     </button>
-                    <button class="btn btn-sm" @click="probeNode(n.id)">探活</button>
+                    <button class="btn btn-sm" :disabled="probingNodeId === n.id" @click="probeNode(n.id)">
+                      {{ probingNodeId === n.id ? '探活中...' : '探活' }}
+                    </button>
                     <button
                       class="btn btn-sm btn-danger"
                       @click="confirmAction = { type: 'delete_node', nodeId: n.id, title: `确认删除节点 #${n.id} (${n.name})？`, desc: '删除后该节点记录将从工作台移除，需重新注册入网。' }"
@@ -205,7 +213,9 @@
           <span>我租用的共享节点（来自算力市场）</span>
           <div class="row">
             <span class="tag tag-ok">在租 {{ activeBuyerLeases.length }} / {{ quotas.max_active_leases || '-' }}</span>
-            <button class="btn btn-sm" @click="load">刷新</button>
+            <button class="btn btn-sm" :disabled="refreshing" @click="load(true)">
+              {{ refreshing ? '刷新中...' : '刷新' }}
+            </button>
             <button class="btn btn-sm btn-primary" @click="emit('go-market')">前往共享市场租用 →</button>
           </div>
         </div>
@@ -246,7 +256,13 @@
                 <td>
                   <div class="row" v-if="l.status === 'active'">
                     <button class="btn btn-sm" @click="copy(l.cdp_ws_url)">复制 CDP WS</button>
-                    <button class="btn btn-sm btn-danger" @click="stopBuyerLease(l.id)">退租结算</button>
+                    <button
+                      class="btn btn-sm btn-danger"
+                      :disabled="stoppingLeaseId === l.id"
+                      @click="stopBuyerLease(l.id)"
+                    >
+                      {{ stoppingLeaseId === l.id ? '结算中...' : '退租结算' }}
+                    </button>
                   </div>
                   <span v-else class="muted" style="font-size: 12px">{{ l.end_reason || l.ended_at }}</span>
                 </td>
@@ -425,9 +441,15 @@
           2. 默认采用 <strong>独占槽位 (Max=1)</strong>，推荐配合隔离容器使用，避免单节点多开独立 Chromium Profile 撑爆宿主机内存。
         </div>
         <div class="field">
-          <label class="row" style="cursor: pointer">
-            <input type="checkbox" v-model="shareForm.share_enabled" />
-            <span>上架至公共算力交易市场接受其他租户按需租用</span>
+          <label class="switch-row" :class="{ active: shareForm.share_enabled }">
+            <span>
+              <span class="switch-row-title">上架至公共算力交易市场</span>
+              <span class="switch-row-desc">开启后接受其他租户按需租用并按平台核定底价获得分成</span>
+            </span>
+            <span class="switch">
+              <input type="checkbox" v-model="shareForm.share_enabled" />
+              <span class="switch-track"></span>
+            </span>
           </label>
         </div>
         <div class="grid-2">
@@ -523,9 +545,9 @@
           买家实付基准约 ¥{{ previewBuyerHr }}/h + ¥{{ previewBuyerGb }}/GB（差价归平台运营盈利，您 100% 实得平台核定的时租底价与流量底价）
         </div>
         <div class="row" style="justify-content: flex-end">
-          <button class="btn" @click="shareTarget = null">取消</button>
-          <button class="btn btn-primary" @click="saveShare">
-            {{ shareForm.share_enabled ? '保存并上架市场' : '保存并下架' }}
+          <button class="btn" :disabled="savingShare" @click="shareTarget = null">取消</button>
+          <button class="btn btn-primary" :disabled="savingShare" @click="saveShare">
+            {{ savingShare ? '正在保存...' : shareForm.share_enabled ? '保存并上架市场' : '保存并下架' }}
           </button>
         </div>
       </div>
@@ -588,21 +610,27 @@
           </div>
 
           <div class="field">
-            <label class="row" style="cursor: pointer">
-              <input
-                type="checkbox"
-                v-model="editForm.api_enabled"
-                :disabled="editTarget.client_type === 'android'"
-              />
+            <label class="switch-row" :class="{ active: editForm.api_enabled }">
               <span>
-                开放第三方 CDP API 接入（关闭后仅可作为自有同步节点，不对外提供 /api/v1 及市场出租）
+                <span class="switch-row-title">开放第三方 CDP API 接入</span>
+                <span class="switch-row-desc">关闭后仅可作为自有同步节点，不对外提供 /api/v1 及市场出租</span>
+              </span>
+              <span class="switch">
+                <input
+                  type="checkbox"
+                  v-model="editForm.api_enabled"
+                  :disabled="editTarget.client_type === 'android'"
+                />
+                <span class="switch-track"></span>
               </span>
             </label>
           </div>
 
           <div class="row" style="justify-content: flex-end">
-            <button type="button" class="btn" @click="editTarget = null">取消</button>
-            <button type="submit" class="btn btn-primary">保存节点配置</button>
+            <button type="button" class="btn" :disabled="savingEdit" @click="editTarget = null">取消</button>
+            <button type="submit" class="btn btn-primary" :disabled="savingEdit">
+              {{ savingEdit ? '保存中...' : '保存节点配置' }}
+            </button>
           </div>
         </form>
       </div>
@@ -662,8 +690,10 @@
         <h3 class="card-title">{{ confirmAction.title }}</h3>
         <p class="muted" style="margin: 0 0 18px">{{ confirmAction.desc }}</p>
         <div class="row" style="justify-content: flex-end">
-          <button class="btn" @click="confirmAction = null">取消</button>
-          <button class="btn btn-danger" @click="executeConfirmedAction">确认执行</button>
+          <button class="btn" :disabled="executingConfirm" @click="confirmAction = null">取消</button>
+          <button class="btn btn-danger" :disabled="executingConfirm" @click="executeConfirmedAction">
+            {{ executingConfirm ? '执行中...' : '确认执行' }}
+          </button>
         </div>
       </div>
     </div>
@@ -693,6 +723,14 @@ const cookieDetailModal = ref(null)
 const geoDetectBusy = ref(false)
 const showPricingHelp = ref(false)
 const confirmAction = ref(null)
+const refreshing = ref(false)
+const savingShare = ref(false)
+const savingEdit = ref(false)
+const probingNodeId = ref(null)
+const busyNodeAction = ref('')
+const loadingCookieNodeId = ref(null)
+const stoppingLeaseId = ref(null)
+const executingConfirm = ref(false)
 
 const showApiDocs = ref(true)
 const apiScope = ref('owned')
@@ -1002,31 +1040,44 @@ const activeShareFeeBps = computed(() => {
 const previewBuyerHr = computed(() => (Number(lockedSellerHourYuan.value || 0) * (1 + activeShareFeeBps.value / 10000)).toFixed(2))
 const previewBuyerGb = computed(() => (Number(lockedSellerGbYuan.value || 0) * (1 + activeShareFeeBps.value / 10000)).toFixed(2))
 
-async function load() {
+async function load(showFeedback = false) {
+  if (refreshing.value) return
+  refreshing.value = true
   try {
     const [nodesRes, leasesRes] = await Promise.all([apiFetch('/api/nodes'), apiFetch('/api/leases')])
     nodes.value = nodesRes || []
     buyerLeases.value = leasesRes?.buyer_leases || []
+    if (showFeedback) {
+      emit('notify', { message: '节点与租约状态已刷新', type: 'info' })
+    }
   } catch (e) {
-    emit('notify', e.message)
+    emit('notify', { message: e.message, type: 'error' })
+  } finally {
+    refreshing.value = false
   }
 }
 
 function copy(val) {
   navigator.clipboard?.writeText(val || '')
-  emit('notify', '已复制到剪贴板')
+  emit('notify', { message: '已复制到剪贴板', type: 'ok' })
 }
 
 async function executeConfirmedAction() {
+  if (executingConfirm.value) return
   const act = confirmAction.value
-  confirmAction.value = null
   if (!act) return
-  if (act.type === 'rotate_api') {
-    await rotate(true, false)
-  } else if (act.type === 'rotate_join') {
-    await rotate(false, true)
-  } else if (act.type === 'delete_node') {
-    await deleteNode(act.nodeId)
+  executingConfirm.value = true
+  try {
+    if (act.type === 'rotate_api') {
+      await rotate(true, false)
+    } else if (act.type === 'rotate_join') {
+      await rotate(false, true)
+    } else if (act.type === 'delete_node') {
+      await deleteNode(act.nodeId)
+    }
+    confirmAction.value = null
+  } finally {
+    executingConfirm.value = false
   }
 }
 
@@ -1037,9 +1088,9 @@ async function rotate(rotApi, rotJoin) {
       body: JSON.stringify({ rotate_api_key: rotApi, rotate_join_token: rotJoin }),
     })
     emit('refresh-profile')
-    emit('notify', '凭据已重新签发')
+    emit('notify', { message: '凭据已重新签发', type: 'ok' })
   } catch (e) {
-    emit('notify', e.message)
+    emit('notify', { message: e.message, type: 'error' })
   }
 }
 
@@ -1055,6 +1106,8 @@ function openShareModal(n) {
 }
 
 async function saveShare() {
+  if (savingShare.value || !shareTarget.value) return
+  savingShare.value = true
   try {
     const res = await apiFetch(`/api/nodes/${shareTarget.value.id}/share`, {
       method: 'POST',
@@ -1062,31 +1115,41 @@ async function saveShare() {
     })
     shareTarget.value = null
     showPricingHelp.value = false
-    emit('notify', res.message)
-    await load()
+    emit('notify', { message: res.message || '共享状态已保存', type: 'ok' })
+    await load(false)
   } catch (e) {
-    emit('notify', e.message)
+    emit('notify', { message: e.message, type: 'error' })
+  } finally {
+    savingShare.value = false
   }
 }
 
 async function stopBuyerLease(leaseId) {
+  if (stoppingLeaseId.value !== null) return
+  stoppingLeaseId.value = leaseId
   try {
     const res = await apiFetch(`/api/leases/${leaseId}/stop`, { method: 'POST' })
-    emit('notify', res.message)
+    emit('notify', { message: res.message || '租约已退租结算', type: 'ok' })
     emit('refresh-profile')
-    await load()
+    await load(false)
   } catch (e) {
-    emit('notify', e.message)
+    emit('notify', { message: e.message, type: 'error' })
+  } finally {
+    stoppingLeaseId.value = null
   }
 }
 
 async function probeNode(id) {
+  if (probingNodeId.value !== null) return
+  probingNodeId.value = id
   try {
     const res = await apiFetch(`/api/nodes/${id}/probe`, { method: 'POST' })
-    emit('notify', res.message)
-    await load()
+    emit('notify', { message: res.message || '节点探活完成', type: 'ok' })
+    await load(false)
   } catch (e) {
-    emit('notify', e.message)
+    emit('notify', { message: e.message, type: 'error' })
+  } finally {
+    probingNodeId.value = null
   }
 }
 
@@ -1101,7 +1164,8 @@ function openEditModal(n) {
 }
 
 async function saveEditNode() {
-  if (!editTarget.value) return
+  if (!editTarget.value || savingEdit.value) return
+  savingEdit.value = true
   try {
     const payload = {
       name: editForm.name,
@@ -1118,10 +1182,12 @@ async function saveEditNode() {
       body: JSON.stringify(payload),
     })
     editTarget.value = null
-    emit('notify', res.message || '节点配置已更新')
-    await load()
+    emit('notify', { message: res.message || '节点配置已更新', type: 'ok' })
+    await load(false)
   } catch (e) {
-    emit('notify', e.message)
+    emit('notify', { message: e.message, type: 'error' })
+  } finally {
+    savingEdit.value = false
   }
 }
 
@@ -1134,64 +1200,80 @@ async function detectNodeRegion(nodeId, targetForm) {
       if (targetForm === 'edit') editForm.share_region = res.share_region
       if (targetForm === 'share') shareForm.share_region = res.share_region
     }
-    emit('notify', res.message || `已识别地区: ${res.share_region}`)
-    await load()
+    emit('notify', { message: res.message || `已识别地区: ${res.share_region}`, type: 'ok' })
+    await load(false)
   } catch (e) {
-    emit('notify', e.message)
+    emit('notify', { message: e.message, type: 'error' })
   } finally {
     geoDetectBusy.value = false
   }
 }
 
 async function toggleEnabled(n) {
+  if (busyNodeAction.value) return
+  busyNodeAction.value = `enabled:${n.id}`
   try {
     const res = await apiFetch(`/api/nodes/${n.id}/toggle-enabled`, { method: 'POST' })
-    emit('notify', res.message || '节点状态已更新')
-    await load()
+    emit('notify', { message: res.message || '节点状态已更新', type: 'ok' })
+    await load(false)
   } catch (e) {
-    emit('notify', e.message)
+    emit('notify', { message: e.message, type: 'error' })
+  } finally {
+    busyNodeAction.value = ''
   }
 }
 
 async function toggleApi(n) {
+  if (busyNodeAction.value) return
+  busyNodeAction.value = `api:${n.id}`
   try {
     const res = await apiFetch(`/api/nodes/${n.id}/toggle-api`, { method: 'POST' })
-    emit('notify', res.message || 'API 状态已切换')
-    await load()
+    emit('notify', { message: res.message || 'API 状态已切换', type: 'ok' })
+    await load(false)
   } catch (e) {
-    emit('notify', e.message)
+    emit('notify', { message: e.message, type: 'error' })
+  } finally {
+    busyNodeAction.value = ''
   }
 }
 
 async function toggleSource(n) {
+  if (busyNodeAction.value) return
+  busyNodeAction.value = `source:${n.id}`
   try {
     const res = await apiFetch(`/api/nodes/${n.id}/toggle-source`, { method: 'POST' })
-    emit('notify', res.message || '源节点状态已更新')
-    await load()
+    emit('notify', { message: res.message || '源节点状态已更新', type: 'ok' })
+    await load(false)
   } catch (e) {
-    emit('notify', e.message)
+    emit('notify', { message: e.message, type: 'error' })
+  } finally {
+    busyNodeAction.value = ''
   }
 }
 
 async function openCookieDetails(n) {
+  if (loadingCookieNodeId.value !== null) return
+  loadingCookieNodeId.value = n.id
   try {
     const res = await apiFetch(`/api/nodes/${n.id}/cookie-details`)
     cookieDetailModal.value = res
   } catch (e) {
-    emit('notify', e.message)
+    emit('notify', { message: e.message, type: 'error' })
+  } finally {
+    loadingCookieNodeId.value = null
   }
 }
 
 async function deleteNode(id) {
   try {
     await apiFetch(`/api/nodes/${id}`, { method: 'DELETE' })
-    emit('notify', '节点已移除')
+    emit('notify', { message: '节点已移除', type: 'ok' })
     emit('refresh-profile')
-    await load()
+    await load(false)
   } catch (e) {
-    emit('notify', e.message)
+    emit('notify', { message: e.message, type: 'error' })
   }
 }
 
-onMounted(load)
+onMounted(() => load(false))
 </script>

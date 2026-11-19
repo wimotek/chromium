@@ -88,6 +88,23 @@ def admin_data():
                 f"?security=reality&encryption=none&pbk={n['pbk']}&headerType=none&fp=chrome"
                 f"&type=tcp&flow=xtls-rprx-vision&sni={clean_sni}&sid={n['sid']}#{quoted_remark}"
             )
+        hy2_suffix = ""
+        if (
+            n.get("net_mode") != "reverse_wss"
+            and str(n.get("core_type") or "xray").lower() == "singbox"
+            and int(n.get("hy2_enabled") or 0) == 1
+            and int(n.get("hy2_port") or 0) > 0
+        ):
+            raw_host = str(n["ip"]).strip()
+            formatted_host = f"[{raw_host}]" if (":" in raw_host and not raw_host.startswith("[")) else raw_host
+            hy2_sni = str(n.get("hy2_sni") or "").strip() or chosen_sni
+            hy2_insecure = 1 if int(n.get("hy2_insecure", 1) or 0) != 0 else 0
+            hy2_remark = urllib.parse.quote(f"{n['name']} [Hy2-UDP]")
+            hy2_suffix = (
+                f"@{formatted_host}:{int(n['hy2_port'])}"
+                f"?sni={urllib.parse.quote(hy2_sni, safe='')}&insecure={hy2_insecure}"
+                f"#{hy2_remark}"
+            )
         node_templates.append({
             "id": n["id"],
             "node_id": n["node_id"],
@@ -100,6 +117,10 @@ def admin_data():
             "server_names": snis,
             "selected_sni": chosen_sni,
             "link_suffix": link_suffix,
+            "core_type": n.get("core_type") or "xray",
+            "hy2_enabled": int(n.get("hy2_enabled") or 0),
+            "hy2_port": int(n.get("hy2_port") or 0),
+            "hy2_suffix": hy2_suffix,
         })
 
     users = []
@@ -131,7 +152,11 @@ def admin_data():
                     "sni": nt["sni"],
                     "server_names": nt["server_names"],
                     "selected_sni": nt["selected_sni"],
+                    "core_type": nt["core_type"],
+                    "hy2_enabled": nt["hy2_enabled"],
+                    "hy2_port": nt["hy2_port"],
                     "link": f"vless://{u_uuid}{nt['link_suffix']}",
+                    "hy2_link": f"hysteria2://{u_uuid}{nt['hy2_suffix']}" if nt["hy2_suffix"] else "",
                 }
                 for nt in node_templates
             ],
@@ -254,6 +279,21 @@ def admin_save_node_config():
         node_obj.server_names = server_names_str
         node_obj.sid = node_obj.sid or sid
         node_obj.node_key = node_obj.node_key or node_key
+        if "hy2_enabled" in data:
+            raw_hy2_en = data.get("hy2_enabled")
+            node_obj.hy2_enabled = 1 if (raw_hy2_en is True or str(raw_hy2_en).strip().lower() in ("1", "true", "yes")) else 0
+        if "hy2_port" in data and str(data.get("hy2_port") or "").strip() != "":
+            try:
+                p_val = int(data.get("hy2_port"))
+                if 0 <= p_val <= 65535:
+                    node_obj.hy2_port = p_val
+            except Exception:
+                pass
+        if "hy2_sni" in data:
+            node_obj.hy2_sni = str(data.get("hy2_sni") or "").strip()[:255]
+        if "hy2_insecure" in data:
+            raw_hy2_ins = data.get("hy2_insecure")
+            node_obj.hy2_insecure = 1 if (raw_hy2_ins is True or str(raw_hy2_ins).strip().lower() in ("1", "true", "yes")) else 0
         node_obj.last_probe = ""
     invalidate_nodes_cache()
     return jsonify({"code": 200, "msg": "节点网络配置已保存！"})
@@ -325,6 +365,7 @@ def admin_ping_node():
 
         agent_xray_ok = None if agent_health is None else bool(agent_health.get("xray_alive", True) and agent_health.get("port_ready", True))
         agent_tunnel_ok = None if (agent_health is None or "tunnel_connected" not in agent_health) else bool(agent_health.get("tunnel_connected"))
+        core_label = "Sing-box" if str(n.get("core_type") or "xray").lower() == "singbox" else "Xray"
 
         if net_mode == "reverse_wss":
             if not hb_alive:
@@ -333,7 +374,7 @@ def admin_ping_node():
                 healthy = False
             elif agent_xray_ok is False:
                 status_code = "xray_unhealthy"
-                reason = "节点有心跳，但 Xray 进程或本地端口异常"
+                reason = f"节点有心跳，但 {core_label} 进程或本地端口异常"
                 healthy = False
             elif agent_tunnel_ok is False:
                 status_code = "tunnel_disconnected"
@@ -423,7 +464,7 @@ def admin_ping_node():
                     healthy = False
                 elif agent_xray_ok is False:
                     status_code = "xray_unhealthy"
-                    reason = "节点心跳在线，但节点自检报告 Xray 进程或本地端口异常"
+                    reason = "节点心跳在线，但节点自检报告代理内核进程或本地端口异常"
                     healthy = False
                 elif not tcp_ok:
                     status_code = "port_unreachable"

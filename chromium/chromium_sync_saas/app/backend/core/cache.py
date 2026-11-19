@@ -90,6 +90,22 @@ class SQLiteCacheBackend:
             finally:
                 conn.close()
 
+    def mset_batch(self, items: Dict[str, str], ttl: Optional[int] = None):
+        if not items:
+            return
+        exp = (time.time() + ttl) if (ttl and ttl > 0) else None
+        rows = [(str(k), str(v), exp) for k, v in items.items()]
+        with self._lock:
+            conn = self._connect()
+            try:
+                conn.executemany(
+                    "INSERT OR REPLACE INTO cache_entries (k, v, expires_at) VALUES (?, ?, ?)",
+                    rows,
+                )
+                conn.commit()
+            finally:
+                conn.close()
+
     def delete(self, key: str):
         with self._lock:
             conn = self._connect()
@@ -292,6 +308,7 @@ class CacheManager:
         self._sqlite_cache = SQLiteCacheBackend(CACHE_DB_PATH)
         self._redis_client = None
         self._redis_url = ""
+        self._config_source = "default"
         self._active_backend = "sqlite_cache"
         self._last_error = ""
         self._last_probe_ts = 0.0
@@ -302,28 +319,49 @@ class CacheManager:
         self._lock = threading.Lock()
         self.reload_from_config()
 
-    def _resolve_redis_url(self) -> str:
-        if DEFAULT_REDIS_URL:
-            return DEFAULT_REDIS_URL
+    def _resolve_redis_url(self) -> tuple[str, str]:
         if os.path.exists(BOOTSTRAP_CONFIG_PATH):
             try:
                 with open(BOOTSTRAP_CONFIG_PATH, "r", encoding="utf-8") as f:
                     data = json.load(f)
-                return str(data.get("redis_url") or "").strip()
+                if isinstance(data, dict) and "redis_url" in data:
+                    return str(data.get("redis_url") or "").strip(), "bootstrap"
             except Exception:
                 pass
-        return ""
+        if DEFAULT_REDIS_URL:
+            return DEFAULT_REDIS_URL, "env"
+        return "", "default"
 
-    def reload_from_config(self, redis_url: Optional[str] = None) -> str:
-        target_url = (redis_url if redis_url is not None else self._resolve_redis_url()).strip()
+    def reload_from_config(self, redis_url: Optional[str] = None, source: Optional[str] = None) -> str:
+        if redis_url is None:
+            target_url, resolved_source = self._resolve_redis_url()
+        else:
+            target_url = str(redis_url).strip()
+            resolved_source = source or "bootstrap"
+
         with self._lock:
+            old_client = self._redis_client
             self._redis_url = target_url
+            self._config_source = resolved_source
             self._redis_client = None
             self._last_error = ""
             self._last_probe_ts = time.monotonic()
 
-            if not target_url or not HAS_REDIS_LIB:
+            if old_client is not None:
+                try:
+                    old_client.close()
+                except Exception:
+                    pass
+
+            if not target_url:
                 self._active_backend = "sqlite_cache"
+                logger.info(f"💾 [Cache] 未配置 Redis，启用内置 SQLite WAL Cache ({CACHE_DB_PATH})")
+                return self._active_backend
+
+            if not HAS_REDIS_LIB:
+                self._active_backend = "sqlite_cache"
+                self._last_error = "redis Python 库未安装"
+                logger.warning("⚠️ [Cache] 缺少 redis 库，自动回退至 SQLite Cache")
                 return self._active_backend
 
             try:
@@ -337,11 +375,13 @@ class CacheManager:
                 client.ping()
                 self._redis_client = client
                 self._active_backend = "redis"
+                logger.info("⚡ [Cache] Redis 高速缓存已连通并激活 (支持故障自动回退 SQLite Cache)")
             except Exception as exc:
                 self._redis_client = None
                 self._active_backend = "sqlite_cache"
                 self._last_error = str(exc)
                 self._fallbacks += 1
+                logger.warning(f"⚠️ [Cache] Redis 连接失败 ({exc})，已自动无缝回退至 SQLite Cache")
             return self._active_backend
 
     def _get_redis(self):
@@ -389,6 +429,25 @@ class CacheManager:
             except Exception as exc:
                 self._trip_fallback(exc)
         self._sqlite_cache.set(key, str_val, ttl=ttl)
+
+    def mset_batch(self, items: Dict[str, Any], ttl: Optional[int] = None):
+        if not items:
+            return
+        encoded = {str(k): str(v) for k, v in items.items()}
+        r = self._get_redis()
+        if r is not None:
+            try:
+                pipe = r.pipeline(transaction=False)
+                for k, raw in encoded.items():
+                    if ttl and ttl > 0:
+                        pipe.setex(k, int(ttl), raw)
+                    else:
+                        pipe.set(k, raw)
+                pipe.execute()
+                return
+            except Exception as exc:
+                self._trip_fallback(exc)
+        self._sqlite_cache.mset_batch(encoded, ttl=ttl)
 
     def delete(self, key: str):
         r = self._get_redis()
@@ -593,58 +652,157 @@ class CacheManager:
     def cleanup_sqlite_expired(self):
         self._sqlite_cache.cleanup_expired()
 
+    @staticmethod
+    def mask_redis_url(url: str) -> str:
+        raw = (url or "").strip()
+        if not raw:
+            return ""
+        if "@" in raw and "://" in raw:
+            scheme, rest = raw.split("://", 1)
+            _, hostpart = rest.rsplit("@", 1)
+            return f"{scheme}://***@{hostpart}"
+        return raw
+
+    def get_current_redis_url(self) -> str:
+        return self._redis_url
+
     def get_status(self) -> dict:
         sqlite_stats = self._sqlite_cache.stats()
         redis_info = None
-        if self._active_backend == "redis" and self._redis_client is not None:
+        client = self._redis_client
+        if self._active_backend == "redis" and client is not None:
             try:
-                info = self._redis_client.info("memory")
-                redis_info = {"used_memory_human": info.get("used_memory_human", ""), "connected": True}
-            except Exception:
+                t0 = time.perf_counter()
+                client.ping()
+                ping_ms = round((time.perf_counter() - t0) * 1000, 2)
+                mem_info = client.info("memory")
+                srv_info = client.info("server")
+                cli_info = client.info("clients")
+                redis_info = {
+                    "connected": True,
+                    "ping_ms": ping_ms,
+                    "version": srv_info.get("redis_version", ""),
+                    "used_memory_human": mem_info.get("used_memory_human", ""),
+                    "connected_clients": int(cli_info.get("connected_clients") or 0),
+                    "uptime_in_seconds": int(srv_info.get("uptime_in_seconds") or 0),
+                }
+            except Exception as exc:
+                self._trip_fallback(exc)
                 redis_info = {"connected": False}
 
-        masked_url = ""
-        if self._redis_url:
-            if "@" in self._redis_url and "://" in self._redis_url:
-                scheme, rest = self._redis_url.split("://", 1)
-                _, hostpart = rest.rsplit("@", 1)
-                masked_url = f"{scheme}://***@{hostpart}"
-            else:
-                masked_url = self._redis_url
+        redis_configured = bool(self._redis_url)
+        redis_connected = self._active_backend == "redis" and self._redis_client is not None and bool(redis_info and redis_info.get("connected"))
+        degraded = redis_configured and not redis_connected
+        engine_state = "redis" if redis_connected else ("degraded" if degraded else "sqlite_cache")
+        if engine_state == "redis":
+            engine_label = "Redis 高速缓存"
+        elif engine_state == "degraded":
+            engine_label = "Redis 已降级 · SQLite Cache 兜底"
+        else:
+            engine_label = "SQLite WAL Cache"
+
+        next_probe_in_sec = (
+            max(0, int(round(self._probe_cooldown_sec - (time.monotonic() - self._last_probe_ts))))
+            if degraded
+            else 0
+        )
+        total_ops = self._hits + self._misses
+        hit_rate = round((self._hits / total_ops) * 100, 1) if total_ops > 0 else 0.0
 
         return {
             "active_backend": self._active_backend,
-            "redis_configured": bool(self._redis_url),
-            "redis_url_masked": masked_url,
+            "engine_state": engine_state,
+            "engine_label": engine_label,
+            "degraded": degraded,
+            "config_source": self._config_source,
+            "has_redis_lib": HAS_REDIS_LIB,
+            "redis_configured": redis_configured,
+            "redis_connected": redis_connected,
+            "redis_url_masked": self.mask_redis_url(self._redis_url),
             "redis_info": redis_info,
+            "probe_cooldown_sec": int(self._probe_cooldown_sec),
+            "next_probe_in_sec": next_probe_in_sec,
             "fallback_count": self._fallbacks,
             "last_error": self._last_error,
             "hits": self._hits,
             "misses": self._misses,
+            "hit_rate": hit_rate,
+            "stats": {
+                "hits": self._hits,
+                "misses": self._misses,
+                "fallbacks": self._fallbacks,
+                "sqlite_fallbacks": self._fallbacks,
+            },
             "sqlite_cache": sqlite_stats,
         }
+
+    def probe_reconnect(self) -> dict:
+        if not self._redis_url:
+            return {
+                "ok": False,
+                "detail": "当前未配置 Redis URL，处于内置 SQLite WAL Cache 模式",
+                "cache": self.get_status(),
+            }
+        self.reload_from_config(self._redis_url, source=self._config_source)
+        status = self.get_status()
+        if status["engine_state"] == "redis":
+            info = status.get("redis_info") or {}
+            ver = info.get("version") or "?"
+            ping_ms = info.get("ping_ms")
+            lat_txt = f", {ping_ms}ms" if ping_ms is not None else ""
+            return {
+                "ok": True,
+                "message": f"Redis 已恢复连接 (v{ver}{lat_txt})",
+                "cache": status,
+            }
+        return {
+            "ok": False,
+            "detail": f"Redis 仍不可达 ({status.get('last_error') or '连接失败'})，继续使用 SQLite WAL Cache 兜底",
+            "cache": status,
+        }
+
+    def test_target(self, redis_url: str = "", use_current: bool = False) -> dict:
+        url = (redis_url or "").strip()
+        if not url and use_current:
+            url = self._redis_url
+            if not url:
+                return {"ok": False, "pong": False, "detail": "当前尚未配置 Redis URL，请先输入连接串"}
+        return self.test_connection(url)
 
     @staticmethod
     def test_connection(redis_url: str) -> dict:
         url = (redis_url or "").strip()
         if not url:
-            return {"ok": False, "detail": "Redis URL 不能为空"}
+            return {"ok": False, "pong": False, "detail": "Redis URL 不能为空"}
         if not HAS_REDIS_LIB:
-            return {"ok": False, "detail": "后端未安装 redis 依赖包"}
+            return {"ok": False, "pong": False, "detail": "后端未安装 redis 依赖包"}
+        client = None
         t0 = time.perf_counter()
         try:
             client = redis.Redis.from_url(url, decode_responses=True, socket_connect_timeout=2.5, socket_timeout=2.5)
-            client.ping()
-            info = client.info("server")
+            pong = bool(client.ping())
             lat = round((time.perf_counter() - t0) * 1000, 2)
+            srv_info = client.info("server")
+            mem_info = client.info("memory")
+            ver = srv_info.get("redis_version", "unknown")
+            mem_human = mem_info.get("used_memory_human", "")
+            mem_suffix = f", 内存 {mem_human}" if mem_human else ""
             return {
                 "ok": True,
+                "pong": pong,
                 "latency_ms": lat,
-                "version": info.get("redis_version", "unknown"),
-                "message": f"Redis 连接成功 (v{info.get('redis_version', '?')}, {lat}ms)",
+                "version": ver,
+                "used_memory_human": mem_human,
+                "message": f"PONG · Redis 连接成功 (v{ver}, {lat}ms{mem_suffix})",
             }
         except Exception as exc:
-            return {"ok": False, "detail": f"Redis 连接失败: {exc}"}
+            return {"ok": False, "pong": False, "detail": f"Redis PING 失败: {exc}"}
+        finally:
+            if client is not None:
+                try:
+                    client.close()
+                except Exception:
+                    pass
 
 
 cache_mgr = CacheManager()

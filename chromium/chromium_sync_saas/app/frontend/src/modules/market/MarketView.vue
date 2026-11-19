@@ -10,7 +10,9 @@
           <span class="tag tag-ok">
             您共减免 {{ (discountBps / 100).toFixed(1) }}% (套餐 {{ (planDiscountBps / 100).toFixed(1) }}% + 等级 {{ (levelDiscountBps / 100).toFixed(1) }}%)
           </span>
-          <button class="btn btn-sm" @click="loadAll">刷新市场</button>
+          <button class="btn btn-sm" :disabled="refreshing" @click="loadAll(true)">
+            {{ refreshing ? '刷新中...' : '刷新市场' }}
+          </button>
         </div>
       </div>
 
@@ -74,9 +76,10 @@
             <input class="input mono" type="number" step="0.1" min="0" placeholder="不限" v-model="batchForm.max_buyer_hour_yuan" />
           </div>
 
-          <label class="row" style="cursor: pointer; font-size: 12px; color: var(--muted); padding-bottom: 8px">
+          <label class="switch switch-sm" style="padding-bottom: 8px">
             <input type="checkbox" v-model="batchForm.exclude_already_leased" />
-            <span>避开我在租节点</span>
+            <span class="switch-track"></span>
+            <span class="switch-state" :class="{ on: batchForm.exclude_already_leased }">避开我在租节点</span>
           </label>
 
           <button
@@ -150,10 +153,10 @@
                 <button
                   v-else
                   class="btn btn-sm btn-primary"
-                  :disabled="m.status !== 'connected' || m.available_slots <= 0"
+                  :disabled="m.status !== 'connected' || m.available_slots <= 0 || rentingNodeId !== null"
                   @click="rentNode(m.id)"
                 >
-                  立即租用
+                  {{ rentingNodeId === m.id ? '租用中...' : '立即租用' }}
                 </button>
               </td>
             </tr>
@@ -193,7 +196,13 @@
                 <td>
                   <div class="row" v-if="l.status === 'active'">
                     <button class="btn btn-sm" @click="copy(l.cdp_ws_url)">复制 CDP WS</button>
-                    <button class="btn btn-sm btn-danger" @click="stopLease(l.id)">退租结算</button>
+                    <button
+                      class="btn btn-sm btn-danger"
+                      :disabled="stoppingLeaseId === l.id"
+                      @click="stopLease(l.id)"
+                    >
+                      {{ stoppingLeaseId === l.id ? '结算中...' : '退租结算' }}
+                    </button>
                   </div>
                   <span v-else class="muted" style="font-size: 12px">{{ l.end_reason || l.ended_at }}</span>
                 </td>
@@ -231,7 +240,14 @@
                   <div class="muted" style="font-size: 11px">{{ l.seller_level_code }} · +{{ ((l.platform_fee_bps || 0) / 100).toFixed(1) }}%</div>
                 </td>
                 <td>
-                  <button v-if="l.status === 'active'" class="btn btn-sm btn-danger" @click="stopLease(l.id)">强制收回</button>
+                  <button
+                    v-if="l.status === 'active'"
+                    class="btn btn-sm btn-danger"
+                    :disabled="stoppingLeaseId === l.id"
+                    @click="stopLease(l.id)"
+                  >
+                    {{ stoppingLeaseId === l.id ? '收回中...' : '强制收回' }}
+                  </button>
                   <span v-else class="muted" style="font-size: 12px">{{ l.ended_at }}</span>
                 </td>
               </tr>
@@ -263,6 +279,9 @@ const sellerLeases = ref([])
 const leasesSectionRef = ref(null)
 
 const batchLoading = ref(false)
+const refreshing = ref(false)
+const rentingNodeId = ref(null)
+const stoppingLeaseId = ref(null)
 const lastBatchResult = ref([])
 const batchForm = reactive({
   count: 1,
@@ -301,7 +320,9 @@ function scrollToMyLeases() {
   leasesSectionRef.value?.scrollIntoView({ behavior: 'smooth', block: 'start' })
 }
 
-async function loadAll() {
+async function loadAll(showFeedback = false) {
+  if (refreshing.value) return
+  refreshing.value = true
   try {
     const [mRes, lRes] = await Promise.all([apiFetch('/api/market/nodes'), apiFetch('/api/leases')])
     marketNodes.value = mRes.nodes || []
@@ -312,19 +333,28 @@ async function loadAll() {
     discountBps.value = mRes.your_discount_bps || 0
     buyerLeases.value = lRes.buyer_leases || []
     sellerLeases.value = lRes.seller_leases || []
+    if (showFeedback) {
+      emit('notify', { message: '算力市场与租约列表已刷新', type: 'info' })
+    }
   } catch (e) {
-    emit('notify', e.message)
+    emit('notify', { message: e.message, type: 'error' })
+  } finally {
+    refreshing.value = false
   }
 }
 
 async function rentNode(nodeId) {
+  if (rentingNodeId.value !== null) return
+  rentingNodeId.value = nodeId
   try {
     const res = await apiFetch(`/api/market/nodes/${nodeId}/lease`, { method: 'POST', body: '{}' })
-    emit('notify', res.message)
+    emit('notify', { message: res.message || '节点租用成功', type: 'ok' })
     emit('refresh-profile')
-    await loadAll()
+    await loadAll(false)
   } catch (e) {
-    emit('notify', e.message)
+    emit('notify', { message: e.message, type: 'error' })
+  } finally {
+    rentingNodeId.value = null
   }
 }
 
@@ -350,11 +380,11 @@ async function rentBatchRandom() {
       body: JSON.stringify(payload),
     })
     lastBatchResult.value = res.leases || []
-    emit('notify', res.message)
+    emit('notify', { message: res.message || '批量租用成功', type: 'ok' })
     emit('refresh-profile')
-    await loadAll()
+    await loadAll(false)
   } catch (e) {
-    emit('notify', e.message)
+    emit('notify', { message: e.message, type: 'error' })
   } finally {
     batchLoading.value = false
   }
@@ -364,24 +394,28 @@ function copyAllBatchWs() {
   const urls = lastBatchResult.value.map((l) => l.cdp_ws_url).filter(Boolean).join('\n')
   if (!urls) return
   navigator.clipboard?.writeText(urls)
-  emit('notify', `已复制 ${lastBatchResult.value.length} 条 CDP WebSocket 地址`)
+  emit('notify', { message: `已复制 ${lastBatchResult.value.length} 条 CDP WebSocket 地址`, type: 'ok' })
 }
 
 async function stopLease(leaseId) {
+  if (stoppingLeaseId.value !== null) return
+  stoppingLeaseId.value = leaseId
   try {
     const res = await apiFetch(`/api/leases/${leaseId}/stop`, { method: 'POST' })
-    emit('notify', res.message)
+    emit('notify', { message: res.message || '租约已结算', type: 'ok' })
     emit('refresh-profile')
-    await loadAll()
+    await loadAll(false)
   } catch (e) {
-    emit('notify', e.message)
+    emit('notify', { message: e.message, type: 'error' })
+  } finally {
+    stoppingLeaseId.value = null
   }
 }
 
 function copy(val) {
   navigator.clipboard?.writeText(val || '')
-  emit('notify', 'CDP WebSocket 地址已复制')
+  emit('notify', { message: 'CDP WebSocket 地址已复制', type: 'ok' })
 }
 
-onMounted(loadAll)
+onMounted(() => loadAll(false))
 </script>

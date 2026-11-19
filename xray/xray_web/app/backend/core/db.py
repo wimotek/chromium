@@ -245,6 +245,11 @@ def _upgrade_legacy_columns(eng):
             ("last_heartbeat_ts", "FLOAT DEFAULT 0"),
             ("agent_health", "VARCHAR(255) DEFAULT ''"),
             ("last_probe", "VARCHAR(512) DEFAULT ''"),
+            ("core_type", "VARCHAR(32) DEFAULT 'xray'"),
+            ("hy2_enabled", "INTEGER DEFAULT 0"),
+            ("hy2_port", "INTEGER DEFAULT 0"),
+            ("hy2_sni", "VARCHAR(255) DEFAULT ''"),
+            ("hy2_insecure", "INTEGER DEFAULT 1"),
         ],
     )
     ensure_cols(

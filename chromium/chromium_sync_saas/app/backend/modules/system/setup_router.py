@@ -59,6 +59,7 @@ class TestDbDTO(BaseModel):
 
 class TestRedisDTO(BaseModel):
     redis_url: str = ""
+    use_current: bool = False
 
 
 class TestSmtpDTO(BaseModel):
@@ -107,6 +108,8 @@ def get_setup_status():
         "tofu_removed": True,
         "db_type": db_info.get("db_type", "sqlite"),
         "cache_backend": cache_status.get("active_backend", "sqlite_cache"),
+        "cache_state": cache_status.get("engine_state", "sqlite_cache"),
+        "cache_degraded": bool(cache_status.get("degraded", False)),
         "defaults": {
             "db_type": db_info.get("db_type", "sqlite"),
             "mysql_host": DEFAULT_MYSQL_HOST,
@@ -145,7 +148,7 @@ def setup_test_db(data: TestDbDTO, request: Request, auth: dict = Depends(_verif
 @router.post("/api/setup/test-redis", summary="测试 Redis 缓存服务连通性")
 def setup_test_redis(data: TestRedisDTO, request: Request, auth: dict = Depends(_verify_setup_or_admin)):
     enforce_rate_limit("setup", get_client_ip(request), RATE_LIMIT_SETUP_PER_MIN, 60, "Redis 连通性探测过于频繁")
-    res = cache_mgr.test_connection(data.redis_url)
+    res = cache_mgr.test_target(data.redis_url, use_current=bool(data.use_current))
     if not res.get("ok"):
         raise HTTPException(status_code=400, detail=res.get("detail", "Redis 连接失败"))
     return res

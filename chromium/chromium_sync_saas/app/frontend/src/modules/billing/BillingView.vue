@@ -155,10 +155,16 @@
             <button
               class="btn btn-sm btn-primary"
               style="width: 100%; margin-top: 10px"
-              :disabled="p.id === user.plan_id"
+              :disabled="p.id === user.plan_id || subscribingPlanId !== null"
               @click="subscribe(p.id)"
             >
-              {{ p.id === user.plan_id ? '已生效' : '立即切换 / 升级' }}
+              {{
+                p.id === user.plan_id
+                  ? '已生效'
+                  : subscribingPlanId === p.id
+                    ? '切换中...'
+                    : '立即切换 / 升级'
+              }}
             </button>
           </div>
         </div>
@@ -221,7 +227,13 @@
                   <div class="row" style="gap: 6px">
                     <template v-if="o.status === 'pending'">
                       <button class="btn btn-sm btn-primary" @click="openCashierModal(o)">去付款 / 核验</button>
-                      <button class="btn btn-sm" @click="cancelRechargeOrder(o.order_no)">取消订单</button>
+                      <button
+                        class="btn btn-sm"
+                        :disabled="cancellingOrderNo === o.order_no"
+                        @click="cancelRechargeOrder(o.order_no)"
+                      >
+                        {{ cancellingOrderNo === o.order_no ? '取消中...' : '取消订单' }}
+                      </button>
                     </template>
                     <span v-else class="muted mono" style="font-size: 11px">{{ o.paid_at || o.created_at }}</span>
                   </div>
@@ -350,11 +362,21 @@
           </div>
 
           <div class="row" style="justify-content: flex-end; margin-top: 14px">
-            <button v-if="!cashierOrder.simulated" class="btn" @click="cancelRechargeOrder(cashierOrder.order_no)">
-              取消订单
+            <button
+              v-if="!cashierOrder.simulated"
+              class="btn"
+              :disabled="cancellingOrderNo === cashierOrder.order_no"
+              @click="cancelRechargeOrder(cashierOrder.order_no)"
+            >
+              {{ cancellingOrderNo === cashierOrder.order_no ? '取消中...' : '取消订单' }}
             </button>
-            <button v-if="cashierOrder.simulated" class="btn btn-emerald" @click="sandboxPay(cashierOrder)">
-              模拟支付成功（不落盘）
+            <button
+              v-if="cashierOrder.simulated"
+              class="btn btn-emerald"
+              :disabled="sandboxPaying"
+              @click="sandboxPay(cashierOrder)"
+            >
+              {{ sandboxPaying ? '模拟支付中...' : '模拟支付成功（不落盘）' }}
             </button>
             <button v-else class="btn btn-primary" :disabled="checkingOrder" @click="checkOrderStatusNow(cashierOrder.order_no)">
               {{ checkingOrder ? '核验中...' : (isStaticQrOrder ? '刷新入账状态' : '我已完成支付 · 立即核验') }}
@@ -398,6 +420,9 @@ const claimingMonthly = ref(false)
 const claimingDaily = ref(false)
 const creatingOrder = ref(false)
 const checkingOrder = ref(false)
+const subscribingPlanId = ref(null)
+const sandboxPaying = ref(false)
+const cancellingOrderNo = ref('')
 let pollTimer = null
 
 const enabledPaymentMethods = computed(() => {
@@ -629,6 +654,8 @@ async function checkOrderStatusNow(orderNo) {
 }
 
 async function sandboxPay(order) {
+  if (sandboxPaying.value) return
+  sandboxPaying.value = true
   try {
     const q = new URLSearchParams({
       channel: order.channel || 'alipay',
@@ -637,38 +664,48 @@ async function sandboxPay(order) {
     const res = await apiFetch(`/api/billing/recharge/${order.order_no}/sandbox-pay?${q.toString()}`, { method: 'POST' })
     if (res.order) cashierOrder.value = { ...res.order, simulated: true }
     stopOrderPolling()
-    emit('notify', res.message)
+    emit('notify', { message: res.message || '模拟支付成功', type: 'ok' })
   } catch (e) {
-    emit('notify', e.message)
+    emit('notify', { message: e.message, type: 'error' })
+  } finally {
+    sandboxPaying.value = false
   }
 }
 
 async function cancelRechargeOrder(orderNo) {
+  if (cancellingOrderNo.value) return
+  cancellingOrderNo.value = orderNo
   try {
     const res = await apiFetch(`/api/billing/recharge/orders/${orderNo}/cancel`, { method: 'POST' })
     stopOrderPolling()
     if (cashierOrder.value && cashierOrder.value.order_no === orderNo && res.order) {
       cashierOrder.value = res.order
     }
-    emit('notify', res.message)
+    emit('notify', { message: res.message || '充值订单已取消', type: 'ok' })
     await loadAll()
   } catch (e) {
-    emit('notify', e.message)
+    emit('notify', { message: e.message, type: 'error' })
+  } finally {
+    cancellingOrderNo.value = ''
   }
 }
 
 async function subscribe(planId) {
+  if (subscribingPlanId.value !== null) return
+  subscribingPlanId.value = planId
   try {
     const res = await apiFetch('/api/plans/subscribe', {
       method: 'POST',
       body: JSON.stringify({ plan_id: planId }),
     })
     if (res.user) user.value = { ...user.value, ...res.user }
-    emit('notify', res.message)
+    emit('notify', { message: res.message || '套餐切换成功', type: 'ok' })
     emit('refresh-profile', res.user || null)
     await loadAll()
   } catch (e) {
-    emit('notify', e.message)
+    emit('notify', { message: e.message, type: 'error' })
+  } finally {
+    subscribingPlanId.value = null
   }
 }
 

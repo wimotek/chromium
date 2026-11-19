@@ -96,6 +96,11 @@ class Node(Base, DictMixin):
     last_heartbeat_ts = Column(Float, default=0.0, nullable=False)
     agent_health = Column(String(255), default="", nullable=False)
     last_probe = Column(String(512), default="", nullable=False)
+    core_type = Column(String(32), default="xray", nullable=False)
+    hy2_enabled = Column(Integer, default=0, nullable=False)
+    hy2_port = Column(Integer, default=0, nullable=False)
+    hy2_sni = Column(String(255), default="", nullable=False)
+    hy2_insecure = Column(Integer, default=1, nullable=False)
 
 
 class Card(Base, DictMixin):

@@ -55,6 +55,14 @@ class TestDbDTO(BaseModel):
 
 class TestRedisDTO(BaseModel):
     redis_url: str = ""
+    use_current: bool = False
+
+
+class CacheReloadDTO(BaseModel):
+    mode: Optional[str] = None
+    redis_url: str = ""
+    use_current: bool = False
+    reconnect_only: bool = False
 
 
 class CompleteSetupDTO(BaseModel):
@@ -81,6 +89,8 @@ def get_setup_status():
         "setup_required": is_setup_required(),
         "db_type": db_info.get("db_type", "sqlite"),
         "cache_backend": cache_status.get("active_backend", "sqlite_cache"),
+        "cache_state": cache_status.get("engine_state", "sqlite_cache"),
+        "cache_degraded": bool(cache_status.get("degraded", False)),
         "defaults": {
             "db_type": db_info.get("db_type", "sqlite"),
             "mysql_host": DEFAULT_MYSQL_HOST,
@@ -114,7 +124,7 @@ def setup_test_db(data: TestDbDTO, request: Request, auth: dict = Depends(_verif
 @router.post("/api/setup/test-redis", summary="测试 Redis 缓存服务连通性")
 def setup_test_redis(data: TestRedisDTO, request: Request, auth: dict = Depends(_verify_setup_or_admin)):
     enforce_rate_limit("setup", get_client_ip(request), RATE_LIMIT_SETUP_PER_MIN, 60, "Redis 连通性探测过于频繁")
-    res = cache_mgr.test_connection(data.redis_url)
+    res = cache_mgr.test_target(data.redis_url, use_current=bool(data.use_current))
     if not res.get("ok"):
         raise HTTPException(status_code=400, detail=res.get("detail", "Redis 连接失败"))
     return res
@@ -219,16 +229,58 @@ def get_system_runtime_info(user: dict = Depends(verify_token)):
     }
 
 
-@router.post("/api/system/cache/reload", summary="热更新 Redis 缓存配置（留空则启用内置 SQLite Cache）")
-def reload_cache_config(data: TestRedisDTO, user: dict = Depends(verify_token)):
-    new_url = (data.redis_url or "").strip()
+@router.get("/api/system/cache/status", summary="实时获取当前缓存引擎状态（SQL Cache / Redis / 降级状态）")
+def get_cache_engine_status(user: dict = Depends(verify_token)):
+    return cache_mgr.get_status()
+
+
+@router.post("/api/system/cache/test", summary="在线执行 Redis PING 连通性测试")
+def test_cache_redis_ping(data: TestRedisDTO, request: Request, user: dict = Depends(verify_token)):
+    enforce_rate_limit("setup", get_client_ip(request), RATE_LIMIT_SETUP_PER_MIN, 60, "Redis PING 测试过于频繁")
+    return cache_mgr.test_target(data.redis_url, use_current=bool(data.use_current))
+
+
+@router.post("/api/system/cache/reload", summary="一键热切换并持久化缓存引擎配置（SQLite Cache / Redis）")
+def reload_cache_config(data: CacheReloadDTO, user: dict = Depends(verify_token)):
+    if data.reconnect_only:
+        return cache_mgr.probe_reconnect()
+
+    mode = (data.mode or "").strip().lower()
+    if mode in {"sqlite", "sqlite_cache", "sql"}:
+        new_url = ""
+    elif data.use_current and not (data.redis_url or "").strip():
+        new_url = cache_mgr.get_current_redis_url()
+    else:
+        new_url = (data.redis_url or "").strip()
+
+    if mode == "redis" and not new_url:
+        raise HTTPException(status_code=400, detail="请填写 Redis 连接 URL（如 redis://127.0.0.1:6379/0）")
+
     boot = load_bootstrap_config()
     boot["redis_url"] = new_url
     save_bootstrap_config(boot)
-    backend = cache_mgr.reload_from_config(new_url)
+    cache_mgr.reload_from_config(new_url, source="bootstrap")
+    status = cache_mgr.get_status()
+
+    if status["engine_state"] == "redis":
+        info = status.get("redis_info") or {}
+        ver = info.get("version") or "?"
+        ping_ms = info.get("ping_ms")
+        lat_txt = f", {ping_ms}ms" if ping_ms is not None else ""
+        msg = f"已热切换并保存为 Redis 高速缓存 (v{ver}{lat_txt})"
+        ok = True
+    elif status["engine_state"] == "degraded":
+        msg = f"Redis 配置已保存，但当前连接失败 ({status.get('last_error') or '不可达'})，已自动降级至 SQLite WAL Cache 兜底"
+        ok = False
+    else:
+        msg = "已热切换并保存为内置 SQLite WAL Cache"
+        ok = True
+
     return {
-        "message": f"缓存引擎已切换为: {backend}",
-        "cache": cache_mgr.get_status(),
+        "ok": ok,
+        "degraded": bool(status.get("degraded", False)),
+        "message": msg,
+        "cache": status,
     }
 
 

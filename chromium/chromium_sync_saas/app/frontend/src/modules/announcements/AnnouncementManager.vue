@@ -38,7 +38,13 @@
             <td>
               <div class="row">
                 <button class="btn btn-sm" @click="openEdit(a)">编辑</button>
-                <button class="btn btn-sm btn-danger" @click="removeItem(a.id)">删除</button>
+                <button
+                  class="btn btn-sm btn-danger"
+                  :disabled="deletingId === a.id"
+                  @click="removeItem(a.id)"
+                >
+                  {{ deletingId === a.id ? '删除中...' : '删除' }}
+                </button>
               </div>
             </td>
           </tr>
@@ -65,10 +71,22 @@
           </div>
           <div class="field">
             <label>展示开关</label>
-            <div class="row" style="padding-top: 6px">
-              <label class="row" style="cursor: pointer; gap: 4px"><input type="checkbox" v-model="form.is_pinned" /> <span>置顶</span></label>
-              <label class="row" style="cursor: pointer; gap: 4px"><input type="checkbox" v-model="form.show_on_auth" /> <span>登录页展示</span></label>
-              <label class="row" style="cursor: pointer; gap: 4px"><input type="checkbox" v-model="form.is_active" /> <span>立即启用</span></label>
+            <div class="row" style="padding-top: 6px; gap: 14px">
+              <label class="switch switch-sm">
+                <input type="checkbox" v-model="form.is_pinned" />
+                <span class="switch-track"></span>
+                <span class="switch-state" :class="{ on: form.is_pinned }">置顶</span>
+              </label>
+              <label class="switch switch-sm">
+                <input type="checkbox" v-model="form.show_on_auth" />
+                <span class="switch-track"></span>
+                <span class="switch-state" :class="{ on: form.show_on_auth }">登录页展示</span>
+              </label>
+              <label class="switch switch-sm">
+                <input type="checkbox" v-model="form.is_active" />
+                <span class="switch-track"></span>
+                <span class="switch-state" :class="{ on: form.is_active }">立即启用</span>
+              </label>
             </div>
           </div>
         </div>
@@ -77,8 +95,10 @@
           <textarea class="textarea" rows="4" v-model.trim="form.content" placeholder="请输入系统公告详细内容..."></textarea>
         </div>
         <div class="row" style="justify-content: flex-end">
-          <button class="btn" @click="modalOpen = false">取消</button>
-          <button class="btn btn-primary" @click="save">{{ editingId ? '保存修改' : '确认发布' }}</button>
+          <button class="btn" :disabled="saving" @click="modalOpen = false">取消</button>
+          <button class="btn btn-primary" :disabled="saving" @click="save">
+            {{ saving ? '提交中...' : editingId ? '保存修改' : '确认发布' }}
+          </button>
         </div>
       </div>
     </div>
@@ -93,6 +113,8 @@ const emit = defineEmits(['notify'])
 const announcements = ref([])
 const modalOpen = ref(false)
 const editingId = ref(null)
+const saving = ref(false)
+const deletingId = ref(null)
 
 const form = reactive({
   title: '',
@@ -115,7 +137,7 @@ async function load() {
     const res = await apiFetch('/api/admin/announcements')
     announcements.value = res.announcements || []
   } catch (e) {
-    emit('notify', e.message)
+    emit('notify', { message: e.message, type: 'error' })
   }
 }
 
@@ -139,25 +161,33 @@ function openEdit(a) {
 }
 
 async function save() {
+  if (saving.value) return
+  saving.value = true
   try {
     const url = editingId.value ? `/api/admin/announcements/${editingId.value}` : '/api/admin/announcements'
     const method = editingId.value ? 'PUT' : 'POST'
     const res = await apiFetch(url, { method, body: JSON.stringify(form) })
-    emit('notify', res.message)
+    emit('notify', { message: res.message || '公告已保存', type: 'ok' })
     modalOpen.value = false
     await load()
   } catch (e) {
-    emit('notify', e.message)
+    emit('notify', { message: e.message, type: 'error' })
+  } finally {
+    saving.value = false
   }
 }
 
 async function removeItem(id) {
+  if (deletingId.value !== null) return
+  deletingId.value = id
   try {
     const res = await apiFetch(`/api/admin/announcements/${id}`, { method: 'DELETE' })
-    emit('notify', res.message)
+    emit('notify', { message: res.message || '公告已删除', type: 'ok' })
     await load()
   } catch (e) {
-    emit('notify', e.message)
+    emit('notify', { message: e.message, type: 'error' })
+  } finally {
+    deletingId.value = null
   }
 }
 

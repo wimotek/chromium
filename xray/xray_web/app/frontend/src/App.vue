@@ -344,11 +344,21 @@ const logout = () => {
 
 <style>
 /* 全局暗黑科技风样式体系 */
+:root {
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Helvetica Neue", Arial, sans-serif;
+  --font-mono: "Cascadia Mono", "JetBrains Mono", Consolas, "SFMono-Regular", Menlo, Monaco, "Liberation Mono", ui-monospace, monospace;
+}
 .dark-theme {
   min-height: 100vh;
   background-color: #080c14;
   color: #e2e8f0;
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, monospace;
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+code, pre, kbd, samp, .font-mono {
+  font-family: var(--font-mono) !important;
+  font-variant-ligatures: none;
 }
 .cyber-header {
   border-bottom: 1px solid rgba(255, 255, 255, 0.08);
@@ -575,7 +585,7 @@ const logout = () => {
 .cyber-table th { color: #64748b; font-weight: 600; white-space: nowrap; }
 
 .status-cell-nowrap { white-space: nowrap !important; }
-.time-sub-text { font-size: 10px; color: #64748b; margin-top: 3px; font-family: monospace; }
+.time-sub-text { font-size: 11px; color: #64748b; margin-top: 3px; font-family: var(--font-mono); }
 
 .badge { padding: 2px 8px; border-radius: 4px; font-size: 11px; white-space: nowrap; }
 .badge-ready { background: rgba(16, 185, 129, 0.2); color: #34d399; }
@@ -598,7 +608,7 @@ const logout = () => {
 .node-field label { display: block; font-size: 12px; color: #94a3b8; margin-bottom: 6px; }
 .code-display {
   background: #020617; border: 1px dashed rgba(255, 255, 255, 0.15); padding: 12px; border-radius: 6px;
-  font-size: 13px; word-break: break-all; font-family: monospace;
+  font-size: 13px; word-break: break-all; font-family: var(--font-mono);
 }
 .text-green { color: #34d399; font-weight: bold; }
 .text-cyan { color: #38bdf8; }
@@ -709,11 +719,11 @@ const logout = () => {
 .btn-cyber-code:disabled { opacity: 0.5; cursor: not-allowed; }
 
 .captcha-group { display: flex; align-items: center; gap: 10px; }
-.captcha-input { width: 140px !important; min-width: 120px !important; font-family: monospace; font-weight: 700; text-align: center; }
+.captcha-input { width: 140px !important; min-width: 120px !important; font-family: var(--font-mono); font-weight: 700; text-align: center; }
 .captcha-svg-box { cursor: pointer; display: flex; align-items: center; justify-content: center; background: #0b1120; border: 1px solid #334155; border-radius: 6px; padding: 2px; }
 
 .redeem-box { display: flex; gap: 10px; align-items: stretch; }
-.redeem-textarea { flex: 1; height: 68px; min-height: 50px; font-family: monospace; }
+.redeem-textarea { flex: 1; height: 68px; min-height: 50px; font-family: var(--font-mono); }
 
 .traffic-meter { margin: 15px 0; }
 .meter-info { display: flex; justify-content: space-between; margin-bottom: 8px; }
@@ -730,7 +740,7 @@ const logout = () => {
 .node-card:hover { border-color: #38bdf8; box-shadow: 0 0 15px rgba(56, 189, 248, 0.15); }
 .node-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
 .node-title { font-weight: 700; font-size: 14px; color: #f1f5f9; }
-.node-detail { font-size: 12px; color: #64748b; font-family: monospace; }
+.node-detail { font-size: 12px; color: #64748b; font-family: var(--font-mono); }
 .sni-select-wrap { display: flex; align-items: center; gap: 6px; margin-top: 6px; font-size: 12px; }
 .cyber-select { background: #0f172a; border: 1px solid #334155; color: #38bdf8; padding: 3px 6px; border-radius: 4px; font-size: 11px; outline: none; cursor: pointer; max-width: 190px; }
 .empty-node-tip { grid-column: 1 / -1; text-align: center; padding: 30px; color: #64748b; font-size: 13px; }

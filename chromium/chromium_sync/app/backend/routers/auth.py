@@ -49,6 +49,8 @@ def auth_status():
         "setup_required": is_setup_required(),
         "db_type": db_info.get("db_type", "sqlite"),
         "cache_backend": cache_status.get("active_backend", "sqlite_cache"),
+        "cache_state": cache_status.get("engine_state", "sqlite_cache"),
+        "cache_degraded": bool(cache_status.get("degraded", False)),
     }
 
 

@@ -44,8 +44,11 @@ router = APIRouter(tags=["财务系统（套餐 · 钱包 · 充值 · 账单）
 
 
 def _get_alipay_gateway_cfg() -> Dict[str, Any]:
+    f2f_on = get_setting("saas_alipay_f2f_enabled", "1") == "1"
+    page_on = get_setting("saas_alipay_page_enabled", "1") == "1"
+    static_on = get_setting("saas_alipay_static_enabled", "0") == "1"
     return {
-        "enabled": get_setting("saas_alipay_enabled", "1") == "1",
+        "enabled": f2f_on or page_on or static_on,
         "mode": get_setting("saas_alipay_mode", "precreate") or "precreate",
         "sign_mode": get_setting("saas_alipay_sign_mode", "public_key") or "public_key",
         "app_id": get_setting("saas_alipay_app_id", ""),
@@ -62,8 +65,10 @@ def _get_alipay_gateway_cfg() -> Dict[str, Any]:
 
 
 def _get_wechat_gateway_cfg() -> Dict[str, Any]:
+    native_on = get_setting("saas_wechat_native_enabled", "1") == "1"
+    static_on = get_setting("saas_wechat_static_enabled", "0") == "1"
     return {
-        "enabled": get_setting("saas_wechat_enabled", "1") == "1",
+        "enabled": native_on or static_on,
         "mode": get_setting("saas_wechat_mode", "native_v3") or "native_v3",
         "app_id": get_setting("saas_wechat_app_id", ""),
         "mch_id": get_setting("saas_wechat_mch_id", ""),
@@ -78,16 +83,14 @@ def _get_wechat_gateway_cfg() -> Dict[str, Any]:
 
 
 def _build_payment_methods_matrix(alipay_cfg: Dict[str, Any], wechat_cfg: Dict[str, Any]) -> list:
-    alipay_master = bool(alipay_cfg.get("enabled"))
-    wechat_master = bool(wechat_cfg.get("enabled"))
     alipay_api_ok = is_alipay_api_configured(alipay_cfg)
     wechat_api_ok = is_wechat_v3_configured(wechat_cfg)
 
-    f2f_on = alipay_master and (get_setting("saas_alipay_f2f_enabled", "1") == "1")
-    page_on = alipay_master and (get_setting("saas_alipay_page_enabled", "1") == "1")
-    alipay_static_on = alipay_master and (get_setting("saas_alipay_static_enabled", "0") == "1")
-    wechat_native_on = wechat_master and (get_setting("saas_wechat_native_enabled", "1") == "1")
-    wechat_static_on = wechat_master and (get_setting("saas_wechat_static_enabled", "0") == "1")
+    f2f_on = get_setting("saas_alipay_f2f_enabled", "1") == "1"
+    page_on = get_setting("saas_alipay_page_enabled", "1") == "1"
+    alipay_static_on = get_setting("saas_alipay_static_enabled", "0") == "1"
+    wechat_native_on = get_setting("saas_wechat_native_enabled", "1") == "1"
+    wechat_static_on = get_setting("saas_wechat_static_enabled", "0") == "1"
 
     return [
         {
@@ -369,13 +372,20 @@ def billing_overview(user: dict = Depends(verify_token)):
             "today": today_str,
         },
         "payment_channels": {
-            "alipay_enabled": get_setting("saas_alipay_enabled", "1") == "1",
+            "alipay_enabled": (
+                (get_setting("saas_alipay_f2f_enabled", "1") == "1")
+                or (get_setting("saas_alipay_page_enabled", "1") == "1")
+                or (get_setting("saas_alipay_static_enabled", "0") == "1")
+            ),
             "alipay_mode": get_setting("saas_alipay_mode", "precreate") or "precreate",
             "alipay_f2f_enabled": get_setting("saas_alipay_f2f_enabled", "1") == "1",
             "alipay_page_enabled": get_setting("saas_alipay_page_enabled", "1") == "1",
             "alipay_static_enabled": get_setting("saas_alipay_static_enabled", "0") == "1",
             "alipay_configured": is_alipay_api_configured(_get_alipay_gateway_cfg()),
-            "wechat_enabled": get_setting("saas_wechat_enabled", "1") == "1",
+            "wechat_enabled": (
+                (get_setting("saas_wechat_native_enabled", "1") == "1")
+                or (get_setting("saas_wechat_static_enabled", "0") == "1")
+            ),
             "wechat_mode": get_setting("saas_wechat_mode", "native_v3") or "native_v3",
             "wechat_native_enabled": get_setting("saas_wechat_native_enabled", "1") == "1",
             "wechat_static_enabled": get_setting("saas_wechat_static_enabled", "0") == "1",

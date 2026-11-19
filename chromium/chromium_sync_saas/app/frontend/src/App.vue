@@ -92,7 +92,18 @@
       </main>
     </template>
 
-    <div v-if="toastMsg" class="toast">{{ toastMsg }}</div>
+    <div
+      v-if="toastMsg"
+      :key="toastKey"
+      class="toast"
+      :class="`toast-${toastType}`"
+      role="status"
+      aria-live="polite"
+    >
+      <span class="toast-icon">{{ toastType === 'error' ? '!' : toastType === 'ok' ? '✓' : 'i' }}</span>
+      <span>{{ toastMsg }}</span>
+      <button type="button" class="toast-close" aria-label="关闭提示" @click="toastMsg = ''">×</button>
+    </div>
   </div>
 </template>
 
@@ -123,6 +134,8 @@ const quotas = ref({})
 const tab = ref('nodes')
 const mobileMenuOpen = ref(false)
 const toastMsg = ref('')
+const toastType = ref('ok')
+const toastKey = ref(0)
 let toastTimer = null
 
 function selectTab(nextTab) {
@@ -130,12 +143,27 @@ function selectTab(nextTab) {
   mobileMenuOpen.value = false
 }
 
-function showToast(msg) {
+function inferToastType(text) {
+  const s = String(text || '')
+  if (/(失败|错误|异常|超时|无权|不能|不可|不存在|未配置|不足|拦截|拒绝|无效|HTTP\s*[45]\d\d|422|500|502|403|404)/i.test(s)) {
+    return 'error'
+  }
+  if (/(已保存|已更新|成功|完成|已复制|已启用|已停用|已创建|已删除|已移除|已取消|已清空|已刷新|已到账|已入账|已生效|已重置|已切换|已加载|已读取|已导出)/.test(s)) {
+    return 'ok'
+  }
+  return 'info'
+}
+
+function showToast(payload, explicitType = '') {
+  const msg = typeof payload === 'object' && payload !== null ? String(payload.message || '') : String(payload || '')
+  if (!msg) return
   toastMsg.value = msg
+  toastType.value = explicitType || (typeof payload === 'object' && payload?.type) || inferToastType(msg)
+  toastKey.value += 1
   clearTimeout(toastTimer)
   toastTimer = setTimeout(() => {
     toastMsg.value = ''
-  }, 3600)
+  }, toastType.value === 'error' ? 5200 : 3800)
 }
 
 async function refreshProfile(updatedUser = null) {

@@ -189,6 +189,17 @@ def get_active_db_info() -> Dict[str, Any]:
     if not _active_db_config:
         get_engine()
     info = dict(_active_db_config)
+    db_type = str(info.get("db_type") or "sqlite").lower()
+    if db_type == "mysql":
+        host = info.get("mysql_host") or DEFAULT_MYSQL_HOST
+        port = info.get("mysql_port") or DEFAULT_MYSQL_PORT
+        database = info.get("mysql_database") or DEFAULT_MYSQL_DATABASE
+        user = info.get("mysql_user") or DEFAULT_MYSQL_USER
+        info["target"] = f"{user}@{host}:{port}/{database}"
+    else:
+        info["target"] = str(info.get("sqlite_path") or DB_PATH)
+    info["dialect"] = db_type
+    info["status"] = "active"
     info["cache_backend"] = cache_mgr.get_status()["active_backend"]
     return info
 
@@ -666,6 +677,22 @@ def set_setting(key: str, value: str):
         else:
             row.value = str_val
     cache_mgr.set(f"{SETTINGS_CACHE_PREFIX}{key}", str_val, ttl=120)
+
+
+def set_settings_batch(items: Dict[str, Any]):
+    if not items:
+        return
+    normalized = {str(k): str(v) for k, v in items.items()}
+    with session_scope() as db:
+        keys = list(normalized.keys())
+        existing = {row.key: row for row in db.query(Setting).filter(Setting.key.in_(keys)).all()}
+        for k, str_val in normalized.items():
+            row = existing.get(k)
+            if row is None:
+                db.add(Setting(key=k, value=str_val))
+            else:
+                row.value = str_val
+    cache_mgr.mset_batch({f"{SETTINGS_CACHE_PREFIX}{k}": v for k, v in normalized.items()}, ttl=120)
 
 
 def get_user_setting(user_id: int, key: str, default: Optional[str] = None) -> str:

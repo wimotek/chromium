@@ -32,6 +32,7 @@ from services.scheduler_service import start_scheduler_thread
 
 # 导入通用路由工具与所有领域蓝图
 from routes import (
+    build_hy2_link,
     build_node_link,
     get_node_snis,
     is_node_healthy_for_sub,
@@ -233,6 +234,9 @@ def get_subscription():
             chosen_sni = forced_sni if (forced_sni and forced_sni in snis) else random.choice(snis)
             remark = f"{n['name']}"
             links.append(build_node_link(user['uuid'], n, remark, chosen_sni=chosen_sni, hub_domain=hub_host, hub_port=hub_port))
+            hy2_link = build_hy2_link(user['uuid'], n, remark)
+            if hy2_link:
+                links.append(hy2_link)
 
     sub_text = "\n".join(links)
     b64_sub = base64.b64encode(sub_text.encode('utf-8')).decode('utf-8')

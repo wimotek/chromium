@@ -102,10 +102,11 @@ def evaluate_node_sub_health(
         return False, "heartbeat_lost", f"节点心跳超时 ({hb_age}秒未响应)"
 
     net_mode = node_dict.get("net_mode") or "direct"
+    core_label = "Sing-box" if str(node_dict.get("core_type") or "xray").lower() == "singbox" else "Xray"
     agent_health = parse_agent_health(node_dict.get("agent_health"))
     if agent_health:
-        if agent_health.get("xray_alive") is False:
-            return False, "xray_unhealthy", "节点自检上报 Xray 进程未运行"
+        if agent_health.get("xray_alive") is False or agent_health.get("core_alive") is False:
+            return False, "xray_unhealthy", f"节点自检上报 {core_label} 进程未运行"
         if agent_health.get("port_ready") is False:
             return False, "xray_unhealthy", "节点自检上报代理监听端口未就绪"
         if net_mode == "reverse_wss" and agent_health.get("tunnel_connected") is False:
@@ -338,4 +339,35 @@ def build_node_link(uuid_str: str, node: dict, remark: str, chosen_sni: str = No
         f"vless://{uuid_str}@{formatted_host}:{node['port']}"
         f"?security=reality&encryption=none&pbk={node['pbk']}&headerType=none&fp=chrome"
         f"&type=tcp&flow=xtls-rprx-vision&sni={clean_sni}&sid={node['sid']}#{urllib.parse.quote(remark)}"
+    )
+
+
+def build_hy2_link(uuid_str: str, node: dict, remark: str) -> str | None:
+    """为启用了 Hysteria2 UDP 的 sing-box 公网直连节点生成 hysteria2:// 分享链接"""
+    if (node.get("net_mode") or "direct") == "reverse_wss":
+        return None
+    if str(node.get("core_type") or "xray").lower() != "singbox":
+        return None
+    if int(node.get("hy2_enabled") or 0) != 1:
+        return None
+
+    hy2_port = int(node.get("hy2_port") or 0)
+    if hy2_port <= 0 or hy2_port > 65535:
+        return None
+
+    agent_health = parse_agent_health(node.get("agent_health"))
+    if agent_health and agent_health.get("hy2_ready") is False:
+        return None
+
+    raw_host = str(node.get("ip") or "").strip()
+    if not raw_host:
+        return None
+    formatted_host = f"[{raw_host}]" if (":" in raw_host and not raw_host.startswith("[")) else raw_host
+    snis = get_node_snis(node)
+    hy2_sni = str(node.get("hy2_sni") or "").strip() or (snis[0] if snis else "www.bing.com")
+    insecure = 1 if int(node.get("hy2_insecure", 1) or 0) != 0 else 0
+    return (
+        f"hysteria2://{uuid_str}@{formatted_host}:{hy2_port}"
+        f"?sni={urllib.parse.quote(hy2_sni, safe='')}&insecure={insecure}"
+        f"#{urllib.parse.quote(remark + ' [Hy2-UDP]')}"
     )

@@ -17,6 +17,7 @@ from core.db import (
     save_bootstrap_config,
     session_scope,
     set_setting,
+    set_settings_batch,
 )
 from core.models import (
     BillingLedger,
@@ -154,8 +155,16 @@ class AdminPlanUpdateDTO(BaseModel):
     can_share_nodes: Optional[bool] = None
 
 
-class RedisReloadDTO(BaseModel):
+class RedisTestDTO(BaseModel):
     redis_url: str = ""
+    use_current: bool = False
+
+
+class RedisReloadDTO(BaseModel):
+    mode: Optional[str] = None
+    redis_url: str = ""
+    use_current: bool = False
+    reconnect_only: bool = False
 
 
 class GeoipUpdateDTO(BaseModel):
@@ -228,7 +237,11 @@ def admin_overview(admin: dict = Depends(require_admin)):
             "saas_daily_checkin_enabled": get_setting("saas_daily_checkin_enabled", "1") == "1",
             "saas_daily_checkin_yuan": float(units_to_yuan_str(int(get_setting("saas_daily_checkin_units", "5000") or 0))),
             "saas_daily_streak_bonus_yuan": float(units_to_yuan_str(int(get_setting("saas_daily_streak_bonus_units", "1000") or 0))),
-            "saas_alipay_enabled": get_setting("saas_alipay_enabled", "1") == "1",
+            "saas_alipay_enabled": (
+                (get_setting("saas_alipay_f2f_enabled", "1") == "1")
+                or (get_setting("saas_alipay_page_enabled", "1") == "1")
+                or (get_setting("saas_alipay_static_enabled", "0") == "1")
+            ),
             "saas_alipay_mode": get_setting("saas_alipay_mode", "precreate") or "precreate",
             "saas_alipay_sign_mode": get_setting("saas_alipay_sign_mode", "public_key") or "public_key",
             "saas_alipay_f2f_enabled": get_setting("saas_alipay_f2f_enabled", "1") == "1",
@@ -245,7 +258,10 @@ def admin_overview(admin: dict = Depends(require_admin)):
             "saas_alipay_notify_url": get_setting("saas_alipay_notify_url", ""),
             "saas_alipay_return_url": get_setting("saas_alipay_return_url", ""),
             "saas_alipay_qr_url": get_setting("saas_alipay_qr_url", ""),
-            "saas_wechat_enabled": get_setting("saas_wechat_enabled", "1") == "1",
+            "saas_wechat_enabled": (
+                (get_setting("saas_wechat_native_enabled", "1") == "1")
+                or (get_setting("saas_wechat_static_enabled", "0") == "1")
+            ),
             "saas_wechat_mode": get_setting("saas_wechat_mode", "native_v3") or "native_v3",
             "saas_wechat_native_enabled": get_setting("saas_wechat_native_enabled", "1") == "1",
             "saas_wechat_static_enabled": get_setting("saas_wechat_static_enabled", "0") == "1",
@@ -278,109 +294,141 @@ def admin_overview(admin: dict = Depends(require_admin)):
 
 @router.post("/api/admin/settings", summary="调整分通道差价比例、邮箱认证、邀请奖励与支付配置")
 def admin_update_settings(data: AdminSettingsDTO, request: Request, admin: dict = Depends(require_admin)):
+    updates: dict[str, str] = {}
+
     if data.saas_reverse_fee_bps is not None:
         bps = max(0, min(10000, int(data.saas_reverse_fee_bps)))
-        set_setting("saas_reverse_fee_bps", str(bps))
-        set_setting("saas_platform_fee_bps", str(bps))
+        updates["saas_reverse_fee_bps"] = str(bps)
+        updates["saas_platform_fee_bps"] = str(bps)
     elif data.saas_platform_fee_bps is not None:
         bps = max(0, min(10000, int(data.saas_platform_fee_bps)))
-        set_setting("saas_platform_fee_bps", str(bps))
-        set_setting("saas_reverse_fee_bps", str(bps))
+        updates["saas_platform_fee_bps"] = str(bps)
+        updates["saas_reverse_fee_bps"] = str(bps)
 
     if data.saas_public_wss_fee_bps is not None:
-        set_setting("saas_public_wss_fee_bps", str(max(0, min(10000, int(data.saas_public_wss_fee_bps)))))
+        updates["saas_public_wss_fee_bps"] = str(max(0, min(10000, int(data.saas_public_wss_fee_bps))))
     if data.saas_market_base_hour_yuan is not None:
-        set_setting("saas_market_base_hour_units", str(max(0, yuan_to_units(data.saas_market_base_hour_yuan))))
+        updates["saas_market_base_hour_units"] = str(max(0, yuan_to_units(data.saas_market_base_hour_yuan)))
     if data.saas_market_base_gb_yuan is not None:
-        set_setting("saas_market_base_gb_units", str(max(0, yuan_to_units(data.saas_market_base_gb_yuan))))
+        updates["saas_market_base_gb_units"] = str(max(0, yuan_to_units(data.saas_market_base_gb_yuan)))
     if data.saas_self_reverse_hub_gb_yuan is not None:
-        set_setting("saas_self_reverse_hub_gb_units", str(max(0, yuan_to_units(data.saas_self_reverse_hub_gb_yuan))))
+        updates["saas_self_reverse_hub_gb_units"] = str(max(0, yuan_to_units(data.saas_self_reverse_hub_gb_yuan)))
     if data.saas_auto_level_enabled is not None:
-        set_setting("saas_auto_level_enabled", "1" if data.saas_auto_level_enabled else "0")
+        updates["saas_auto_level_enabled"] = "1" if data.saas_auto_level_enabled else "0"
     if data.saas_allow_public_register is not None:
-        set_setting("saas_allow_public_register", "1" if data.saas_allow_public_register else "0")
+        updates["saas_allow_public_register"] = "1" if data.saas_allow_public_register else "0"
     if data.saas_require_email_verify is not None:
-        set_setting("saas_require_email_verify", "1" if data.saas_require_email_verify else "0")
+        updates["saas_require_email_verify"] = "1" if data.saas_require_email_verify else "0"
     if data.saas_referral_enabled is not None:
-        set_setting("saas_referral_enabled", "1" if data.saas_referral_enabled else "0")
+        updates["saas_referral_enabled"] = "1" if data.saas_referral_enabled else "0"
     if data.saas_referral_inviter_bonus_yuan is not None:
-        set_setting("saas_referral_inviter_bonus_units", str(max(0, yuan_to_units(data.saas_referral_inviter_bonus_yuan))))
+        updates["saas_referral_inviter_bonus_units"] = str(max(0, yuan_to_units(data.saas_referral_inviter_bonus_yuan)))
     if data.saas_referral_invitee_bonus_yuan is not None:
-        set_setting("saas_referral_invitee_bonus_units", str(max(0, yuan_to_units(data.saas_referral_invitee_bonus_yuan))))
+        updates["saas_referral_invitee_bonus_units"] = str(max(0, yuan_to_units(data.saas_referral_invitee_bonus_yuan)))
     if data.saas_allow_self_recharge is not None:
-        set_setting("saas_allow_self_recharge", "1" if data.saas_allow_self_recharge else "0")
+        updates["saas_allow_self_recharge"] = "1" if data.saas_allow_self_recharge else "0"
     if data.saas_welcome_bonus_yuan is not None:
-        set_setting("saas_welcome_bonus_units", str(max(0, yuan_to_units(data.saas_welcome_bonus_yuan))))
+        updates["saas_welcome_bonus_units"] = str(max(0, yuan_to_units(data.saas_welcome_bonus_yuan)))
     if data.saas_monthly_claim_enabled is not None:
-        set_setting("saas_monthly_claim_enabled", "1" if data.saas_monthly_claim_enabled else "0")
+        updates["saas_monthly_claim_enabled"] = "1" if data.saas_monthly_claim_enabled else "0"
     if data.saas_monthly_claim_yuan is not None:
-        set_setting("saas_monthly_claim_units", str(max(0, yuan_to_units(data.saas_monthly_claim_yuan))))
+        updates["saas_monthly_claim_units"] = str(max(0, yuan_to_units(data.saas_monthly_claim_yuan)))
     if data.saas_daily_checkin_enabled is not None:
-        set_setting("saas_daily_checkin_enabled", "1" if data.saas_daily_checkin_enabled else "0")
+        updates["saas_daily_checkin_enabled"] = "1" if data.saas_daily_checkin_enabled else "0"
     if data.saas_daily_checkin_yuan is not None:
-        set_setting("saas_daily_checkin_units", str(max(0, yuan_to_units(data.saas_daily_checkin_yuan))))
+        updates["saas_daily_checkin_units"] = str(max(0, yuan_to_units(data.saas_daily_checkin_yuan)))
     if data.saas_daily_streak_bonus_yuan is not None:
-        set_setting("saas_daily_streak_bonus_units", str(max(0, yuan_to_units(data.saas_daily_streak_bonus_yuan))))
-    if data.saas_alipay_enabled is not None:
-        set_setting("saas_alipay_enabled", "1" if data.saas_alipay_enabled else "0")
+        updates["saas_daily_streak_bonus_units"] = str(max(0, yuan_to_units(data.saas_daily_streak_bonus_yuan)))
     if data.saas_alipay_mode is not None and data.saas_alipay_mode.strip().lower() in {"precreate", "page_pay", "static_qr"}:
-        set_setting("saas_alipay_mode", data.saas_alipay_mode.strip().lower())
+        updates["saas_alipay_mode"] = data.saas_alipay_mode.strip().lower()
     if data.saas_alipay_sign_mode is not None and data.saas_alipay_sign_mode.strip().lower() in {"public_key", "cert"}:
-        set_setting("saas_alipay_sign_mode", data.saas_alipay_sign_mode.strip().lower())
+        updates["saas_alipay_sign_mode"] = data.saas_alipay_sign_mode.strip().lower()
+
+    has_alipay_method_flags = any(
+        x is not None for x in (data.saas_alipay_f2f_enabled, data.saas_alipay_page_enabled, data.saas_alipay_static_enabled)
+    )
     if data.saas_alipay_f2f_enabled is not None:
-        set_setting("saas_alipay_f2f_enabled", "1" if data.saas_alipay_f2f_enabled else "0")
+        updates["saas_alipay_f2f_enabled"] = "1" if data.saas_alipay_f2f_enabled else "0"
     if data.saas_alipay_page_enabled is not None:
-        set_setting("saas_alipay_page_enabled", "1" if data.saas_alipay_page_enabled else "0")
+        updates["saas_alipay_page_enabled"] = "1" if data.saas_alipay_page_enabled else "0"
     if data.saas_alipay_static_enabled is not None:
-        set_setting("saas_alipay_static_enabled", "1" if data.saas_alipay_static_enabled else "0")
+        updates["saas_alipay_static_enabled"] = "1" if data.saas_alipay_static_enabled else "0"
+    if has_alipay_method_flags:
+        f2f_eff = (updates.get("saas_alipay_f2f_enabled") or get_setting("saas_alipay_f2f_enabled", "1")) == "1"
+        page_eff = (updates.get("saas_alipay_page_enabled") or get_setting("saas_alipay_page_enabled", "1")) == "1"
+        static_eff = (updates.get("saas_alipay_static_enabled") or get_setting("saas_alipay_static_enabled", "0")) == "1"
+        updates["saas_alipay_enabled"] = "1" if (f2f_eff or page_eff or static_eff) else "0"
+    elif data.saas_alipay_enabled is not None:
+        updates["saas_alipay_enabled"] = "1" if data.saas_alipay_enabled else "0"
+        if not data.saas_alipay_enabled:
+            updates["saas_alipay_f2f_enabled"] = "0"
+            updates["saas_alipay_page_enabled"] = "0"
+            updates["saas_alipay_static_enabled"] = "0"
+
     if data.saas_alipay_app_id is not None:
-        set_setting("saas_alipay_app_id", data.saas_alipay_app_id.strip())
+        updates["saas_alipay_app_id"] = data.saas_alipay_app_id.strip()
     if data.saas_alipay_private_key is not None and data.saas_alipay_private_key.strip():
-        set_setting("saas_alipay_private_key", data.saas_alipay_private_key.strip())
+        updates["saas_alipay_private_key"] = data.saas_alipay_private_key.strip()
     if data.saas_alipay_public_key is not None:
-        set_setting("saas_alipay_public_key", data.saas_alipay_public_key.strip())
+        updates["saas_alipay_public_key"] = data.saas_alipay_public_key.strip()
     if data.saas_alipay_app_cert is not None:
-        set_setting("saas_alipay_app_cert", data.saas_alipay_app_cert.strip())
+        updates["saas_alipay_app_cert"] = data.saas_alipay_app_cert.strip()
     if data.saas_alipay_cert_public_key is not None:
-        set_setting("saas_alipay_cert_public_key", data.saas_alipay_cert_public_key.strip())
+        updates["saas_alipay_cert_public_key"] = data.saas_alipay_cert_public_key.strip()
     if data.saas_alipay_root_cert is not None:
-        set_setting("saas_alipay_root_cert", data.saas_alipay_root_cert.strip())
+        updates["saas_alipay_root_cert"] = data.saas_alipay_root_cert.strip()
     if data.saas_alipay_gateway_url is not None:
-        set_setting("saas_alipay_gateway_url", data.saas_alipay_gateway_url.strip() or "https://openapi.alipay.com/gateway.do")
+        updates["saas_alipay_gateway_url"] = data.saas_alipay_gateway_url.strip() or "https://openapi.alipay.com/gateway.do"
     if data.saas_alipay_notify_url is not None:
-        set_setting("saas_alipay_notify_url", data.saas_alipay_notify_url.strip())
+        updates["saas_alipay_notify_url"] = data.saas_alipay_notify_url.strip()
     if data.saas_alipay_return_url is not None:
-        set_setting("saas_alipay_return_url", data.saas_alipay_return_url.strip())
+        updates["saas_alipay_return_url"] = data.saas_alipay_return_url.strip()
     if data.saas_alipay_qr_url is not None:
-        set_setting("saas_alipay_qr_url", data.saas_alipay_qr_url.strip())
-    if data.saas_wechat_enabled is not None:
-        set_setting("saas_wechat_enabled", "1" if data.saas_wechat_enabled else "0")
+        updates["saas_alipay_qr_url"] = data.saas_alipay_qr_url.strip()
+
     if data.saas_wechat_mode is not None and data.saas_wechat_mode.strip().lower() in {"native_v3", "static_qr"}:
-        set_setting("saas_wechat_mode", data.saas_wechat_mode.strip().lower())
+        updates["saas_wechat_mode"] = data.saas_wechat_mode.strip().lower()
+
+    has_wechat_method_flags = any(
+        x is not None for x in (data.saas_wechat_native_enabled, data.saas_wechat_static_enabled)
+    )
     if data.saas_wechat_native_enabled is not None:
-        set_setting("saas_wechat_native_enabled", "1" if data.saas_wechat_native_enabled else "0")
+        updates["saas_wechat_native_enabled"] = "1" if data.saas_wechat_native_enabled else "0"
     if data.saas_wechat_static_enabled is not None:
-        set_setting("saas_wechat_static_enabled", "1" if data.saas_wechat_static_enabled else "0")
+        updates["saas_wechat_static_enabled"] = "1" if data.saas_wechat_static_enabled else "0"
+    if has_wechat_method_flags:
+        native_eff = (updates.get("saas_wechat_native_enabled") or get_setting("saas_wechat_native_enabled", "1")) == "1"
+        wstatic_eff = (updates.get("saas_wechat_static_enabled") or get_setting("saas_wechat_static_enabled", "0")) == "1"
+        updates["saas_wechat_enabled"] = "1" if (native_eff or wstatic_eff) else "0"
+    elif data.saas_wechat_enabled is not None:
+        updates["saas_wechat_enabled"] = "1" if data.saas_wechat_enabled else "0"
+        if not data.saas_wechat_enabled:
+            updates["saas_wechat_native_enabled"] = "0"
+            updates["saas_wechat_static_enabled"] = "0"
+
     if data.saas_wechat_app_id is not None:
-        set_setting("saas_wechat_app_id", data.saas_wechat_app_id.strip())
+        updates["saas_wechat_app_id"] = data.saas_wechat_app_id.strip()
     if data.saas_wechat_mch_id is not None:
-        set_setting("saas_wechat_mch_id", data.saas_wechat_mch_id.strip())
+        updates["saas_wechat_mch_id"] = data.saas_wechat_mch_id.strip()
     if data.saas_wechat_serial_no is not None:
-        set_setting("saas_wechat_serial_no", data.saas_wechat_serial_no.strip())
+        updates["saas_wechat_serial_no"] = data.saas_wechat_serial_no.strip()
     if data.saas_wechat_private_key is not None and data.saas_wechat_private_key.strip():
-        set_setting("saas_wechat_private_key", data.saas_wechat_private_key.strip())
+        updates["saas_wechat_private_key"] = data.saas_wechat_private_key.strip()
     if data.saas_wechat_api_v3_key is not None and data.saas_wechat_api_v3_key.strip():
-        set_setting("saas_wechat_api_v3_key", data.saas_wechat_api_v3_key.strip())
+        updates["saas_wechat_api_v3_key"] = data.saas_wechat_api_v3_key.strip()
     if data.saas_wechat_platform_public_key is not None:
-        set_setting("saas_wechat_platform_public_key", data.saas_wechat_platform_public_key.strip())
+        updates["saas_wechat_platform_public_key"] = data.saas_wechat_platform_public_key.strip()
     if data.saas_wechat_gateway_url is not None:
-        set_setting("saas_wechat_gateway_url", data.saas_wechat_gateway_url.strip() or "https://api.mch.weixin.qq.com")
+        updates["saas_wechat_gateway_url"] = data.saas_wechat_gateway_url.strip() or "https://api.mch.weixin.qq.com"
     if data.saas_wechat_notify_url is not None:
-        set_setting("saas_wechat_notify_url", data.saas_wechat_notify_url.strip())
+        updates["saas_wechat_notify_url"] = data.saas_wechat_notify_url.strip()
     if data.saas_wechat_qr_url is not None:
-        set_setting("saas_wechat_qr_url", data.saas_wechat_qr_url.strip())
+        updates["saas_wechat_qr_url"] = data.saas_wechat_qr_url.strip()
     if data.saas_payment_notify_secret is not None and data.saas_payment_notify_secret.strip():
-        set_setting("saas_payment_notify_secret", data.saas_payment_notify_secret.strip())
+        updates["saas_payment_notify_secret"] = data.saas_payment_notify_secret.strip()
+
+    if updates:
+        set_settings_batch(updates)
 
     audit_details = data.model_dump(
         exclude_none=True,
@@ -406,7 +454,7 @@ def admin_update_settings(data: AdminSettingsDTO, request: Request, admin: dict 
         status="ok",
         details=audit_details,
     )
-    return {"message": "平台策略与支付配置已更新"}
+    return {"message": "平台策略与支付配置已保存生效", "updated_keys": len(updates)}
 
 
 @router.get("/api/admin/users", summary="查看全部租户、邮箱认证、推荐关系、等级与钱包情况")
@@ -1042,14 +1090,88 @@ def admin_delete_cancelled_recharge(order_id: int, request: Request, admin: dict
     return {"message": f"已删除已取消的订单记录 {order_no}"}
 
 
-@router.post("/api/system/cache/reload", summary="热更新 Redis 缓存配置（Admin）")
-def admin_reload_cache(data: RedisReloadDTO, admin: dict = Depends(require_admin)):
-    new_url = (data.redis_url or "").strip()
+@router.get("/api/system/cache/status", summary="实时获取当前缓存引擎状态（SQL Cache / Redis / 降级状态）")
+def admin_cache_status(admin: dict = Depends(require_admin)):
+    return cache_mgr.get_status()
+
+
+@router.post("/api/system/cache/test", summary="在线执行 Redis PING 连通性测试（Admin）")
+def admin_test_cache_redis(data: RedisTestDTO, admin: dict = Depends(require_admin)):
+    return cache_mgr.test_target(data.redis_url, use_current=bool(data.use_current))
+
+
+@router.post("/api/system/cache/reload", summary="一键热切换并持久化缓存引擎配置（Admin）")
+def admin_reload_cache(data: RedisReloadDTO, request: Request, admin: dict = Depends(require_admin)):
+    if data.reconnect_only:
+        res = cache_mgr.probe_reconnect()
+        write_audit_log(
+            action="admin_cache_reconnect",
+            actor_id=admin["id"],
+            actor_username=admin["username"],
+            target_type="system",
+            target_id="cache_engine",
+            ip=get_client_ip(request),
+            status="ok" if res.get("ok") else "degraded",
+            details={
+                "engine_state": (res.get("cache") or {}).get("engine_state"),
+                "redis_url_masked": (res.get("cache") or {}).get("redis_url_masked"),
+            },
+        )
+        return res
+
+    mode = (data.mode or "").strip().lower()
+    if mode in {"sqlite", "sqlite_cache", "sql"}:
+        new_url = ""
+    elif data.use_current and not (data.redis_url or "").strip():
+        new_url = cache_mgr.get_current_redis_url()
+    else:
+        new_url = (data.redis_url or "").strip()
+
+    if mode == "redis" and not new_url:
+        raise HTTPException(status_code=400, detail="请填写 Redis 连接 URL（如 redis://127.0.0.1:6379/0）")
+
     boot = load_bootstrap_config()
     boot["redis_url"] = new_url
     save_bootstrap_config(boot)
-    backend = cache_mgr.reload_from_config(new_url)
-    return {"message": f"缓存引擎已切换为: {backend}", "cache": cache_mgr.get_status()}
+    cache_mgr.reload_from_config(new_url, source="bootstrap")
+    status = cache_mgr.get_status()
+
+    if status["engine_state"] == "redis":
+        info = status.get("redis_info") or {}
+        ver = info.get("version") or "?"
+        ping_ms = info.get("ping_ms")
+        lat_txt = f", {ping_ms}ms" if ping_ms is not None else ""
+        msg = f"已热切换并保存为 Redis 高速缓存 (v{ver}{lat_txt})"
+        ok = True
+    elif status["engine_state"] == "degraded":
+        msg = f"Redis 配置已保存，但当前连接失败 ({status.get('last_error') or '不可达'})，已自动降级至 SQLite WAL Cache 兜底"
+        ok = False
+    else:
+        msg = "已热切换并保存为内置 SQLite WAL Cache"
+        ok = True
+
+    write_audit_log(
+        action="admin_reload_cache",
+        actor_id=admin["id"],
+        actor_username=admin["username"],
+        target_type="system",
+        target_id="cache_engine",
+        ip=get_client_ip(request),
+        status="ok" if ok else "degraded",
+        details={
+            "mode": mode or ("redis" if new_url else "sqlite_cache"),
+            "engine_state": status.get("engine_state"),
+            "active_backend": status.get("active_backend"),
+            "degraded": bool(status.get("degraded", False)),
+            "redis_url_masked": status.get("redis_url_masked", ""),
+        },
+    )
+    return {
+        "ok": ok,
+        "degraded": bool(status.get("degraded", False)),
+        "message": msg,
+        "cache": status,
+    }
 
 
 @router.get("/api/admin/geoip/status", summary="查看 geoip.dat 地理库加载状态（Admin）")

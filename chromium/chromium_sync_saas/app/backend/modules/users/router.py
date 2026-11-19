@@ -120,6 +120,8 @@ def auth_status():
         "auto_level_enabled": get_setting("saas_auto_level_enabled", "1") == "1",
         "db_type": db_info.get("db_type", "sqlite"),
         "cache_backend": cache_status.get("active_backend", "sqlite_cache"),
+        "cache_state": cache_status.get("engine_state", "sqlite_cache"),
+        "cache_degraded": bool(cache_status.get("degraded", False)),
     }
 
 

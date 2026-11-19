@@ -5,7 +5,7 @@ from datetime import datetime
 from flask import Blueprint, request, jsonify, send_file
 from config import Config
 from core.db import get_setting, set_setting, is_setup_required, invalidate_nodes_cache, invalidate_users_cache
-from core.cache import cache
+from core.cache import cache, test_redis_connection
 from services.notify_service import send_smtp_email
 from core.cert_manager import get_cert_info, generate_self_signed_cert
 from core.backup_manager import (
@@ -77,6 +77,189 @@ def admin_cert_self_signed():
         }), 400
     generate_self_signed_cert()
     return jsonify({"code": 200, "msg": "已重新生成高兼容性 10 年期自签 TLS 证书"})
+
+
+# ----------------- 缓存引擎（SQL Cache / Redis）实时监控与热切换 API -----------------
+
+def _resolve_admin_redis_params(data: dict) -> tuple[str, str, int, str, int]:
+    """解析后台提交的 Redis 连接参数；若未输入新密码且未勾选清除，则沿用已保存密码或原 URL"""
+    import urllib.parse
+
+    explicit_url = str(data.get("redis_url") or "").strip()
+    use_saved_url = bool(data.get("use_saved_url"))
+    clear_pwd = bool(data.get("clear_redis_password"))
+    raw_pwd = str(data.get("redis_password") or "").strip()
+
+    saved_pwd = Config.REDIS_PASSWORD
+    if not saved_pwd and Config.REDIS_URL:
+        try:
+            saved_pwd = urllib.parse.unquote(urllib.parse.urlparse(Config.REDIS_URL).password or "")
+        except Exception:
+            saved_pwd = ""
+
+    if raw_pwd:
+        effective_pwd = raw_pwd
+    elif clear_pwd:
+        effective_pwd = ""
+    else:
+        effective_pwd = saved_pwd
+
+    if explicit_url:
+        return explicit_url, str(data.get("redis_host") or "").strip(), 6379, effective_pwd, 0
+    if use_saved_url and Config.REDIS_URL:
+        return Config.REDIS_URL, str(data.get("redis_host") or "").strip(), 6379, effective_pwd, 0
+
+    host = str(data.get("redis_host") or "").strip()
+    try:
+        port = int(data.get("redis_port") or 6379)
+    except (TypeError, ValueError):
+        port = 6379
+    try:
+        db_idx = int(data.get("redis_db") if data.get("redis_db") not in (None, "") else 0)
+    except (TypeError, ValueError):
+        db_idx = 0
+
+    url = Config.build_redis_url(host, port, effective_pwd, db_idx) if host else ""
+    return url, host, port, effective_pwd, db_idx
+
+
+def _build_cache_admin_payload() -> dict:
+    return {
+        "status": cache.detailed_status(),
+        "config": Config.cache_config_summary(),
+        "db_dialect": Config.db_dialect(),
+    }
+
+
+@system_bp.route('/api/admin/cache/status', methods=['POST'])
+def admin_cache_status():
+    data = request.json or {}
+    if not check_admin(data.get('admin_user'), data.get('admin_pwd')):
+        return jsonify({"code": 403, "msg": "无权限"})
+    return jsonify({"code": 200, "data": _build_cache_admin_payload()})
+
+
+@system_bp.route('/api/admin/cache/test', methods=['POST'])
+def admin_cache_test():
+    data = request.json or {}
+    if not check_admin(data.get('admin_user'), data.get('admin_pwd')):
+        return jsonify({"code": 403, "msg": "无权限"})
+
+    redis_url, host, port, _, db_idx = _resolve_admin_redis_params(data)
+    if not redis_url:
+        return jsonify({"code": 400, "msg": "请填写 Redis 主机地址或完整连接 URL"})
+    if port < 1 or port > 65535:
+        return jsonify({"code": 400, "msg": "Redis 端口必须在 1 ~ 65535 之间"})
+    if db_idx < 0 or db_idx > 15:
+        return jsonify({"code": 400, "msg": "Redis 库索引 (DB) 必须在 0 ~ 15 之间"})
+
+    ok, msg = test_redis_connection(redis_url)
+    return jsonify({"code": 200 if ok else 400, "msg": msg})
+
+
+@system_bp.route('/api/admin/cache/save', methods=['POST'])
+def admin_cache_save():
+    data = request.json or {}
+    if not check_admin(data.get('admin_user'), data.get('admin_pwd')):
+        return jsonify({"code": 403, "msg": "无权限"})
+
+    mode = str(data.get("cache_mode") or "sql_cache").strip().lower()
+    if mode not in ("redis", "sql_cache"):
+        return jsonify({"code": 400, "msg": "不支持的缓存引擎类型，仅支持 redis 或 sql_cache"})
+
+    key_prefix = str(data.get("redis_key_prefix") or "xray_hub:").strip() or "xray_hub:"
+    try:
+        timeout_val = max(0.3, min(15.0, float(data.get("redis_timeout") or 1.5)))
+    except (TypeError, ValueError):
+        timeout_val = 1.5
+    try:
+        cooldown_val = max(5, min(600, int(data.get("redis_cooldown_seconds") or 30)))
+    except (TypeError, ValueError):
+        cooldown_val = 30
+
+    explicit_url = str(data.get("redis_url") or "").strip()
+    redis_url, host, port, effective_pwd, db_idx = _resolve_admin_redis_params(data)
+
+    if mode == "redis":
+        if not redis_url:
+            return jsonify({"code": 400, "msg": "启用 Redis 前请填写 Redis 主机地址或完整连接 URL"})
+        if port < 1 or port > 65535:
+            return jsonify({"code": 400, "msg": "Redis 端口必须在 1 ~ 65535 之间"})
+        if db_idx < 0 or db_idx > 15:
+            return jsonify({"code": 400, "msg": "Redis 库索引 (DB) 必须在 0 ~ 15 之间"})
+
+        ok, test_msg = test_redis_connection(redis_url)
+        if not ok:
+            return jsonify({"code": 400, "msg": f"连通性校验未通过，未切换配置：{test_msg}"})
+
+        Config.save_hub_config({
+            "cache_mode": "redis",
+            "redis_url": explicit_url,
+            "redis_host": "" if explicit_url else host,
+            "redis_port": port,
+            "redis_password": "" if explicit_url else effective_pwd,
+            "redis_db": db_idx,
+            "redis_key_prefix": key_prefix,
+            "redis_timeout": timeout_val,
+            "redis_cooldown_seconds": cooldown_val,
+        })
+        cache.reset_client()
+        cache.delete_prefix("setting:")
+        invalidate_nodes_cache()
+        invalidate_users_cache()
+        return jsonify({
+            "code": 200,
+            "msg": f"已成功切换为 Redis 缓存引擎并全节点 Worker 热生效（无需重启容器）！{test_msg}",
+            "data": _build_cache_admin_payload(),
+        })
+
+    # 切回内置 SQL Cache（保留主机/端口配置方便下次快速切回）
+    save_patch = {
+        "cache_mode": "sql_cache",
+        "redis_key_prefix": key_prefix,
+        "redis_timeout": timeout_val,
+        "redis_cooldown_seconds": cooldown_val,
+    }
+    if host:
+        save_patch["redis_host"] = host
+    if 1 <= port <= 65535:
+        save_patch["redis_port"] = port
+    if 0 <= db_idx <= 15:
+        save_patch["redis_db"] = db_idx
+    if data.get("clear_redis_password"):
+        save_patch["redis_password"] = ""
+        save_patch["redis_url"] = ""
+    elif str(data.get("redis_password") or "").strip():
+        save_patch["redis_password"] = str(data.get("redis_password")).strip()
+
+    Config.save_hub_config(save_patch)
+    cache.reset_client()
+    cache.delete_prefix("setting:")
+    invalidate_nodes_cache()
+    invalidate_users_cache()
+    return jsonify({
+        "code": 200,
+        "msg": "已热切换回内置 SQL Cache（kv_cache），所有 Worker 进程将在 1~2 秒内自动同步，无需重启容器！",
+        "data": _build_cache_admin_payload(),
+    })
+
+
+@system_bp.route('/api/admin/cache/flush', methods=['POST'])
+def admin_cache_flush():
+    data = request.json or {}
+    if not check_admin(data.get('admin_user'), data.get('admin_pwd')):
+        return jsonify({"code": 403, "msg": "无权限"})
+
+    deleted_settings = cache.delete_prefix("setting:")
+    invalidate_nodes_cache()
+    invalidate_users_cache()
+    cleaned_expired = cache.cleanup_expired_sql()
+    return jsonify({
+        "code": 200,
+        "msg": f"业务缓存已清理刷新（清除配置缓存 {deleted_settings} 项、节点/用户快照已失效、清理过期 SQL 缓存 {cleaned_expired} 条）",
+        "data": _build_cache_admin_payload(),
+    })
+
 
 # ----------------- 数据库备份与恢复 API -----------------
 

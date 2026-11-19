@@ -16,21 +16,36 @@ const profile = reactive({
 
 // 1.5 存储引擎 (ORM) 与缓存运行时监控状态
 const runtimeInfo = reactive({
-  db: { db_type: 'sqlite', target: '' },
+  db: { db_type: 'sqlite', dialect: 'sqlite', target: '/data/app.db', status: 'active' },
   cache: {
     active_backend: 'sqlite_cache',
+    engine_state: 'sqlite_cache',
+    engine_label: 'SQLite WAL Cache',
+    degraded: false,
+    config_source: 'default',
+    has_redis_lib: true,
     redis_configured: false,
     redis_connected: false,
     redis_url_masked: '',
-    last_error: null,
+    redis_info: null,
+    probe_cooldown_sec: 30,
+    next_probe_in_sec: 0,
+    fallback_count: 0,
+    last_error: '',
+    hits: 0,
+    misses: 0,
+    hit_rate: 0,
     stats: { hits: 0, misses: 0, fallbacks: 0, sqlite_fallbacks: 0 },
-    sqlite_cache: { entries: 0, buffered_hashes: 0, db_path: '' }
+    sqlite_cache: { entries: 0, buffered_hashes: 0, db_path: '/data/cache.db' }
   }
 })
+const cacheTargetMode = ref('sqlite_cache') // 'sqlite_cache' | 'redis'
 const redisInput = ref('')
+const refreshingCache = ref(false)
 const testingRedis = ref(false)
 const reloadingCache = ref(false)
-const redisTestMsg = ref('')
+const reconnectingRedis = ref(false)
+const redisPingResult = ref(null)
 
 // 2. 指南 Tab 状态 (4 大实战场景)
 const activeGuideTab = ref('same_host') // 'same_host' | 'remote_host' | 'api' | 'openclaw'
@@ -55,6 +70,59 @@ const currentHubPort = computed(() => {
   return window.location.protocol === 'https:' ? '443' : '80'
 })
 
+const cacheState = computed(() => {
+  const c = runtimeInfo.cache
+  if (c.engine_state) return c.engine_state
+  if (c.active_backend === 'redis') return 'redis'
+  return c.redis_configured ? 'degraded' : 'sqlite_cache'
+})
+
+const cacheBadgeMeta = computed(() => {
+  if (cacheState.value === 'redis') {
+    return { text: '⚡ Redis 运行中', cls: 'runtime-pill-redis' }
+  }
+  if (cacheState.value === 'degraded') {
+    return { text: '⚠️ Redis 已降级 · SQL Cache 兜底', cls: 'runtime-pill-degraded' }
+  }
+  return { text: '💾 SQLite WAL Cache', cls: 'runtime-pill-sqlite' }
+})
+
+const cacheHits = computed(() => Number(runtimeInfo.cache.hits ?? runtimeInfo.cache.stats?.hits ?? 0))
+const cacheMisses = computed(() => Number(runtimeInfo.cache.misses ?? runtimeInfo.cache.stats?.misses ?? 0))
+const cacheFallbacks = computed(() => Number(runtimeInfo.cache.fallback_count ?? runtimeInfo.cache.stats?.fallbacks ?? 0))
+const cacheHitRate = computed(() => {
+  if (runtimeInfo.cache.hit_rate !== undefined && runtimeInfo.cache.hit_rate !== null) {
+    return Number(runtimeInfo.cache.hit_rate).toFixed(1)
+  }
+  const total = cacheHits.value + cacheMisses.value
+  return total > 0 ? ((cacheHits.value / total) * 100).toFixed(1) : '0.0'
+})
+
+const cacheConfigSourceLabel = computed(() => {
+  const src = runtimeInfo.cache.config_source
+  if (src === 'bootstrap') return '管理后台持久化 (bootstrap.json)'
+  if (src === 'env') return '环境变量 (REDIS_URL)'
+  return '默认内置配置'
+})
+
+const applyCachePayload = (cacheData, syncMode = false) => {
+  if (!cacheData || typeof cacheData !== 'object') return
+  Object.assign(runtimeInfo.cache, cacheData)
+  if (syncMode) {
+    cacheTargetMode.value = cacheData.redis_configured ? 'redis' : 'sqlite_cache'
+  }
+}
+
+const readJsonSafe = async (res) => {
+  const raw = await res.text()
+  if (!raw) return {}
+  try {
+    return JSON.parse(raw)
+  } catch {
+    return { detail: raw.slice(0, 200) }
+  }
+}
+
 const loadData = async () => {
   const [pRes, kRes, cRes, rtRes] = await Promise.all([
     props.api('/api/profile'),
@@ -62,64 +130,143 @@ const loadData = async () => {
     props.api('/api/cookie-policy'),
     props.api('/api/system/runtime-info')
   ])
-  Object.assign(profile, await pRes.json())
-  keys.value = await kRes.json()
+  if (pRes.ok) Object.assign(profile, await pRes.json())
+  if (kRes.ok) keys.value = await kRes.json()
   if (rtRes.ok) {
     const rt = await rtRes.json()
     Object.assign(runtimeInfo.db, rt.db || {})
-    Object.assign(runtimeInfo.cache, rt.cache || {})
-    if (!redisInput.value && rt.cache?.redis_url_masked) {
-      redisInput.value = ''
+    applyCachePayload(rt.cache, true)
+  }
+}
+
+const refreshCacheStatus = async (showNotice = true) => {
+  if (refreshingCache.value) return
+  refreshingCache.value = true
+  try {
+    const res = await props.api('/api/system/cache/status')
+    const data = await readJsonSafe(res)
+    if (res.ok) {
+      applyCachePayload(data, false)
+      emit('runtime-updated')
+      if (showNotice) props.showToast(`已刷新缓存引擎状态：${runtimeInfo.cache.engine_label || cacheState.value}`, 'success')
+    } else {
+      props.showToast(data.detail || '刷新缓存状态失败', 'error')
     }
+  } catch (e) {
+    props.showToast(`刷新缓存状态异常: ${e}`, 'error')
+  } finally {
+    refreshingCache.value = false
   }
 }
 
 const testRedisConn = async () => {
-  if (!redisInput.value.trim()) {
-    redisTestMsg.value = '留空时将使用内置 SQLite WAL Cache，无需外接 Redis'
+  const rawUrl = redisInput.value.trim()
+  const useCurrent = !rawUrl && Boolean(runtimeInfo.cache.redis_configured)
+  if (!rawUrl && !useCurrent) {
+    redisPingResult.value = {
+      ok: false,
+      message: '请先填写 Redis 连接 URL（如 redis://127.0.0.1:6379/0 或 redis://:password@host:6379/0）',
+      testedAt: new Date().toLocaleTimeString('zh-CN', { hour12: false })
+    }
     return
   }
   testingRedis.value = true
-  redisTestMsg.value = ''
+  redisPingResult.value = null
   try {
-    const res = await props.api('/api/setup/test-redis', {
+    const res = await props.api('/api/system/cache/test', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ redis_url: redisInput.value.trim() })
+      body: JSON.stringify({ redis_url: rawUrl, use_current: useCurrent })
     })
-    const data = await res.json()
-    if (res.ok) {
-      redisTestMsg.value = data.detail || 'Redis 连接成功'
-      props.showToast(redisTestMsg.value, 'success')
+    const data = await readJsonSafe(res)
+    const testedAt = new Date().toLocaleTimeString('zh-CN', { hour12: false })
+    if (res.ok && data.ok) {
+      redisPingResult.value = {
+        ok: true,
+        message: data.message || `PONG · Redis 连接成功 (${data.latency_ms ?? '?'}ms)`,
+        latency_ms: data.latency_ms,
+        version: data.version,
+        used_memory_human: data.used_memory_human,
+        testedAt
+      }
+      props.showToast(redisPingResult.value.message, 'success')
     } else {
-      redisTestMsg.value = data.detail || 'Redis 连接失败，将自动回退 SQLite Cache'
-      props.showToast(redisTestMsg.value, 'error')
+      redisPingResult.value = {
+        ok: false,
+        message: data.detail || data.message || 'Redis PING 失败，切换后将自动降级至 SQLite WAL Cache',
+        testedAt
+      }
+      props.showToast(redisPingResult.value.message, 'error')
     }
+  } catch (e) {
+    redisPingResult.value = {
+      ok: false,
+      message: `PING 请求异常: ${e}`,
+      testedAt: new Date().toLocaleTimeString('zh-CN', { hour12: false })
+    }
+    props.showToast(redisPingResult.value.message, 'error')
   } finally {
     testingRedis.value = false
   }
 }
 
-const reloadCacheEngine = async (clearToSqlite = false) => {
+const reloadCacheEngine = async (forceSqlite = false) => {
+  if (reloadingCache.value) return
+  const targetMode = forceSqlite ? 'sqlite_cache' : cacheTargetMode.value
+  const rawUrl = redisInput.value.trim()
+  const useCurrent = targetMode === 'redis' && !rawUrl && Boolean(runtimeInfo.cache.redis_configured)
+
+  if (targetMode === 'redis' && !rawUrl && !useCurrent) {
+    props.showToast('请输入 Redis 连接 URL 后再热切换保存', 'error')
+    return
+  }
+
   reloadingCache.value = true
   try {
-    const targetUrl = clearToSqlite ? '' : redisInput.value.trim()
     const res = await props.api('/api/system/cache/reload', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ redis_url: targetUrl })
+      body: JSON.stringify({
+        mode: targetMode,
+        redis_url: targetMode === 'redis' ? rawUrl : '',
+        use_current: useCurrent
+      })
     })
-    const data = await res.json()
+    const data = await readJsonSafe(res)
     if (res.ok) {
-      props.showToast(data.message || '缓存引擎已切换', 'success')
-      if (clearToSqlite) redisInput.value = ''
-      await loadData()
+      if (data.cache) applyCachePayload(data.cache, true)
+      if (targetMode === 'sqlite_cache' || data.ok) {
+        redisInput.value = ''
+      }
+      props.showToast(data.message || '缓存引擎已热切换并保存', data.ok === false || data.degraded ? 'error' : 'success')
       emit('runtime-updated')
     } else {
-      props.showToast(data.detail || '切换缓存失败', 'error')
+      props.showToast(data.detail || '热切换缓存失败', 'error')
     }
+  } catch (e) {
+    props.showToast(`热切换请求异常: ${e}`, 'error')
   } finally {
     reloadingCache.value = false
+  }
+}
+
+const reconnectRedisNow = async () => {
+  if (reconnectingRedis.value) return
+  reconnectingRedis.value = true
+  try {
+    const res = await props.api('/api/system/cache/reload', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ reconnect_only: true })
+    })
+    const data = await readJsonSafe(res)
+    if (data.cache) applyCachePayload(data.cache, true)
+    props.showToast(data.message || data.detail || '已完成重连探测', data.ok ? 'success' : 'error')
+    emit('runtime-updated')
+  } catch (e) {
+    props.showToast(`重连探测异常: ${e}`, 'error')
+  } finally {
+    reconnectingRedis.value = false
   }
 }
 
@@ -346,13 +493,22 @@ onMounted(() => {
     <!-- ==================== 左列：存储缓存监控 + 管理员账号 + SSH 密钥存储库 ==================== -->
     <div class="layout-column-item">
 
-      <!-- 卡片 0: ORM 存储引擎与 Redis / SQLite Cache 熔断状态 -->
+      <!-- 卡片 0: ORM 存储引擎与 Redis / SQLite Cache 状态及热切换 -->
       <div class="content-full-card">
-        <div class="table-header-bar" style="margin-bottom:12px; padding-bottom:8px;">
-          <h3 class="card-inner-h3">🗄️ 存储引擎 (ORM) 与缓存运行监控</h3>
-          <span :class="runtimeInfo.cache.active_backend === 'redis' ? 'runtime-pill-redis' : 'runtime-pill-sqlite'">
-            {{ runtimeInfo.cache.active_backend === 'redis' ? '⚡ Redis 已激活' : '💾 SQLite Cache 运行中' }}
-          </span>
+        <div class="table-header-bar" style="margin-bottom:12px; padding-bottom:10px; gap:8px; flex-wrap:wrap;">
+          <h3 class="card-inner-h3">🗄️ 存储引擎 (ORM) 与缓存引擎监控</h3>
+          <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
+            <span :class="cacheBadgeMeta.cls">{{ cacheBadgeMeta.text }}</span>
+            <button
+              type="button"
+              @click="refreshCacheStatus(true)"
+              :disabled="refreshingCache"
+              class="btn-copy-tag"
+              title="实时探活并刷新缓存状态"
+            >
+              {{ refreshingCache ? '刷新中...' : '🔄 刷新状态' }}
+            </button>
+          </div>
         </div>
 
         <div class="runtime-metrics-grid">
@@ -367,49 +523,143 @@ onMounted(() => {
           </div>
 
           <div class="runtime-box">
-            <div class="runtime-k">缓存命中 / 回退次数</div>
+            <div class="runtime-k">当前激活缓存后端</div>
+            <div
+              class="runtime-v font-mono"
+              :style="{ color: cacheState === 'redis' ? '#34d399' : (cacheState === 'degraded' ? '#fbbf24' : '#38bdf8') }"
+            >
+              {{
+                cacheState === 'redis'
+                  ? `Redis v${runtimeInfo.cache.redis_info?.version || '?'}`
+                  : (cacheState === 'degraded' ? 'SQL Cache (降级兜底)' : 'SQLite WAL Cache')
+              }}
+            </div>
+            <div class="runtime-sub font-mono" :title="runtimeInfo.cache.redis_url_masked || runtimeInfo.cache.sqlite_cache?.db_path">
+              <template v-if="cacheState === 'redis'">
+                PING {{ runtimeInfo.cache.redis_info?.ping_ms ?? '-' }}ms · 内存 {{ runtimeInfo.cache.redis_info?.used_memory_human || '-' }} · 连接 {{ runtimeInfo.cache.redis_info?.connected_clients ?? '-' }}
+              </template>
+              <template v-else-if="cacheState === 'degraded'">
+                目标: {{ runtimeInfo.cache.redis_url_masked || 'Redis' }} · 兜底: {{ runtimeInfo.cache.sqlite_cache?.db_path || '/data/cache.db' }}
+              </template>
+              <template v-else>
+                {{ runtimeInfo.cache.sqlite_cache?.db_path || '/data/cache.db' }} · KV {{ runtimeInfo.cache.sqlite_cache?.entries ?? 0 }} 条
+              </template>
+            </div>
+          </div>
+
+          <div class="runtime-box">
+            <div class="runtime-k">命中率 / 容灾回退</div>
             <div class="runtime-v font-mono" style="color:#e2e8f0;">
-              {{ runtimeInfo.cache.stats?.hits || 0 }} <span style="font-size:11px; color:#64748b;">hits</span>
-              · {{ runtimeInfo.cache.stats?.misses || 0 }} <span style="font-size:11px; color:#64748b;">miss</span>
+              {{ cacheHitRate }}%
+              <span style="font-size:11px; color:#64748b;">({{ cacheHits }} / {{ cacheMisses }})</span>
             </div>
             <div class="runtime-sub font-mono">
-              回退次数: {{ runtimeInfo.cache.stats?.fallbacks || runtimeInfo.cache.stats?.sqlite_fallbacks || 0 }}
-              · 缓冲键: {{ runtimeInfo.cache.sqlite_cache?.buffered_hashes || 0 }}
+              回退次数: {{ cacheFallbacks }} · 缓冲哈希: {{ runtimeInfo.cache.sqlite_cache?.buffered_hashes ?? 0 }} · 来源: {{ cacheConfigSourceLabel }}
             </div>
           </div>
         </div>
 
-        <div v-if="runtimeInfo.cache.last_error" class="runtime-warn-box font-mono">
-          ⚠️ 最近 Redis 异常（已自动回退 SQLite Cache 兜底，每 30s 自动探活重连）: {{ runtimeInfo.cache.last_error }}
-        </div>
-
-        <div style="margin-top:12px;">
-          <label class="form-label">热更新 Redis URL (如 redis://127.0.0.1:6379/0，留空则切回 SQLite WAL Cache)</label>
-          <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-top:4px;">
-            <input
-              v-model="redisInput"
-              :placeholder="runtimeInfo.cache.redis_url_masked || 'redis://:password@host:6379/0'"
-              class="cdp-input font-mono"
-              style="flex:1; min-width:200px;"
-            >
-            <button type="button" @click="testRedisConn" :disabled="testingRedis" class="btn-gray-test">
-              {{ testingRedis ? '测试中...' : '连通性测试' }}
-            </button>
-            <button type="button" @click="reloadCacheEngine(false)" :disabled="reloadingCache" class="btn-primary-gradient">
-              {{ reloadingCache ? '切换中...' : '应用热切换' }}
-            </button>
+        <!-- 降级状态告警栏 -->
+        <div v-if="cacheState === 'degraded'" class="runtime-warn-box">
+          <div style="display:flex; justify-content:space-between; align-items:center; gap:10px; flex-wrap:wrap;">
+            <div class="font-mono" style="flex:1; min-width:200px;">
+              <strong>⚠️ Redis 降级告警（SQLite WAL Cache 自动兜底中）：</strong>
+              {{ runtimeInfo.cache.last_error || 'Redis 当前不可达' }}
+              <div style="font-size:11px; color:#fde68a; margin-top:4px;">
+                已配置地址: {{ runtimeInfo.cache.redis_url_masked }} · 每 {{ runtimeInfo.cache.probe_cooldown_sec || 30 }}s 自动探活重连
+                <span v-if="runtimeInfo.cache.next_probe_in_sec > 0">（下次约 {{ runtimeInfo.cache.next_probe_in_sec }}s 后）</span>
+              </div>
+            </div>
             <button
-              v-if="runtimeInfo.cache.redis_configured"
               type="button"
-              @click="reloadCacheEngine(true)"
-              :disabled="reloadingCache"
+              @click="reconnectRedisNow"
+              :disabled="reconnectingRedis"
               class="btn-gray-test"
-              title="清空 Redis 配置并切回本地 SQLite Cache"
+              style="height:30px; padding:4px 12px; border-color:#d97706; color:#fde68a;"
             >
-              切回 SQLite
+              {{ reconnectingRedis ? '探测中...' : '⚡ 立即重连探测' }}
             </button>
           </div>
-          <p v-if="redisTestMsg" style="font-size:11px; color:#38bdf8; margin-top:6px;">{{ redisTestMsg }}</p>
+        </div>
+
+        <!-- 缓存引擎在线 PING 测试与一键热切换保存 -->
+        <div class="cache-switch-panel">
+          <div style="display:flex; justify-content:space-between; align-items:center; gap:8px; flex-wrap:wrap; margin-bottom:10px;">
+            <label class="form-label" style="margin:0; color:#cbd5e1; font-weight:600;">缓存引擎热切换与持久化配置（无需重启 Hub）</label>
+            <div style="display:flex; gap:6px;">
+              <button
+                type="button"
+                @click="cacheTargetMode = 'sqlite_cache'"
+                :class="cacheTargetMode === 'sqlite_cache' ? 'guide-tab-active' : 'guide-tab-normal'"
+              >
+                💾 SQLite WAL Cache
+              </button>
+              <button
+                type="button"
+                @click="cacheTargetMode = 'redis'"
+                :class="cacheTargetMode === 'redis' ? 'guide-tab-active' : 'guide-tab-normal'"
+              >
+                ⚡ Redis 高速缓存
+              </button>
+            </div>
+          </div>
+
+          <div v-if="cacheTargetMode === 'redis'">
+            <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+              <input
+                v-model="redisInput"
+                :placeholder="runtimeInfo.cache.redis_url_masked ? `当前已保存: ${runtimeInfo.cache.redis_url_masked}（留空可测试/沿用当前地址）` : 'redis://:password@127.0.0.1:6379/0'"
+                class="cdp-input font-mono"
+                style="flex:1; min-width:220px;"
+              >
+              <button type="button" @click="testRedisConn" :disabled="testingRedis" class="btn-gray-test">
+                {{ testingRedis ? 'PING 中...' : '📡 测试 Redis PING' }}
+              </button>
+              <button type="button" @click="reloadCacheEngine(false)" :disabled="reloadingCache" class="btn-primary-gradient">
+                {{ reloadingCache ? '切换保存中...' : '⚡ 一键热切换保存' }}
+              </button>
+              <button
+                v-if="runtimeInfo.cache.redis_configured"
+                type="button"
+                @click="reloadCacheEngine(true)"
+                :disabled="reloadingCache"
+                class="btn-gray-test"
+                title="清空 Redis 配置并热切换回内置 SQLite WAL Cache"
+              >
+                切回 SQL Cache
+              </button>
+            </div>
+            <div style="font-size:11px; color:#64748b; margin-top:6px;">
+              支持 <code>redis://</code> 与 TLS <code>rediss://</code> 连接串；保存后立即写入 <code>bootstrap.json</code> 并热切换生效，断连时自动 1.5s 熔断降级至 SQLite WAL Cache。
+            </div>
+          </div>
+
+          <div v-else style="display:flex; justify-content:space-between; align-items:center; gap:10px; flex-wrap:wrap;">
+            <div style="font-size:12px; color:#94a3b8; flex:1; min-width:220px;">
+              使用内置 SQLite WAL 本地缓存引擎（<code>{{ runtimeInfo.cache.sqlite_cache?.db_path || '/data/cache.db' }}</code>），零外部依赖，适合单机与中小规模集群。
+            </div>
+            <button
+              type="button"
+              @click="reloadCacheEngine(true)"
+              :disabled="reloadingCache || (!runtimeInfo.cache.redis_configured && cacheState === 'sqlite_cache')"
+              class="btn-primary-gradient"
+            >
+              {{
+                reloadingCache
+                  ? '切换保存中...'
+                  : (!runtimeInfo.cache.redis_configured && cacheState === 'sqlite_cache' ? '✓ 当前已是 SQL Cache' : '💾 一键热切换保存为 SQL Cache')
+              }}
+            </button>
+          </div>
+
+          <div
+            v-if="redisPingResult"
+            :class="redisPingResult.ok ? 'ping-result-ok' : 'ping-result-err'"
+            class="font-mono"
+          >
+            <span>{{ redisPingResult.ok ? '✅' : '❌' }} {{ redisPingResult.message }}</span>
+            <span style="opacity:0.75; font-size:10px; margin-left:8px;">[{{ redisPingResult.testedAt }}]</span>
+          </div>
         </div>
       </div>
 
@@ -946,21 +1196,40 @@ python3 ~/.openclaw/skills/chromium-cdp-hub/scripts/hub_pool.py crawl --url "htt
   border: 1px solid #059669;
   color: #34d399;
   font-size: 11px;
-  padding: 2px 8px;
+  font-weight: 600;
+  padding: 2px 9px;
   border-radius: 4px;
+  white-space: nowrap;
 }
 .runtime-pill-sqlite {
-  background: rgba(245, 158, 11, 0.15);
-  border: 1px solid #d97706;
-  color: #fbbf24;
+  background: rgba(56, 189, 248, 0.14);
+  border: 1px solid #0284c7;
+  color: #38bdf8;
   font-size: 11px;
-  padding: 2px 8px;
+  font-weight: 600;
+  padding: 2px 9px;
   border-radius: 4px;
+  white-space: nowrap;
+}
+.runtime-pill-degraded {
+  background: rgba(239, 68, 68, 0.16);
+  border: 1px solid #ef4444;
+  color: #fca5a5;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 9px;
+  border-radius: 4px;
+  white-space: nowrap;
 }
 .runtime-metrics-grid {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 10px;
+}
+@media (max-width: 760px) {
+  .runtime-metrics-grid {
+    grid-template-columns: 1fr;
+  }
 }
 .runtime-box {
   background: #060b17;
@@ -975,25 +1244,58 @@ python3 ~/.openclaw/skills/chromium-cdp-hub/scripts/hub_pool.py crawl --url "htt
   margin-bottom: 4px;
 }
 .runtime-v {
-  font-size: 14px;
+  font-size: 13px;
   font-weight: 700;
 }
 .runtime-sub {
   font-size: 11px;
   color: #64748b;
-  margin-top: 3px;
+  margin-top: 4px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 .runtime-warn-box {
   margin-top: 10px;
-  background: rgba(217, 119, 6, 0.12);
+  background: rgba(217, 119, 6, 0.14);
   border: 1px solid #d97706;
   color: #fbbf24;
   border-radius: 6px;
-  padding: 8px 10px;
+  padding: 10px 12px;
   font-size: 11px;
   word-break: break-all;
+}
+.cache-switch-panel {
+  margin-top: 12px;
+  background: #09122a;
+  border: 1px solid #172554;
+  border-radius: 8px;
+  padding: 12px;
+}
+.ping-result-ok {
+  margin-top: 10px;
+  background: rgba(16, 185, 129, 0.12);
+  border: 1px solid #059669;
+  color: #34d399;
+  border-radius: 6px;
+  padding: 7px 10px;
+  font-size: 11px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.ping-result-err {
+  margin-top: 10px;
+  background: rgba(239, 68, 68, 0.12);
+  border: 1px solid #dc2626;
+  color: #fca5a5;
+  border-radius: 6px;
+  padding: 7px 10px;
+  font-size: 11px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
 }
 </style>

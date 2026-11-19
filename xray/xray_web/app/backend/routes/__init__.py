@@ -1,6 +1,7 @@
 from routes._common import (
     BACKEND_DIR,
     HEARTBEAT_ONLINE_SEC,
+    build_hy2_link,
     build_node_link,
     check_admin,
     compute_heartbeat_age_sec,
@@ -19,6 +20,7 @@ from routes._common import (
 __all__ = [
     "BACKEND_DIR",
     "HEARTBEAT_ONLINE_SEC",
+    "build_hy2_link",
     "build_node_link",
     "check_admin",
     "compute_heartbeat_age_sec",

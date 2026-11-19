@@ -27,7 +27,9 @@
     <div class="card">
       <div class="card-title">
         <span>分享您的专属邀请链接（好友注册完成邮箱验证后双方即时到账）</span>
-        <button class="btn btn-sm" @click="load">刷新收益明细</button>
+        <button class="btn btn-sm" :disabled="refreshing" @click="load(true)">
+          {{ refreshing ? '刷新中...' : '刷新收益明细' }}
+        </button>
       </div>
       <div class="grid-2">
         <div class="field">
@@ -92,27 +94,35 @@ const overview = ref({
   total_earned_yuan: '0.00',
 })
 const rewards = ref([])
+const refreshing = ref(false)
 
 const inviteLink = computed(() => {
   if (!overview.value.invite_code) return ''
   return `${window.location.origin}/?ref=${overview.value.invite_code}`
 })
 
-async function load() {
+async function load(showFeedback = false) {
+  if (refreshing.value) return
+  refreshing.value = true
   try {
     const res = await apiFetch('/api/referrals/overview')
     overview.value = res
     rewards.value = res.rewards || []
+    if (showFeedback) {
+      emit('notify', { message: '邀请返利明细已刷新', type: 'info' })
+    }
   } catch (e) {
-    emit('notify', e.message)
+    emit('notify', { message: e.message, type: 'error' })
+  } finally {
+    refreshing.value = false
   }
 }
 
 function copy(val, msg) {
   if (!val) return
   navigator.clipboard?.writeText(val)
-  emit('notify', msg)
+  emit('notify', { message: msg, type: 'ok' })
 }
 
-onMounted(load)
+onMounted(() => load(false))
 </script>
