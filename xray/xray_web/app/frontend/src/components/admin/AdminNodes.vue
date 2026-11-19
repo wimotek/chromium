@@ -218,6 +218,13 @@
                   <span class="status-dot"></span>
                   <span>{{ getNodeHealthBadge(node).text }}</span>
                 </div>
+                <div
+                  v-if="node.status !== 0 && node.sub_eligible === false"
+                  style="font-size: 10px; color: #f87171; margin-top: 3px;"
+                  :title="node.sub_exclude_reason || '异常节点已自动从订阅剔除'"
+                >
+                  已从订阅剔除
+                </div>
               </td>
 
               <td style="text-align: right;">
@@ -300,9 +307,9 @@
                 {{ node.last_heartbeat || '刚刚' }}
               </td>
               <td>
-                <span class="heartbeat-badge" :class="getHeartbeatInfo(node.last_heartbeat).cls">
+                <span class="heartbeat-badge" :class="getHeartbeatInfo(node).cls">
                   <span class="status-dot"></span>
-                  <span>{{ getHeartbeatInfo(node.last_heartbeat).label }}</span>
+                  <span>{{ getHeartbeatInfo(node).label }}</span>
                 </span>
               </td>
               <td>
@@ -590,6 +597,8 @@ const auditLogsList = ref([])
 const pingResults = reactive({})
 const pingingNodeId = ref('')
 const pingingAll = ref(false)
+const serverOffsetMs = ref(0)
+const lastFetchMs = ref(Date.now())
 let pollTimer = null
 
 const clusterInfo = reactive({
@@ -741,50 +750,137 @@ const fallbackCopy = (text, label = '内容') => {
   }
 }
 
-const getHeartbeatInfo = (lastHeartbeat) => {
-  if (!lastHeartbeat || lastHeartbeat.includes('等待') || lastHeartbeat.includes('下线')) {
-    return { label: lastHeartbeat || '未上线', diff: '无心跳', cls: 'badge-disabled' }
+const parseAgentHealth = (node) => {
+  if (!node) return null
+  if (node.agent_health_info && typeof node.agent_health_info === 'object') {
+    return node.agent_health_info
   }
-  const t = new Date(lastHeartbeat.replace(/-/g, '/')).getTime()
-  if (isNaN(t)) {
-    return { label: '未知', diff: lastHeartbeat, cls: 'badge-disabled' }
+  if (typeof node.agent_health === 'string' && node.agent_health.trim()) {
+    try {
+      const obj = JSON.parse(node.agent_health)
+      return obj && typeof obj === 'object' ? obj : null
+    } catch (_) {
+      return null
+    }
+  }
+  return null
+}
+
+const getHeartbeatInfo = (nodeOrStr) => {
+  const isObj = nodeOrStr && typeof nodeOrStr === 'object'
+  const lastHeartbeat = isObj ? nodeOrStr.last_heartbeat : nodeOrStr
+
+  if (!lastHeartbeat || String(lastHeartbeat).includes('等待') || String(lastHeartbeat).includes('下线')) {
+    return { label: lastHeartbeat || '未上线', diff: '无心跳', diffSec: null, cls: 'badge-disabled' }
   }
 
-  const diffSec = Math.floor((Date.now() - t) / 1000)
-  if (diffSec < 0 || diffSec <= 135) {
+  let diffSec = null
+  if (isObj && typeof nodeOrStr.last_heartbeat_ts === 'number' && nodeOrStr.last_heartbeat_ts > 0) {
+    const serverNowSec = (Date.now() - serverOffsetMs.value) / 1000
+    diffSec = Math.max(0, Math.floor(serverNowSec - nodeOrStr.last_heartbeat_ts))
+  } else if (isObj && typeof nodeOrStr.heartbeat_age_sec === 'number' && nodeOrStr.heartbeat_age_sec >= 0) {
+    const elapsed = Math.max(0, Math.floor((Date.now() - lastFetchMs.value) / 1000))
+    diffSec = nodeOrStr.heartbeat_age_sec + elapsed
+  } else {
+    const t = new Date(String(lastHeartbeat).replace(/-/g, '/')).getTime()
+    if (isNaN(t)) {
+      return { label: '未知', diff: String(lastHeartbeat), diffSec: null, cls: 'badge-disabled' }
+    }
+    const rawDiff = Math.floor((Date.now() - t) / 1000)
+    // 防止跨时区/时钟偏差导致负数永久显示在线
+    if (rawDiff < -30) {
+      return { label: '时间未同步', diff: '请点击测活校准', diffSec: null, cls: 'badge-restricted' }
+    }
+    diffSec = Math.max(0, rawDiff)
+  }
+
+  if (diffSec <= 135) {
     const diffText = diffSec <= 10 ? '刚刚' : `${diffSec}秒前`
-    return { label: '在线 (活跃)', diff: diffText, cls: 'badge-ready' }
+    return { label: '在线 (活跃)', diff: diffText, diffSec, cls: 'badge-ready' }
   } else if (diffSec <= 300) {
     const diffText = `${Math.floor(diffSec / 60)}分钟前`
-    return { label: '延迟预警', diff: diffText, cls: 'badge-restricted' }
+    return { label: '延迟预警', diff: diffText, diffSec, cls: 'badge-restricted' }
   } else {
     const diffText = `${Math.floor(diffSec / 60)}分钟前`
-    return { label: '离线失联', diff: diffText, cls: 'badge-disabled' }
+    return { label: '离线失联', diff: diffText, diffSec, cls: 'badge-disabled' }
   }
+}
+
+const getEffectiveProbe = (node) => {
+  const memPing = pingResults[node.node_id]
+  if (memPing) return memPing
+  const persisted = node.last_probe_info
+  if (!persisted || typeof persisted !== 'object') return null
+  // 若持久化测活记录是心跳/自检/隧道异常，且节点之后已恢复并收到更新的健康心跳，则忽略旧异常
+  const recoverable = ['offline', 'heartbeat_lost', 'xray_unhealthy', 'tunnel_disconnected']
+  if (
+    persisted.healthy === false &&
+    recoverable.includes(persisted.status_code) &&
+    Number(node.last_heartbeat_ts || 0) > Number(persisted.ts || 0)
+  ) {
+    return null
+  }
+  return persisted
 }
 
 const getNodeHealthBadge = (node) => {
   if (node.status === 0) {
     return { label: '管理停用', text: '管理停用', cls: 'badge-disabled' }
   }
-  const hb = getHeartbeatInfo(node.last_heartbeat)
+  const hb = getHeartbeatInfo(node)
+  const agentHealth = parseAgentHealth(node)
   if (pingingNodeId.value === node.node_id) {
-    return { text: '测活中...', cls: hb.cls }
+    return { text: '深度测活中...', cls: hb.cls }
   }
-  const ping = pingResults[node.node_id]
+  const ping = getEffectiveProbe(node)
   if (ping) {
-    if (ping.net_mode === 'reverse_wss') {
-      return ping.reachable
-        ? { text: '在线 (WSS反穿)', cls: 'badge-ready' }
-        : { text: '离线 (WSS断开)', cls: 'badge-disabled' }
+    // 若节点心跳已断连或超阈值，绝不因历史 ping 结果残留假绿灯
+    if (hb.cls !== 'badge-ready' && ping.status_code === 'online') {
+      return { text: hb.label, cls: hb.cls }
     }
-    if (ping.reachable) {
-      return { text: `在线 (${ping.rtt_ms}ms)`, cls: 'badge-ready' }
+    // 若当前心跳自检已暴露 Xray / 隧道异常，优先级高于历史在线 ping
+    if (ping.status_code === 'online' && agentHealth) {
+      if (agentHealth.xray_alive === false || agentHealth.port_ready === false) {
+        return { text: 'Xray 进程异常', cls: 'badge-disabled' }
+      }
+      if (node.net_mode === 'reverse_wss' && agentHealth.tunnel_connected === false) {
+        return { text: 'WSS 隧道断开', cls: 'badge-restricted' }
+      }
     }
-    if (hb.cls === 'badge-ready') {
+
+    if (ping.status_code === 'online') {
+      if (ping.net_mode === 'reverse_wss') {
+        return { text: '在线 (WSS反穿)', cls: 'badge-ready' }
+      }
+      const rttLabel = ping.tls_rtt_ms != null ? `TLS ${ping.tls_rtt_ms}ms` : `${ping.rtt_ms}ms`
+      return { text: `在线 (${rttLabel})`, cls: 'badge-ready' }
+    }
+    if (ping.status_code === 'xray_unhealthy') {
+      return { text: 'Xray 进程异常', cls: 'badge-disabled' }
+    }
+    if (ping.status_code === 'tls_failed') {
+      return { text: 'TLS握手失败', cls: 'badge-disabled' }
+    }
+    if (ping.status_code === 'heartbeat_lost') {
+      return { text: '心跳断连 · 端口有响应', cls: 'badge-restricted' }
+    }
+    if (ping.status_code === 'tunnel_disconnected') {
+      return { text: 'WSS 隧道断开', cls: 'badge-restricted' }
+    }
+    if (ping.status_code === 'port_unreachable') {
       return { text: '心跳正常 · 端口不通', cls: 'badge-restricted' }
     }
-    return { text: '离线 (端口不通)', cls: 'badge-disabled' }
+    return { text: '离线失联', cls: 'badge-disabled' }
+  }
+
+  // 未点击测活时，也立即暴露节点心跳携带的本地 Xray / 隧道异常
+  if (hb.cls === 'badge-ready' && agentHealth) {
+    if (agentHealth.xray_alive === false || agentHealth.port_ready === false) {
+      return { text: 'Xray 进程异常', cls: 'badge-disabled' }
+    }
+    if (node.net_mode === 'reverse_wss' && agentHealth.tunnel_connected === false) {
+      return { text: 'WSS 隧道断开', cls: 'badge-restricted' }
+    }
   }
   return { text: hb.label, cls: hb.cls }
 }
@@ -799,19 +895,37 @@ const getServerNamesCount = (node) => {
 
 const getHeartbeatTooltip = (node) => {
   if (node.status === 0) return '管理已停用'
-  const info = getHeartbeatInfo(node.last_heartbeat)
-  const ping = pingResults[node.node_id]
-  let tip = `最后心跳: ${node.last_heartbeat || '无记录'} (${info.diff})`
+  const info = getHeartbeatInfo(node)
+  const agentHealth = parseAgentHealth(node)
+  const ping = getEffectiveProbe(node)
+
+  const lines = [`最后心跳: ${node.last_heartbeat || '无记录'} (${info.diff})`]
+  if (node.sub_eligible === false) {
+    lines.push(`订阅状态: 已自动剔除（${node.sub_exclude_reason || '节点异常'}）`)
+  } else if (node.sub_eligible === true) {
+    lines.push('订阅状态: 正常收录下发')
+  }
+  if (agentHealth) {
+    const xrayTxt = agentHealth.xray_alive === false ? '异常' : '正常'
+    const portTxt = agentHealth.port_ready === false ? '未监听' : '正常'
+    const statsTxt = agentHealth.stats_ready === false ? '异常' : '正常'
+    lines.push(`节点自检: Xray进程[${xrayTxt}] · 业务端口[${portTxt}] · Stats[${statsTxt}]`)
+  }
   if (ping) {
+    if (ping.reason) {
+      lines.push(`测活结论: ${ping.reason}`)
+    }
     if (ping.net_mode === 'reverse_wss') {
-      tip += ping.reachable ? ' | WSS 反向隧道在线' : ' | WSS 反向隧道未上报心跳'
-    } else {
+      lines.push(`WSS隧道: ${ping.healthy ? '在线健康' : '异常/断开'}`)
+    } else if (ping.tcp_ok !== undefined && ping.tcp_ok !== null) {
       const stack = ping.network_mode ? ` [${ping.network_mode}]` : ''
-      tip += ` | ${ping.reachable ? `TCP 握手正常: ${ping.rtt_ms}ms${stack}` : `TCP 端口不可达${stack}`}`
+      const tcpPart = ping.tcp_ok ? `TCP通(${ping.tcp_rtt_ms}ms)` : 'TCP不可达'
+      const tlsPart = ping.tls_ok ? `TLS/REALITY握手正常(${ping.tls_rtt_ms}ms)` : `TLS握手失败(${ping.tls_error || '超时'})`
+      lines.push(`Hub探测${stack}: ${tcpPart} | ${tlsPart}`)
     }
   }
-  tip += ' (点击徽标立即执行测活)'
-  return tip
+  lines.push('提示: 点击徽标执行深度测活（端口/TLS异常修复后，再次测活通过将自动恢复订阅收录）')
+  return lines.join('\n')
 }
 
 const getScopeSummary = (node) => {
@@ -821,6 +935,13 @@ const getScopeSummary = (node) => {
   return parts.length ? parts.join('+') : '未指派'
 }
 
+const syncServerClock = (serverTs) => {
+  lastFetchMs.value = Date.now()
+  if (typeof serverTs === 'number' && serverTs > 0) {
+    serverOffsetMs.value = Date.now() - serverTs * 1000
+  }
+}
+
 const fetchNodes = async (silent = false) => {
   try {
     const res = await axios.post('/api/admin/data', {
@@ -828,6 +949,7 @@ const fetchNodes = async (silent = false) => {
       admin_pwd: props.adminPassword
     })
     if (res.data.code === 200) {
+      syncServerClock(res.data.server_ts)
       adminNodes.value = res.data.nodes || []
       auditLogsList.value = res.data.audit_logs || []
       if (res.data.cluster_info) {
@@ -854,6 +976,7 @@ const handlePingNode = async (nodeId) => {
       node_id: nodeId
     })
     if (res.data.code === 200) {
+      syncServerClock(res.data.server_ts)
       if (res.data.data) {
         Object.assign(pingResults, res.data.data)
       }
@@ -866,7 +989,12 @@ const handlePingNode = async (nodeId) => {
           }
         }
       }
-      ElMessage.success('节点连通性与心跳探测完成')
+      const single = res.data.data?.[nodeId]
+      if (single && !single.healthy) {
+        ElMessage.warning(`节点检测异常：${single.reason || '连接失败'}`)
+      } else {
+        ElMessage.success('深度测活通过：心跳 + TCP/TLS REALITY 握手正常')
+      }
     }
   } catch (_) {
     ElMessage.error('探测请求失败')
@@ -883,13 +1011,20 @@ const handlePingAllNodes = async () => {
       admin_pwd: props.adminPassword
     })
     if (res.data.code === 200) {
+      syncServerClock(res.data.server_ts)
       if (res.data.data) {
         Object.assign(pingResults, res.data.data)
       }
       if (res.data.nodes) {
         adminNodes.value = res.data.nodes
       }
-      ElMessage.success('全量节点心跳与端口检测完成！')
+      const vals = Object.values(res.data.data || {})
+      const badCount = vals.filter(v => !v.healthy).length
+      if (badCount > 0) {
+        ElMessage.warning(`全量深度测活完成：${vals.length - badCount} 个健康，${badCount} 个异常（悬停徽标查看详情）`)
+      } else {
+        ElMessage.success('全量节点深度测活完成：全部健康！')
+      }
     }
   } catch (_) {
     ElMessage.error('批量测活失败')
@@ -965,6 +1100,7 @@ const handleApproveNode = async (node) => {
       node_id: node.node_id
     })
     if (res.data.code === 200) {
+      delete pingResults[node.node_id]
       ElMessage.success(res.data.msg)
       fetchNodes()
       emit('reload-all')
@@ -994,6 +1130,7 @@ const submitNodeConfig = async () => {
       ...configForm
     })
     if (res.data.code === 200) {
+      delete pingResults[configForm.node_id]
       ElMessage.success(res.data.msg)
       showConfigModal.value = false
       fetchNodes()
@@ -1045,6 +1182,7 @@ const handleForceResync = async (nodeId) => {
       node_id: nodeId
     })
     if (res.data.code === 200) {
+      delete pingResults[nodeId]
       ElMessage.success(res.data.msg)
       fetchNodes()
     }

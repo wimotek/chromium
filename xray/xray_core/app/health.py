@@ -32,7 +32,7 @@ def _check_tcp_local(port: int, timeout: float = 1.5) -> bool:
 
 
 def evaluate_health(app_ref) -> tuple[bool, dict]:
-    """评估 Edge Core 当前运行健康度"""
+    """评估 Edge Core 当前运行健康度（进程 + 监听端口 + Stats API + 反穿隧道）"""
     xray_mgr = getattr(app_ref, "xray_mgr", None)
     proc = getattr(xray_mgr, "proc", None) if xray_mgr else None
     xray_alive = bool(proc is not None and proc.poll() is None)
@@ -40,15 +40,25 @@ def evaluate_health(app_ref) -> tuple[bool, dict]:
     net_mode = getattr(app_ref, "net_mode", "direct")
     target_port = AppConfig.LOCAL_BRIDGE_PORT if net_mode == "reverse_wss" else AppConfig.PORT
     port_ready = _check_tcp_local(target_port) if xray_alive else False
+    stats_ready = _check_tcp_local(AppConfig.STATS_PORT) if xray_alive else False
 
-    healthy = xray_alive and port_ready
+    tunnel_sup = getattr(app_ref, "tunnel_supervisor", None)
+    tunnel_connected = bool(tunnel_sup and getattr(tunnel_sup, "is_connected", False)) if net_mode == "reverse_wss" else None
+
+    healthy = xray_alive and port_ready and stats_ready
+    if net_mode == "reverse_wss" and tunnel_sup is not None:
+        healthy = healthy and bool(tunnel_connected)
+
     payload = {
         "status": "ok" if healthy else "unhealthy",
+        "healthy": healthy,
         "xray_alive": xray_alive,
         "xray_pid": proc.pid if xray_alive and proc else None,
         "net_mode": net_mode,
         "listen_port": target_port,
         "port_ready": port_ready,
+        "stats_ready": stats_ready,
+        "tunnel_connected": tunnel_connected,
     }
     return healthy, payload
 

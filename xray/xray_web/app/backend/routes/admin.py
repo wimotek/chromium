@@ -1,4 +1,5 @@
 import datetime
+import json
 import re
 import secrets
 import threading
@@ -20,15 +21,32 @@ from core.db import (
 )
 from core.models import AuditLog, Card, Node, User
 from routes import (
+    HEARTBEAT_ONLINE_SEC,
     build_node_link,
     check_admin,
+    compute_heartbeat_age_sec,
+    evaluate_node_sub_health,
     get_node_snis,
     normalize_expire_date,
+    parse_agent_health,
+    parse_last_probe,
     resolve_public_endpoint,
 )
 from services.notify_service import notify_user
 
 admin_bp = Blueprint("admin_bp", __name__)
+
+
+def _enrich_node_dict(node_dict: dict, now_ts: float, now_dt: datetime.datetime) -> dict:
+    item = dict(node_dict)
+    item["heartbeat_age_sec"] = compute_heartbeat_age_sec(item, now_ts, now_dt)
+    item["agent_health_info"] = parse_agent_health(item.get("agent_health"))
+    item["last_probe_info"] = parse_last_probe(item.get("last_probe"))
+    sub_ok, sub_code, sub_reason = evaluate_node_sub_health(item, now_ts=now_ts, now_dt=now_dt)
+    item["sub_eligible"] = sub_ok
+    item["sub_status_code"] = sub_code
+    item["sub_exclude_reason"] = "" if sub_ok else sub_reason
+    return item
 
 
 @admin_bp.route("/api/admin/data", methods=["POST"])
@@ -122,12 +140,16 @@ def admin_data():
     cluster_token = get_setting("cluster_token", "")
     auto_approve = get_setting("node_auto_approve", "true").lower() == "true"
     tofu_enabled = get_setting("tofu_enabled", "true").lower() == "true"
+    now_ts = time.time()
+    now_dt = datetime.datetime.now()
+    enriched_nodes = [_enrich_node_dict(n, now_ts, now_dt) for n in active_nodes]
 
     return jsonify({
         "code": 200,
+        "server_ts": now_ts,
         "cards": cards,
         "users": users,
-        "nodes": active_nodes,
+        "nodes": enriched_nodes,
         "audit_logs": audit_logs,
         "cluster_info": {
             "cluster_token": cluster_token,
@@ -189,6 +211,7 @@ def admin_approve_node():
         if node_obj:
             node_obj.is_approved = 1
             node_obj.status = 1
+            node_obj.last_probe = ""
     invalidate_nodes_cache()
     return jsonify({"code": 200, "msg": f"节点 [{node_id}] 审核批准通过！已解除隔离并激活上线服务。"})
 
@@ -231,6 +254,7 @@ def admin_save_node_config():
         node_obj.server_names = server_names_str
         node_obj.sid = node_obj.sid or sid
         node_obj.node_key = node_obj.node_key or node_key
+        node_obj.last_probe = ""
     invalidate_nodes_cache()
     return jsonify({"code": 200, "msg": "节点网络配置已保存！"})
 
@@ -266,9 +290,11 @@ def admin_list_nodes():
     if not check_admin(data.get("admin_user"), data.get("admin_pwd")):
         return jsonify({"code": 403, "msg": "无权限"})
 
+    now_ts = time.time()
+    now_dt = datetime.datetime.now()
     with db_session(readonly=True) as s:
-        nodes = [n.to_dict() for n in s.scalars(select(Node).order_by(Node.id.asc())).all()]
-    return jsonify({"code": 200, "data": nodes})
+        nodes = [_enrich_node_dict(n.to_dict(), now_ts, now_dt) for n in s.scalars(select(Node).order_by(Node.id.asc())).all()]
+    return jsonify({"code": 200, "server_ts": now_ts, "data": nodes})
 
 
 @admin_bp.route("/api/admin/nodes/ping", methods=["POST"])
@@ -280,10 +306,11 @@ def admin_ping_node():
     node_id = data.get("node_id", "").strip()
     from core.edge_agent_service import EdgeAgentService
     edge_svc = EdgeAgentService.get_instance()
+    now_ts = time.time()
     now_dt = datetime.datetime.now()
     results = {}
 
-    with db_session() as s:
+    with db_session(readonly=True) as s:
         stmt = select(Node).where(Node.node_id == node_id) if node_id else select(Node).order_by(Node.id.asc())
         node_snapshots = [n.to_dict() for n in s.scalars(stmt).all()]
 
@@ -292,18 +319,45 @@ def admin_ping_node():
         nid = n["node_id"]
         net_mode = n.get("net_mode") or "direct"
         last_hb = n.get("last_heartbeat") or ""
-        hb_alive = False
-        if last_hb and "等待" not in last_hb and "下线" not in last_hb:
-            try:
-                hb_dt = datetime.datetime.strptime(last_hb, "%Y-%m-%d %H:%M:%S")
-                hb_alive = (now_dt - hb_dt).total_seconds() <= 135
-            except Exception:
-                pass
+        hb_age_sec = compute_heartbeat_age_sec(n, now_ts, now_dt)
+        hb_alive = hb_age_sec is not None and hb_age_sec <= HEARTBEAT_ONLINE_SEC
+        agent_health = parse_agent_health(n.get("agent_health"))
+
+        agent_xray_ok = None if agent_health is None else bool(agent_health.get("xray_alive", True) and agent_health.get("port_ready", True))
+        agent_tunnel_ok = None if (agent_health is None or "tunnel_connected" not in agent_health) else bool(agent_health.get("tunnel_connected"))
 
         if net_mode == "reverse_wss":
+            if not hb_alive:
+                status_code = "offline"
+                reason = "节点心跳超时失联"
+                healthy = False
+            elif agent_xray_ok is False:
+                status_code = "xray_unhealthy"
+                reason = "节点有心跳，但 Xray 进程或本地端口异常"
+                healthy = False
+            elif agent_tunnel_ok is False:
+                status_code = "tunnel_disconnected"
+                reason = "节点有心跳，但 WSS 反向隧道未连接"
+                healthy = False
+            else:
+                status_code = "online"
+                reason = "心跳正常且 WSS 反向隧道健康"
+                healthy = True
+
             results[nid] = {
-                "reachable": hb_alive,
-                "rtt_ms": 0.0 if hb_alive else None,
+                "healthy": healthy,
+                "reachable": healthy,
+                "status_code": status_code,
+                "reason": reason,
+                "hb_alive": hb_alive,
+                "hb_age_sec": hb_age_sec,
+                "agent_health": agent_health,
+                "tcp_ok": None,
+                "tcp_rtt_ms": None,
+                "tls_ok": None,
+                "tls_rtt_ms": None,
+                "tls_error": "",
+                "rtt_ms": 0.0 if healthy else None,
                 "net_mode": "reverse_wss",
                 "network_mode": "reverse_tunnel",
                 "ipv4_reachable": False,
@@ -312,22 +366,92 @@ def admin_ping_node():
                 "last_heartbeat": last_hb,
             }
         else:
-            direct_targets.append((nid, (n.get("ip") or "").strip(), int(n.get("port") or 443), net_mode, last_hb))
+            snis = get_node_snis(n)
+            primary_sni = snis[0] if snis else "www.microsoft.com"
+            direct_targets.append((
+                nid,
+                (n.get("ip") or "").strip(),
+                int(n.get("port") or 443),
+                primary_sni,
+                net_mode,
+                last_hb,
+                hb_alive,
+                hb_age_sec,
+                agent_health,
+                agent_xray_ok,
+            ))
 
     tunnel_updates: dict[str, str] = {}
     if direct_targets:
         def _probe_one(target):
-            nid, ip, port, net_mode, last_hb = target
-            reachable, rtt_ms, det = edge_svc.probe_host_endpoint(ip, port)
-            return nid, reachable, rtt_ms, det, net_mode, last_hb
+            nid, ip, port, primary_sni, net_mode, last_hb, hb_alive, hb_age_sec, agent_health, agent_xray_ok = target
+            tcp_ok, tcp_rtt_ms, det = edge_svc.probe_host_endpoint(ip, port)
+            tls_ok = False
+            tls_rtt_ms = None
+            tls_error = ""
+            if tcp_ok:
+                probe_target_host = ip
+                if det.ipv4_reachable and det.ipv4 and det.ipv4.host:
+                    probe_target_host = det.ipv4.host
+                elif det.ipv6_reachable and det.ipv6 and det.ipv6.host:
+                    probe_target_host = det.ipv6.host
+                tls_ok, tls_rtt_ms, tls_error = edge_svc.probe_tls_handshake(probe_target_host, port, primary_sni)
+            else:
+                tls_error = "TCP 端口不可达"
+            return nid, tcp_ok, tcp_rtt_ms, tls_ok, tls_rtt_ms, tls_error, det, net_mode, last_hb, hb_alive, hb_age_sec, agent_health, agent_xray_ok
 
         max_workers = min(16, max(1, len(direct_targets)))
         with ThreadPoolExecutor(max_workers=max_workers) as pool:
-            for nid, reachable, rtt_ms, det, net_mode, last_hb in pool.map(_probe_one, direct_targets):
+            for (
+                nid, tcp_ok, tcp_rtt_ms, tls_ok, tls_rtt_ms, tls_error, det,
+                net_mode, last_hb, hb_alive, hb_age_sec, agent_health, agent_xray_ok
+            ) in pool.map(_probe_one, direct_targets):
                 tunnel_updates[nid] = det.network_mode
+
+                # 联合判活：必须同时满足 心跳未超时 + 节点自检无故障 + TCP通 + TLS/REALITY握手通
+                if not hb_alive and not tcp_ok:
+                    status_code = "offline"
+                    reason = "节点心跳失联且公网端口不可达"
+                    healthy = False
+                elif not hb_alive and tcp_ok and not tls_ok:
+                    status_code = "tls_failed"
+                    reason = f"心跳已断连，且端口仅 TCP 有响应但 {tls_error}"
+                    healthy = False
+                elif not hb_alive and tcp_ok and tls_ok:
+                    status_code = "heartbeat_lost"
+                    reason = "端口 TLS 有响应但节点心跳已断连（守护进程异常或 IP 已变更）"
+                    healthy = False
+                elif agent_xray_ok is False:
+                    status_code = "xray_unhealthy"
+                    reason = "节点心跳在线，但节点自检报告 Xray 进程或本地端口异常"
+                    healthy = False
+                elif not tcp_ok:
+                    status_code = "port_unreachable"
+                    reason = "节点心跳正常，但 Hub 无法连通其公网代理端口"
+                    healthy = False
+                elif not tls_ok:
+                    status_code = "tls_failed"
+                    reason = f"TCP 握手成功，但 {tls_error}"
+                    healthy = False
+                else:
+                    status_code = "online"
+                    reason = "心跳活跃 + TCP/TLS REALITY 握手全部正常"
+                    healthy = True
+
                 results[nid] = {
-                    "reachable": reachable,
-                    "rtt_ms": rtt_ms,
+                    "healthy": healthy,
+                    "reachable": bool(tcp_ok and tls_ok),
+                    "status_code": status_code,
+                    "reason": reason,
+                    "hb_alive": hb_alive,
+                    "hb_age_sec": hb_age_sec,
+                    "agent_health": agent_health,
+                    "tcp_ok": tcp_ok,
+                    "tcp_rtt_ms": tcp_rtt_ms,
+                    "tls_ok": tls_ok,
+                    "tls_rtt_ms": tls_rtt_ms,
+                    "tls_error": tls_error,
+                    "rtt_ms": tls_rtt_ms if tls_ok else tcp_rtt_ms,
                     "net_mode": net_mode,
                     "network_mode": det.network_mode,
                     "ipv4_reachable": det.ipv4_reachable,
@@ -336,19 +460,44 @@ def admin_ping_node():
                     "last_heartbeat": last_hb,
                 }
 
+    done_ts = time.time()
+    done_dt = datetime.datetime.now()
     with db_session() as s:
         stmt = select(Node).where(Node.node_id == node_id) if node_id else select(Node).order_by(Node.id.asc())
         node_objs = s.scalars(stmt).all()
         for node_obj in node_objs:
-            if node_obj.node_id in tunnel_updates:
-                node_obj.tunnel_status = tunnel_updates[node_obj.node_id]
+            nid = node_obj.node_id
+            if nid in tunnel_updates:
+                node_obj.tunnel_status = tunnel_updates[nid]
+            res_item = results.get(nid)
+            if isinstance(res_item, dict):
+                probe_record = {
+                    "healthy": bool(res_item.get("healthy")),
+                    "status_code": str(res_item.get("status_code") or "offline"),
+                    "reason": str(res_item.get("reason") or "")[:120],
+                    "net_mode": str(res_item.get("net_mode") or "direct"),
+                    "tcp_ok": res_item.get("tcp_ok"),
+                    "tcp_rtt_ms": res_item.get("tcp_rtt_ms"),
+                    "tls_ok": res_item.get("tls_ok"),
+                    "tls_rtt_ms": res_item.get("tls_rtt_ms"),
+                    "tls_error": str(res_item.get("tls_error") or "")[:80],
+                    "rtt_ms": res_item.get("rtt_ms"),
+                    "ts": round(done_ts, 2),
+                }
+                node_obj.last_probe = json.dumps(probe_record, ensure_ascii=False, separators=(",", ":"))[:500]
         s.flush()
-        nodes = [n.to_dict() for n in node_objs]
+        nodes = [_enrich_node_dict(n.to_dict(), done_ts, done_dt) for n in node_objs]
 
-    if tunnel_updates:
-        invalidate_nodes_cache()
+    # 测活结果直接影响订阅健康过滤，立即刷新节点缓存
+    invalidate_nodes_cache()
 
-    return jsonify({"code": 200, "msg": "基于 wimotek-edge-agent TCP 三次握手的节点连通性检测完成", "data": results, "nodes": nodes})
+    return jsonify({
+        "code": 200,
+        "server_ts": done_ts,
+        "msg": "节点联合深度测活完成（心跳 + 节点自检 + TCP/TLS REALITY 握手）",
+        "data": results,
+        "nodes": nodes,
+    })
 
 
 @admin_bp.route("/api/admin/nodes/force_resync", methods=["POST"])
@@ -365,6 +514,9 @@ def admin_nodes_force_resync():
             node_obj.sid = ""
             node_obj.pending_key = "FORCE_RESYNC"
             node_obj.last_heartbeat = "等待重新上报"
+            node_obj.last_heartbeat_ts = 0.0
+            node_obj.agent_health = ""
+            node_obj.last_probe = ""
     invalidate_nodes_cache()
     return jsonify({"code": 200, "msg": "重置指令已就绪！已开启重置接纳模式，节点将在下次回传时自动完成重绑并回传公钥。"})
 

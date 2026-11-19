@@ -1,6 +1,8 @@
 import os
 import sys
 import re
+import json
+import time
 import random
 import datetime
 import calendar
@@ -17,6 +19,122 @@ from core.cache import cache
 from core.db import db_session, hash_pwd
 from core.models import User
 from core.rate_limit import ban_ip, check_ip_ban, get_client_ip, is_whitelisted_ip
+
+HEARTBEAT_ONLINE_SEC = 135
+_HB_RECOVERABLE_PROBE_CODES = frozenset({
+    "offline",
+    "heartbeat_lost",
+    "xray_unhealthy",
+    "tunnel_disconnected",
+})
+
+
+def parse_agent_health(raw) -> dict | None:
+    if isinstance(raw, dict):
+        return raw
+    if not raw or not isinstance(raw, str):
+        return None
+    try:
+        parsed = json.loads(raw)
+        return parsed if isinstance(parsed, dict) else None
+    except Exception:
+        return None
+
+
+def parse_last_probe(raw) -> dict | None:
+    if isinstance(raw, dict):
+        return raw
+    if not raw or not isinstance(raw, str):
+        return None
+    try:
+        parsed = json.loads(raw)
+        return parsed if isinstance(parsed, dict) else None
+    except Exception:
+        return None
+
+
+def compute_heartbeat_age_sec(
+    node_dict: dict,
+    now_ts: float | None = None,
+    now_dt: datetime.datetime | None = None,
+) -> int | None:
+    if now_ts is None:
+        now_ts = time.time()
+    hb_ts = float(node_dict.get("last_heartbeat_ts") or 0.0)
+    if hb_ts > 0:
+        return max(0, int(now_ts - hb_ts))
+
+    last_hb = (node_dict.get("last_heartbeat") or "").strip()
+    if not last_hb or "等待" in last_hb or "下线" in last_hb:
+        return None
+    try:
+        if now_dt is None:
+            now_dt = datetime.datetime.now()
+        hb_dt = datetime.datetime.strptime(last_hb, "%Y-%m-%d %H:%M:%S")
+        return max(0, int((now_dt - hb_dt).total_seconds()))
+    except Exception:
+        return None
+
+
+def evaluate_node_sub_health(
+    node_dict: dict,
+    now_ts: float | None = None,
+    now_dt: datetime.datetime | None = None,
+) -> tuple[bool, str, str]:
+    """
+    判定节点是否满足订阅下发健康条件（仅基于心跳新鲜度、节点自检状态、手动测活记录）：
+    返回 (eligible, status_code, reason)。
+    """
+    if now_ts is None:
+        now_ts = time.time()
+    if now_dt is None:
+        now_dt = datetime.datetime.now()
+
+    if int(node_dict.get("status", 1)) != 1:
+        return False, "disabled", "节点已被管理员停用"
+    if int(node_dict.get("is_approved", 1)) != 1:
+        return False, "pending", "节点尚未审批通过"
+
+    hb_age = compute_heartbeat_age_sec(node_dict, now_ts, now_dt)
+    if hb_age is None:
+        return False, "heartbeat_lost", "节点尚未上报有效心跳"
+    if hb_age > HEARTBEAT_ONLINE_SEC:
+        return False, "heartbeat_lost", f"节点心跳超时 ({hb_age}秒未响应)"
+
+    net_mode = node_dict.get("net_mode") or "direct"
+    agent_health = parse_agent_health(node_dict.get("agent_health"))
+    if agent_health:
+        if agent_health.get("xray_alive") is False:
+            return False, "xray_unhealthy", "节点自检上报 Xray 进程未运行"
+        if agent_health.get("port_ready") is False:
+            return False, "xray_unhealthy", "节点自检上报代理监听端口未就绪"
+        if net_mode == "reverse_wss" and agent_health.get("tunnel_connected") is False:
+            return False, "tunnel_disconnected", "节点自检上报 WSS 反向隧道未连接"
+
+    if net_mode == "reverse_wss" and str(node_dict.get("tunnel_status") or "").lower() == "disconnected":
+        return False, "tunnel_disconnected", "WSS 反向隧道已断开"
+
+    last_probe = parse_last_probe(node_dict.get("last_probe"))
+    if last_probe and last_probe.get("healthy") is False:
+        probe_code = str(last_probe.get("status_code") or "offline")
+        probe_ts = float(last_probe.get("ts") or 0.0)
+        hb_ts = float(node_dict.get("last_heartbeat_ts") or 0.0)
+        # 若此前测活失败原因是心跳/进程/隧道类，且在测活之后又收到了新的健康心跳，则自动视为已恢复
+        if probe_code in _HB_RECOVERABLE_PROBE_CODES and hb_ts > probe_ts:
+            return True, "online", "正常"
+        probe_reason = str(last_probe.get("reason") or "手动测活未通过")
+        return False, probe_code, f"手动测活异常：{probe_reason}"
+
+    return True, "online", "正常"
+
+
+def is_node_healthy_for_sub(
+    node_dict: dict,
+    now_ts: float | None = None,
+    now_dt: datetime.datetime | None = None,
+) -> bool:
+    eligible, _, _ = evaluate_node_sub_health(node_dict, now_ts=now_ts, now_dt=now_dt)
+    return eligible
 
 
 def check_admin(u: str, p: str) -> bool:

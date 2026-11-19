@@ -19,6 +19,7 @@ class WssTunnelSupervisor:
         self.node_key = node_key
         self.bridge_port = bridge_port
         self.is_running = True
+        self.is_connected = False
         self.active_connections = 0
 
     async def _bridge_streams(self, ws, local_reader: asyncio.StreamReader, local_writer: asyncio.StreamWriter):
@@ -113,12 +114,16 @@ class WssTunnelSupervisor:
                     # 尝试连接本地 Xray bridge 端口 127.0.0.1:10086
                     try:
                         local_reader, local_writer = await asyncio.open_connection("127.0.0.1", self.bridge_port)
+                        self.is_connected = True
                         await self._bridge_streams(ws, local_reader, local_writer)
                     except Exception as e:
                         print(f"[WssTunnel] 本地 Xray 核心尚未就绪 ({e})，稍后重试", flush=True)
                         await asyncio.sleep(2)
+                    finally:
+                        self.is_connected = False
 
             except Exception as e:
+                self.is_connected = False
                 # 记录简要日志并指数退避
                 # print(f"[WssTunnel] 隧道波动 ({e})，{backoff}s 后重试...", flush=True)
                 await asyncio.sleep(backoff)

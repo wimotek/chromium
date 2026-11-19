@@ -2,6 +2,7 @@ import datetime
 import json
 import re
 import secrets
+import time
 import traceback
 import uuid
 
@@ -25,9 +26,28 @@ from core.rate_limit import (
     rate_limit_response,
     reset_rate_counter,
 )
-from routes import get_node_snis, is_user_allowed_for_node, resolve_public_endpoint
+from routes import (
+    get_node_snis,
+    is_user_allowed_for_node,
+    parse_last_probe,
+    resolve_public_endpoint,
+)
 
 node_bp = Blueprint("node_bp", __name__)
+
+
+def _serialize_agent_health(raw_health) -> tuple[str, dict | None]:
+    if not isinstance(raw_health, dict):
+        return "", None
+    parsed = {
+        "healthy": bool(raw_health.get("healthy", True)),
+        "xray_alive": bool(raw_health.get("xray_alive", True)),
+        "port_ready": bool(raw_health.get("port_ready", True)),
+        "stats_ready": bool(raw_health.get("stats_ready", True)),
+    }
+    if "tunnel_connected" in raw_health and raw_health.get("tunnel_connected") is not None:
+        parsed["tunnel_connected"] = bool(raw_health.get("tunnel_connected"))
+    return json.dumps(parsed, separators=(",", ":")), parsed
 
 
 @node_bp.route("/api/node/challenge", methods=["GET", "POST"])
@@ -66,7 +86,9 @@ def node_heartbeat():
         raw_dest = data.get("dest", "www.microsoft.com:443").strip()
         raw_sni = data.get("sni", "www.microsoft.com").strip()
         raw_server_names = data.get("server_names", "").strip()
+        now_ts = time.time()
         now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        agent_health_json, agent_health_dict = _serialize_agent_health(data.get("health"))
 
         if not node_id:
             return jsonify({"code": 400, "msg": "缺少 node_id"}), 400
@@ -243,6 +265,9 @@ def node_heartbeat():
                     existing.status = status
                     existing.is_approved = is_approved
                     existing.last_heartbeat = now_str
+                    existing.last_heartbeat_ts = now_ts
+                    if agent_health_json:
+                        existing.agent_health = agent_health_json
                     existing.dest = dest
                     existing.sni = primary_sni
                     existing.server_names = server_names_str
@@ -268,6 +293,8 @@ def node_heartbeat():
                             sid=sid,
                             status=status,
                             last_heartbeat=now_str,
+                            last_heartbeat_ts=now_ts,
+                            agent_health=agent_health_json,
                             allow_all=1,
                             allowed_groups="",
                             allowed_users="",
@@ -389,6 +416,10 @@ def node_heartbeat():
                 node_obj.status = 1
                 node_obj.is_approved = 1
                 node_obj.last_heartbeat = now_str
+                node_obj.last_heartbeat_ts = now_ts
+                node_obj.last_probe = ""
+                if agent_health_json:
+                    node_obj.agent_health = agent_health_json
                 node_obj.last_challenge_nonce = next_challenge_nonce
                 node_obj.node_public_key = final_pubkey
                 node_obj.key_lock_status = final_lock
@@ -428,10 +459,34 @@ def node_heartbeat():
             return jsonify(resync_resp)
 
         # 快速分支：正常日常心跳 / 密钥轮换（纯本地短事务，零网络阻塞）
+        need_cache_invalidate = False
+        stage2_resp = None
+        rotated_resp = None
         with db_session() as s:
             node_obj = s.scalar(select(Node).where(Node.node_id == node_id))
             if not node_obj:
                 return jsonify({"code": 403, "msg": "【安全拦截】节点通信凭据校验失败，拒绝服务！"}), 403
+
+            prev_hb_ts = float(node_obj.last_heartbeat_ts or 0.0)
+            prev_health = node_obj.agent_health or ""
+            prev_tunnel = node_obj.tunnel_status or ""
+            prev_probe = node_obj.last_probe or ""
+            prev_status = int(node_obj.status or 0)
+            hb_was_stale = (prev_hb_ts <= 0.0) or ((now_ts - prev_hb_ts) >= 90.0)
+
+            def _maybe_clear_recoverable_probe(n_obj, health_dict):
+                lp = parse_last_probe(n_obj.last_probe)
+                if not lp or lp.get("healthy") is not False:
+                    return
+                code = str(lp.get("status_code") or "")
+                if code not in ("offline", "heartbeat_lost", "xray_unhealthy", "tunnel_disconnected"):
+                    return
+                if health_dict:
+                    if health_dict.get("xray_alive") is False or health_dict.get("port_ready") is False:
+                        return
+                    if (n_obj.net_mode or "direct") == "reverse_wss" and health_dict.get("tunnel_connected") is False:
+                        return
+                n_obj.last_probe = ""
 
             if pending_key and client_key == current_key:
                 node_obj.node_key = pending_key
@@ -442,73 +497,101 @@ def node_heartbeat():
                     node_obj.sid = sid
                 node_obj.status = 1
                 node_obj.last_heartbeat = now_str
+                node_obj.last_heartbeat_ts = now_ts
+                if agent_health_json:
+                    node_obj.agent_health = agent_health_json
+                if (node_obj.net_mode or "direct") == "reverse_wss" and agent_health_dict and "tunnel_connected" in agent_health_dict:
+                    node_obj.tunnel_status = "connected" if agent_health_dict["tunnel_connected"] else "disconnected"
+                _maybe_clear_recoverable_probe(node_obj, agent_health_dict)
                 node_obj.last_challenge_nonce = next_challenge_nonce
-                return jsonify({
+                need_cache_invalidate = True
+                rotated_resp = {
                     "code": 200,
                     "msg": "心跳正常，已同步新密钥",
                     "new_node_key": pending_key,
                     "challenge_nonce": next_challenge_nonce,
-                })
-
-            auth_success = False
-            if client_key and client_key == current_key:
-                auth_success = True
-            elif locked_pubkey and node_pubkey == locked_pubkey:
-                auth_success = True
-            else:
-                valid_cluster_token = get_setting("cluster_token", "").strip()
-                if valid_cluster_token and (bootstrap_token == valid_cluster_token or client_key == valid_cluster_token):
-                    auth_success = True
-
-            if auth_success:
-                update_lock_status = "locked" if (locked_pubkey or node_pubkey) else "unlocked"
-                save_pubkey = locked_pubkey or node_pubkey
-
-                node_obj.ip = node_obj.ip or str(save_ip)
-                node_obj.port = node_obj.port or node_port
-                node_obj.pbk = pbk
-                node_obj.sid = node_obj.sid or sid
-                node_obj.dest = node_obj.dest or dest
-                node_obj.sni = node_obj.sni or primary_sni
-                node_obj.server_names = node_obj.server_names or server_names_str
-                node_obj.status = 1
-                node_obj.last_heartbeat = now_str
-                node_obj.last_challenge_nonce = next_challenge_nonce
-                node_obj.key_lock_status = update_lock_status
-                node_obj.node_public_key = save_pubkey
-                s.flush()
-                latest_node = node_obj.to_dict()
-
-                snis = get_node_snis(latest_node)
-                clean_dest = latest_node["dest"] if (latest_node.get("dest") and ":" in latest_node["dest"]) else f"{latest_node.get('dest', 'www.microsoft.com')}:443"
-                stage2_net_mode = latest_node.get("net_mode", "direct")
-                stage2_resp = {
-                    "code": 200,
-                    "msg": "心跳正常 (密码学验签通过)",
-                    "challenge_nonce": next_challenge_nonce,
-                    "key_lock_status": update_lock_status,
-                    "net_mode": stage2_net_mode,
-                    "node_config": {
-                        "net_mode": stage2_net_mode,
-                        "port": latest_node["port"],
-                        "dest": clean_dest,
-                        "sni": snis[0] if snis else "www.microsoft.com",
-                        "server_names": snis,
-                        "sid": latest_node["sid"],
-                    },
                 }
-                if stage2_net_mode == "reverse_wss":
-                    hub_host, hub_port, _ = resolve_public_endpoint(request)
-                    stage2_resp["tunnel_config"] = {
-                        "hub_ws_host": hub_host,
-                        "hub_ws_port": hub_port,
-                        "hub_ws_path": f"/api/tunnel/bridge/{node_id}",
-                        "tunnel_uuid": latest_node.get("tunnel_uuid") or "",
-                        "portal_domain": f"reverse.{node_id}.hub.internal",
+            else:
+                auth_success = False
+                if client_key and client_key == current_key:
+                    auth_success = True
+                elif locked_pubkey and node_pubkey == locked_pubkey:
+                    auth_success = True
+                else:
+                    valid_cluster_token = get_setting("cluster_token", "").strip()
+                    if valid_cluster_token and (bootstrap_token == valid_cluster_token or client_key == valid_cluster_token):
+                        auth_success = True
+
+                if auth_success:
+                    update_lock_status = "locked" if (locked_pubkey or node_pubkey) else "unlocked"
+                    save_pubkey = locked_pubkey or node_pubkey
+
+                    node_obj.ip = node_obj.ip or str(save_ip)
+                    node_obj.port = node_obj.port or node_port
+                    node_obj.pbk = pbk
+                    node_obj.sid = node_obj.sid or sid
+                    node_obj.dest = node_obj.dest or dest
+                    node_obj.sni = node_obj.sni or primary_sni
+                    node_obj.server_names = node_obj.server_names or server_names_str
+                    node_obj.status = 1
+                    node_obj.last_heartbeat = now_str
+                    node_obj.last_heartbeat_ts = now_ts
+                    if agent_health_json:
+                        node_obj.agent_health = agent_health_json
+                    if (node_obj.net_mode or "direct") == "reverse_wss" and agent_health_dict and "tunnel_connected" in agent_health_dict:
+                        node_obj.tunnel_status = "connected" if agent_health_dict["tunnel_connected"] else "disconnected"
+                    _maybe_clear_recoverable_probe(node_obj, agent_health_dict)
+                    node_obj.last_challenge_nonce = next_challenge_nonce
+                    node_obj.key_lock_status = update_lock_status
+                    node_obj.node_public_key = save_pubkey
+                    s.flush()
+                    latest_node = node_obj.to_dict()
+
+                    if (
+                        hb_was_stale
+                        or prev_status != 1
+                        or (node_obj.agent_health or "") != prev_health
+                        or (node_obj.tunnel_status or "") != prev_tunnel
+                        or (node_obj.last_probe or "") != prev_probe
+                    ):
+                        need_cache_invalidate = True
+
+                    snis = get_node_snis(latest_node)
+                    clean_dest = latest_node["dest"] if (latest_node.get("dest") and ":" in latest_node["dest"]) else f"{latest_node.get('dest', 'www.microsoft.com')}:443"
+                    stage2_net_mode = latest_node.get("net_mode", "direct")
+                    stage2_resp = {
+                        "code": 200,
+                        "msg": "心跳正常 (密码学验签通过)",
+                        "challenge_nonce": next_challenge_nonce,
+                        "key_lock_status": update_lock_status,
+                        "net_mode": stage2_net_mode,
+                        "node_config": {
+                            "net_mode": stage2_net_mode,
+                            "port": latest_node["port"],
+                            "dest": clean_dest,
+                            "sni": snis[0] if snis else "www.microsoft.com",
+                            "server_names": snis,
+                            "sid": latest_node["sid"],
+                        },
                     }
-                if current_key and client_key != current_key:
-                    stage2_resp["tofu_assigned_key"] = current_key
-                return jsonify(stage2_resp)
+                    if stage2_net_mode == "reverse_wss":
+                        hub_host, hub_port, _ = resolve_public_endpoint(request)
+                        stage2_resp["tunnel_config"] = {
+                            "hub_ws_host": hub_host,
+                            "hub_ws_port": hub_port,
+                            "hub_ws_path": f"/api/tunnel/bridge/{node_id}",
+                            "tunnel_uuid": latest_node.get("tunnel_uuid") or "",
+                            "portal_domain": f"reverse.{node_id}.hub.internal",
+                        }
+                    if current_key and client_key != current_key:
+                        stage2_resp["tofu_assigned_key"] = current_key
+
+        if need_cache_invalidate:
+            invalidate_nodes_cache()
+        if rotated_resp is not None:
+            return jsonify(rotated_resp)
+        if stage2_resp is not None:
+            return jsonify(stage2_resp)
 
         return jsonify({"code": 403, "msg": "【安全拦截】节点通信凭据校验失败，拒绝服务！"}), 403
 

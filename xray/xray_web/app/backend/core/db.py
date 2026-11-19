@@ -242,6 +242,9 @@ def _upgrade_legacy_columns(eng):
             ("net_mode", "VARCHAR(32) DEFAULT 'direct'"),
             ("tunnel_uuid", "VARCHAR(64) DEFAULT ''"),
             ("tunnel_status", "VARCHAR(64) DEFAULT 'disconnected'"),
+            ("last_heartbeat_ts", "FLOAT DEFAULT 0"),
+            ("agent_health", "VARCHAR(255) DEFAULT ''"),
+            ("last_probe", "VARCHAR(512) DEFAULT ''"),
         ],
     )
     ensure_cols(

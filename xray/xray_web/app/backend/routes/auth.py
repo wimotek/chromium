@@ -1,6 +1,7 @@
 import datetime
 import random
 import re
+import time
 import uuid
 
 from flask import Blueprint, jsonify, request
@@ -31,6 +32,7 @@ from core.rate_limit import (
 from routes import (
     build_node_link,
     get_node_snis,
+    is_node_healthy_for_sub,
     is_user_allowed_for_node,
     normalize_expire_date,
     resolve_public_endpoint,
@@ -107,7 +109,12 @@ def login():
     reset_rate_counter("login_acct_fail", acct_key, sliding=False)
 
     all_nodes = get_cached_nodes()
-    visible_nodes = [n for n in all_nodes if is_user_allowed_for_node(user_dict, n)]
+    now_ts = time.time()
+    now_dt = datetime.datetime.now()
+    visible_nodes = [
+        n for n in all_nodes
+        if is_user_allowed_for_node(user_dict, n) and is_node_healthy_for_sub(n, now_ts=now_ts, now_dt=now_dt)
+    ]
 
     nodes_data = []
     hub_host, hub_port, host_prefix = resolve_public_endpoint(request)

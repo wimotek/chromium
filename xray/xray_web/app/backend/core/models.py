@@ -93,6 +93,9 @@ class Node(Base, DictMixin):
     net_mode = Column(String(32), default="direct", nullable=False)
     tunnel_uuid = Column(String(64), default="", nullable=False)
     tunnel_status = Column(String(64), default="disconnected", nullable=False)
+    last_heartbeat_ts = Column(Float, default=0.0, nullable=False)
+    agent_health = Column(String(255), default="", nullable=False)
+    last_probe = Column(String(512), default="", nullable=False)
 
 
 class Card(Base, DictMixin):

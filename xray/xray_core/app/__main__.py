@@ -19,7 +19,7 @@ from .config_builder import build_xray_config
 from .xray_manager import XrayManager
 from .tunnel import WssTunnelSupervisor
 from .hub_client import HubClient
-from .health import start_health_server
+from .health import evaluate_health, start_health_server
 
 
 class EdgeCoreApplication:
@@ -123,7 +123,8 @@ ShortId: {self.xray_mgr.short_id}
         """定期心跳、接收 Hub 拨测裁决与策略同步、回传流量"""
         while self.is_running:
             try:
-                # 1. 上报双栈 IP 与端口，接收 Hub (wimotek-edge-agent) 的网络判定结果
+                # 1. 采集本地 Xray 进程与监听端口真实健康度，连同双栈 IP 上报 Hub
+                _, local_health = evaluate_health(self)
                 ok, hb_data = self.hub_client.send_heartbeat(
                     net_mode=self.net_mode,
                     ip=self.ext_ip,
@@ -133,6 +134,7 @@ ShortId: {self.xray_mgr.short_id}
                     ipv4=self.ext_ipv4,
                     ipv6=self.ext_ipv6,
                     preferred_mode=AppConfig.NET_MODE,
+                    health=local_health,
                 )
 
                 if hb_data and hb_data.get("network_detection"):

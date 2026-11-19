@@ -12,7 +12,9 @@ import ipaddress
 import os
 import secrets
 import socket
+import ssl
 import threading
+import time
 from pathlib import Path
 from typing import Optional, Dict, Any, Tuple
 
@@ -238,6 +240,60 @@ class EdgeAgentService:
         reachable = det.ipv4_reachable or det.ipv6_reachable
         best_rtt = round(min(latencies), 1) if latencies else None
         return reachable, best_rtt, det
+
+    def probe_tls_handshake(
+        self,
+        host: str,
+        port: int = 443,
+        sni: str = "www.microsoft.com",
+        timeout: Optional[float] = None,
+    ) -> Tuple[bool, Optional[float], str]:
+        """
+        对直连节点发起真实 TLS ClientHello / REALITY 回落握手探测：
+        - 健康的 Xray VLESS-REALITY 节点收到普通 ClientHello 会透传到 dest 并完成合法 TLS ServerHello 握手；
+        - 若节点 OOM/卡死（仅内核回 SYN-ACK）、Xray 进程挂起、端口被非 TLS 服务占用或节点出站不通，
+          TLS 握手将超时、重置或报协议错误，从而彻底杜绝“纯 TCP 握手假在线”。
+        返回: (tls_ok, tls_rtt_ms, error_msg)
+        """
+        clean_host = (host or "").strip().strip("[]")
+        clean_sni = (sni or "www.microsoft.com").strip().split(":")[0] or "www.microsoft.com"
+        probe_timeout = float(timeout if timeout is not None else max(3.0, self.config.network_probe_timeout_seconds))
+
+        if not clean_host or clean_host == "0.0.0.0":
+            return False, None, "目标地址无效"
+
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+
+        start_ts = time.perf_counter()
+        raw_sock = None
+        tls_sock = None
+        try:
+            raw_sock = socket.create_connection((clean_host, int(port)), timeout=probe_timeout)
+            raw_sock.settimeout(probe_timeout)
+            tls_sock = ctx.wrap_socket(raw_sock, server_hostname=clean_sni)
+            tls_sock.do_handshake()
+            rtt_ms = round((time.perf_counter() - start_ts) * 1000.0, 1)
+            return True, rtt_ms, ""
+        except socket.timeout:
+            return False, None, "TLS/REALITY 握手超时 (进程卡死、OOM 或节点出站不通)"
+        except TimeoutError:
+            return False, None, "TLS/REALITY 握手超时 (进程卡死、OOM 或节点出站不通)"
+        except ssl.SSLError as exc:
+            reason = getattr(exc, "reason", None) or str(exc)
+            return False, None, f"TLS 协议握手失败 ({reason})"
+        except ConnectionResetError:
+            return False, None, "连接在 TLS 握手阶段被重置 (端口可能被拦截或非 REALITY 服务)"
+        except OSError as exc:
+            return False, None, f"TLS 握手异常 ({exc.strerror or exc})"
+        finally:
+            for sock_obj in (tls_sock, raw_sock):
+                if sock_obj is not None:
+                    try:
+                        sock_obj.close()
+                    except Exception:
+                        pass
 
     def log_access(
         self,

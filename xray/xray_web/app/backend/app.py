@@ -1,9 +1,11 @@
 import base64
+import datetime
 import io
 import mimetypes
 import os
 import random
 import sys
+import time
 
 mimetypes.add_type("application/javascript", ".js")
 mimetypes.add_type("application/javascript", ".mjs")
@@ -29,7 +31,13 @@ from core.rate_limit import is_trusted_proxy_peer, rate_limit
 from services.scheduler_service import start_scheduler_thread
 
 # 导入通用路由工具与所有领域蓝图
-from routes import build_node_link, get_node_snis, is_user_allowed_for_node, resolve_public_endpoint
+from routes import (
+    build_node_link,
+    get_node_snis,
+    is_node_healthy_for_sub,
+    is_user_allowed_for_node,
+    resolve_public_endpoint,
+)
 from routes.admin import admin_bp
 from routes.auth import auth_bp
 from routes.card import card_bp
@@ -208,9 +216,14 @@ def get_subscription():
         abort(403)
 
     all_nodes = get_cached_nodes()
+    now_ts = time.time()
+    now_dt = datetime.datetime.now()
 
-    # 权限过滤器：仅提取启用的且用户被允许访问的节点
-    allowed_nodes = [n for n in all_nodes if is_user_allowed_for_node(user, n)]
+    # 权限 + 健康双重过滤：仅下发已启用、用户有权访问、且心跳/自检/手动测活均健康的节点
+    allowed_nodes = [
+        n for n in all_nodes
+        if is_user_allowed_for_node(user, n) and is_node_healthy_for_sub(n, now_ts=now_ts, now_dt=now_dt)
+    ]
 
     hub_host, hub_port, _ = resolve_public_endpoint(request)
     links = []

@@ -71,8 +71,9 @@ class HubClient:
         ipv4: str = "",
         ipv6: str = "",
         preferred_mode: str = "auto",
+        health: Optional[Dict[str, Any]] = None,
     ) -> Tuple[bool, Optional[Dict[str, Any]]]:
-        """向 Hub 上报自身公网 IPv4 / IPv6 与端口，交由 Hub 端 wimotek-edge-agent 拨测判定网络模式"""
+        """向 Hub 上报自身公网 IPv4 / IPv6、端口及本地 Xray 真实健康状态，交由 Hub 端拨测判定"""
         if not AppConfig.PANEL_URL:
             return False, None
 
@@ -95,6 +96,8 @@ class HubClient:
             "net_mode": preferred_mode if preferred_mode in ("direct", "reverse_wss") else "auto",
             "active_net_mode": net_mode,
         }
+        if isinstance(health, dict):
+            payload["health"] = health
 
         if self.is_bootstrapping:
             payload["bootstrap_token"] = AppConfig.BOOTSTRAP_TOKEN

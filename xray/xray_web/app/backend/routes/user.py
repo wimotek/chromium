@@ -2,6 +2,7 @@ import datetime
 import random
 import re
 import threading
+import time
 import uuid
 
 from flask import Blueprint, abort, jsonify, request, send_file
@@ -23,6 +24,7 @@ from core.rate_limit import (
 from routes import (
     build_node_link,
     get_node_snis,
+    is_node_healthy_for_sub,
     is_user_allowed_for_node,
     normalize_expire_date,
     resolve_public_endpoint,
@@ -47,7 +49,12 @@ def user_refresh_info():
         user_dict = user_obj.to_dict()
 
     all_nodes = get_cached_nodes()
-    visible_nodes = [n for n in all_nodes if is_user_allowed_for_node(user_dict, n)]
+    now_ts = time.time()
+    now_dt = datetime.datetime.now()
+    visible_nodes = [
+        n for n in all_nodes
+        if is_user_allowed_for_node(user_dict, n) and is_node_healthy_for_sub(n, now_ts=now_ts, now_dt=now_dt)
+    ]
 
     nodes_data = []
     hub_host, hub_port, host_prefix = resolve_public_endpoint(request)
@@ -116,7 +123,12 @@ def user_reset_uuid():
 
     invalidate_users_cache()
     all_nodes = get_cached_nodes()
-    visible_nodes = [n for n in all_nodes if is_user_allowed_for_node(user_dict, n)]
+    now_ts = time.time()
+    now_dt = datetime.datetime.now()
+    visible_nodes = [
+        n for n in all_nodes
+        if is_user_allowed_for_node(user_dict, n) and is_node_healthy_for_sub(n, now_ts=now_ts, now_dt=now_dt)
+    ]
 
     hub_host, hub_port, host_prefix = resolve_public_endpoint(request)
     sub_url = f"{host_prefix}/api/sub?token={new_uuid}"
