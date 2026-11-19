@@ -36,6 +36,7 @@ from routes import (
     is_node_healthy_for_sub,
     is_user_allowed_for_node,
     normalize_expire_date,
+    pick_node_sni,
     resolve_public_endpoint,
 )
 from services.notify_service import send_smtp_email
@@ -124,7 +125,7 @@ def login():
     for n in visible_nodes:
         if len(n.get("pbk", "")) == 43:
             snis = get_node_snis(n)
-            random_sni = random.choice(snis)
+            random_sni = pick_node_sni(n)
             link = build_node_link(
                 user_dict["uuid"],
                 n,

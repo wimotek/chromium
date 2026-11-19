@@ -14,6 +14,7 @@ from routes._common import (
     normalize_expire_date,
     parse_agent_health,
     parse_last_probe,
+    pick_node_sni,
     resolve_public_endpoint,
 )
 
@@ -33,5 +34,6 @@ __all__ = [
     "normalize_expire_date",
     "parse_agent_health",
     "parse_last_probe",
+    "pick_node_sni",
     "resolve_public_endpoint",
 ]

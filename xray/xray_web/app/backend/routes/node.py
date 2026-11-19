@@ -449,6 +449,8 @@ def node_heartbeat():
         if int(node_snapshot.get("is_approved") if node_snapshot.get("is_approved") is not None else 1) == 0:
             return jsonify({
                 "code": 403,
+                "is_approved": 0,
+                "pending_approval": True,
                 "msg": "【隔离拦截】节点尚未获得管理员批准上线。请联系管理员在控制面板审批通过。",
                 "challenge_nonce": next_challenge_nonce,
             }), 403

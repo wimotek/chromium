@@ -33,6 +33,7 @@ class EdgeCoreApplication:
         self.current_clients = []
         self.health_server = None
         self.is_running = True
+        self._hub_state = ""
 
         print("==================================================================", flush=True)
         print("          Wimotek Edge Core (Pure Python Edition)                 ", flush=True)
@@ -43,6 +44,14 @@ class EdgeCoreApplication:
         print(f"[*] Primary IP   : {self.ext_ip}", flush=True)
         print(f"[*] Initial Mode : {self.net_mode.upper()} (配置策略: {AppConfig.NET_MODE.upper()})", flush=True)
         print(f"[*] Panel Hub URL: {AppConfig.PANEL_URL or '纯单机模式 (Standalone)'}", flush=True)
+        if AppConfig.PANEL_URL:
+            if self.hub_client.node_key:
+                auth_desc = "已持久化节点密钥 (node_key)"
+            elif AppConfig.BOOTSTRAP_TOKEN:
+                auth_desc = "集群引导令牌 (CLUSTER_TOKEN)"
+            else:
+                auth_desc = "无引导令牌 (TOFU 模式：若后台关闭免审则进入待审批隔离区)"
+            print(f"[*] Auth Mode    : {auth_desc}", flush=True)
         print("==================================================================", flush=True)
 
     def write_standalone_client_info(self, client_uuid: str):
@@ -76,18 +85,21 @@ ShortId: {self.xray_mgr.short_id}
 
     def bootstrap_initial_config(self):
         """生成初版 config.json 并预检"""
-        client_uuid = os.environ.get("UUID", "11111111-2222-3333-4444-555555555555")
-        default_clients = [{
-            "id": client_uuid,
-            "flow": "xtls-rprx-vision",
-            "email": "admin@local.host"
-        }]
-        self.current_clients = default_clients
-
         is_standalone = not bool(AppConfig.PANEL_URL)
+        client_uuid = os.environ.get("UUID", "11111111-2222-3333-4444-555555555555")
+        if is_standalone:
+            self.current_clients = [{
+                "id": client_uuid,
+                "flow": "xtls-rprx-vision",
+                "email": "admin@local.host"
+            }]
+        else:
+            # 集群模式未获主控准入同步前不注入任何默认兜底 UUID，仅监听端口等待 Hub 拨测与授权同步
+            self.current_clients = []
+
         initial_cfg = build_xray_config(
             net_mode=self.net_mode,
-            clients=default_clients,
+            clients=self.current_clients,
             private_key=self.xray_mgr.private_key,
             short_id=self.xray_mgr.short_id,
             port=AppConfig.PORT,
@@ -122,6 +134,7 @@ ShortId: {self.xray_mgr.short_id}
     async def sync_loop(self):
         """定期心跳、接收 Hub 拨测裁决与策略同步、回传流量"""
         while self.is_running:
+            sleep_sec = 60
             try:
                 # 1. 采集本地 Xray 进程与监听端口真实健康度，连同双栈 IP 上报 Hub
                 _, local_health = evaluate_health(self)
@@ -137,7 +150,17 @@ ShortId: {self.xray_mgr.short_id}
                     health=local_health,
                 )
 
-                if hb_data and hb_data.get("network_detection"):
+                if not ok or not isinstance(hb_data, dict):
+                    err_detail = self.hub_client.last_error or "网络超时或主控不可达"
+                    print(
+                        f"[HubSync] ⚠️ 无法连接主控 Hub ({AppConfig.PANEL_URL}): {err_detail}，将在 30 秒后重试...",
+                        flush=True,
+                    )
+                    self._hub_state = "unreachable"
+                    await asyncio.sleep(30)
+                    continue
+
+                if hb_data.get("network_detection"):
                     det = hb_data["network_detection"]
                     print(
                         f"[HubProbe] 🌐 Hub 拨测完成: {det.get('network_mode')} "
@@ -145,6 +168,61 @@ ShortId: {self.xray_mgr.short_id}
                         f"推荐端点={det.get('recommended_endpoint') or '反向隧道'})",
                         flush=True
                     )
+
+                hb_code = int(hb_data.get("code") or 200)
+                hb_msg = str(hb_data.get("msg") or "").strip()
+
+                if self.hub_client.is_pending_approval_response(hb_data):
+                    if not hb_data.get("tofu_assigned_key"):
+                        print(
+                            f"[HubSync] ⏳ 节点等待管理员审批上线（{hb_msg or '已进入待审隔离区'}），"
+                            "请前往主控面板「节点管理 → 待审批节点隔离区」审批通过（30 秒后复查）...",
+                            flush=True,
+                        )
+                    self._hub_state = "pending"
+                    self._stop_tunnel_worker()
+                    if self.current_clients:
+                        self.current_clients = []
+                        empty_cfg = build_xray_config(
+                            net_mode=self.net_mode,
+                            clients=[],
+                            private_key=self.xray_mgr.private_key,
+                            short_id=self.xray_mgr.short_id,
+                            port=AppConfig.PORT,
+                            dest=AppConfig.DEST,
+                            server_names=AppConfig.get_server_name_list(),
+                            is_standalone=False,
+                        )
+                        self.xray_mgr.apply_config(empty_cfg)
+                    await asyncio.sleep(30)
+                    continue
+
+                if hb_code != 200:
+                    print(
+                        f"[HubSync] ❌ 主控拒绝接入 (HTTP {hb_code}): {hb_msg or '认证未通过'}，将在 60 秒后重试...",
+                        flush=True,
+                    )
+                    self._hub_state = "rejected"
+                    self._stop_tunnel_worker()
+                    if self.current_clients:
+                        self.current_clients = []
+                        empty_cfg = build_xray_config(
+                            net_mode=self.net_mode,
+                            clients=[],
+                            private_key=self.xray_mgr.private_key,
+                            short_id=self.xray_mgr.short_id,
+                            port=AppConfig.PORT,
+                            dest=AppConfig.DEST,
+                            server_names=AppConfig.get_server_name_list(),
+                            is_standalone=False,
+                        )
+                        self.xray_mgr.apply_config(empty_cfg)
+                    await asyncio.sleep(60)
+                    continue
+
+                if self._hub_state in ("pending", "rejected"):
+                    print("[HubSync] ✅ 管理员审批已通过！节点正式接入集群并开始同步授权用户。", flush=True)
+                self._hub_state = "approved"
 
                 # 2. 拉取最新授权用户与主控权威策略
                 sync_data = self.hub_client.fetch_users_and_policy()
@@ -211,10 +289,10 @@ ShortId: {self.xray_mgr.short_id}
                 # 3. 统计增量流量回传结算
                 self.hub_client.query_and_report_traffic()
 
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"[HubSync] ⚠️ 同步循环异常: {e}", flush=True)
 
-            await asyncio.sleep(60)
+            await asyncio.sleep(sleep_sec)
 
     async def watchdog_loop(self):
         """秒级看门狗轮询"""

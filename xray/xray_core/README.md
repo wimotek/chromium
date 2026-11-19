@@ -1,8 +1,167 @@
 # Xray-core 极简边缘代理套件 (非 Root 多阶段构建 & 双模自适应)
 
-这是一个工业级、轻量化、开箱即用的 Xray 边缘节点容器镜像。采用 **Alpine 三阶段极简构建**、**非 Root 最低特权运行（UID/GID `10001`）** 与 **dumb-init 完整信号链守护**，支持 **公网直连 (VLESS-REALITY-Vision)** 与 **NAT4 / 无公网入口 (WSS 反向打洞穿透)** 双模式运行。
+这是一个工业级、轻量化、开箱即用的 Xray-core 边缘节点容器镜像。
 
-底层彻底抛弃脆弱的 Shell 脚本编排，采用纯 Python 标准库异步架构（`python3 -m app`）进行看门狗自愈与配置热加载。
+- **Docker Hub**: `wimotek/xray:latest`
+- **GHCR**: `ghcr.io/wimotek/xray:latest`
+- **支持架构**: `linux/amd64`、`linux/arm64`
+
+采用 **Alpine 三阶段极简构建**、**非 Root 最低特权运行（UID/GID `10001`）** 与 **`dumb-init` 完整信号链守护**，支持 **公网直连 (VLESS-REALITY-Vision)** 与 **NAT4 / 无公网入口 (WSS 反向打洞穿透)** 双模式运行；底层彻底抛弃 Shell 编排，采用纯 Python 标准库异步架构（`python3 -m app`）进行看门狗自愈与配置热加载。
+
+---
+
+## 🚀 快速部署（Docker Run & Docker Compose）
+
+> **部署前必做**：容器以非 Root 用户 `appuser`（UID/GID `10001`）运行，挂载宿主机目录前必须先授权 `10001:10001`（改用 Docker 命名卷 `-v xray_node_data:/data` 时可免 `chown`），并在防火墙/安全组放行 **`443/TCP`**。
+
+### 方式 1：纯单机一键启动（无需 Hub 控制中心）
+
+不填写 `PANEL_URL` 即可自动生成 X25519 密钥对、`ShortId`、`config.json`，并将完整客户端配置与 `vless://` 导入链接输出至日志和 `./data/client_info.txt`。
+
+#### 1) Docker Run 单机一键启动
+
+```bash
+# 1. 创建并授权持久化数据目录 (非 root UID 10001 必需)
+mkdir -p ./data && chown -R 10001:10001 ./data
+
+# 2. 生成随机客户端 UUID 并启动纯单机 VLESS-REALITY 节点（其余参数均已内置默认值）
+docker run -d \
+  --name xray-standalone \
+  --restart unless-stopped \
+  --network host \
+  -e UUID="$(cat /proc/sys/kernel/random/uuid)" \
+  -v $(pwd)/data:/data \
+  wimotek/xray:latest
+```
+
+> 提示：若系统无 `/proc/sys/kernel/random/uuid`，可替换为 `uuidgen` 或任意标准 UUIDv4；如需使用 GHCR 镜像，替换为 `ghcr.io/wimotek/xray:latest`；无法使用 `--network host` 时改为 `-p 443:443/tcp`。
+
+#### 2) Docker Compose 单机配置 (`docker-compose.yml`)
+
+```yaml
+services:
+  xray-standalone:
+    image: wimotek/xray:latest
+    # 可选：改用 GHCR 镜像 ghcr.io/wimotek/xray:latest
+    container_name: xray-standalone
+    restart: unless-stopped
+    # 推荐 host 模式：开箱支持 IPv4/IPv6 双栈
+    network_mode: "host"
+    # 可选：若改用桥接端口映射，请注释上方 network_mode 并取消下方 ports 注释
+    # ports:
+    #   - "443:443/tcp"
+    environment:
+      # 不填写 PANEL_URL 即自动进入纯单机模式；只需指定随机 UUID
+      - UUID=请替换为随机UUIDv4
+      # --- 以下均为可选参数（已内置默认值，按需取消注释覆写） ---
+      # - TZ=Asia/Shanghai                             # 默认 Asia/Shanghai
+      # - SERVER_IP=你的公网IP或域名                     # NAT 后或无法自动探测公网 IP 时指定
+      # - SERVER_IPV6=你的公网IPv6                       # 默认自动探测
+      # - PORT=443                                     # 默认 443
+      # - DEST=www.microsoft.com:443                   # 默认 www.microsoft.com:443
+      # - SERVER_NAMES=www.microsoft.com,microsoft.com # 默认 www.microsoft.com,microsoft.com
+      # - HEALTH_PORT=10087                            # 默认 10087（回环 /healthz，0 禁用）
+    volumes:
+      - ./data:/data
+```
+
+#### 3) 获取客户端导入链接
+
+启动数秒后，直接复制 `vless://` 链接导入 **v2rayN / Clash Verge / Sing-box / Shadowrocket**：
+
+```bash
+# 查看容器日志中的 vless:// 链接
+docker logs xray-standalone
+
+# 或直接读取持久化摘要文件
+cat ./data/client_info.txt
+```
+
+---
+
+### 方式 2：Docker Run 接入 Hub 主控集群
+
+```bash
+# 1. 创建并授权持久化数据目录 (非 root UID 10001 必需)
+mkdir -p ./data && chown -R 10001:10001 ./data
+
+# 2. 启动边缘节点接入 Hub（其余均为内置默认值的可选参数，按需追加 -e 覆写）
+docker run -d \
+  --name xray-node \
+  --restart unless-stopped \
+  --network host \
+  -e PANEL_URL="https://<主控服务器IP或域名>:8443" \
+  -e CLUSTER_TOKEN="xray_cluster_secret_key_2026" \
+  -v $(pwd)/data:/data \
+  wimotek/xray:latest
+```
+
+> 可选扩展：
+> - 若公网 443 端口被运营商/防火墙封锁，可追加 `-e NET_MODE="reverse_wss"` 强制启用 WSS 反向穿透（也可在 Web 后台一键热切换）；
+> - 如需改用桥接模式，去掉 `--network host` 并加 `-p 443:443/tcp`。
+
+---
+
+### 方式 3：Docker Compose 接入 Hub 主控集群
+
+```bash
+mkdir -p ./data && chown -R 10001:10001 ./data
+```
+
+创建 `docker-compose.yml`（仓库同目录已内置现成模板；所有可选参数默认以 `#` 注释，按需取消注释即可）：
+
+```yaml
+services:
+  xray:
+    image: wimotek/xray:latest
+    # 可选：改用 GHCR 镜像 ghcr.io/wimotek/xray:latest
+    container_name: xray-node
+    restart: unless-stopped
+    # 推荐 host 模式：开箱支持 IPv4/IPv6 双栈
+    network_mode: "host"
+    # 可选：若改用桥接端口映射，请注释上方 network_mode 并取消下方 ports 注释
+    # ports:
+    #   - "443:443/tcp"
+    environment:
+      # --- 必填：接入 Hub 控制中心（留空 PANEL_URL 即进入纯单机模式） ---
+      - PANEL_URL=https://<主控服务器IP或域名>:8443
+      - CLUSTER_TOKEN=xray_cluster_secret_key_2026
+      # --- 以下均为可选参数（已内置默认值，按需取消注释覆写） ---
+      # - TZ=Asia/Shanghai                             # 默认 Asia/Shanghai
+      # - NET_MODE=auto                                # 默认 auto（Hub 拨测裁决），可选 direct / reverse_wss
+      # - EDGE_AGENT_REVERSE_TUNNEL=true               # 可选布尔覆写：强制开启反穿
+      # - SERVER_IP=你的公网IP或域名                     # 默认自动探测
+      # - SERVER_IPV6=你的公网IPv6                       # 默认自动探测
+      # - PORT=443                                     # 默认 443
+      # - DEST=www.microsoft.com:443                   # 默认 www.microsoft.com:443
+      # - SERVER_NAMES=www.microsoft.com,microsoft.com # 默认 www.microsoft.com,microsoft.com
+      # - LOCAL_BRIDGE_PORT=10086                      # 默认 10086（同机多实例避让）
+      # - STATS_PORT=10085                             # 默认 10085（同机多实例避让）
+      # - HEALTH_PORT=10087                            # 默认 10087（同机多实例避让，0 禁用）
+    volumes:
+      - ./data:/data
+```
+
+启动并查看日志：
+
+```bash
+docker compose up -d && docker compose logs -f xray
+```
+
+---
+
+### 常用运维命令
+
+```bash
+# 更新镜像并无感重建（Docker Compose）
+docker compose pull && docker compose up -d
+
+# 查看实时日志
+docker logs -f --tail 100 xray-node
+
+# 查看容器健康检查状态（探针检测 127.0.0.1:10087/healthz）
+docker inspect --format='{{.State.Health.Status}}' xray-node
+```
 
 ---
 
@@ -31,164 +190,26 @@
 
 ---
 
-## ⚠️ 宿主机目录挂载权限要求（必读）
+## ⚠️ 宿主机目录权限与低端口注意事项
 
-由于镜像已切换为 **非 Root 用户 `appuser`（UID `10001` / GID `10001`）** 运行，若直接挂载宿主机本地目录（如 `-v $(pwd)/data:/data`），Docker 在宿主机目录不存在时会自动以 `root:root (0:0)` 权限创建该目录，导致容器启动时出现 `PermissionError: [Errno 13] Permission denied: '/data/...'` 写入失败！
-
-请在启动容器前，**务必按以下任一方式处理持久化目录权限**：
-
-### 方式 A：宿主机目录绑定挂载（推荐生产使用，提前授权 UID `10001`）
+### 1. 宿主机目录挂载权限（非 Root UID `10001` 必需）
+若直接挂载宿主机本地目录（如 `-v $(pwd)/data:/data`），Docker 自动创建的目录属主为 `root:root`，会导致容器报 `PermissionError`。请提前执行：
 
 ```bash
 mkdir -p ./data
 chown -R 10001:10001 ./data
 ```
 
-> **提示**：如从旧版 `root` 容器升级迁移，原 `./data` 下的 `config.json`、`node_key.txt`、`public_key.txt` 等文件归属为 `root`，升级启动前同样需执行一次 `chown -R 10001:10001 ./data`。
+> 从旧版 `root` 容器升级迁移时同样需执行一次 `chown -R 10001:10001 ./data`；若改用 Docker 命名卷（`-v xray_node_data:/data`），首次初始化会自动继承 `10001:10001` 属主。
 
-### 方式 B：使用 Docker 命名卷（自动继承镜像内权限）
-
-Docker 命名卷在首次初始化时会自动拷贝镜像内 `/data` 的 `10001:10001` 属主与 `775` 权限，无需手动 `chown`：
-
-```bash
--v xray_node_data:/data
-```
-
-### 关于非 Root 绑定 443 端口的宿主机注意事项
-
-镜像已对 `/usr/bin/xray` 写入文件级权能 `cap_net_bind_service=+ep`，绝大多数标准 Docker 环境可直接绑定 `443` 端口。若遇到以下特殊宿主环境：
-1. **切勿添加 `--security-opt=no-new-privileges:true`**：该安全参数会屏蔽二进制文件上的 `setcap` 权能提权，导致 Xray 无法绑定 443 端口；
-2. 若在部分精简内核 / LXC / 无特权容器环境导致文件 `xattr` 权能失效，可任选其一解决：
-   - 在启动参数中显式保留权能并放宽内核非特权端口起点：
-     `--sysctl net.ipv4.ip_unprivileged_port_start=0`（注意 `--network host` 模式下需在宿主机执行 `sysctl -w net.ipv4.ip_unprivileged_port_start=0`）；
-   - 或改用高位端口 `-e PORT=8443` 配合宿主机防火墙/网关转发。
-
----
-
-## 🚀 快速启动
-
-### 方式 1：Docker Run 单条命令接入主控集群（推荐）
-
-```bash
-# 1. 创建并授权持久化数据目录 (非 root UID 10001 必需)
-mkdir -p ./data && chown -R 10001:10001 ./data
-
-# 2. 启动边缘节点容器
-docker run -d \
-  --name xray-node \
-  --restart always \
-  --network host \
-  -e TZ="Asia/Shanghai" \
-  -e PANEL_URL="https://<主控服务器IP>:8443" \
-  -e CLUSTER_TOKEN="xray_cluster_secret_key_2026" \
-  -e NET_MODE="auto" \
-  -e PORT=443 \
-  -e DEST="www.microsoft.com:443" \
-  -e SERVER_NAMES="www.microsoft.com,microsoft.com" \
-  -v $(pwd)/data:/data \
-  ghcr.io/wimotek/xray:latest
-```
-
-### 方式 2：使用 Docker Compose 启动
-
-先在宿主机执行权限初始化：
-```bash
-mkdir -p ./data && chown -R 10001:10001 ./data
-```
-
-创建 `docker-compose.yml`：
-
-```yaml
-services:
-  xray:
-    image: ghcr.io/wimotek/xray:latest
-    container_name: xray-node
-    restart: unless-stopped
-    network_mode: "host"
-    environment:
-      - TZ=Asia/Shanghai
-      - PANEL_URL=https://<主控服务器IP>:8443      # 留空则进入纯单机模式
-      - CLUSTER_TOKEN=xray_cluster_secret_key_2026 # 集群引导令牌或单次 Join Token
-      - NET_MODE=auto                              # auto / direct / reverse_wss
-      - PORT=443
-      - DEST=www.microsoft.com:443
-      - SERVER_NAMES=www.microsoft.com,microsoft.com
-    volumes:
-      - ./data:/data
-```
-
-启动命令：
-```bash
-docker compose up -d
-```
-
-### 方式 3：公网 IP 但 443 端口被运营商/防火墙封锁（强制反穿）
-
-若主机拥有公网 IP（如国内家宽公网动态 IP），但运营商封锁了入站 80/443 端口，请显式强制启用反穿：
-```bash
--e NET_MODE="reverse_wss"
-```
-或直接在 Web 控制面板后台为该节点切换模式，节点下次心跳将自动热切换拉起反穿隧道。
-
-### 方式 4：纯单机部署示例（不连 Hub 控制中心）
-
-无需部署 `xray_web` 主控端，不填写 `PANEL_URL` 即可进入纯单机模式（自动生成 X25519 密钥对、`ShortId`、`config.json`，并将完整客户端配置与 `vless://` 导入链接输出到控制台日志及 `./data/client_info.txt`）。
-
-#### 1) Docker Run 单机一键启动
-
-```bash
-# 1. 创建并授权持久化数据目录 (非 root UID 10001 必需)
-mkdir -p ./data && chown -R 10001:10001 ./data
-
-# 2. 生成随机客户端 UUID 并启动纯单机 VLESS-REALITY 节点
-docker run -d \
-  --name xray-standalone \
-  --restart always \
-  --network host \
-  -e TZ="Asia/Shanghai" \
-  -e UUID="$(cat /proc/sys/kernel/random/uuid)" \
-  -e PORT=443 \
-  -e DEST="www.microsoft.com:443" \
-  -e SERVER_NAMES="www.microsoft.com,microsoft.com" \
-  -v $(pwd)/data:/data \
-  ghcr.io/wimotek/xray:latest
-```
-
-> **提示**：若宿主机系统无 `/proc/sys/kernel/random/uuid`，可替换为 `uuidgen` 或任意标准 UUIDv4；若未指定 `UUID`，默认使用 `11111111-2222-3333-4444-555555555555`（生产单机使用**强烈建议自定义随机 UUID**）。
-
-#### 2) Docker Compose 单机配置 (`docker-compose.yml`)
-
-```yaml
-services:
-  xray-standalone:
-    image: ghcr.io/wimotek/xray:latest
-    container_name: xray-standalone
-    restart: unless-stopped
-    network_mode: "host"
-    environment:
-      - TZ=Asia/Shanghai
-      # 不配置 PANEL_URL 即自动开启纯单机模式
-      - UUID=请替换为随机UUIDv4
-      - PORT=443
-      - DEST=www.microsoft.com:443
-      - SERVER_NAMES=www.microsoft.com,microsoft.com
-      # 若机器在 NAT 后或无法自动探测公网 IP，可手动指定对外连接地址：
-      # - SERVER_IP=你的公网IP或域名
-    volumes:
-      - ./data:/data
-```
-
-#### 3) 获取客户端导入链接与节点凭据
-
-启动数秒后，通过日志或持久化文件即可直接复制 `vless://` 链接导入 **v2rayN / Clash Verge / Sing-box / Shadowrocket**：
-
-```bash
-# 方式一：查看容器实时输出的配置信息与 vless:// 链接
-docker logs xray-standalone
-
-# 方式二：直接读取持久化目录生成的配置摘要
-cat ./data/client_info.txt
-```
+### 2. 非 Root 绑定 443 低端口注意事项
+镜像已对 `/usr/bin/xray` 写入文件级权能 `cap_net_bind_service=+ep`，绝大多数标准 Docker 环境可直接绑定 `443` 端口：
+1. **切勿添加 `--security-opt=no-new-privileges:true`**，该选项会屏蔽二进制文件上的 `setcap` 权能提权，导致无法绑定 `443`；
+2. 若在极少数 LXC / 精简宿主机内核下 `xattr` 权能不生效，可在宿主机执行：
+   ```bash
+   sudo sysctl -w net.ipv4.ip_unprivileged_port_start=0
+   ```
+   或改用高位端口（如 `-e PORT=8443`）。
 
 ---
 
@@ -203,9 +224,11 @@ cat ./data/client_info.txt
 | `EDGE_AGENT_REVERSE_TUNNEL` | *(空)* | 可选布尔覆写：`true` 强制反穿 |
 | `SERVER_IP` / `SERVER_IPV6` | *(自动探测)* | 手动指定节点对外汇报的 IPv4 / IPv6 地址（覆盖外部 IP 探测与 `/proc/net/if_inet6` 采集） |
 | `PORT` | `443` | 节点直连监听端口（反穿模式下对外端口由 Hub 代理接管） |
-| `HEALTH_PORT` | `10087` | 仅绑定回环 `127.0.0.1` 的本地 `/healthz` 健康检查端口（设为 `0` 禁用，Docker `HEALTHCHECK` 自动回退直连探测） |
 | `DEST` | `www.microsoft.com:443` | REALITY 伪装回落目标 |
 | `SERVER_NAMES` | `www.microsoft.com,microsoft.com` | REALITY 伪装 SNI 列表（逗号分隔） |
+| `LOCAL_BRIDGE_PORT` | `10086` | 反穿模式下回环 `127.0.0.1` 的本地桥接端口 |
+| `STATS_PORT` | `10085` | 纯回环 `127.0.0.1` 的 Xray `StatsService` 流量统计端口 |
+| `HEALTH_PORT` | `10087` | 仅绑定回环 `127.0.0.1` 的本地 `/healthz` 健康检查端口（设为 `0` 禁用） |
 | `DATA_DIR` | `/data` | 持久化数据目录，存储 `node_id.txt`、`node_key.txt`、`public_key.txt`、`short_id.txt`、`config.json` |
 | `TZ` | `Asia/Shanghai` | 容器运行期时区（镜像含完整 `/usr/share/zoneinfo`，支持任意标准时区动态切换） |
 

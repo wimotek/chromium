@@ -37,6 +37,7 @@ from routes import (
     get_node_snis,
     is_node_healthy_for_sub,
     is_user_allowed_for_node,
+    pick_node_sni,
     resolve_public_endpoint,
 )
 from routes.admin import admin_bp
@@ -230,8 +231,7 @@ def get_subscription():
     links = []
     for n in allowed_nodes:
         if len(n.get("pbk", "")) == 43:
-            snis = get_node_snis(n)
-            chosen_sni = forced_sni if (forced_sni and forced_sni in snis) else random.choice(snis)
+            chosen_sni = pick_node_sni(n, forced_sni=forced_sni)
             remark = f"{n['name']}"
             links.append(build_node_link(user['uuid'], n, remark, chosen_sni=chosen_sni, hub_domain=hub_host, hub_port=hub_port))
             hy2_link = build_hy2_link(user['uuid'], n, remark)

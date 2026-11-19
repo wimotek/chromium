@@ -42,6 +42,7 @@ def build_singbox_config(
     hy2_masquerade: str = "",
     hy2_up_mbps: int = 0,
     hy2_down_mbps: int = 0,
+    log_level: str = "",
 ) -> Dict[str, Any]:
     """根据运行模式 (direct vs reverse_wss) 组装现代 sing-box JSON 配置"""
     server_names = server_names or ["www.microsoft.com"]
@@ -143,9 +144,13 @@ def build_singbox_config(
         inbounds.append(bridge_inbound)
         stat_inbounds.append("vless-bridge")
 
+    effective_log_level = (log_level or AppConfig.LOG_LEVEL or "warn").strip().lower()
+    if effective_log_level == "warning":
+        effective_log_level = "warn"
+
     config: Dict[str, Any] = {
         "log": {
-            "level": "warn",
+            "level": effective_log_level,
             "timestamp": True,
         },
         "inbounds": inbounds,

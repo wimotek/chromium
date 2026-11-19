@@ -1,0 +1,49 @@
+services:
+  singbox:
+    image: wimotek/sing-box:latest
+    # 可选：改用 GHCR 镜像 ghcr.io/wimotek/sing-box:latest
+    container_name: singbox-node
+    restart: unless-stopped
+    # 方式 A：host 网络模式（推荐，开箱支持 IPv4/IPv6 双栈与原生 UDP 零 NAT 损耗）
+    network_mode: "host"
+    # 方式 B（可选）：若改用桥接端口映射，请注释上方 network_mode 并取消下方 ports 注释（TCP+UDP 必须同时放行）
+    # ports:
+    #   - "443:443/tcp"
+    #   - "443:443/udp"
+    environment:
+      # ==================== 模式 A：纯单机双协议模式（默认启用；无需 Hub，仅需填随机 UUID） ====================
+      - UUID=请替换为随机UUIDv4
+      # ==================== 模式 B（可选）：接入 Hub 主控集群（取消下方两行注释并可注释上方 UUID） ====================
+      # - PANEL_URL=https://<主控服务器IP或域名>:8443
+      # - CLUSTER_TOKEN=xray_cluster_secret_key_2026
+      # ==================== 以下均为可选参数（镜像已内置合理默认值，按需取消注释覆写） ====================
+      # - TZ=Asia/Shanghai                             # 默认 Asia/Shanghai
+      # - LOG_LEVEL=fatal                              # 默认 warn；设为 fatal 可屏蔽外网 REALITY 扫描回落日志
+      # - NET_MODE=auto                                # 默认 auto（Hub 拨测裁决），可选 direct / reverse_wss
+      # - SERVER_IP=你的公网IP或域名                     # 可选：手动指定对外上报 IPv4（默认自动探测）
+      # - SERVER_IPV6=你的公网IPv6                       # 可选：手动指定对外上报 IPv6（默认自动探测）
+      # --- VLESS-REALITY (TCP) 可选参数 ---
+      # - PORT=443                                     # 默认 443
+      # - DEST=www.microsoft.com:443                   # 默认 www.microsoft.com:443
+      # - SERVER_NAMES=www.microsoft.com,microsoft.com # 默认 www.microsoft.com,microsoft.com
+      # --- Hysteria2 (原生 UDP/QUIC) 可选参数 ---
+      # - HY2_ENABLED=true                             # 默认 true（开启双协议）
+      # - HY2_PORT=443                                 # 默认跟随 PORT（443/udp 与 REALITY 443/tcp 共存）
+      # - HY2_SNI=www.bing.com                         # 默认 www.bing.com
+      # - HY2_MASQUERADE=https://www.bing.com          # 默认 https://www.bing.com
+      # - HY2_UP_MBPS=100                              # 默认 0（自动 BBR）；填机房真实带宽启用 Brutal
+      # - HY2_DOWN_MBPS=100                            # 默认 0（自动 BBR）；填机房真实带宽启用 Brutal
+      # --- 自有 CA 证书可选参数（默认自动生成 ECDSA 自签证书） ---
+      # - HY2_CERT_PATH=/certs/fullchain.pem           # 需确保 UID 10001 可读
+      # - HY2_KEY_PATH=/certs/privkey.pem
+      # - HY2_INSECURE=false                           # 自签默认 true；自定义证书默认 false
+      # --- 同机多实例 / 端口冲突避让可选参数 ---
+      # - LOCAL_BRIDGE_PORT=10086                      # 默认 10086（反穿模式回环桥接端口）
+      # - STATS_PORT=10085                             # 默认 10085（回环 v2ray_api 流量统计端口）
+      # - HEALTH_PORT=10087                            # 默认 10087（回环 /healthz 健康检查端口，0 禁用）
+    volumes:
+      # 启动前请先执行: mkdir -p ./data && chown -R 10001:10001 ./data
+      - ./data:/data
+      # 可选：挂载自有 CA 证书
+      # - /path/to/fullchain.pem:/certs/fullchain.pem:ro
+      # - /path/to/privkey.pem:/certs/privkey.pem:ro

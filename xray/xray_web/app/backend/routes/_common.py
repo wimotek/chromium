@@ -319,6 +319,16 @@ def resolve_public_endpoint(req=None) -> tuple[str, int, str]:
     return host, port, base_url
 
 
+def pick_node_sni(node: dict, forced_sni: str = None) -> str:
+    """选择节点下发给客户端的 REALITY SNI：sing-box 仅校验主 server_name（首个 SNI），xray_core 支持多 SNI 随机挑选"""
+    snis = get_node_snis(node)
+    if str(node.get("core_type") or "xray").lower() == "singbox":
+        return snis[0]
+    if forced_sni and forced_sni in snis:
+        return forced_sni
+    return random.choice(snis)
+
+
 def build_node_link(uuid_str: str, node: dict, remark: str, chosen_sni: str = None, hub_domain: str = None, hub_port: int = None) -> str:
     if node.get("net_mode") == "reverse_wss":
         default_p = Config.PUBLIC_PORT if Config.PUBLIC_PORT > 0 else 443
@@ -330,8 +340,7 @@ def build_node_link(uuid_str: str, node: dict, remark: str, chosen_sni: str = No
             f"?security=tls&encryption=none&headerType=none&type=ws&host={hub_host}&path={ws_path}&sni={hub_host}#{urllib.parse.quote(remark + ' [WSS反穿]')}"
         )
 
-    snis = get_node_snis(node)
-    sni = chosen_sni if (chosen_sni and chosen_sni in snis) else random.choice(snis)
+    sni = pick_node_sni(node, forced_sni=chosen_sni)
     clean_sni = sni.split(":")[0]
     raw_host = str(node['ip']).strip()
     formatted_host = f"[{raw_host}]" if (":" in raw_host and not raw_host.startswith("[")) else raw_host

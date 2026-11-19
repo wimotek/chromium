@@ -551,7 +551,19 @@ def test_redis_connection(redis_url: str) -> tuple[bool, str]:
     except Exception as exc:
         err_text = str(exc)
         upper_err = err_text.upper()
-        if "WRONGPASS" in upper_err or "INVALID PASSWORD" in upper_err or "AUTH" in upper_err:
+        if "PROTECTED MODE" in upper_err:
+            return False, (
+                f"Redis 服务端处于保护模式（服务端当前未生效任何密码，且拒绝非 127.0.0.1 外部连接）: {err_text}。"
+                "请在 Redis 服务端确认已实际加载密码（用 redis-cli 执行 CONFIG GET requirepass 检查是否为空；"
+                "若用 Docker 启动请加 --requirepass，宿主机安装请确认 redis-server 加载了含 requirepass 的配置文件并已重启）"
+            )
+        if (
+            "WRONGPASS" in upper_err
+            or "INVALID PASSWORD" in upper_err
+            or "NOAUTH" in upper_err
+            or "ERR AUTH" in upper_err
+            or "ERR CLIENT SENT AUTH" in upper_err
+        ):
             return False, (
                 f"Redis 认证失败: {err_text}（若密码含 # / ! / @，请确认 redis.conf 中 requirepass "
                 "已用双引号包裹，否则 # 后的字符会被 Redis 当作注释截断）"

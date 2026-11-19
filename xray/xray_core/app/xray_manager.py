@@ -155,8 +155,11 @@ class XrayManager:
                 import shutil
                 shutil.move(tmp_write, AppConfig.CONFIG_FILE)
 
-            print("[Xray] ✅ 配置文件更新存盘，平滑重启核心中...", flush=True)
-            self.restart()
+            if self.proc and self.proc.poll() is None:
+                print("[Xray] ✅ 配置文件更新存盘，平滑重启核心中...", flush=True)
+                self.restart()
+            else:
+                print("[Xray] ✅ 配置文件已校验存盘。", flush=True)
             return True
         return False
 
@@ -178,7 +181,7 @@ class XrayManager:
         self.start()
 
     def stop(self):
-        """安全停机"""
+        """安全停机（确保旧进程完全退出释放端口后再返回）"""
         if self.proc and self.proc.poll() is None:
             try:
                 self.proc.send_signal(signal.SIGTERM)
@@ -186,6 +189,7 @@ class XrayManager:
             except Exception:
                 try:
                     self.proc.kill()
+                    self.proc.wait(timeout=3)
                 except Exception:
                     pass
         self.proc = None

@@ -1,0 +1,32 @@
+services:
+  xray:
+    image: wimotek/xray:latest
+    # 可选：改用 GHCR 镜像 ghcr.io/wimotek/xray:latest
+    container_name: xray-node
+    restart: unless-stopped
+    # 方式 A：host 网络模式（推荐，开箱支持 IPv4/IPv6 双栈）
+    network_mode: "host"
+    # 方式 B（可选）：若改用桥接端口映射，请注释上方 network_mode 并取消下方 ports 注释
+    # ports:
+    #   - "443:443/tcp"
+    environment:
+      # ==================== 模式 A：纯单机模式（默认启用；无需 Hub，仅需填随机 UUID） ====================
+      - UUID=请替换为随机UUIDv4
+      # ==================== 模式 B（可选）：接入 Hub 主控集群（取消下方两行注释并可注释上方 UUID） ====================
+      # - PANEL_URL=https://<主控服务器IP或域名>:8443
+      # - CLUSTER_TOKEN=xray_cluster_secret_key_2026
+      # ==================== 以下均为可选参数（镜像已内置合理默认值，按需取消注释覆写） ====================
+      # - TZ=Asia/Shanghai                             # 默认 Asia/Shanghai
+      # - NET_MODE=auto                                # 默认 auto（Hub 拨测裁决），可选 direct / reverse_wss
+      # - EDGE_AGENT_REVERSE_TUNNEL=true               # 可选布尔覆写：强制开启反穿
+      # - SERVER_IP=你的公网IP或域名                     # 默认自动探测
+      # - SERVER_IPV6=你的公网IPv6                       # 默认自动探测
+      # - PORT=443                                     # 默认 443
+      # - DEST=www.microsoft.com:443                   # 默认 www.microsoft.com:443
+      # - SERVER_NAMES=www.microsoft.com,microsoft.com # 默认 www.microsoft.com,microsoft.com
+      # - LOCAL_BRIDGE_PORT=10086                      # 默认 10086（反穿模式回环桥接端口）
+      # - STATS_PORT=10085                             # 默认 10085（回环 StatsService 流量统计端口）
+      # - HEALTH_PORT=10087                            # 默认 10087（回环 /healthz 健康检查端口，0 禁用）
+    volumes:
+      # 启动前请先执行: mkdir -p ./data && chown -R 10001:10001 ./data
+      - ./data:/data

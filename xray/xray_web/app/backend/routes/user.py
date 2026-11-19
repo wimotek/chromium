@@ -28,6 +28,7 @@ from routes import (
     is_node_healthy_for_sub,
     is_user_allowed_for_node,
     normalize_expire_date,
+    pick_node_sni,
     resolve_public_endpoint,
 )
 from services.client_pack_service import ensure_base_v2rayng_apk, generate_windows_package
@@ -64,7 +65,7 @@ def user_refresh_info():
     for n in visible_nodes:
         if len(n.get("pbk", "")) == 43:
             snis = get_node_snis(n)
-            random_sni = random.choice(snis)
+            random_sni = pick_node_sni(n)
             link = build_node_link(
                 user_dict["uuid"],
                 n,
@@ -143,7 +144,7 @@ def user_reset_uuid():
     for n in visible_nodes:
         if len(n.get("pbk", "")) == 43:
             snis = get_node_snis(n)
-            random_sni = random.choice(snis)
+            random_sni = pick_node_sni(n)
             link = build_node_link(
                 new_uuid,
                 n,

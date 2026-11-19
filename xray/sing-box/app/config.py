@@ -13,6 +13,16 @@ def _parse_bool(raw: str, default: bool = True) -> bool:
     return val in ("1", "true", "yes", "on")
 
 
+_VALID_LOG_LEVELS = ("trace", "debug", "info", "warn", "error", "fatal", "panic")
+
+
+def _parse_log_level(raw: str, default: str = "warn") -> str:
+    val = (raw or "").strip().lower()
+    if val == "warning":
+        val = "warn"
+    return val if val in _VALID_LOG_LEVELS else default
+
+
 class AppConfig:
     CORE_TYPE = "singbox"
     DATA_DIR = os.environ.get("DATA_DIR", "/data")
@@ -78,6 +88,9 @@ class AppConfig:
 
     # 网络模式配置: auto / direct / reverse_wss
     NET_MODE = os.environ.get("NET_MODE", "auto").strip().lower()
+
+    # Sing-box 内核日志级别: trace / debug / info / warn / error / fatal / panic（默认 warn；设为 fatal 可静默外网 REALITY 扫描回落日志）
+    LOG_LEVEL = _parse_log_level(os.environ.get("LOG_LEVEL", "warn"), default="warn")
 
     # 证书 Pinning (可选)
     CERT_PIN = os.environ.get("EDGE_AGENT_CERTIFICATE_PIN_SHA256", "").strip() or None

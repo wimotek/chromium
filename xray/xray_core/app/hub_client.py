@@ -25,6 +25,7 @@ class HubClient:
         self.node_id = node_id
         self.node_key = self._load_node_key()
         self.is_bootstrapping = not bool(self.node_key)
+        self.last_error = ""
 
     def _load_node_key(self) -> str:
         if os.path.exists(AppConfig.NODE_KEY_FILE):
@@ -51,15 +52,32 @@ class HubClient:
                 }
             )
             with urllib.request.urlopen(req, timeout=timeout, context=_ssl_unverified_context()) as resp:
+                self.last_error = ""
                 return json.loads(resp.read().decode("utf-8"))
         except urllib.error.HTTPError as e:
+            self.last_error = f"HTTP {e.code}"
             try:
                 body = e.read().decode("utf-8")
-                return json.loads(body)
+                data = json.loads(body)
+                if isinstance(data, dict) and "code" not in data:
+                    data["code"] = e.code
+                return data
             except Exception:
                 return {"code": e.code, "msg": str(e)}
-        except Exception:
+        except Exception as e:
+            self.last_error = str(e)
             return None
+
+    @staticmethod
+    def is_pending_approval_response(resp: Optional[Dict[str, Any]]) -> bool:
+        if not isinstance(resp, dict):
+            return False
+        if resp.get("pending_approval") is True:
+            return True
+        if resp.get("is_approved") == 0 or str(resp.get("is_approved", "")).strip() == "0":
+            return True
+        msg = str(resp.get("msg") or "")
+        return any(k in msg for k in ("隔离拦截", "待审隔离", "待审批", "尚未获得管理员批准"))
 
     def send_heartbeat(
         self,
@@ -120,7 +138,14 @@ class HubClient:
         assigned_key = resp.get("tofu_assigned_key")
         if assigned_key:
             self.save_node_key(assigned_key)
-            print(f"[HubSync] 🎉 TOFU 信任协商成功！已固化专属密钥: {assigned_key[:6]}...{assigned_key[-4:]}", flush=True)
+            if self.is_pending_approval_response(resp):
+                print(
+                    f"[HubSync] ⏳ TOFU 首次建档完成，节点已进入【待审批隔离区】"
+                    f"（已固化节点凭证: {assigned_key[:6]}...{assigned_key[-4:]}），等待管理员在控制面板审批通过...",
+                    flush=True,
+                )
+            else:
+                print(f"[HubSync] 🎉 TOFU 信任协商成功并已准入上线！已固化专属密钥: {assigned_key[:6]}...{assigned_key[-4:]}", flush=True)
 
         new_key = resp.get("new_node_key")
         if new_key:
