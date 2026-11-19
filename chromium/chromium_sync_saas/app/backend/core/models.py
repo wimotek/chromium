@@ -267,6 +267,7 @@ class Node(Base):
     recommended_endpoint = Column(String(255), default="")
     wss_endpoint = Column(String(255), default="")
     edge_wss_secret = Column(String(255), default="")
+    last_ip = Column(String(64), default="")
     ipv4_reachable = Column(Integer, default=0)
     ipv6_reachable = Column(Integer, default=0)
     client_type = Column(String(32), default="desktop")

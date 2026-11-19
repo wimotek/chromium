@@ -54,12 +54,13 @@ data class CookieItem(
 }
 
 data class CookieGuardConfig(
-    val mode: String = "whitelist", // whitelist | blacklist | all | block_export
+    val mode: String = "all", // 三选一：all (默认不限制) | whitelist (白名单，空则全拦截) | blacklist (黑名单)
     val whitelistDomains: List<String> = emptyList(),
     val blacklistDomains: List<String> = DEFAULT_SENSITIVE_BLACKLIST,
     val blockedCookieNames: List<String> = emptyList(),
     val excludeExpired: Boolean = true,
-    val protectInject: Boolean = false
+    val protectInject: Boolean = false,
+    val blockBrowserAccess: Boolean = false
 ) {
     companion object {
         val DEFAULT_SENSITIVE_BLACKLIST = listOf(
@@ -108,6 +109,18 @@ data class FilterStats(
 
 class CookieGuard(val config: CookieGuardConfig) {
 
+    fun isHostAllowedForBrowser(host: String): Boolean {
+        if (!config.blockBrowserAccess) return true
+        val dom = host.trim().lowercase(Locale.ROOT).trimStart('.')
+        if (dom.isEmpty()) return true
+        return when (config.mode) {
+            "whitelist" -> config.whitelistDomains.isNotEmpty() &&
+                config.whitelistDomains.any { matchDomainRule(dom, it) }
+            "blacklist" -> config.blacklistDomains.none { matchDomainRule(dom, it) }
+            else -> true // "all": 不限制
+        }
+    }
+
     fun filterForExport(cookies: List<CookieItem>): Pair<List<CookieItem>, FilterStats> {
         return applyRules(cookies)
     }
@@ -135,21 +148,6 @@ class CookieGuard(val config: CookieGuardConfig) {
         val allowedMap = LinkedHashMap<String, Int>()
         val blockedMap = LinkedHashMap<String, Int>()
 
-        if (config.mode == "block_export") {
-            cookies.forEach { c ->
-                val d = c.domain.trim().lowercase(Locale.ROOT).trimStart('.').ifEmpty { "unknown" }
-                blockedMap[d] = (blockedMap[d] ?: 0) + 1
-            }
-            return emptyList<CookieItem>() to FilterStats(
-                total = cookies.size,
-                allowed = 0,
-                blockedByPolicy = cookies.size,
-                expiredDropped = 0,
-                allowedDomains = emptyMap(),
-                blockedDomains = blockedMap
-            )
-        }
-
         val nowSec = System.currentTimeMillis() / 1000.0
         var blockedCount = 0
         var expiredCount = 0
@@ -164,7 +162,10 @@ class CookieGuard(val config: CookieGuardConfig) {
                 continue
             }
 
-            if (config.blockedCookieNames.isNotEmpty() && config.blockedCookieNames.any { matchWildcard(name.lowercase(Locale.ROOT), it) }) {
+            if (config.mode != "all" &&
+                config.blockedCookieNames.isNotEmpty() &&
+                config.blockedCookieNames.any { matchWildcard(name.lowercase(Locale.ROOT), it) }
+            ) {
                 blockedCount++
                 val key = dom.ifEmpty { "unknown" }
                 blockedMap[key] = (blockedMap[key] ?: 0) + 1
@@ -173,6 +174,7 @@ class CookieGuard(val config: CookieGuardConfig) {
 
             when (config.mode) {
                 "whitelist" -> {
+                    // 选白名单时，白名单为空则全量拦截
                     val ok = config.whitelistDomains.isNotEmpty() &&
                         config.whitelistDomains.any { matchDomainRule(dom, it) }
                     if (!ok) {

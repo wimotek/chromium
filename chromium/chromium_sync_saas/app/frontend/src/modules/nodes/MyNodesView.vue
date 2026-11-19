@@ -83,14 +83,27 @@
             <tbody>
               <tr v-for="n in nodes" :key="n.id">
                 <td>
-                  <div><strong>#{{ n.id }} {{ n.name }}</strong></div>
-                  <div class="muted mono">{{ n.group_name }} · {{ n.client_type || 'desktop' }}</div>
+                  <div class="row" style="gap: 6px">
+                    <strong>#{{ n.id }} {{ n.name }}</strong>
+                    <span v-if="n.is_source === 1" class="tag tag-info">默认源</span>
+                  </div>
+                  <div class="row" style="gap: 6px; margin-top: 4px">
+                    <span class="muted mono">{{ n.group_name }} · {{ n.client_type || 'desktop' }}</span>
+                    <span class="tag" :title="`记录 IP: ${n.last_ip || '未记录'}`">地区: {{ n.share_region || 'Global' }}</span>
+                  </div>
                 </td>
                 <td>
                   <div>
                     <span class="tag tag-info">{{ channelLabel(n.channel_type || n.conn_type) }}</span>
-                    <span class="tag" :class="n.status === 'connected' ? 'tag-ok' : 'tag-warn'" style="margin-left: 4px">{{ n.status }}</span>
+                    <span
+                      class="tag"
+                      :class="n.enabled === 0 ? 'tag-danger' : n.status === 'connected' ? 'tag-ok' : 'tag-warn'"
+                      style="margin-left: 4px"
+                    >
+                      {{ n.enabled === 0 ? '已禁用 (disabled)' : n.status }}
+                    </span>
                     <span class="tag" :class="qualityTagClass(n.quality_grade)" style="margin-left: 4px">{{ n.quality_grade || 'C' }}级</span>
+                    <span v-if="n.api_enabled === 0" class="tag tag-warn" style="margin-left: 4px">API禁用</span>
                   </div>
                   <div class="muted mono" style="font-size: 11px; margin-top: 4px">
                     延迟 {{ n.avg_latency_ms > 0 ? `${n.avg_latency_ms}ms` : '--' }} · 速率 {{ n.avg_speed_kbps || 0 }}KB/s
@@ -125,7 +138,36 @@
                   在线: {{ fmtDuration(n.online_seconds || 0) }} · 已租 {{ fmtDuration(n.total_leased_seconds) }}
                 </td>
                 <td>
-                  <div class="row">
+                  <div class="row" style="gap: 6px">
+                    <button class="btn btn-sm" @click="openEditModal(n)">修改</button>
+                    <button
+                      class="btn btn-sm"
+                      :class="n.enabled === 0 ? 'btn-emerald' : 'btn-warn'"
+                      :disabled="n.enabled !== 0 && n.active_lease_count > 0"
+                      :title="n.enabled !== 0 && n.active_lease_count > 0 ? '节点出租中暂不可禁用' : ''"
+                      @click="toggleEnabled(n)"
+                    >
+                      {{ n.enabled === 0 ? '启用' : '禁用' }}
+                    </button>
+                    <button
+                      class="btn btn-sm"
+                      :disabled="n.client_type === 'android'"
+                      :title="n.client_type === 'android' ? 'Android 节点锁定禁用第三方 API' : '切换第三方 CDP API 开放状态'"
+                      @click="toggleApi(n)"
+                    >
+                      {{ n.api_enabled === 0 ? 'API开' : 'API禁' }}
+                    </button>
+                    <button class="btn btn-sm" @click="toggleSource(n)">
+                      {{ n.is_source === 1 ? '取消源' : '设为源' }}
+                    </button>
+                    <button
+                      class="btn btn-sm"
+                      :disabled="n.active_lease_count > 0"
+                      :title="n.active_lease_count > 0 ? '出租期间禁止查看实时 Cookie 明细' : ''"
+                      @click="openCookieDetails(n)"
+                    >
+                      Cookie
+                    </button>
                     <button
                       v-if="n.client_type === 'android' || n.api_enabled === 0"
                       class="btn btn-sm"
@@ -390,7 +432,20 @@
         </div>
         <div class="grid-2">
           <div class="field"><label>市场展示标题</label><input class="input" v-model="shareForm.share_title" /></div>
-          <div class="field"><label>地区标签</label><input class="input" v-model="shareForm.share_region" /></div>
+          <div class="field">
+            <label>地区标签（支持 geoip.dat 自动识别或手动填写，如 US / HK / JP）</label>
+            <div class="row" style="gap: 6px; flex-wrap: nowrap">
+              <input class="input mono" v-model="shareForm.share_region" style="flex: 1" />
+              <button
+                type="button"
+                class="btn btn-sm"
+                :disabled="geoDetectBusy"
+                @click="detectNodeRegion(shareTarget.id, 'share')"
+              >
+                {{ geoDetectBusy ? '识别中...' : 'GeoIP 识别' }}
+              </button>
+            </div>
+          </div>
           <div class="field">
             <div class="label-with-help">
               <span>卖家底价 · 时租 (元/小时)</span>
@@ -476,6 +531,131 @@
       </div>
     </div>
 
+    <!-- 修改节点配置弹窗 -->
+    <div v-if="editTarget" class="modal-backdrop" @click.self="editTarget = null">
+      <div class="modal-box">
+        <div class="card-title">
+          <span>修改节点配置 · #{{ editTarget.id }} {{ editTarget.name }}</span>
+          <button class="btn btn-sm" @click="editTarget = null">关闭</button>
+        </div>
+        <form @submit.prevent="saveEditNode">
+          <div class="grid-2">
+            <div class="field">
+              <label>节点名称</label>
+              <input class="input" required v-model="editForm.name" />
+            </div>
+            <div class="field">
+              <label>所属分组</label>
+              <input class="input" v-model="editForm.group_name" placeholder="默认分组" />
+            </div>
+            <div class="field">
+              <label>地区标签（GeoIP / 自定义）</label>
+              <div class="row" style="gap: 6px; flex-wrap: nowrap">
+                <input class="input mono" v-model="editForm.share_region" style="flex: 1" placeholder="如 US / HK / JP / Global" />
+                <button
+                  type="button"
+                  class="btn btn-sm"
+                  :disabled="geoDetectBusy"
+                  @click="detectNodeRegion(editTarget.id, 'edit')"
+                >
+                  {{ geoDetectBusy ? '识别中...' : 'GeoIP 识别' }}
+                </button>
+              </div>
+              <div class="muted mono" style="font-size: 11px; margin-top: 4px">
+                记录公网/接入 IP：{{ editTarget.last_ip || '暂未记录' }}
+              </div>
+            </div>
+            <div class="field">
+              <label>节点接入类型（SaaS 纯 WSS 路由，无需本地绑定端口）</label>
+              <input
+                class="input mono"
+                :value="`${channelLabel(editTarget.channel_type || editTarget.conn_type)} · ${editTarget.client_type || 'desktop'}`"
+                readonly
+                disabled
+              />
+            </div>
+          </div>
+
+          <div v-if="['public_wss', 'wss_direct'].includes(editTarget.conn_type)" class="grid-2">
+            <div class="field">
+              <label>公网 WSS 节点端点 (wss_endpoint)</label>
+              <input class="input mono" v-model="editForm.wss_endpoint" placeholder="1.2.3.4:9443 或 domain:9443" />
+            </div>
+            <div class="field">
+              <label>节点边端鉴权密钥 (edge_wss_secret)</label>
+              <input class="input mono" v-model="editForm.edge_wss_secret" placeholder="留空表示不修改或未设密钥" />
+            </div>
+          </div>
+
+          <div class="field">
+            <label class="row" style="cursor: pointer">
+              <input
+                type="checkbox"
+                v-model="editForm.api_enabled"
+                :disabled="editTarget.client_type === 'android'"
+              />
+              <span>
+                开放第三方 CDP API 接入（关闭后仅可作为自有同步节点，不对外提供 /api/v1 及市场出租）
+              </span>
+            </label>
+          </div>
+
+          <div class="row" style="justify-content: flex-end">
+            <button type="button" class="btn" @click="editTarget = null">取消</button>
+            <button type="submit" class="btn btn-primary">保存节点配置</button>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    <!-- Cookie 明细弹窗 -->
+    <div v-if="cookieDetailModal" class="modal-backdrop" @click.self="cookieDetailModal = null">
+      <div class="modal-box modal-box-lg">
+        <div class="card-title">
+          <span>节点实时 Cookie 明细 · {{ cookieDetailModal.node_name }}</span>
+          <button class="btn btn-sm" @click="cookieDetailModal = null">关闭</button>
+        </div>
+        <div class="row" style="margin-bottom: 12px">
+          <span class="tag tag-info">总计 {{ cookieDetailModal.total }}</span>
+          <span class="tag tag-ok">长期有效 {{ cookieDetailModal.valid_count }}</span>
+          <span class="tag">会话级 {{ cookieDetailModal.session_count }}</span>
+          <span class="tag tag-danger">已失效 {{ cookieDetailModal.expired_count }}</span>
+        </div>
+        <div v-if="!cookieDetailModal.cookies || cookieDetailModal.cookies.length === 0" class="muted" style="padding: 16px 0">
+          当前节点浏览器暂无 Cookie 记录（或节点未连接）。
+        </div>
+        <div v-else class="table-wrap" style="max-height: 55vh; overflow-y: auto">
+          <table>
+            <thead>
+              <tr>
+                <th>名称</th>
+                <th>域名 / 路径</th>
+                <th>掩码值</th>
+                <th>状态</th>
+                <th>过期时间</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="(c, idx) in cookieDetailModal.cookies" :key="idx">
+                <td class="mono"><strong>{{ c.name }}</strong></td>
+                <td class="mono muted">{{ c.domain }}{{ c.path }}</td>
+                <td class="mono muted">{{ c.value_masked }}</td>
+                <td>
+                  <span
+                    class="tag"
+                    :class="c.status === 'valid' ? 'tag-ok' : c.status === 'expired' ? 'tag-danger' : 'tag-info'"
+                  >
+                    {{ c.status }}
+                  </span>
+                </td>
+                <td class="mono muted">{{ c.expires_desc }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
     <!-- 二次确认弹窗 -->
     <div v-if="confirmAction" class="modal-backdrop" @click.self="confirmAction = null">
       <div class="modal-box">
@@ -508,6 +688,9 @@ const showPublishGuide = ref(false)
 const nodes = ref([])
 const buyerLeases = ref([])
 const shareTarget = ref(null)
+const editTarget = ref(null)
+const cookieDetailModal = ref(null)
+const geoDetectBusy = ref(false)
 const showPricingHelp = ref(false)
 const confirmAction = ref(null)
 
@@ -744,6 +927,15 @@ const shareForm = reactive({
   max_concurrent_leases: 1,
 })
 
+const editForm = reactive({
+  name: '',
+  group_name: '默认分组',
+  share_region: 'Global',
+  wss_endpoint: '',
+  edge_wss_secret: '',
+  api_enabled: true,
+})
+
 function channelLabel(ch) {
   if (ch === 'public_wss' || ch === 'wss_direct') return '公网WSS直连'
   return 'WSS反向穿透'
@@ -893,6 +1085,98 @@ async function probeNode(id) {
     const res = await apiFetch(`/api/nodes/${id}/probe`, { method: 'POST' })
     emit('notify', res.message)
     await load()
+  } catch (e) {
+    emit('notify', e.message)
+  }
+}
+
+function openEditModal(n) {
+  editTarget.value = n
+  editForm.name = n.name || ''
+  editForm.group_name = n.group_name || '默认分组'
+  editForm.share_region = n.share_region || 'Global'
+  editForm.wss_endpoint = n.wss_endpoint || n.recommended_endpoint || ''
+  editForm.edge_wss_secret = n.edge_wss_secret || ''
+  editForm.api_enabled = n.client_type === 'android' ? false : n.api_enabled !== 0
+}
+
+async function saveEditNode() {
+  if (!editTarget.value) return
+  try {
+    const payload = {
+      name: editForm.name,
+      group_name: editForm.group_name,
+      share_region: editForm.share_region,
+      api_enabled: editTarget.value.client_type === 'android' ? 0 : editForm.api_enabled ? 1 : 0,
+    }
+    if (['public_wss', 'wss_direct'].includes(editTarget.value.conn_type)) {
+      payload.wss_endpoint = editForm.wss_endpoint
+      payload.edge_wss_secret = editForm.edge_wss_secret
+    }
+    const res = await apiFetch(`/api/nodes/${editTarget.value.id}`, {
+      method: 'PUT',
+      body: JSON.stringify(payload),
+    })
+    editTarget.value = null
+    emit('notify', res.message || '节点配置已更新')
+    await load()
+  } catch (e) {
+    emit('notify', e.message)
+  }
+}
+
+async function detectNodeRegion(nodeId, targetForm) {
+  if (geoDetectBusy.value) return
+  geoDetectBusy.value = true
+  try {
+    const res = await apiFetch(`/api/nodes/${nodeId}/detect-region`, { method: 'POST' })
+    if (res.share_region) {
+      if (targetForm === 'edit') editForm.share_region = res.share_region
+      if (targetForm === 'share') shareForm.share_region = res.share_region
+    }
+    emit('notify', res.message || `已识别地区: ${res.share_region}`)
+    await load()
+  } catch (e) {
+    emit('notify', e.message)
+  } finally {
+    geoDetectBusy.value = false
+  }
+}
+
+async function toggleEnabled(n) {
+  try {
+    const res = await apiFetch(`/api/nodes/${n.id}/toggle-enabled`, { method: 'POST' })
+    emit('notify', res.message || '节点状态已更新')
+    await load()
+  } catch (e) {
+    emit('notify', e.message)
+  }
+}
+
+async function toggleApi(n) {
+  try {
+    const res = await apiFetch(`/api/nodes/${n.id}/toggle-api`, { method: 'POST' })
+    emit('notify', res.message || 'API 状态已切换')
+    await load()
+  } catch (e) {
+    emit('notify', e.message)
+  }
+}
+
+async function toggleSource(n) {
+  try {
+    const res = await apiFetch(`/api/nodes/${n.id}/toggle-source`, { method: 'POST' })
+    emit('notify', res.message || '源节点状态已更新')
+    await load()
+  } catch (e) {
+    emit('notify', e.message)
+  }
+}
+
+async function openCookieDetails(n) {
+  try {
+    const res = await apiFetch(`/api/nodes/${n.id}/cookie-details`)
+    cookieDetailModal.value = res
   } catch (e) {
     emit('notify', e.message)
   }

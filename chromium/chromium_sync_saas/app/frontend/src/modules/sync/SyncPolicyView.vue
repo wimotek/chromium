@@ -154,8 +154,8 @@
 
           <div class="field">
             <div class="row" style="justify-content: space-between; margin-bottom: 4px">
-              <label style="margin: 0">域名白名单 (Include Domains，黑名单有内容时自动禁用)</label>
-              <span v-if="isBlacklistActive" class="tag tag-warn">黑名单生效中 · 白名单已锁定</span>
+              <label style="margin: 0">域名白名单 (Include Domains，二选一)</label>
+              <span v-if="isBlacklistActive" class="tag tag-warn">🔒 黑名单有内容时白名单自动禁用</span>
             </div>
             <input
               v-model="cookiePolicy.sync_include_domains"
@@ -163,6 +163,9 @@
               class="input mono"
               placeholder="例如: google.com, x.com（需先清空下方黑名单才生效）"
             />
+            <div class="muted" style="font-size: 12px; margin-top: 5px; line-height: 1.5">
+              <span style="color: #fbbf24; font-weight: 600">⚠️ 二选一规则：</span>如果下方「域名黑名单」有内容，将自动禁用白名单（仅按黑名单排除）；如需使用白名单（仅同步指定域名），请先清空黑名单（支持逗号/分号/换行分隔与 <span class="mono">*.domain.com</span> 通配）。
+            </div>
           </div>
 
           <div class="field">
@@ -172,6 +175,9 @@
               class="input mono"
               placeholder="例如: doubleclick.net, google-analytics.com（留空即可改用白名单）"
             />
+            <div class="muted" style="font-size: 12px; margin-top: 5px">
+              全局自动剔除广告、数据统计类垃圾凭据；留空即可切换为上方白名单模式（同步与清理时均支持 <span class="mono">*.domain.com</span> 通配并触发目标清理）。
+            </div>
           </div>
 
           <div class="subcard" style="margin-bottom: 14px; border-color: rgba(192, 132, 252, 0.35)">
@@ -180,7 +186,7 @@
                 <input type="checkbox" v-model="cookiePolicy.sync_cleanup_enabled" />
                 <span>启用同步时全局 Cookie 删除清理策略（按域名 / 日期 / 关键词）</span>
               </label>
-              <span class="muted" style="font-size: 11px">同步前先剔除再向自有空闲节点清理</span>
+              <span class="muted" style="font-size: 11px">全网合并 / 组对组 / 节点对组 / 一对多 均先剔除再清理源与目标空闲节点</span>
             </div>
 
             <div class="row" style="margin-bottom: 10px; gap: 18px">

@@ -90,6 +90,11 @@ COPY --from=frontend-builder --chown="${PUID}:${PGID}" /build/dist /app/frontend
 COPY --from=backend-builder --chown="${PUID}:${PGID}" /build/backend_bin /app/backend
 COPY --chmod=755 entrypoint.sh /entrypoint.sh
 
+RUN python3 -c "import urllib.request; urls=['https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geoip.dat','https://cdn.jsdelivr.net/gh/Loyalsoldier/v2ray-rules-dat@release/geoip.dat']; [urllib.request.urlretrieve(u, '/app/geoip.dat') for u in urls[:1]]" \
+    || python3 -c "import urllib.request; urllib.request.urlretrieve('https://cdn.jsdelivr.net/gh/Loyalsoldier/v2ray-rules-dat@release/geoip.dat', '/app/geoip.dat')" \
+    || true \
+    && ([ -f /app/geoip.dat ] && chown "${PUID}:${PGID}" /app/geoip.dat || true)
+
 WORKDIR /app/backend
 
 EXPOSE ${HUB_PORT}

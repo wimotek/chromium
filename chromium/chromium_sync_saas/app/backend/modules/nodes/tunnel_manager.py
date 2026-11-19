@@ -408,7 +408,7 @@ class TunnelManager:
         with session_scope() as db:
             node = db.get(Node, node_id)
             if node is not None:
-                node.status = status
+                node.status = "disabled" if node.enabled == 0 else status
                 if cookie_count is not None:
                     node.cookie_count = cookie_count
 

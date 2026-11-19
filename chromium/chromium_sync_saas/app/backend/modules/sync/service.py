@@ -18,6 +18,7 @@ from modules.nodes.cdp_engine import (
     fetch_cookies_native,
     filter_cookies_by_domains,
     inject_cookies_native,
+    parse_rule_terms,
     probe_node_cookies,
     purge_stale_cookies_on_node,
     smart_merge_cookies,
@@ -289,11 +290,8 @@ async def execute_policy_task(policy_id: int, owner_id_guard: Optional[int] = No
     start_ts = time.time()
 
     try:
-        all_enabled_nodes, skipped_leased = _filter_sync_eligible_nodes(raw_enabled_nodes)
-        if not all_enabled_nodes:
-            return
-
         sync_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        all_enabled_nodes, skipped_leased = _filter_sync_eligible_nodes(raw_enabled_nodes)
         log_detail = [f"🚀 [租户 #{owner_id}] 触发策略 [{policy['name']}] (类型: {policy['sync_type']})"]
         if skipped_leased:
             log_detail.append(
@@ -302,13 +300,10 @@ async def execute_policy_task(policy_id: int, owner_id_guard: Optional[int] = No
                 + ")，防止同步污染买家会话或反向吸取买家凭据"
             )
 
+        diff_enabled = get_user_setting(owner_id, "sync_diff_enabled", "1") == "1"
         active_nodes = [n for n in all_enabled_nodes if n.get("status") == "connected"]
-        include_domains = [d.strip() for d in get_user_setting(owner_id, "sync_include_domains", "").split(",") if d.strip()]
-        exclude_domains = [
-            d.strip()
-            for d in get_user_setting(owner_id, "sync_exclude_domains", "doubleclick.net,google-analytics.com").split(",")
-            if d.strip()
-        ]
+        include_domains = parse_rule_terms(get_user_setting(owner_id, "sync_include_domains", ""))
+        exclude_domains = parse_rule_terms(get_user_setting(owner_id, "sync_exclude_domains", "doubleclick.net,google-analytics.com"))
         cleanup_rules = get_tenant_cleanup_rules(owner_id)
 
         source_node_desc = ""
@@ -327,7 +322,11 @@ async def execute_policy_task(policy_id: int, owner_id_guard: Optional[int] = No
             target_nodes_desc = f"自有活跃节点 ({len(active_nodes)} 个)"
 
         try:
-            if policy["sync_type"] == "smart_merge":
+            if not all_enabled_nodes:
+                source_node_desc = "无空闲启用节点"
+                log_detail.append("⚠️ 当前无可用的自有空闲启用节点（可能全部已禁用或正处于市场出租中），本次同步已跳过")
+                status = "SKIPPED"
+            elif policy["sync_type"] == "smart_merge":
                 source_node_desc = "🌟 多主汇聚 (严格限定本租户自有空闲节点)"
                 merge_pool_nodes = scope_targets if policy["target_type"] in ("group", "nodes") else active_nodes
                 if not merge_pool_nodes:
@@ -359,22 +358,28 @@ async def execute_policy_task(policy_id: int, owner_id_guard: Optional[int] = No
                     nodes_to_inject = []
                     total_diff_count = 0
                     for item in node_in_memory_data:
-                        diff_c, skipped = compute_cookie_diff(item["cookies"], golden_pool)
+                        if diff_enabled:
+                            diff_c, skipped = compute_cookie_diff(item["cookies"], golden_pool)
+                        else:
+                            diff_c, skipped = (list(golden_pool), 0)
                         if diff_c:
                             nodes_to_inject.append({"node": item["node"], "diff_cookies": diff_c, "skipped": skipped})
                             total_diff_count += len(diff_c)
 
-                    if total_diff_count == 0 and total_dropped == 0 and cap_trimmed == 0:
+                    if total_diff_count == 0 and total_dropped == 0 and cap_trimmed == 0 and not cleanup_rules.get("enabled"):
                         log_detail.append("⚡ [前置比对无差异] 自有节点已 100% 对齐，跳过写入")
                         status = "NO_CHANGE"
                     else:
-                        log_detail.append(f"✨ 黄金池汇聚 {cookie_count_metric} 条 ({total_diff_count} 项增量待对齐)")
+                        log_detail.append(f"✨ 黄金池汇聚 {cookie_count_metric} 条 ({total_diff_count} 项增量待对齐，过滤/待清理 {total_dropped} 项)")
+                        changed_any = False
                         for item in node_in_memory_data:
                             n = item["node"]
                             match_inject = next((x for x in nodes_to_inject if x["node"]["id"] == n["id"]), None)
                             t_host = _resolve_node_target_host(n)
-                            if match_inject or cleanup_rules.get("enabled") or total_dropped > 0:
-                                await purge_stale_cookies_on_node(
+                            should_purge = bool(match_inject or cleanup_rules.get("enabled") or total_dropped > 0)
+                            purged_cnt = 0
+                            if should_purge:
+                                purged_cnt = await purge_stale_cookies_on_node(
                                     n["local_bind_port"],
                                     t_host,
                                     exclude_domains,
@@ -383,6 +388,7 @@ async def execute_policy_task(policy_id: int, owner_id_guard: Optional[int] = No
                                     pre_fetched_cookies=item.get("raw_cookies"),
                                 )
                             if match_inject:
+                                changed_any = True
                                 await inject_cookies_native(n["local_bind_port"], match_inject["diff_cookies"], t_host, node_id=n["id"])
                                 c_cnt, _ = await probe_node_cookies(n["local_bind_port"], t_host, node_id=n["id"])
                                 with session_scope() as db:
@@ -390,13 +396,27 @@ async def execute_policy_task(policy_id: int, owner_id_guard: Optional[int] = No
                                     if node_obj is not None:
                                         node_obj.cookie_count = c_cnt
                                         node_obj.last_sync = sync_time
-                                log_detail.append(f"-> 节点 [{n['name']}] 写入 {len(match_inject['diff_cookies'])} 项，现存 {c_cnt} 条")
-                        status = "SUCCESS"
+                                purge_info = f"，清理 {purged_cnt} 条" if purged_cnt > 0 else ""
+                                log_detail.append(
+                                    f"-> 节点 [{n['name']}] {'差量' if diff_enabled else '全量'}写入 {len(match_inject['diff_cookies'])} 项 (跳过 {match_inject['skipped']} 项{purge_info})，现存 {c_cnt} 条"
+                                )
+                            elif purged_cnt > 0:
+                                changed_any = True
+                                c_cnt, _ = await probe_node_cookies(n["local_bind_port"], t_host, node_id=n["id"])
+                                with session_scope() as db:
+                                    node_obj = db.get(Node, n["id"])
+                                    if node_obj is not None:
+                                        node_obj.cookie_count = c_cnt
+                                        node_obj.last_sync = sync_time
+                                log_detail.append(f"-> 节点 [{n['name']}] 已按全局删除/黑名单策略清理 {purged_cnt} 条 Cookie，现存 {c_cnt} 条")
+                            else:
+                                log_detail.append(f"-> 节点 [{n['name']}] 凭据已对齐，跳过写入 (现存 {len(item['cookies'])} 条)")
+                        status = "SUCCESS" if changed_any else "NO_CHANGE"
 
             elif policy["sync_type"] == "group_to_group":
                 src_group = policy.get("source_group") or "默认分组"
                 src_active_nodes = [n for n in active_nodes if n.get("group_name") == src_group]
-                source_node_desc = f"🏢 自有源分组 [{src_group}]"
+                source_node_desc = f"🏢 自有源分组 [{src_group}] ({len(src_active_nodes)} 活跃)"
                 if not src_active_nodes:
                     status = "SKIPPED"
                     log_detail.append(f"⚠️ 源分组 [{src_group}] 无在线空闲节点")
@@ -410,19 +430,95 @@ async def execute_policy_task(policy_id: int, owner_id_guard: Optional[int] = No
                         for r in fetched_results
                         if isinstance(r, list)
                     ]
+
+                    src_purged_any = False
+                    if cleanup_rules.get("enabled"):
+                        for idx, sn in enumerate(src_active_nodes):
+                            raw_sn = (
+                                fetched_results[idx]
+                                if idx < len(fetched_results) and isinstance(fetched_results[idx], list)
+                                else None
+                            )
+                            s_host = _resolve_node_target_host(sn)
+                            src_purged = await purge_stale_cookies_on_node(
+                                sn["local_bind_port"],
+                                s_host,
+                                exclude_domains,
+                                node_id=sn["id"],
+                                cleanup_rules=cleanup_rules,
+                                pre_fetched_cookies=raw_sn,
+                            )
+                            if src_purged > 0:
+                                src_purged_any = True
+                                s_cnt, _ = await probe_node_cookies(sn["local_bind_port"], s_host, node_id=sn["id"])
+                                with session_scope() as db:
+                                    s_obj = db.get(Node, sn["id"])
+                                    if s_obj is not None:
+                                        s_obj.cookie_count = s_cnt
+                                        s_obj.last_sync = sync_time
+                                log_detail.append(f"-> 源节点 [{sn['name']}] 已按全局删除策略清理 {src_purged} 条，现存 {s_cnt} 条")
+
                     group_cookies, _ = smart_merge_cookies(valid_lists, max_per_domain=50)
                     cookie_count_metric = len(group_cookies)
                     dest_nodes = [n for n in scope_targets if n not in src_active_nodes]
-                    injected_any = False
-                    for target in dest_nodes:
-                        t_host = _resolve_node_target_host(target)
-                        curr_c = await fetch_cookies_native(target["local_bind_port"], t_host, node_id=target["id"])
-                        diff_c, _ = compute_cookie_diff(curr_c, group_cookies)
-                        if diff_c:
-                            injected_any = True
-                            await inject_cookies_native(target["local_bind_port"], diff_c, t_host, node_id=target["id"])
-                            log_detail.append(f"-> 目标 [{target['name']}] 写入 {len(diff_c)} 项")
-                    status = "SUCCESS" if injected_any else "NO_CHANGE"
+                    if not dest_nodes:
+                        if src_purged_any:
+                            status = "SUCCESS"
+                        else:
+                            log_detail.append("ℹ️ 目标分组中无在线空闲接收节点")
+                            status = "SKIPPED"
+                    else:
+                        injected_any = src_purged_any
+                        for target in dest_nodes:
+                            t_host = _resolve_node_target_host(target)
+                            curr_c = await fetch_cookies_native(target["local_bind_port"], t_host, node_id=target["id"])
+                            purged_cnt = 0
+                            if cleanup_rules.get("enabled"):
+                                purged_cnt = await purge_stale_cookies_on_node(
+                                    target["local_bind_port"],
+                                    t_host,
+                                    exclude_domains,
+                                    node_id=target["id"],
+                                    cleanup_rules=cleanup_rules,
+                                    pre_fetched_cookies=curr_c,
+                                )
+                            if diff_enabled:
+                                diff_c, _ = compute_cookie_diff(curr_c, group_cookies)
+                            else:
+                                diff_c = list(group_cookies)
+
+                            if diff_c:
+                                injected_any = True
+                                if not cleanup_rules.get("enabled"):
+                                    purged_cnt = await purge_stale_cookies_on_node(
+                                        target["local_bind_port"],
+                                        t_host,
+                                        exclude_domains,
+                                        node_id=target["id"],
+                                        cleanup_rules=cleanup_rules,
+                                        pre_fetched_cookies=curr_c,
+                                    )
+                                await inject_cookies_native(target["local_bind_port"], diff_c, t_host, node_id=target["id"])
+                                t_cnt, _ = await probe_node_cookies(target["local_bind_port"], t_host, node_id=target["id"])
+                                with session_scope() as db:
+                                    t_obj = db.get(Node, target["id"])
+                                    if t_obj is not None:
+                                        t_obj.cookie_count = t_cnt
+                                        t_obj.last_sync = sync_time
+                                purge_info = f"（清理 {purged_cnt} 条）" if purged_cnt > 0 else ""
+                                log_detail.append(f"-> 目标 [{target['name']}] {'差量' if diff_enabled else '全量'}写入 {len(diff_c)} 项{purge_info}，现存 {t_cnt} 条")
+                            elif purged_cnt > 0:
+                                injected_any = True
+                                t_cnt, _ = await probe_node_cookies(target["local_bind_port"], t_host, node_id=target["id"])
+                                with session_scope() as db:
+                                    t_obj = db.get(Node, target["id"])
+                                    if t_obj is not None:
+                                        t_obj.cookie_count = t_cnt
+                                        t_obj.last_sync = sync_time
+                                log_detail.append(f"-> 目标 [{target['name']}] 已全局清理 {purged_cnt} 条，现存 {t_cnt} 条")
+                            else:
+                                log_detail.append(f"-> 目标 [{target['name']}] 数据完全一致，跳过写入")
+                        status = "SUCCESS" if injected_any else "NO_CHANGE"
 
             else:
                 source = next((n for n in all_enabled_nodes if n["id"] == policy["source_id"]), None)
@@ -436,19 +532,86 @@ async def execute_policy_task(policy_id: int, owner_id_guard: Optional[int] = No
                     source_node_desc = source["name"]
                     src_host = _resolve_node_target_host(source)
                     raw_c = await fetch_cookies_native(source["local_bind_port"], src_host, node_id=source["id"])
+                    src_purged = 0
+                    if cleanup_rules.get("enabled"):
+                        src_purged = await purge_stale_cookies_on_node(
+                            source["local_bind_port"],
+                            src_host,
+                            exclude_domains,
+                            node_id=source["id"],
+                            cleanup_rules=cleanup_rules,
+                            pre_fetched_cookies=raw_c,
+                        )
+                        if src_purged > 0:
+                            s_cnt, _ = await probe_node_cookies(source["local_bind_port"], src_host, node_id=source["id"])
+                            with session_scope() as db:
+                                s_obj = db.get(Node, source["id"])
+                                if s_obj is not None:
+                                    s_obj.cookie_count = s_cnt
+                                    s_obj.last_sync = sync_time
+                            log_detail.append(f"-> 源节点 [{source['name']}] 已按全局删除策略清理 {src_purged} 条 Cookie，现存 {s_cnt} 条")
+
                     cookies, _, _ = filter_cookies_by_domains(raw_c, include_domains, exclude_domains, cleanup_rules=cleanup_rules)
                     cookie_count_metric = len(cookies)
                     dest_nodes = [n for n in scope_targets if n["id"] != source["id"]]
-                    injected_any = False
-                    for target in dest_nodes:
-                        tgt_host = _resolve_node_target_host(target)
-                        curr_c = await fetch_cookies_native(target["local_bind_port"], tgt_host, node_id=target["id"])
-                        diff_c, _ = compute_cookie_diff(curr_c, cookies)
-                        if diff_c:
-                            injected_any = True
-                            await inject_cookies_native(target["local_bind_port"], diff_c, tgt_host, node_id=target["id"])
-                            log_detail.append(f"-> 目标 [{target['name']}] 写入 {len(diff_c)} 项")
-                    status = "SUCCESS" if injected_any else "NO_CHANGE"
+                    if not dest_nodes:
+                        if src_purged > 0:
+                            status = "SUCCESS"
+                        else:
+                            log_detail.append("ℹ️ 目标接收队列中无在线空闲节点")
+                            status = "SKIPPED"
+                    else:
+                        injected_any = src_purged > 0
+                        for target in dest_nodes:
+                            tgt_host = _resolve_node_target_host(target)
+                            curr_c = await fetch_cookies_native(target["local_bind_port"], tgt_host, node_id=target["id"])
+                            purged_cnt = 0
+                            if cleanup_rules.get("enabled"):
+                                purged_cnt = await purge_stale_cookies_on_node(
+                                    target["local_bind_port"],
+                                    tgt_host,
+                                    exclude_domains,
+                                    node_id=target["id"],
+                                    cleanup_rules=cleanup_rules,
+                                    pre_fetched_cookies=curr_c,
+                                )
+                            if diff_enabled:
+                                diff_c, _ = compute_cookie_diff(curr_c, cookies)
+                            else:
+                                diff_c = list(cookies)
+
+                            if diff_c:
+                                injected_any = True
+                                if not cleanup_rules.get("enabled"):
+                                    purged_cnt = await purge_stale_cookies_on_node(
+                                        target["local_bind_port"],
+                                        tgt_host,
+                                        exclude_domains,
+                                        node_id=target["id"],
+                                        cleanup_rules=cleanup_rules,
+                                        pre_fetched_cookies=curr_c,
+                                    )
+                                await inject_cookies_native(target["local_bind_port"], diff_c, tgt_host, node_id=target["id"])
+                                target_count, _ = await probe_node_cookies(target["local_bind_port"], tgt_host, node_id=target["id"])
+                                with session_scope() as db:
+                                    t_obj = db.get(Node, target["id"])
+                                    if t_obj is not None:
+                                        t_obj.cookie_count = target_count
+                                        t_obj.last_sync = sync_time
+                                purge_info = f"（清理 {purged_cnt} 条）" if purged_cnt > 0 else ""
+                                log_detail.append(f"-> 目标 [{target['name']}] {'差量' if diff_enabled else '全量'}写入 {len(diff_c)} 项{purge_info}，现存 {target_count} 条")
+                            elif purged_cnt > 0:
+                                injected_any = True
+                                target_count, _ = await probe_node_cookies(target["local_bind_port"], tgt_host, node_id=target["id"])
+                                with session_scope() as db:
+                                    t_obj = db.get(Node, target["id"])
+                                    if t_obj is not None:
+                                        t_obj.cookie_count = target_count
+                                        t_obj.last_sync = sync_time
+                                log_detail.append(f"-> 目标 [{target['name']}] 已全局清理 {purged_cnt} 条，现存 {target_count} 条")
+                            else:
+                                log_detail.append(f"-> 目标 [{target['name']}] 数据一致，跳过写入")
+                        status = "SUCCESS" if injected_any else "NO_CHANGE"
         except Exception as e:
             status = "FAILED"
             log_detail.append(f"策略执行中断: {e}")

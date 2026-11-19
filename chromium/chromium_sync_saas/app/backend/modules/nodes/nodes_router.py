@@ -44,6 +44,7 @@ from modules.billing.service import (
     resolve_channel_platform_fee_bps,
 )
 from modules.nodes.cdp_engine import fetch_cookies_native, probe_node_cookies, probe_node_with_latency
+from modules.nodes.geoip_service import get_geoip_status, pick_best_public_ip, resolve_node_region
 from modules.nodes.traffic_service import get_live_node_traffic_overlay
 from modules.nodes.tunnel_manager import tunnel_mgr
 from modules.users.level_service import record_node_telemetry_sync
@@ -449,6 +450,8 @@ async def update_node(node_id: int, data: dict, request: Request, user: dict = D
         node.group_name = grp_name
         node.local_bind_port = l_port
         node.api_enabled = api_enabled_val
+        if "share_region" in data and data.get("share_region") is not None:
+            node.share_region = (str(data.get("share_region") or "").strip() or "Global")[:64]
         if orig_node.get("conn_type") in ("public_wss", "wss_direct"):
             if "wss_endpoint" in data and str(data.get("wss_endpoint") or "").strip():
                 node.wss_endpoint = str(data.get("wss_endpoint")).strip()[:255]
@@ -689,6 +692,12 @@ async def http_auto_register_node(
     wss_endpoint_val = rec_ep
     edge_secret_val = (data.edge_wss_secret or "").strip()
     client_type_val = _detect_client_type(request.headers, {"client_type": data.client_type})
+    detected_region, resolved_ip = resolve_node_region([direct_ip, data.public_ipv4, data.public_ipv6, client_ip])
+    best_ip_val = (
+        resolved_ip
+        or pick_best_public_ip([direct_ip, data.public_ipv4, data.public_ipv6, client_ip])
+        or str(direct_ip or client_ip or "")[:64]
+    )
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     # 预先构建票据管理器，避免在 session_scope 内触发 get_setting 嵌套事务
@@ -743,6 +752,9 @@ async def http_auto_register_node(
                     existing.recommended_endpoint = rec_ep
                     existing.wss_endpoint = wss_endpoint_val
                     existing.edge_wss_secret = edge_secret_val
+                    existing.last_ip = best_ip_val
+                    if detected_region and (existing.share_region or "").strip().lower() in ("", "global"):
+                        existing.share_region = detected_region
                     existing.ipv4_reachable = v4_ok
                     existing.ipv6_reachable = v6_ok
                     existing.client_type = client_type_val
@@ -771,6 +783,8 @@ async def http_auto_register_node(
                     recommended_endpoint=rec_ep,
                     wss_endpoint=wss_endpoint_val,
                     edge_wss_secret=edge_secret_val,
+                    last_ip=best_ip_val,
+                    share_region=detected_region or "Global",
                     ipv4_reachable=v4_ok,
                     ipv6_reachable=v6_ok,
                     client_type=client_type_val,
@@ -957,6 +971,12 @@ async def _run_reverse_tunnel_session(
     v4_ok_int = 1 if detection.get("ipv4_reachable") else 0
     v6_ok_int = 1 if detection.get("ipv6_reachable") else 0
     node_name = node_name or f"Edge-{node_uuid[:6]}"
+    detected_region, resolved_ip = resolve_node_region([rec_endpoint, pub_v4, pub_v6, client_ip])
+    best_ip_val = (
+        resolved_ip
+        or pick_best_public_ip([rec_endpoint, pub_v4, pub_v6, client_ip])
+        or str(client_ip or "")[:64]
+    )
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     # 预先构建票据管理器，避免在 session_scope 内嵌套调用 get_setting
@@ -1030,6 +1050,9 @@ async def _run_reverse_tunnel_session(
                         existing_row.fingerprint = node_fp
                         existing_row.network_mode = net_mode
                         existing_row.recommended_endpoint = rec_endpoint
+                        existing_row.last_ip = best_ip_val
+                        if detected_region and (existing_row.share_region or "").strip().lower() in ("", "global"):
+                            existing_row.share_region = detected_region
                         existing_row.ipv4_reachable = v4_ok_int
                         existing_row.ipv6_reachable = v6_ok_int
                         existing_row.client_type = client_type_val
@@ -1058,6 +1081,8 @@ async def _run_reverse_tunnel_session(
                             status="connected",
                             network_mode=net_mode,
                             recommended_endpoint=rec_endpoint,
+                            last_ip=best_ip_val,
+                            share_region=detected_region or "Global",
                             ipv4_reachable=v4_ok_int,
                             ipv6_reachable=v6_ok_int,
                             client_type=client_type_val,
@@ -1313,6 +1338,8 @@ async def toggle_node_enabled(node_id: int, user: dict = Depends(verify_token)):
         row = _get_owned_node_or_404(db, node_id, user)
         curr = row.enabled if row.enabled is not None else 1
         new_val = 0 if curr == 1 else 1
+        if new_val == 0 and int(row.active_lease_count or 0) > 0:
+            raise HTTPException(status_code=409, detail="该节点当前正在市场出租中，请先等待租约结束或由管理员强断后再禁用")
         row.enabled = new_val
         row.status = "disabled" if new_val == 0 else "standby"
         db.flush()
@@ -1324,6 +1351,38 @@ async def toggle_node_enabled(node_id: int, user: dict = Depends(verify_token)):
         ok, start_msg = await tunnel_mgr.start_tunnel(updated)
         msg = f"节点 [{updated['name']}] 已恢复启用: {start_msg}"
     return {"message": msg, "enabled": new_val, "status": updated.get("status")}
+
+
+@router.post("/api/nodes/{node_id}/detect-region", summary="通过 geoip.dat 自动识别节点公网 IP 所属国家/地区")
+def detect_node_region(node_id: int, user: dict = Depends(verify_token)):
+    geo_st = get_geoip_status()
+    if not geo_st.get("loaded"):
+        raise HTTPException(
+            status_code=400,
+            detail="服务器尚未加载 geoip.dat 地理库（请联系管理员在「运营管理台 → 租赁风控与引擎」一键下载，或挂载 /data/geoip.dat）",
+        )
+    with session_scope() as db:
+        row = _get_owned_node_or_404(db, node_id, user)
+        candidates = [row.recommended_endpoint, row.wss_endpoint, row.last_ip]
+        region, detected_ip = resolve_node_region(candidates)
+        if not detected_ip:
+            raise HTTPException(
+                status_code=400,
+                detail="该节点尚未上报可识别的公网 IP（当前仅记录内网或回环地址），请确认节点通过公网（或保留真实客户端 IP 的反代）接入后重试",
+            )
+        if not region:
+            raise HTTPException(
+                status_code=400,
+                detail=f"已在 geoip.dat 查询公网 IP ({detected_ip})，但未匹配到具体国家/地区条目，可手动填写地区标签",
+            )
+        row.last_ip = detected_ip
+        row.share_region = region
+        node_name = row.name
+    return {
+        "share_region": region,
+        "detected_ip": detected_ip,
+        "message": f"节点 [{node_name}] 已通过 geoip.dat 识别地区为 {region}（IP: {detected_ip}）",
+    }
 
 
 @router.post("/api/nodes/{node_id}/toggle-api")

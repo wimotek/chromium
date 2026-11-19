@@ -115,7 +115,12 @@ class NodeConfigStore(context: Context) {
     }
 
     fun loadCookieGuardConfig(): CookieGuardConfig {
-        val mode = prefs.getString("guard_mode", "whitelist") ?: "whitelist"
+        val rawMode = prefs.getString("guard_mode", "all") ?: "all"
+        val mode = when (rawMode) {
+            "whitelist", "blacklist", "all" -> rawMode
+            "block_export" -> "whitelist"
+            else -> "all"
+        }
         val wlRaw = prefs.getString("guard_whitelist", "") ?: ""
         val hasBlSaved = prefs.contains("guard_blacklist")
         val blRaw = if (hasBlSaved) {
@@ -130,7 +135,8 @@ class NodeConfigStore(context: Context) {
             blacklistDomains = CookieGuardConfig.parseRuleList(blRaw),
             blockedCookieNames = CookieGuardConfig.parseRuleList(namesRaw),
             excludeExpired = prefs.getBoolean("guard_exclude_expired", true),
-            protectInject = prefs.getBoolean("guard_protect_inject", false)
+            protectInject = prefs.getBoolean("guard_protect_inject", false),
+            blockBrowserAccess = prefs.getBoolean("guard_block_browser", false)
         )
     }
 
@@ -140,15 +146,18 @@ class NodeConfigStore(context: Context) {
         blacklistRaw: String,
         blockedNamesRaw: String,
         excludeExpired: Boolean,
-        protectInject: Boolean
+        protectInject: Boolean,
+        blockBrowserAccess: Boolean = false
     ) {
+        val normalizedMode = if (mode in setOf("all", "whitelist", "blacklist")) mode else "all"
         prefs.edit()
-            .putString("guard_mode", mode)
+            .putString("guard_mode", normalizedMode)
             .putString("guard_whitelist", whitelistRaw)
             .putString("guard_blacklist", blacklistRaw)
             .putString("guard_blocked_names", blockedNamesRaw)
             .putBoolean("guard_exclude_expired", excludeExpired)
             .putBoolean("guard_protect_inject", protectInject)
+            .putBoolean("guard_block_browser", blockBrowserAccess)
             .apply()
     }
 

@@ -930,9 +930,9 @@
         </div>
       </div>
 
-      <div class="card" v-if="runtimeInfo.db || runtimeInfo.cache">
-        <div class="card-title">基础设施运行引擎状态 (数据库 / Redis 缓存 / 防爆破防刷)</div>
-        <div class="grid-3">
+      <div class="card" v-if="runtimeInfo.db || runtimeInfo.cache || runtimeInfo.geoip">
+        <div class="card-title">基础设施运行引擎状态 (数据库 / Redis 缓存 / 防爆破防刷 / GeoIP 地区库)</div>
+        <div class="grid-2">
           <div class="subcard">
             <div class="kpi-label">关系数据库引擎</div>
             <div class="mono" style="margin-top: 6px; font-weight: 600">{{ runtimeInfo.db?.dialect || 'sqlite' }} · {{ runtimeInfo.db?.status || 'active' }}</div>
@@ -948,6 +948,33 @@
             <div class="kpi-label">防暴力破解 & 限流状态</div>
             <div class="mono muted" style="margin-top: 6px; font-size: 12px">
               活跃黑名单 IP: {{ runtimeInfo.antispam?.blocked_ips ?? 0 }} · 验证码桶: {{ runtimeInfo.antispam?.active_buckets ?? 0 }}
+            </div>
+          </div>
+          <div class="subcard">
+            <div class="row" style="justify-content: space-between">
+              <div class="kpi-label">GeoIP 地区库 (geoip.dat)</div>
+              <span class="tag" :class="runtimeInfo.geoip?.loaded ? 'tag-ok' : 'tag-warn'">
+                {{ runtimeInfo.geoip?.loaded ? '已加载' : '未加载' }}
+              </span>
+            </div>
+            <div class="mono muted" style="margin-top: 6px; font-size: 12px">
+              <template v-if="runtimeInfo.geoip?.loaded">
+                国家/地区 {{ runtimeInfo.geoip?.country_count || 0 }} · IPv4 {{ runtimeInfo.geoip?.ipv4_cidr_count || 0 }} · IPv6 {{ runtimeInfo.geoip?.ipv6_cidr_count || 0 }} ({{ runtimeInfo.geoip?.path }})
+              </template>
+              <template v-else>
+                尚未检测到 geoip.dat（可点击下方在线下载到 /data/geoip.dat 或手动挂载）
+              </template>
+            </div>
+            <div class="row" style="margin-top: 8px">
+              <input
+                class="input mono"
+                style="flex: 1"
+                v-model="geoipUrlInput"
+                placeholder="镜像 URL（留空使用默认 Loyalsoldier geoip.dat）"
+              />
+              <button class="btn btn-sm btn-primary" :disabled="geoipUpdating" @click="updateGeoip">
+                {{ geoipUpdating ? '下载更新中...' : '在线下载/更新' }}
+              </button>
             </div>
           </div>
         </div>
@@ -1158,6 +1185,8 @@ const referralSummary = ref({})
 const referralRewards = ref([])
 const runtimeInfo = ref({})
 const redisUrlInput = ref('')
+const geoipUrlInput = ref('')
+const geoipUpdating = ref(false)
 
 const userSearch = ref('')
 const userRoleFilter = ref('')
@@ -1583,6 +1612,23 @@ async function reloadRedis() {
     await load()
   } catch (e) {
     emit('notify', e.message)
+  }
+}
+
+async function updateGeoip() {
+  if (geoipUpdating.value) return
+  geoipUpdating.value = true
+  try {
+    const res = await apiFetch('/api/admin/geoip/update', {
+      method: 'POST',
+      body: JSON.stringify({ url: geoipUrlInput.value.trim() }),
+    })
+    emit('notify', res.message || 'geoip.dat 已更新加载')
+    await load()
+  } catch (e) {
+    emit('notify', e.message)
+  } finally {
+    geoipUpdating.value = false
   }
 }
 

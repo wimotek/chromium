@@ -382,6 +382,7 @@ def _ensure_schema_migrations(engine):
             "last_monthly_claim_ym": "VARCHAR(16) DEFAULT ''",
         },
         "nodes": {
+            "last_ip": "VARCHAR(64) DEFAULT ''",
             "avg_latency_ms": "INTEGER DEFAULT 0",
             "avg_speed_kbps": "INTEGER DEFAULT 0",
             "online_seconds": "BIGINT DEFAULT 0",

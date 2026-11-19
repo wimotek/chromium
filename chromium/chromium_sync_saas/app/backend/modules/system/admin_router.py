@@ -45,6 +45,7 @@ from modules.billing.service import (
     get_self_reverse_hub_gb_units,
     settle_single_lease_sync,
 )
+from modules.nodes.geoip_service import download_geoip_dat, get_geoip_status
 from modules.nodes.traffic_service import get_traffic_summary
 from modules.nodes.tunnel_manager import tunnel_mgr
 from modules.sync.service import reschedule_all_policies
@@ -157,6 +158,10 @@ class RedisReloadDTO(BaseModel):
     redis_url: str = ""
 
 
+class GeoipUpdateDTO(BaseModel):
+    url: str = ""
+
+
 @router.get("/api/admin/overview", summary="平台总营收、差价抽成、租户与共享节点大盘（Admin）")
 def admin_overview(admin: dict = Depends(require_admin)):
     with session_scope() as db:
@@ -264,6 +269,7 @@ def admin_overview(admin: dict = Depends(require_admin)):
             "db": get_active_db_info(),
             "cache": cache_mgr.get_status(),
             "antispam": get_antispam_stats(),
+            "geoip": get_geoip_status(),
         },
         "recent_leases": recent_leases,
         "traffic": get_traffic_summary(owner_id=None, limit_hours=24),
@@ -1044,3 +1050,36 @@ def admin_reload_cache(data: RedisReloadDTO, admin: dict = Depends(require_admin
     save_bootstrap_config(boot)
     backend = cache_mgr.reload_from_config(new_url)
     return {"message": f"缓存引擎已切换为: {backend}", "cache": cache_mgr.get_status()}
+
+
+@router.get("/api/admin/geoip/status", summary="查看 geoip.dat 地理库加载状态（Admin）")
+def admin_geoip_status(admin: dict = Depends(require_admin)):
+    return get_geoip_status()
+
+
+@router.post("/api/admin/geoip/update", summary="从镜像源在线下载并热更新 geoip.dat（Admin）")
+def admin_geoip_update(data: GeoipUpdateDTO, request: Request, admin: dict = Depends(require_admin)):
+    try:
+        status = download_geoip_dat(custom_url=data.url or None)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+
+    write_audit_log(
+        action="admin_geoip_update",
+        actor_id=admin["id"],
+        actor_username=admin["username"],
+        target_type="system",
+        target_id="geoip_dat",
+        ip=get_client_ip(request),
+        status="ok",
+        details={
+            "path": status.get("path"),
+            "country_count": status.get("country_count"),
+            "ipv4_cidr_count": status.get("ipv4_cidr_count"),
+            "ipv6_cidr_count": status.get("ipv6_cidr_count"),
+        },
+    )
+    return {
+        "message": f"geoip.dat 已更新并加载（{status.get('country_count', 0)} 个国家/地区，{status.get('ipv4_cidr_count', 0)} IPv4 CIDR）",
+        "geoip": status,
+    }

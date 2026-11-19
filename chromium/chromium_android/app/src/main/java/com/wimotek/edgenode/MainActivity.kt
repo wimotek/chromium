@@ -77,6 +77,7 @@ import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
@@ -94,6 +95,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
@@ -250,6 +252,13 @@ fun BrowserTab(store: NodeConfigStore, visible: Boolean) {
             trimmed.startsWith("http://") || trimmed.startsWith("https://") -> trimmed
             trimmed.contains(".") && !trimmed.contains(" ") -> "https://$trimmed"
             else -> "https://www.bing.com/search?q=${Uri.encode(trimmed)}"
+        }
+        val guardCfg = store.loadCookieGuardConfig()
+        val host = runCatching { Uri.parse(target).host }.getOrNull() ?: ""
+        if (host.isNotEmpty() && !CookieGuard(guardCfg).isHostAllowedForBrowser(host)) {
+            Toast.makeText(context, "已被本机黑白名单拦截: $host", Toast.LENGTH_SHORT).show()
+            AgentStateBus.log("GUARD", "本地浏览器拦截访问: $host")
+            return
         }
         urlInput = target
         store.saveLastHomepage(target)
@@ -446,6 +455,13 @@ fun BrowserTab(store: NodeConfigStore, visible: Boolean) {
                         override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
                             val reqUrl = request?.url?.toString() ?: return false
                             if (reqUrl.startsWith("http://") || reqUrl.startsWith("https://")) {
+                                val host = request.url?.host ?: ""
+                                val guardCfg = store.loadCookieGuardConfig()
+                                if (host.isNotEmpty() && !CookieGuard(guardCfg).isHostAllowedForBrowser(host)) {
+                                    Toast.makeText(ctx, "已被本机黑白名单拦截: $host", Toast.LENGTH_SHORT).show()
+                                    AgentStateBus.log("GUARD", "本地浏览器拦截跳转: $host")
+                                    return true
+                                }
                                 store.recordVisitedUrl(reqUrl)
                                 return false
                             }
@@ -466,7 +482,13 @@ fun BrowserTab(store: NodeConfigStore, visible: Boolean) {
 
                         override fun shouldInterceptRequest(view: WebView?, request: WebResourceRequest?): WebResourceResponse? {
                             request?.url?.toString()?.let { u ->
-                                if (u.startsWith("http")) store.recordVisitedUrl(u)
+                                if (u.startsWith("http")) {
+                                    val host = request.url?.host ?: ""
+                                    val guardCfg = store.loadCookieGuardConfig()
+                                    if (host.isEmpty() || CookieGuard(guardCfg).isHostAllowedForBrowser(host)) {
+                                        store.recordVisitedUrl(u)
+                                    }
+                                }
                             }
                             return super.shouldInterceptRequest(view, request)
                         }
@@ -927,7 +949,21 @@ fun CookieGuardTab(store: NodeConfigStore, serviceRunning: Boolean) {
     var blockedNamesRaw by remember { mutableStateOf(store.getRawBlockedNames()) }
     var excludeExpired by remember { mutableStateOf(initialCfg.excludeExpired) }
     var protectInject by remember { mutableStateOf(initialCfg.protectInject) }
+    var blockBrowserAccess by remember { mutableStateOf(initialCfg.blockBrowserAccess) }
     var previewText by remember { mutableStateOf("") }
+
+    val wlCount = remember(whitelistRaw) { CookieGuardConfig.parseRuleList(whitelistRaw).size }
+    val blCount = remember(blacklistRaw) { CookieGuardConfig.parseRuleList(blacklistRaw).size }
+    val isWhitelistEditable = (mode == "whitelist")
+    val isBlacklistEditable = (mode == "blacklist")
+
+    val disabledFieldColors = OutlinedTextFieldDefaults.colors(
+        disabledContainerColor = Color(0xFF0B1220),
+        disabledBorderColor = Color(0xFF334155),
+        disabledTextColor = Color(0xFF64748B),
+        disabledLabelColor = Color(0xFF64748B),
+        disabledPlaceholderColor = Color(0xFF475569)
+    )
 
     Column(
         modifier = Modifier
@@ -936,12 +972,42 @@ fun CookieGuardTab(store: NodeConfigStore, serviceRunning: Boolean) {
             .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        Text("本地边缘 Cookie 隐私防火墙", fontSize = 20.sp, fontWeight = FontWeight.Bold)
+        Text("本地黑白名单 & Cookie 防火墙", fontSize = 20.sp, fontWeight = FontWeight.Bold)
         Text(
-            "所有过滤均在手机本机内存立即拦截，未放行的 Cookie 绝不会上传至 Hub。",
+            "规则三选一（默认不限制）；未放行的 Cookie 绝不会上传至 Hub，支持 *.domain.com 与 *bank* 通配。",
             fontSize = 12.sp,
             color = Color(0xFF94A3B8)
         )
+
+        Card(
+            colors = CardDefaults.cardColors(
+                containerColor = when {
+                    mode == "all" -> Color(0xFF0A221D)
+                    mode == "whitelist" && wlCount == 0 -> Color(0xFF2B1B0E)
+                    else -> Color(0xFF09122A)
+                }
+            ),
+            shape = RoundedCornerShape(10.dp)
+        ) {
+            Text(
+                text = when (mode) {
+                    "whitelist" -> if (wlCount == 0) {
+                        "当前模式：白名单模式（白名单为空 → 全量拦截所有域名！黑名单已禁用）"
+                    } else {
+                        "当前模式：白名单模式（仅放行 ${wlCount} 项白名单 · 黑名单已置灰禁用）"
+                    }
+                    "blacklist" -> "当前模式：黑名单模式（拦截 ${blCount} 项黑名单 · 白名单已置灰禁用）"
+                    else -> "当前模式：不限制（默认全部放行，白名单与黑名单均已禁用）"
+                },
+                fontSize = 12.sp,
+                color = when {
+                    mode == "all" -> Color(0xFF34D399)
+                    mode == "whitelist" && wlCount == 0 -> Color(0xFFFBBF24)
+                    else -> Color(0xFF38BDF8)
+                },
+                modifier = Modifier.padding(12.dp)
+            )
+        }
 
         Card(
             colors = CardDefaults.cardColors(containerColor = Color(0xFF1E293B)),
@@ -949,13 +1015,17 @@ fun CookieGuardTab(store: NodeConfigStore, serviceRunning: Boolean) {
         ) {
             Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 val modes = listOf(
-                    "whitelist" to "严格白名单（推荐）：仅放行白名单域名，其余全部本机拦截",
-                    "blacklist" to "黑名单排除：放行除黑名单/敏感名以外的域名",
-                    "all" to "本地全量放行：允许内置工作浏览器全部 Cookie 同步",
-                    "block_export" to "禁止导出：不向 Hub 上传任何本地 Cookie"
+                    "all" to "不限制（默认）：全部放行，黑白名单均禁用",
+                    "whitelist" to "白名单模式：仅放行白名单域名（为空时全量拦截，黑名单禁修改）",
+                    "blacklist" to "黑名单模式：拦截黑名单域名（预置常用敏感域，白名单禁修改）"
                 )
                 modes.forEach { (valKey, desc) ->
-                    Row(verticalAlignment = Alignment.CenterVertically) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { mode = valKey }
+                    ) {
                         RadioButton(selected = (mode == valKey), onClick = { mode = valKey })
                         Text(desc, fontSize = 13.sp)
                     }
@@ -975,8 +1045,21 @@ fun CookieGuardTab(store: NodeConfigStore, serviceRunning: Boolean) {
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Text("Hub 下发写入本机时同样校验保护规则", fontSize = 13.sp)
+                    Text("Hub 下发写入本机时同样校验当前规则", fontSize = 13.sp)
                     Switch(checked = protectInject, onCheckedChange = { protectInject = it })
+                }
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("禁止工作浏览器打开受限网址（不仅拦截 Cookie）", fontSize = 13.sp)
+                    Switch(
+                        checked = blockBrowserAccess,
+                        enabled = (mode != "all"),
+                        onCheckedChange = { blockBrowserAccess = it }
+                    )
                 }
             }
         }
@@ -984,27 +1067,90 @@ fun CookieGuardTab(store: NodeConfigStore, serviceRunning: Boolean) {
         OutlinedTextField(
             value = whitelistRaw,
             onValueChange = { whitelistRaw = it },
-            label = { Text("白名单域名（每行或逗号分隔，支持 *.domain.com）") },
+            enabled = isWhitelistEditable,
+            colors = disabledFieldColors,
+            label = {
+                Text(
+                    when (mode) {
+                        "whitelist" -> "白名单域名（留空将全量拦截；每行或逗号分隔，支持 *.domain.com）"
+                        "blacklist" -> "白名单域名（黑名单模式下已禁用，禁止修改）"
+                        else -> "白名单域名（不限制模式下已禁用，禁止修改）"
+                    }
+                )
+            },
+            placeholder = { Text("例如: google.com, *.x.com（为空则全量拦截）", fontSize = 12.sp) },
             minLines = 3,
             maxLines = 6,
-            modifier = Modifier.fillMaxWidth()
+            modifier = Modifier
+                .fillMaxWidth()
+                .alpha(if (isWhitelistEditable) 1f else 0.55f)
         )
 
         OutlinedTextField(
             value = blacklistRaw,
             onValueChange = { blacklistRaw = it },
-            label = { Text("黑名单域名（支持 *bank* 通配）") },
+            enabled = isBlacklistEditable,
+            colors = disabledFieldColors,
+            label = {
+                Text(
+                    when (mode) {
+                        "blacklist" -> "黑名单域名（已预置常用敏感/追踪域；命中即拦截，支持 *bank* 通配）"
+                        "whitelist" -> "黑名单域名（白名单模式下已禁用，禁止修改）"
+                        else -> "黑名单域名（不限制模式下已禁用，禁止修改）"
+                    }
+                )
+            },
+            placeholder = { Text("例如: alipay.com, doubleclick.net", fontSize = 12.sp) },
             minLines = 3,
             maxLines = 6,
-            modifier = Modifier.fillMaxWidth()
+            modifier = Modifier
+                .fillMaxWidth()
+                .alpha(if (isBlacklistEditable) 1f else 0.55f)
         )
+
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            OutlinedButton(
+                onClick = {
+                    blacklistRaw = CookieGuardConfig.DEFAULT_SENSITIVE_BLACKLIST.joinToString("\n")
+                    Toast.makeText(context, "已恢复黑名单常用敏感/追踪域默认值，请点击保存生效", Toast.LENGTH_SHORT).show()
+                },
+                enabled = isBlacklistEditable,
+                modifier = Modifier.weight(1f)
+            ) {
+                Text("恢复黑名单常用值", fontSize = 12.sp)
+            }
+            OutlinedButton(
+                onClick = {
+                    if (isWhitelistEditable) {
+                        whitelistRaw = ""
+                        Toast.makeText(context, "已清空白名单（保存后将全量拦截）", Toast.LENGTH_SHORT).show()
+                    } else if (isBlacklistEditable) {
+                        blacklistRaw = ""
+                        Toast.makeText(context, "已清空黑名单", Toast.LENGTH_SHORT).show()
+                    }
+                },
+                enabled = (isWhitelistEditable || isBlacklistEditable),
+                modifier = Modifier.weight(1f)
+            ) {
+                Text(if (isWhitelistEditable) "清空白名单" else "清空黑名单", fontSize = 12.sp)
+            }
+        }
 
         OutlinedTextField(
             value = blockedNamesRaw,
             onValueChange = { blockedNamesRaw = it },
-            label = { Text("屏蔽 Cookie 名称关键字（可选，逗号分隔）") },
+            enabled = (mode != "all"),
+            colors = disabledFieldColors,
+            label = {
+                Text(
+                    if (mode == "all") "屏蔽 Cookie 名称关键字（不限制模式下已禁用）"
+                    else "屏蔽 Cookie 名称关键字（可选，逗号分隔）"
+                )
+            },
             singleLine = true,
-            modifier = Modifier.fillMaxWidth()
+            modifier = Modifier
+                .fillMaxWidth()
+                .alpha(if (mode != "all") 1f else 0.55f)
         )
 
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -1016,7 +1162,8 @@ fun CookieGuardTab(store: NodeConfigStore, serviceRunning: Boolean) {
                         blacklistDomains = CookieGuardConfig.parseRuleList(blacklistRaw),
                         blockedCookieNames = CookieGuardConfig.parseRuleList(blockedNamesRaw),
                         excludeExpired = excludeExpired,
-                        protectInject = protectInject
+                        protectInject = protectInject,
+                        blockBrowserAccess = blockBrowserAccess
                     )
                     val raw = WebViewCookieBridge.extractAllLocalCookies(store, cfg)
                     val (_, stats) = CookieGuard(cfg).filterForExport(raw)
@@ -1032,7 +1179,15 @@ fun CookieGuardTab(store: NodeConfigStore, serviceRunning: Boolean) {
 
             Button(
                 onClick = {
-                    store.saveCookieGuardConfig(mode, whitelistRaw, blacklistRaw, blockedNamesRaw, excludeExpired, protectInject)
+                    store.saveCookieGuardConfig(
+                        mode = mode,
+                        whitelistRaw = whitelistRaw,
+                        blacklistRaw = blacklistRaw,
+                        blockedNamesRaw = blockedNamesRaw,
+                        excludeExpired = excludeExpired,
+                        protectInject = protectInject,
+                        blockBrowserAccess = blockBrowserAccess
+                    )
                     if (serviceRunning) {
                         context.startService(
                             Intent(context, EdgeAgentService::class.java).apply {
@@ -1040,7 +1195,7 @@ fun CookieGuardTab(store: NodeConfigStore, serviceRunning: Boolean) {
                             }
                         )
                     }
-                    Toast.makeText(context, "Cookie 防火墙策略已保存生效", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(context, "本地黑白名单与防火墙策略已保存生效", Toast.LENGTH_SHORT).show()
                 },
                 modifier = Modifier.weight(1f)
             ) {

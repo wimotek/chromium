@@ -223,7 +223,7 @@ def filter_cookies_by_domains(
             continue
 
         domain = c.get("domain", "").lower().lstrip(".")
-        if clean_exc and any(exc in domain for exc in clean_exc):
+        if clean_exc and any(exc in domain or match_domain_pattern(domain, exc) for exc in clean_exc):
             blacklist_dropped += 1
             continue
         if cleanup_active:
@@ -231,7 +231,7 @@ def filter_cookies_by_domains(
             if hit:
                 blacklist_dropped += 1
                 continue
-        if clean_inc and not any(inc in domain for inc in clean_inc):
+        if clean_inc and not any(inc in domain or match_domain_pattern(domain, inc) for inc in clean_inc):
             continue
 
         filtered.append(c)
