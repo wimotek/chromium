@@ -1,8 +1,20 @@
 import json
 import os
+import re
 import threading
 import time
 import urllib.parse
+
+
+_UNSAFE_USERINFO_RE = re.compile(r"[@#/?:\[\]\s]|%(?![0-9A-Fa-f]{2})")
+
+
+def _normalize_redis_key_prefix(raw_prefix: str) -> str:
+    """统一规范化 Redis 键命名空间前缀，确保非空且以单个冒号 ':' 结尾"""
+    clean = str(raw_prefix or "").strip().rstrip(":")
+    if not clean:
+        return "xray_hub:"
+    return f"{clean}:"
 
 
 class Config:
@@ -69,7 +81,7 @@ class Config:
     _ENV_REDIS_PORT = int(os.getenv("REDIS_PORT", "6379") or 6379)
     _ENV_REDIS_PASSWORD = os.getenv("REDIS_PASSWORD", "").strip()
     _ENV_REDIS_DB = int(os.getenv("REDIS_DB", "0") or 0)
-    _ENV_REDIS_KEY_PREFIX = os.getenv("REDIS_KEY_PREFIX", "xray_hub:").strip() or "xray_hub:"
+    _ENV_REDIS_KEY_PREFIX = _normalize_redis_key_prefix(os.getenv("REDIS_KEY_PREFIX", "xray_hub:"))
     _ENV_REDIS_TIMEOUT = float(os.getenv("REDIS_TIMEOUT", "1.5") or 1.5)
     _ENV_REDIS_COOLDOWN_SECONDS = int(os.getenv("REDIS_COOLDOWN_SECONDS", "30") or 30)
 
@@ -115,7 +127,7 @@ class Config:
         hub_redis_host = str(data.get("redis_host") or "").strip()
 
         if "redis_key_prefix" in data and str(data.get("redis_key_prefix") or "").strip():
-            cls.REDIS_KEY_PREFIX = str(data.get("redis_key_prefix")).strip()
+            cls.REDIS_KEY_PREFIX = cls.normalize_redis_key_prefix(data.get("redis_key_prefix"))
         if "redis_timeout" in data and data.get("redis_timeout") not in (None, ""):
             try:
                 cls.REDIS_TIMEOUT = max(0.3, min(15.0, float(data["redis_timeout"])))
@@ -255,6 +267,61 @@ class Config:
         return f"mysql+pymysql://{auth}{host}:{int(port or 3306)}/{db_name}?charset=utf8mb4"
 
     @classmethod
+    def normalize_redis_key_prefix(cls, raw_prefix: str) -> str:
+        return _normalize_redis_key_prefix(raw_prefix)
+
+    @classmethod
+    def normalize_redis_url(cls, raw_url: str) -> str:
+        """自动转义 Redis URL 密码/用户名中未编码的特殊字符（如 @ # / ? : [ ] 空格等）"""
+        raw = str(raw_url or "").strip()
+        if not raw or "://" not in raw:
+            return raw
+        scheme, rest = raw.split("://", 1)
+        if scheme.lower() not in ("redis", "rediss"):
+            return raw
+
+        search_end = len(rest)
+        while True:
+            at_idx = rest.rfind("@", 0, search_end)
+            if at_idx < 0:
+                return raw
+            userinfo = rest[:at_idx]
+            host_part = rest[at_idx + 1:]
+            try:
+                probe = urllib.parse.urlparse(f"{scheme}://{host_part}")
+                _ = probe.port
+                valid_host = bool(probe.hostname) and not probe.fragment and "@" not in (probe.netloc or "")
+            except ValueError:
+                valid_host = False
+            if valid_host:
+                try:
+                    raw_probe = urllib.parse.urlparse(raw)
+                    _ = raw_probe.port
+                    if (
+                        raw_probe.hostname
+                        and not raw_probe.fragment
+                        and raw_probe.username is None
+                        and raw_probe.password is None
+                    ):
+                        return raw
+                except ValueError:
+                    pass
+
+                if ":" in userinfo:
+                    user, pwd = userinfo.split(":", 1)
+                    enc_user = urllib.parse.quote(user, safe="") if _UNSAFE_USERINFO_RE.search(user) else user
+                    enc_pwd = urllib.parse.quote(pwd, safe="") if _UNSAFE_USERINFO_RE.search(pwd) else pwd
+                    new_userinfo = f"{enc_user}:{enc_pwd}"
+                else:
+                    new_userinfo = (
+                        urllib.parse.quote(userinfo, safe="")
+                        if _UNSAFE_USERINFO_RE.search(userinfo)
+                        else userinfo
+                    )
+                return f"{scheme}://{new_userinfo}@{host_part}"
+            search_end = at_idx
+
+    @classmethod
     def build_redis_url(
         cls,
         host: str,
@@ -270,13 +337,13 @@ class Config:
             if (":" in clean_host and not clean_host.startswith("["))
             else clean_host
         )
-        pw = urllib.parse.quote_plus(str(password or "").strip())
+        pw = urllib.parse.quote(str(password or "").strip(), safe="")
         auth = f":{pw}@" if pw else ""
         return f"redis://{auth}{formatted_host}:{int(port or 6379)}/{int(db or 0)}"
 
     @classmethod
     def mask_redis_url(cls, url: str) -> str:
-        raw = str(url or "").strip()
+        raw = cls.normalize_redis_url(url)
         if not raw:
             return ""
         try:
@@ -328,7 +395,7 @@ class Config:
         if cls.CACHE_MODE == "sql_cache":
             return ""
         if cls.REDIS_URL:
-            return cls.REDIS_URL
+            return cls.normalize_redis_url(cls.REDIS_URL)
         if cls.REDIS_HOST:
             return cls.build_redis_url(cls.REDIS_HOST, cls.REDIS_PORT, cls.REDIS_PASSWORD, cls.REDIS_DB)
         return ""
@@ -342,7 +409,7 @@ class Config:
         port = cls.REDIS_PORT or 6379
         db_idx = cls.REDIS_DB or 0
         has_password = bool(cls.REDIS_PASSWORD)
-        raw_url_for_parse = cls.REDIS_URL or effective_url
+        raw_url_for_parse = cls.normalize_redis_url(cls.REDIS_URL) or effective_url
 
         if raw_url_for_parse:
             try:
@@ -369,7 +436,7 @@ class Config:
             "redis_port": int(port or 6379),
             "redis_db": int(db_idx or 0),
             "has_redis_password": has_password,
-            "redis_key_prefix": cls.REDIS_KEY_PREFIX or "xray_hub:",
+            "redis_key_prefix": cls.normalize_redis_key_prefix(cls.REDIS_KEY_PREFIX),
             "redis_timeout": float(cls.REDIS_TIMEOUT or 1.5),
             "redis_cooldown_seconds": int(cls.REDIS_COOLDOWN_SECONDS or 30),
             "hub_config_path": cls.HUB_CONFIG_PATH,

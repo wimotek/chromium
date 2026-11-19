@@ -85,7 +85,7 @@ def _resolve_admin_redis_params(data: dict) -> tuple[str, str, int, str, int]:
     """解析后台提交的 Redis 连接参数；若未输入新密码且未勾选清除，则沿用已保存密码或原 URL"""
     import urllib.parse
 
-    explicit_url = str(data.get("redis_url") or "").strip()
+    explicit_url = Config.normalize_redis_url(data.get("redis_url") or "")
     use_saved_url = bool(data.get("use_saved_url"))
     clear_pwd = bool(data.get("clear_redis_password"))
     raw_pwd = str(data.get("redis_password") or "").strip()
@@ -93,7 +93,8 @@ def _resolve_admin_redis_params(data: dict) -> tuple[str, str, int, str, int]:
     saved_pwd = Config.REDIS_PASSWORD
     if not saved_pwd and Config.REDIS_URL:
         try:
-            saved_pwd = urllib.parse.unquote(urllib.parse.urlparse(Config.REDIS_URL).password or "")
+            saved_url = Config.normalize_redis_url(Config.REDIS_URL)
+            saved_pwd = urllib.parse.unquote(urllib.parse.urlparse(saved_url).password or "")
         except Exception:
             saved_pwd = ""
 
@@ -107,7 +108,7 @@ def _resolve_admin_redis_params(data: dict) -> tuple[str, str, int, str, int]:
     if explicit_url:
         return explicit_url, str(data.get("redis_host") or "").strip(), 6379, effective_pwd, 0
     if use_saved_url and Config.REDIS_URL:
-        return Config.REDIS_URL, str(data.get("redis_host") or "").strip(), 6379, effective_pwd, 0
+        return Config.normalize_redis_url(Config.REDIS_URL), str(data.get("redis_host") or "").strip(), 6379, effective_pwd, 0
 
     host = str(data.get("redis_host") or "").strip()
     try:
@@ -167,7 +168,7 @@ def admin_cache_save():
     if mode not in ("redis", "sql_cache"):
         return jsonify({"code": 400, "msg": "不支持的缓存引擎类型，仅支持 redis 或 sql_cache"})
 
-    key_prefix = str(data.get("redis_key_prefix") or "xray_hub:").strip() or "xray_hub:"
+    key_prefix = Config.normalize_redis_key_prefix(data.get("redis_key_prefix") or "xray_hub:")
     try:
         timeout_val = max(0.3, min(15.0, float(data.get("redis_timeout") or 1.5)))
     except (TypeError, ValueError):
@@ -177,7 +178,8 @@ def admin_cache_save():
     except (TypeError, ValueError):
         cooldown_val = 30
 
-    explicit_url = str(data.get("redis_url") or "").strip()
+    explicit_url = Config.normalize_redis_url(data.get("redis_url") or "")
+    use_saved_url = bool(data.get("use_saved_url"))
     redis_url, host, port, effective_pwd, db_idx = _resolve_admin_redis_params(data)
 
     if mode == "redis":
@@ -192,12 +194,13 @@ def admin_cache_save():
         if not ok:
             return jsonify({"code": 400, "msg": f"连通性校验未通过，未切换配置：{test_msg}"})
 
+        saved_explicit_url = explicit_url or (Config.normalize_redis_url(Config.REDIS_URL) if use_saved_url else "")
         Config.save_hub_config({
             "cache_mode": "redis",
-            "redis_url": explicit_url,
-            "redis_host": "" if explicit_url else host,
+            "redis_url": saved_explicit_url,
+            "redis_host": "" if saved_explicit_url else host,
             "redis_port": port,
-            "redis_password": "" if explicit_url else effective_pwd,
+            "redis_password": "" if saved_explicit_url else effective_pwd,
             "redis_db": db_idx,
             "redis_key_prefix": key_prefix,
             "redis_timeout": timeout_val,

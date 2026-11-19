@@ -8,10 +8,11 @@ RUN apk add --no-cache tzdata
 # Stage 2: 源码带全特性标签交叉编译 sing-box (with_quic + with_v2ray_api) 与 sb-helper
 # 使用 --platform=$BUILDPLATFORM 实现原生 Go 交叉编译，大幅加速多架构构建
 # =========================================================================
-FROM --platform=$BUILDPLATFORM golang:1.24-alpine AS singbox-builder
+FROM --platform=$BUILDPLATFORM golang:1.26-alpine AS singbox-builder
 ARG TARGETOS=linux
 ARG TARGETARCH
 ARG SINGBOX_VERSION=latest
+ENV GOTOOLCHAIN=local
 
 RUN apk add --no-cache git curl jq
 
@@ -28,24 +29,39 @@ RUN set -ex && \
             *)  TAG_VER="v${SINGBOX_VERSION}" ;; \
         esac; \
     fi && \
-    echo "==> Building sing-box ${TAG_VER} for ${TARGETOS}/${TARGETARCH}" && \
+    if [ -z "${TAG_VER}" ] || [ "${TAG_VER}" = "v" ]; then \
+        echo "ERROR: Failed to resolve sing-box version tag" >&2 && exit 1; \
+    fi && \
+    BUILD_OS="${TARGETOS:-linux}" && \
+    BUILD_ARCH="${TARGETARCH:-$(go env GOARCH)}" && \
+    echo "==> Building sing-box ${TAG_VER} for ${BUILD_OS}/${BUILD_ARCH} ($(go version))" && \
     git clone --depth 1 --branch "${TAG_VER}" https://github.com/SagerNet/sing-box.git /src/sing-box && \
     cd /src/sing-box && \
     mkdir -p /out/usr/bin && \
     VERSION_NUM="${TAG_VER#v}" && \
-    CGO_ENABLED=0 GOOS="${TARGETOS}" GOARCH="${TARGETARCH}" \
+    BUILD_TAGS="with_quic,with_grpc,with_dhcp,with_wireguard,with_utls,with_acme,with_clash_api,with_v2ray_api" && \
+    LDFLAGS_SHARED="" && \
+    if [ -f release/LDFLAGS ]; then \
+        LDFLAGS_SHARED="$(cat release/LDFLAGS)"; \
+    fi && \
+    case "${LDFLAGS_SHARED}" in \
+        *checklinkname=0*) BUILD_TAGS="${BUILD_TAGS},badlinkname,tfogo_checklinkname0" ;; \
+    esac && \
+    CGO_ENABLED=0 GOOS="${BUILD_OS}" GOARCH="${BUILD_ARCH}" \
     go build -v -trimpath \
-        -tags "with_quic,with_grpc,with_dhcp,with_wireguard,with_utls,with_acme,with_clash_api,with_v2ray_api" \
-        -ldflags "-X github.com/sagernet/sing-box/constant.Version=${VERSION_NUM} -s -w -buildid=" \
+        -tags "${BUILD_TAGS}" \
+        -ldflags "-X github.com/sagernet/sing-box/constant.Version=${VERSION_NUM} ${LDFLAGS_SHARED} -s -w -buildid=" \
         -o /out/usr/bin/sing-box ./cmd/sing-box && \
     chmod 755 /out/usr/bin/sing-box
 
-# 编译零外部依赖的 Go 1.24 工具 sb-helper (v2ray_api gRPC 流量采集 / ECDSA 自签证书 / X25519 公钥推导)
+# 编译零外部依赖的 Go 1.26 工具 sb-helper (v2ray_api gRPC 流量采集 / ECDSA 自签证书 / X25519 公钥推导)
 COPY tools/sb_helper/ /src/sb_helper/
 RUN set -ex && \
     cd /src/sb_helper && \
     go mod init sb-helper && \
-    CGO_ENABLED=0 GOOS="${TARGETOS}" GOARCH="${TARGETARCH}" \
+    BUILD_OS="${TARGETOS:-linux}" && \
+    BUILD_ARCH="${TARGETARCH:-$(go env GOARCH)}" && \
+    CGO_ENABLED=0 GOOS="${BUILD_OS}" GOARCH="${BUILD_ARCH}" \
     go build -trimpath -ldflags "-s -w -buildid=" -o /out/usr/bin/sb-helper . && \
     chmod 755 /out/usr/bin/sb-helper
 

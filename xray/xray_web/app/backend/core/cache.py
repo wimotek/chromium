@@ -35,7 +35,8 @@ class CacheManager:
         self._sql_dirty: bool = False
 
     def _prefixed(self, key: str) -> str:
-        return f"{Config.REDIS_KEY_PREFIX}{key}"
+        prefix = Config.normalize_redis_key_prefix(Config.REDIS_KEY_PREFIX)
+        return f"{prefix}{key}"
 
     def _close_client_locked(self):
         old = self._client
@@ -521,6 +522,7 @@ class CacheManager:
 
 def test_redis_connection(redis_url: str) -> tuple[bool, str]:
     """供安装向导与管理后台测试 Redis 连通性"""
+    redis_url = Config.normalize_redis_url(redis_url)
     if not redis_url:
         return False, "请填写有效的 Redis URL 或主机地址"
     if redis_lib is None:
@@ -547,7 +549,14 @@ def test_redis_connection(redis_url: str) -> tuple[bool, str]:
             pass
         return True, f"Redis PING 响应成功（延迟 {rtt_ms} ms{ver_str}）"
     except Exception as exc:
-        return False, f"Redis 连接测试失败: {exc}"
+        err_text = str(exc)
+        upper_err = err_text.upper()
+        if "WRONGPASS" in upper_err or "INVALID PASSWORD" in upper_err or "AUTH" in upper_err:
+            return False, (
+                f"Redis 认证失败: {err_text}（若密码含 # / ! / @，请确认 redis.conf 中 requirepass "
+                "已用双引号包裹，否则 # 后的字符会被 Redis 当作注释截断）"
+            )
+        return False, f"Redis 连接测试失败: {err_text}"
     finally:
         if client is not None:
             try:

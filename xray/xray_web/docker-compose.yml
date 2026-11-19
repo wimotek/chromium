@@ -37,7 +37,14 @@ services:
       # 或者直接使用完整 SQLAlchemy URL：
       # - DATABASE_URL=mysql+pymysql://xray_web:your_strong_password@127.0.0.1:3306/xray_web?charset=utf8mb4
       # ==================== 可选 Redis 加速（未配置或故障自动回退 SQL Cache） ====================
-      # - REDIS_URL=redis://127.0.0.1:6379/0
+      # 生产环境共用 Redis 时，通过 REDIS_KEY_PREFIX 统一键命名空间前缀隔离（自动补齐末尾冒号 :）
+      # - REDIS_HOST=127.0.0.1
+      # - REDIS_PORT=6379
+      # - REDIS_PASSWORD=your_redis_password
+      # - REDIS_DB=0
+      # - REDIS_KEY_PREFIX=prod:xray_hub:
+      # 或使用完整连接 URL（支持 rediss:// TLS 与 ACL 用户名；后端自动转义密码中的 @ / # 等特殊字符）：
+      # - REDIS_URL=redis://:your_redis_password@127.0.0.1:6379/0
       # ==================== 安全防刷与可信代理校验 ====================
       # - RATE_LIMIT_ENABLE=true
       # - TRUST_PROXY=auto              # auto(仅回环/内网可信代理) | always | never

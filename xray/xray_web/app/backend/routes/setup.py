@@ -63,17 +63,14 @@ def _build_db_url_from_payload(data: dict) -> str:
 def _build_redis_url_from_payload(data: dict) -> str:
     if not data.get("redis_enabled"):
         return ""
-    explicit_url = str(data.get("redis_url") or "").strip()
+    explicit_url = Config.normalize_redis_url(data.get("redis_url") or "")
     if explicit_url:
         return explicit_url
     host = str(data.get("redis_host") or "127.0.0.1").strip()
     port = _safe_int(data.get("redis_port"), 6379)
     password = str(data.get("redis_password") or "").strip()
     db_idx = _safe_int(data.get("redis_db"), 0)
-    if password:
-        import urllib.parse
-        return f"redis://:{urllib.parse.quote_plus(password)}@{host}:{port}/{db_idx}"
-    return f"redis://{host}:{port}/{db_idx}"
+    return Config.build_redis_url(host, port, password, db_idx)
 
 
 @setup_bp.route("/api/setup/status", methods=["GET"])
@@ -231,7 +228,7 @@ def setup_complete():
         "mysql_password": str(data.get("mysql_password") or "") if db_type == "mysql" else "",
         "mysql_database": str(data.get("mysql_database") or "xray_web").strip() if db_type == "mysql" else "",
         "cache_mode": "redis" if redis_enabled else "",
-        "redis_url": redis_url,
+        "redis_url": Config.normalize_redis_url(data.get("redis_url") or "") if redis_enabled else "",
         "redis_host": str(data.get("redis_host") or "").strip() if redis_enabled else "",
         "redis_port": _safe_int(data.get("redis_port"), 6379),
         "redis_password": str(data.get("redis_password") or "").strip() if redis_enabled else "",

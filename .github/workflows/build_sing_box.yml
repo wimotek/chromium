@@ -56,6 +56,11 @@ jobs:
             RAW_VER="$INPUT_VER"
           fi
 
+          if [ -z "$RAW_VER" ] || [ "$RAW_VER" = "null" ]; then
+            echo "ERROR: Failed to resolve sing-box release version." >&2
+            exit 1
+          fi
+
           case "$RAW_VER" in
             v*) TAG_NAME="$RAW_VER"; CLEAN_VER="${RAW_VER#v}" ;;
             *)  TAG_NAME="v$RAW_VER"; CLEAN_VER="$RAW_VER" ;;
