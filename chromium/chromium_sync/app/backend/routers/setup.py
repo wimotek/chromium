@@ -14,7 +14,7 @@ from config import (
     apply_hub_network_overrides,
     logger,
 )
-from core.cache import cache_mgr
+from core.cache import build_encoded_redis_url, cache_mgr, normalize_key_prefix
 from core.db import (
     get_active_db_info,
     get_setting,
@@ -55,12 +55,30 @@ class TestDbDTO(BaseModel):
 
 class TestRedisDTO(BaseModel):
     redis_url: str = ""
+    redis_host: Optional[str] = None
+    redis_port: Optional[int] = 6379
+    redis_db: Optional[int] = 0
+    redis_username: Optional[str] = ""
+    redis_password: Optional[str] = None
+    redis_tls: bool = False
+    keep_password: bool = True
+    clear_password: bool = False
+    key_prefix: Optional[str] = None
     use_current: bool = False
 
 
 class CacheReloadDTO(BaseModel):
     mode: Optional[str] = None
     redis_url: str = ""
+    redis_host: Optional[str] = None
+    redis_port: Optional[int] = 6379
+    redis_db: Optional[int] = 0
+    redis_username: Optional[str] = ""
+    redis_password: Optional[str] = None
+    redis_tls: bool = False
+    keep_password: bool = True
+    clear_password: bool = False
+    key_prefix: Optional[str] = None
     use_current: bool = False
     reconnect_only: bool = False
 
@@ -73,6 +91,13 @@ class CompleteSetupDTO(BaseModel):
     mysql_password: Optional[str] = ""
     mysql_database: Optional[str] = "chromium_sync"
     redis_url: Optional[str] = ""
+    redis_host: Optional[str] = None
+    redis_port: Optional[int] = 6379
+    redis_db: Optional[int] = 0
+    redis_username: Optional[str] = ""
+    redis_password: Optional[str] = None
+    redis_tls: bool = False
+    redis_key_prefix: Optional[str] = None
     admin_username: str = "admin"
     admin_password: str
     hub_public_host: Optional[str] = ""
@@ -124,7 +149,19 @@ def setup_test_db(data: TestDbDTO, request: Request, auth: dict = Depends(_verif
 @router.post("/api/setup/test-redis", summary="测试 Redis 缓存服务连通性")
 def setup_test_redis(data: TestRedisDTO, request: Request, auth: dict = Depends(_verify_setup_or_admin)):
     enforce_rate_limit("setup", get_client_ip(request), RATE_LIMIT_SETUP_PER_MIN, 60, "Redis 连通性探测过于频繁")
-    res = cache_mgr.test_target(data.redis_url, use_current=bool(data.use_current))
+    res = cache_mgr.test_target(
+        data.redis_url,
+        use_current=bool(data.use_current),
+        redis_host=data.redis_host,
+        redis_port=data.redis_port,
+        redis_db=data.redis_db,
+        redis_username=data.redis_username,
+        redis_password=data.redis_password,
+        redis_tls=bool(data.redis_tls),
+        keep_password=bool(data.keep_password),
+        clear_password=bool(data.clear_password),
+        key_prefix=data.key_prefix,
+    )
     if not res.get("ok"):
         raise HTTPException(status_code=400, detail=res.get("detail", "Redis 连接失败"))
     return res
@@ -151,11 +188,30 @@ def _complete_initial_setup_locked(data: CompleteSetupDTO):
     if db_type not in {"sqlite", "mysql"}:
         raise HTTPException(status_code=400, detail="不支持的数据库类型，仅支持 sqlite 或 mysql")
 
+    try:
+        resolved_redis_cfg, resolved_prefix = cache_mgr.resolve_target_config(
+            redis_url=data.redis_url or "",
+            redis_host=data.redis_host,
+            redis_port=data.redis_port,
+            redis_db=data.redis_db,
+            redis_username=data.redis_username,
+            redis_password=data.redis_password,
+            redis_tls=bool(data.redis_tls),
+            keep_password=False,
+            clear_password=False,
+            use_current=False,
+            key_prefix=data.redis_key_prefix,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
     boot_cfg = {
         "setup_completed": True,
         "completed_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "db_type": db_type,
-        "redis_url": (data.redis_url or "").strip(),
+        "redis_url": build_encoded_redis_url(resolved_redis_cfg) if resolved_redis_cfg else "",
+        "redis_config": resolved_redis_cfg,
+        "redis_key_prefix": resolved_prefix,
         "hub_public_host": (data.hub_public_host or "").strip(),
         "hub_external_port": int(data.hub_external_port) if data.hub_external_port else None,
     }
@@ -174,7 +230,12 @@ def _complete_initial_setup_locked(data: CompleteSetupDTO):
         raise HTTPException(status_code=400, detail=db_test.get("detail", "目标数据库连接测试失败"))
 
     # 2. 切换缓存引擎并应用对外域名/端口覆盖参数（此时尚未落盘 bootstrap.json，确保失败可重试）
-    cache_mgr.reload_from_config(boot_cfg["redis_url"])
+    cache_mgr.reload_from_config(
+        redis_url="" if not resolved_redis_cfg else None,
+        source="bootstrap",
+        redis_config=resolved_redis_cfg,
+        key_prefix=resolved_prefix,
+    )
     apply_hub_network_overrides(
         public_host=boot_cfg.get("hub_public_host"),
         external_port=boot_cfg.get("hub_external_port"),
@@ -237,7 +298,19 @@ def get_cache_engine_status(user: dict = Depends(verify_token)):
 @router.post("/api/system/cache/test", summary="在线执行 Redis PING 连通性测试")
 def test_cache_redis_ping(data: TestRedisDTO, request: Request, user: dict = Depends(verify_token)):
     enforce_rate_limit("setup", get_client_ip(request), RATE_LIMIT_SETUP_PER_MIN, 60, "Redis PING 测试过于频繁")
-    return cache_mgr.test_target(data.redis_url, use_current=bool(data.use_current))
+    return cache_mgr.test_target(
+        data.redis_url,
+        use_current=bool(data.use_current),
+        redis_host=data.redis_host,
+        redis_port=data.redis_port,
+        redis_db=data.redis_db,
+        redis_username=data.redis_username,
+        redis_password=data.redis_password,
+        redis_tls=bool(data.redis_tls),
+        keep_password=bool(data.keep_password),
+        clear_password=bool(data.clear_password),
+        key_prefix=data.key_prefix,
+    )
 
 
 @router.post("/api/system/cache/reload", summary="一键热切换并持久化缓存引擎配置（SQLite Cache / Redis）")
@@ -247,19 +320,47 @@ def reload_cache_config(data: CacheReloadDTO, user: dict = Depends(verify_token)
 
     mode = (data.mode or "").strip().lower()
     if mode in {"sqlite", "sqlite_cache", "sql"}:
+        try:
+            key_prefix = normalize_key_prefix(
+                data.key_prefix if data.key_prefix is not None else cache_mgr.get_key_prefix(),
+                strict=True,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        new_cfg = None
         new_url = ""
-    elif data.use_current and not (data.redis_url or "").strip():
-        new_url = cache_mgr.get_current_redis_url()
     else:
-        new_url = (data.redis_url or "").strip()
-
-    if mode == "redis" and not new_url:
-        raise HTTPException(status_code=400, detail="请填写 Redis 连接 URL（如 redis://127.0.0.1:6379/0）")
+        try:
+            new_cfg, key_prefix = cache_mgr.resolve_target_config(
+                redis_url=data.redis_url,
+                redis_host=data.redis_host,
+                redis_port=data.redis_port,
+                redis_db=data.redis_db,
+                redis_username=data.redis_username,
+                redis_password=data.redis_password,
+                redis_tls=bool(data.redis_tls),
+                keep_password=bool(data.keep_password),
+                clear_password=bool(data.clear_password),
+                use_current=bool(data.use_current),
+                key_prefix=data.key_prefix,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        if mode == "redis" and not new_cfg:
+            raise HTTPException(status_code=400, detail="请填写 Redis 主机地址或连接 URL")
+        new_url = build_encoded_redis_url(new_cfg) if new_cfg else ""
 
     boot = load_bootstrap_config()
     boot["redis_url"] = new_url
+    boot["redis_config"] = new_cfg
+    boot["redis_key_prefix"] = key_prefix
     save_bootstrap_config(boot)
-    cache_mgr.reload_from_config(new_url, source="bootstrap")
+    cache_mgr.reload_from_config(
+        redis_url="" if not new_cfg else None,
+        source="bootstrap",
+        redis_config=new_cfg,
+        key_prefix=key_prefix,
+    )
     status = cache_mgr.get_status()
 
     if status["engine_state"] == "redis":
@@ -267,10 +368,10 @@ def reload_cache_config(data: CacheReloadDTO, user: dict = Depends(verify_token)
         ver = info.get("version") or "?"
         ping_ms = info.get("ping_ms")
         lat_txt = f", {ping_ms}ms" if ping_ms is not None else ""
-        msg = f"已热切换并保存为 Redis 高速缓存 (v{ver}{lat_txt})"
+        msg = f"已热切换并保存为 Redis 高速缓存 (v{ver}{lat_txt} · 命名空间 {status.get('key_prefix')})"
         ok = True
     elif status["engine_state"] == "degraded":
-        msg = f"Redis 配置已保存，但当前连接失败 ({status.get('last_error') or '不可达'})，已自动降级至 SQLite WAL Cache 兜底"
+        msg = f"Redis 配置已保存（前缀 {status.get('key_prefix')}），但当前连接失败 ({status.get('last_error') or '不可达'})，已自动降级至 SQLite WAL Cache 兜底"
         ok = False
     else:
         msg = "已热切换并保存为内置 SQLite WAL Cache"

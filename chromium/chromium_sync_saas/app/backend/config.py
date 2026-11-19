@@ -36,6 +36,7 @@ DEFAULT_MYSQL_USER = (os.getenv("MYSQL_USER") or "root").strip()
 DEFAULT_MYSQL_PASSWORD = os.getenv("MYSQL_PASSWORD") or ""
 DEFAULT_MYSQL_DATABASE = (os.getenv("MYSQL_DATABASE") or "chromium_sync_saas").strip()
 DEFAULT_REDIS_URL = (os.getenv("REDIS_URL") or "").strip()
+DEFAULT_REDIS_KEY_PREFIX = (os.getenv("REDIS_KEY_PREFIX") or os.getenv("CACHE_KEY_PREFIX") or "csync_saas:").strip()
 
 # SaaS 多租户运营与抽成默认参数
 SAAS_ALLOW_PUBLIC_REGISTER = os.getenv("SAAS_ALLOW_PUBLIC_REGISTER", "true").strip().lower() not in {"0", "false", "no", "off"}

@@ -1,11 +1,19 @@
 import json
 import os
+import re
 import sqlite3
 import threading
 import time
 from typing import Any, Dict, List, Optional
+from urllib.parse import quote, unquote
 
-from config import BOOTSTRAP_CONFIG_PATH, CACHE_DB_PATH, DEFAULT_REDIS_URL, logger
+from config import (
+    BOOTSTRAP_CONFIG_PATH,
+    CACHE_DB_PATH,
+    DEFAULT_REDIS_KEY_PREFIX,
+    DEFAULT_REDIS_URL,
+    logger,
+)
 
 try:
     import redis
@@ -13,6 +21,237 @@ try:
 except ImportError:
     redis = None
     HAS_REDIS_LIB = False
+
+_REDIS_HOSTPATH_RE = re.compile(
+    r"^(\[[^\]]+\]|[^/\s:?#]+)(?::(\d+))?(?:/(\d*))?(?:\?([^#]*))?$"
+)
+_PCT_ESCAPED_RE = re.compile(r"%[0-9A-Fa-f]{2}")
+_KEY_PREFIX_VALID_RE = re.compile(r"^[A-Za-z0-9:._-]+$")
+
+
+def normalize_key_prefix(
+    prefix: Optional[str],
+    fallback: str = DEFAULT_REDIS_KEY_PREFIX,
+    strict: bool = False,
+) -> str:
+    """规范化 Redis 键命名空间前缀，生产环境默认强制附加统一冒号前缀避免冲突"""
+    raw = fallback if prefix is None else str(prefix)
+    cleaned = raw.strip()
+    if not cleaned:
+        cleaned = (fallback or "csync_saas:").strip() or "csync_saas:"
+    if not _KEY_PREFIX_VALID_RE.fullmatch(cleaned):
+        if strict:
+            raise ValueError("键命名空间前缀仅允许字母、数字、冒号(:)、点(.)、下划线(_)与短横线(-)")
+        cleaned = re.sub(r"[^A-Za-z0-9:._-]", "", cleaned)
+        if not cleaned:
+            cleaned = (fallback or "csync_saas:").strip() or "csync_saas:"
+    cleaned = cleaned.rstrip(":")
+    if not cleaned:
+        cleaned = "csync_saas"
+    return f"{cleaned}:"
+
+
+def _smart_decode_userinfo_part(raw_part: str) -> str:
+    if not raw_part:
+        return ""
+    if any(ch in raw_part for ch in ("@", "#", "?", "/", " ")):
+        return raw_part
+    if _PCT_ESCAPED_RE.search(raw_part):
+        return unquote(raw_part)
+    return raw_part
+
+
+def parse_redis_url_safe(raw_url: str) -> Optional[Dict[str, Any]]:
+    """安全解析 Redis URL，避免密码中含 @ / # / ? / / / ! / : 等特殊字符时被 urlparse 截断"""
+    url = (raw_url or "").strip()
+    if not url:
+        return None
+    if url.startswith("unix://"):
+        return {
+            "scheme": "unix",
+            "raw_url": url,
+            "host": url,
+            "port": 0,
+            "db": 0,
+            "username": "",
+            "password": "",
+            "tls": False,
+        }
+
+    if "://" not in url:
+        raise ValueError("Redis URL 必须以 redis://、rediss:// 或 unix:// 开头")
+
+    scheme, rest = url.split("://", 1)
+    scheme = scheme.strip().lower()
+    if scheme not in {"redis", "rediss"}:
+        raise ValueError(f"不支持的 Redis 协议头: {scheme}://（仅支持 redis://、rediss://、unix://）")
+
+    username = ""
+    password = ""
+    hostpath = rest
+
+    if "@" in rest:
+        userinfo, candidate_host = rest.rsplit("@", 1)
+        if not _REDIS_HOSTPATH_RE.match(candidate_host):
+            raise ValueError("无法解析 Redis 主机与端口，建议使用分项参数表单填写（支持密码任意特殊字符）")
+        hostpath = candidate_host
+        if ":" in userinfo:
+            raw_u, raw_p = userinfo.split(":", 1)
+            username = _smart_decode_userinfo_part(raw_u)
+            password = _smart_decode_userinfo_part(raw_p)
+        else:
+            password = _smart_decode_userinfo_part(userinfo)
+
+    m = _REDIS_HOSTPATH_RE.match(hostpath)
+    if not m:
+        raise ValueError("Redis 地址格式无效，正确示例: redis://:password@127.0.0.1:6379/0")
+
+    raw_host, port_s, db_s, query_s = m.groups()
+    host = raw_host[1:-1] if (raw_host.startswith("[") and raw_host.endswith("]")) else raw_host
+    port = int(port_s) if port_s else 6379
+    if not (1 <= port <= 65535):
+        raise ValueError(f"Redis 端口超出范围 (1-65535): {port}")
+    db = int(db_s) if (db_s is not None and db_s != "") else 0
+    if not (0 <= db <= 255):
+        raise ValueError(f"Redis DB 编号超出范围 (0-255): {db}")
+
+    return {
+        "scheme": scheme,
+        "host": host,
+        "port": port,
+        "db": db,
+        "username": username,
+        "password": password,
+        "tls": scheme == "rediss",
+        "query": query_s or "",
+    }
+
+
+def normalize_redis_config_dict(cfg: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    if not cfg or not isinstance(cfg, dict):
+        return None
+    if cfg.get("scheme") == "unix" and cfg.get("raw_url"):
+        return {
+            "scheme": "unix",
+            "raw_url": str(cfg["raw_url"]).strip(),
+            "host": str(cfg["raw_url"]).strip(),
+            "port": 0,
+            "db": 0,
+            "username": "",
+            "password": "",
+            "tls": False,
+        }
+    host = str(cfg.get("host") or "").strip()
+    if not host:
+        return None
+    if host.startswith("[") and host.endswith("]"):
+        host = host[1:-1].strip()
+    try:
+        port = int(cfg.get("port") if cfg.get("port") not in (None, "") else 6379)
+    except (TypeError, ValueError):
+        raise ValueError("Redis 端口必须是有效整数 (1-65535)")
+    if not (1 <= port <= 65535):
+        raise ValueError(f"Redis 端口超出范围 (1-65535): {port}")
+    try:
+        db = int(cfg.get("db") if cfg.get("db") not in (None, "") else 0)
+    except (TypeError, ValueError):
+        raise ValueError("Redis DB 编号必须是有效整数 (0-255)")
+    if not (0 <= db <= 255):
+        raise ValueError(f"Redis DB 编号超出范围 (0-255): {db}")
+
+    tls = bool(cfg.get("tls") or str(cfg.get("scheme") or "").lower() == "rediss")
+    return {
+        "scheme": "rediss" if tls else "redis",
+        "host": host,
+        "port": port,
+        "db": db,
+        "username": str(cfg.get("username") or "").strip(),
+        "password": "" if cfg.get("password") is None else str(cfg.get("password")),
+        "tls": tls,
+        "query": str(cfg.get("query") or "").strip(),
+    }
+
+
+def build_encoded_redis_url(cfg: Optional[Dict[str, Any]]) -> str:
+    if not cfg:
+        return ""
+    if cfg.get("scheme") == "unix":
+        return str(cfg.get("raw_url") or "")
+    host = str(cfg.get("host") or "").strip()
+    if not host:
+        return ""
+    host_fmt = f"[{host}]" if (":" in host and not host.startswith("[")) else host
+    scheme = "rediss" if cfg.get("tls") else "redis"
+    port = int(cfg.get("port") or 6379)
+    db = int(cfg.get("db") or 0)
+    user = str(cfg.get("username") or "")
+    pwd = str(cfg.get("password") or "")
+    auth = ""
+    if user or pwd:
+        enc_u = quote(user, safe="") if user else ""
+        enc_p = quote(pwd, safe="") if pwd else ""
+        auth = f"{enc_u}:{enc_p}@"
+    query = str(cfg.get("query") or "").strip()
+    q_suffix = f"?{query}" if query else ""
+    return f"{scheme}://{auth}{host_fmt}:{port}/{db}{q_suffix}"
+
+
+def mask_redis_config(cfg: Optional[Dict[str, Any]]) -> str:
+    if not cfg:
+        return ""
+    if cfg.get("scheme") == "unix":
+        return str(cfg.get("raw_url") or "")
+    host = str(cfg.get("host") or "").strip()
+    if not host:
+        return ""
+    host_fmt = f"[{host}]" if (":" in host and not host.startswith("[")) else host
+    scheme = "rediss" if cfg.get("tls") else "redis"
+    port = int(cfg.get("port") or 6379)
+    db = int(cfg.get("db") or 0)
+    user = str(cfg.get("username") or "")
+    has_pwd = bool(cfg.get("password"))
+    if user and has_pwd:
+        auth = f"{user}:***@"
+    elif has_pwd:
+        auth = "***@"
+    elif user:
+        auth = f"{user}@"
+    else:
+        auth = ""
+    return f"{scheme}://{auth}{host_fmt}:{port}/{db}"
+
+
+def _create_redis_client(
+    cfg: Dict[str, Any],
+    socket_connect_timeout: float = 1.5,
+    socket_timeout: float = 1.5,
+    health_check_interval: int = 30,
+):
+    if cfg.get("scheme") == "unix":
+        return redis.Redis.from_url(
+            cfg["raw_url"],
+            decode_responses=True,
+            socket_connect_timeout=socket_connect_timeout,
+            socket_timeout=socket_timeout,
+            health_check_interval=health_check_interval,
+        )
+    kwargs: Dict[str, Any] = {
+        "host": cfg["host"],
+        "port": int(cfg.get("port") or 6379),
+        "db": int(cfg.get("db") or 0),
+        "decode_responses": True,
+        "socket_connect_timeout": socket_connect_timeout,
+        "socket_timeout": socket_timeout,
+        "health_check_interval": health_check_interval,
+    }
+    if cfg.get("username"):
+        kwargs["username"] = cfg["username"]
+    if cfg.get("password"):
+        kwargs["password"] = cfg["password"]
+    if cfg.get("tls"):
+        kwargs["ssl"] = True
+    return redis.Redis(**kwargs)
+
 
 
 class SQLiteCacheBackend:
@@ -307,7 +546,9 @@ class CacheManager:
     def __init__(self):
         self._sqlite_cache = SQLiteCacheBackend(CACHE_DB_PATH)
         self._redis_client = None
+        self._redis_config: Optional[Dict[str, Any]] = None
         self._redis_url = ""
+        self._key_prefix = normalize_key_prefix(DEFAULT_REDIS_KEY_PREFIX)
         self._config_source = "default"
         self._active_backend = "sqlite_cache"
         self._last_error = ""
@@ -319,29 +560,160 @@ class CacheManager:
         self._lock = threading.Lock()
         self.reload_from_config()
 
-    def _resolve_redis_url(self) -> tuple[str, str]:
+    def _rk(self, key: str) -> str:
+        k = str(key)
+        p = self._key_prefix
+        if not p or k.startswith(p):
+            return k
+        return f"{p}{k}"
+
+    def _strip_rk(self, key: str) -> str:
+        k = str(key)
+        p = self._key_prefix
+        if p and k.startswith(p):
+            return k[len(p):]
+        return k
+
+    def get_key_prefix(self) -> str:
+        return self._key_prefix
+
+    def get_current_redis_config(self) -> Optional[Dict[str, Any]]:
+        return dict(self._redis_config) if self._redis_config else None
+
+    def _resolve_redis_settings(self) -> tuple[Optional[Dict[str, Any]], str, str, str]:
         if os.path.exists(BOOTSTRAP_CONFIG_PATH):
             try:
                 with open(BOOTSTRAP_CONFIG_PATH, "r", encoding="utf-8") as f:
                     data = json.load(f)
-                if isinstance(data, dict) and "redis_url" in data:
-                    return str(data.get("redis_url") or "").strip(), "bootstrap"
-            except Exception:
-                pass
-        if DEFAULT_REDIS_URL:
-            return DEFAULT_REDIS_URL, "env"
-        return "", "default"
+                if isinstance(data, dict):
+                    prefix_raw = data.get("redis_key_prefix")
+                    if prefix_raw is None and isinstance(data.get("redis_config"), dict):
+                        prefix_raw = data["redis_config"].get("key_prefix")
+                    key_prefix = normalize_key_prefix(prefix_raw, DEFAULT_REDIS_KEY_PREFIX, strict=False)
 
-    def reload_from_config(self, redis_url: Optional[str] = None, source: Optional[str] = None) -> str:
-        if redis_url is None:
-            target_url, resolved_source = self._resolve_redis_url()
-        else:
-            target_url = str(redis_url).strip()
+                    if "redis_config" in data or "redis_url" in data:
+                        raw_cfg = data.get("redis_config")
+                        if isinstance(raw_cfg, dict) and (raw_cfg.get("host") or raw_cfg.get("raw_url")):
+                            cfg = normalize_redis_config_dict(raw_cfg)
+                            return cfg, build_encoded_redis_url(cfg), key_prefix, "bootstrap"
+                        raw_url = str(data.get("redis_url") or "").strip()
+                        if raw_url:
+                            cfg = parse_redis_url_safe(raw_url)
+                            return cfg, build_encoded_redis_url(cfg), key_prefix, "bootstrap"
+                        return None, "", key_prefix, "bootstrap"
+            except Exception as exc:
+                logger.warning(f"⚠️ [Cache] 解析 bootstrap.json Redis 配置失败 ({exc})，将尝试回退默认配置")
+
+        key_prefix = normalize_key_prefix(DEFAULT_REDIS_KEY_PREFIX, DEFAULT_REDIS_KEY_PREFIX, strict=False)
+        if DEFAULT_REDIS_URL:
+            try:
+                cfg = parse_redis_url_safe(DEFAULT_REDIS_URL)
+                return cfg, build_encoded_redis_url(cfg), key_prefix, "env"
+            except Exception as exc:
+                logger.warning(f"⚠️ [Cache] 环境变量 REDIS_URL 格式无效 ({exc})，将保持原样标记降级")
+                return None, DEFAULT_REDIS_URL, key_prefix, "env"
+        return None, "", key_prefix, "default"
+
+    def resolve_target_config(
+        self,
+        *,
+        redis_url: str = "",
+        redis_host: Optional[str] = None,
+        redis_port: Optional[int] = 6379,
+        redis_db: Optional[int] = 0,
+        redis_username: Optional[str] = "",
+        redis_password: Optional[str] = None,
+        redis_tls: bool = False,
+        keep_password: bool = True,
+        clear_password: bool = False,
+        use_current: bool = False,
+        key_prefix: Optional[str] = None,
+    ) -> tuple[Optional[Dict[str, Any]], str]:
+        prefix = normalize_key_prefix(
+            key_prefix if key_prefix is not None else self._key_prefix,
+            DEFAULT_REDIS_KEY_PREFIX,
+            strict=True,
+        )
+        host_clean = (redis_host or "").strip()
+        url_clean = (redis_url or "").strip()
+
+        if host_clean:
+            pwd_val = ""
+            if clear_password:
+                pwd_val = ""
+            elif redis_password is not None and redis_password != "":
+                pwd_val = str(redis_password)
+            elif keep_password and self._redis_config:
+                pwd_val = str(self._redis_config.get("password") or "")
+            cfg = normalize_redis_config_dict({
+                "host": host_clean,
+                "port": redis_port if redis_port not in (None, "") else 6379,
+                "db": redis_db if redis_db not in (None, "") else 0,
+                "username": (redis_username or "").strip(),
+                "password": pwd_val,
+                "tls": bool(redis_tls),
+            })
+            return cfg, prefix
+
+        if url_clean:
+            cfg = parse_redis_url_safe(url_clean)
+            return cfg, prefix
+
+        if use_current and self._redis_config:
+            return dict(self._redis_config), prefix
+
+        return None, prefix
+
+    def reload_from_config(
+        self,
+        redis_url: Optional[str] = None,
+        source: Optional[str] = None,
+        redis_config: Optional[Dict[str, Any]] = None,
+        key_prefix: Optional[str] = None,
+    ) -> str:
+        parse_err = ""
+        if redis_config is not None:
+            try:
+                target_cfg = normalize_redis_config_dict(redis_config) if redis_config else None
+            except Exception as exc:
+                target_cfg = None
+                parse_err = str(exc)
+            target_url = build_encoded_redis_url(target_cfg) if target_cfg else ""
+            target_prefix = normalize_key_prefix(
+                key_prefix if key_prefix is not None else self._key_prefix,
+                DEFAULT_REDIS_KEY_PREFIX,
+                strict=False,
+            )
             resolved_source = source or "bootstrap"
+        elif redis_url is None:
+            target_cfg, target_url, target_prefix, resolved_source = self._resolve_redis_settings()
+            if key_prefix is not None:
+                target_prefix = normalize_key_prefix(key_prefix, DEFAULT_REDIS_KEY_PREFIX, strict=False)
+        else:
+            raw_u = str(redis_url).strip()
+            target_prefix = normalize_key_prefix(
+                key_prefix if key_prefix is not None else self._key_prefix,
+                DEFAULT_REDIS_KEY_PREFIX,
+                strict=False,
+            )
+            resolved_source = source or "bootstrap"
+            if not raw_u:
+                target_cfg = None
+                target_url = ""
+            else:
+                try:
+                    target_cfg = parse_redis_url_safe(raw_u)
+                    target_url = build_encoded_redis_url(target_cfg)
+                except Exception as exc:
+                    target_cfg = None
+                    target_url = raw_u
+                    parse_err = str(exc)
 
         with self._lock:
             old_client = self._redis_client
+            self._redis_config = target_cfg
             self._redis_url = target_url
+            self._key_prefix = target_prefix
             self._config_source = resolved_source
             self._redis_client = None
             self._last_error = ""
@@ -353,9 +725,18 @@ class CacheManager:
                 except Exception:
                     pass
 
-            if not target_url:
+            if not target_cfg and not target_url:
                 self._active_backend = "sqlite_cache"
-                logger.info(f"💾 [Cache] 未配置 Redis，启用内置 SQLite WAL Cache ({CACHE_DB_PATH})")
+                logger.info(
+                    f"💾 [Cache] 未配置 Redis，启用内置 SQLite WAL Cache ({CACHE_DB_PATH}) | 命名空间前缀={self._key_prefix}"
+                )
+                return self._active_backend
+
+            if parse_err or target_cfg is None:
+                self._active_backend = "sqlite_cache"
+                self._last_error = parse_err or "Redis 配置无效"
+                self._fallbacks += 1
+                logger.warning(f"⚠️ [Cache] Redis 配置解析失败 ({self._last_error})，自动回退至 SQLite Cache")
                 return self._active_backend
 
             if not HAS_REDIS_LIB:
@@ -365,9 +746,8 @@ class CacheManager:
                 return self._active_backend
 
             try:
-                client = redis.Redis.from_url(
-                    target_url,
-                    decode_responses=True,
+                client = _create_redis_client(
+                    target_cfg,
                     socket_connect_timeout=1.5,
                     socket_timeout=1.5,
                     health_check_interval=30,
@@ -375,7 +755,9 @@ class CacheManager:
                 client.ping()
                 self._redis_client = client
                 self._active_backend = "redis"
-                logger.info("⚡ [Cache] Redis 高速缓存已连通并激活 (支持故障自动回退 SQLite Cache)")
+                logger.info(
+                    f"⚡ [Cache] Redis 高速缓存已连通并激活 ({mask_redis_config(target_cfg)} | 前缀={self._key_prefix})"
+                )
             except Exception as exc:
                 self._redis_client = None
                 self._active_backend = "sqlite_cache"
@@ -387,8 +769,13 @@ class CacheManager:
     def _get_redis(self):
         if self._redis_client is not None:
             return self._redis_client
-        if self._redis_url and (time.monotonic() - self._last_probe_ts) >= self._probe_cooldown_sec:
-            self.reload_from_config(self._redis_url)
+        if (self._redis_config or self._redis_url) and (time.monotonic() - self._last_probe_ts) >= self._probe_cooldown_sec:
+            self.reload_from_config(
+                redis_url=self._redis_url if self._redis_config is None else None,
+                source=self._config_source,
+                redis_config=self._redis_config,
+                key_prefix=self._key_prefix,
+            )
             return self._redis_client
         return None
 
@@ -405,7 +792,7 @@ class CacheManager:
         r = self._get_redis()
         if r is not None:
             try:
-                val = r.get(key)
+                val = r.get(self._rk(key))
                 self._hits += 1 if val is not None else 0
                 self._misses += 1 if val is None else 0
                 return val
@@ -421,10 +808,11 @@ class CacheManager:
         r = self._get_redis()
         if r is not None:
             try:
+                rk = self._rk(key)
                 if ttl and ttl > 0:
-                    r.setex(key, int(ttl), str_val)
+                    r.setex(rk, int(ttl), str_val)
                 else:
-                    r.set(key, str_val)
+                    r.set(rk, str_val)
                 return
             except Exception as exc:
                 self._trip_fallback(exc)
@@ -439,10 +827,11 @@ class CacheManager:
             try:
                 pipe = r.pipeline(transaction=False)
                 for k, raw in encoded.items():
+                    rk = self._rk(k)
                     if ttl and ttl > 0:
-                        pipe.setex(k, int(ttl), raw)
+                        pipe.setex(rk, int(ttl), raw)
                     else:
-                        pipe.set(k, raw)
+                        pipe.set(rk, raw)
                 pipe.execute()
                 return
             except Exception as exc:
@@ -453,7 +842,7 @@ class CacheManager:
         r = self._get_redis()
         if r is not None:
             try:
-                r.delete(key)
+                r.delete(self._rk(key))
                 return
             except Exception as exc:
                 self._trip_fallback(exc)
@@ -487,7 +876,7 @@ class CacheManager:
         r = self._get_redis()
         if r is not None:
             try:
-                res = r.eval(self._LUA_INCR_WINDOW, 1, key, step, win)
+                res = r.eval(self._LUA_INCR_WINDOW, 1, self._rk(key), step, win)
                 count = int(res[0])
                 ttl_left = max(1, int(res[1])) if len(res) > 1 and int(res[1]) > 0 else win
                 return count, ttl_left
@@ -501,7 +890,7 @@ class CacheManager:
         r = self._get_redis()
         if r is not None:
             try:
-                return int(r.hincrby(hkey, field, int(delta)))
+                return int(r.hincrby(self._rk(hkey), field, int(delta)))
             except Exception as exc:
                 self._trip_fallback(exc)
         return self._sqlite_cache.hincrby(hkey, field, int(delta))
@@ -515,10 +904,11 @@ class CacheManager:
                 pipe = r.pipeline(transaction=False)
                 has_cmd = False
                 for hkey, fields in ops.items():
+                    rk = self._rk(hkey)
                     for field, delta in fields.items():
                         d = int(delta or 0)
                         if d:
-                            pipe.hincrby(hkey, field, d)
+                            pipe.hincrby(rk, field, d)
                             has_cmd = True
                 if has_cmd:
                     pipe.execute()
@@ -536,10 +926,11 @@ class CacheManager:
             try:
                 pipe = r.pipeline(transaction=False)
                 for k, raw in encoded.items():
+                    rk = self._rk(k)
                     if ttl and ttl > 0:
-                        pipe.setex(k, int(ttl), raw)
+                        pipe.setex(rk, int(ttl), raw)
                     else:
-                        pipe.set(k, raw)
+                        pipe.set(rk, raw)
                 pipe.execute()
                 return
             except Exception as exc:
@@ -554,7 +945,7 @@ class CacheManager:
         r = self._get_redis()
         if r is not None:
             try:
-                vals = r.mget(keys)
+                vals = r.mget([self._rk(k) for k in keys])
                 for k, raw in zip(keys, vals):
                     if raw is not None:
                         self._hits += 1
@@ -589,9 +980,10 @@ class CacheManager:
         r = self._get_redis()
         if r is not None:
             try:
+                rk = self._rk(hkey)
                 pipe = r.pipeline()
-                pipe.hgetall(hkey)
-                pipe.delete(hkey)
+                pipe.hgetall(rk)
+                pipe.delete(rk)
                 res, _ = pipe.execute()
                 for k, v in (res or {}).items():
                     merged[str(k)] = merged.get(str(k), 0) + int(v or 0)
@@ -604,7 +996,7 @@ class CacheManager:
         r = self._get_redis()
         if r is not None:
             try:
-                res = r.hgetall(hkey)
+                res = r.hgetall(self._rk(hkey))
                 for k, v in (res or {}).items():
                     merged[str(k)] = merged.get(str(k), 0) + int(v or 0)
             except Exception as exc:
@@ -620,7 +1012,7 @@ class CacheManager:
             try:
                 pipe = r.pipeline(transaction=False)
                 for hk in hkeys:
-                    pipe.hgetall(hk)
+                    pipe.hgetall(self._rk(hk))
                 rows = pipe.execute()
                 for hk, res in zip(hkeys, rows):
                     if not res:
@@ -643,8 +1035,8 @@ class CacheManager:
         r = self._get_redis()
         if r is not None:
             try:
-                for k in r.scan_iter(match=f"{prefix}*", count=200):
-                    found.add(str(k))
+                for k in r.scan_iter(match=f"{self._rk(prefix)}*", count=200):
+                    found.add(self._strip_rk(str(k)))
             except Exception as exc:
                 self._trip_fallback(exc)
         return sorted(found)
@@ -657,6 +1049,12 @@ class CacheManager:
         raw = (url or "").strip()
         if not raw:
             return ""
+        try:
+            cfg = parse_redis_url_safe(raw)
+            if cfg:
+                return mask_redis_config(cfg)
+        except Exception:
+            pass
         if "@" in raw and "://" in raw:
             scheme, rest = raw.split("://", 1)
             _, hostpart = rest.rsplit("@", 1)
@@ -690,7 +1088,7 @@ class CacheManager:
                 self._trip_fallback(exc)
                 redis_info = {"connected": False}
 
-        redis_configured = bool(self._redis_url)
+        redis_configured = bool(self._redis_config or self._redis_url)
         redis_connected = self._active_backend == "redis" and self._redis_client is not None and bool(redis_info and redis_info.get("connected"))
         degraded = redis_configured and not redis_connected
         engine_state = "redis" if redis_connected else ("degraded" if degraded else "sqlite_cache")
@@ -709,16 +1107,30 @@ class CacheManager:
         total_ops = self._hits + self._misses
         hit_rate = round((self._hits / total_ops) * 100, 1) if total_ops > 0 else 0.0
 
+        cfg = self._redis_config or {}
+        redis_params = {
+            "host": str(cfg.get("host") or ""),
+            "port": int(cfg.get("port") or 6379),
+            "db": int(cfg.get("db") or 0),
+            "username": str(cfg.get("username") or ""),
+            "tls": bool(cfg.get("tls", False)),
+            "has_password": bool(cfg.get("password")),
+            "key_prefix": self._key_prefix,
+        }
+
         return {
             "active_backend": self._active_backend,
             "engine_state": engine_state,
             "engine_label": engine_label,
             "degraded": degraded,
             "config_source": self._config_source,
+            "key_prefix": self._key_prefix,
+            "default_key_prefix": normalize_key_prefix(DEFAULT_REDIS_KEY_PREFIX),
             "has_redis_lib": HAS_REDIS_LIB,
             "redis_configured": redis_configured,
             "redis_connected": redis_connected,
-            "redis_url_masked": self.mask_redis_url(self._redis_url),
+            "redis_url_masked": mask_redis_config(self._redis_config) if self._redis_config else self.mask_redis_url(self._redis_url),
+            "redis_params": redis_params,
             "redis_info": redis_info,
             "probe_cooldown_sec": int(self._probe_cooldown_sec),
             "next_probe_in_sec": next_probe_in_sec,
@@ -737,13 +1149,18 @@ class CacheManager:
         }
 
     def probe_reconnect(self) -> dict:
-        if not self._redis_url:
+        if not (self._redis_config or self._redis_url):
             return {
                 "ok": False,
-                "detail": "当前未配置 Redis URL，处于内置 SQLite WAL Cache 模式",
+                "detail": "当前未配置 Redis，处于内置 SQLite WAL Cache 模式",
                 "cache": self.get_status(),
             }
-        self.reload_from_config(self._redis_url, source=self._config_source)
+        self.reload_from_config(
+            redis_url=self._redis_url if self._redis_config is None else None,
+            source=self._config_source,
+            redis_config=self._redis_config,
+            key_prefix=self._key_prefix,
+        )
         status = self.get_status()
         if status["engine_state"] == "redis":
             info = status.get("redis_info") or {}
@@ -752,7 +1169,7 @@ class CacheManager:
             lat_txt = f", {ping_ms}ms" if ping_ms is not None else ""
             return {
                 "ok": True,
-                "message": f"Redis 已恢复连接 (v{ver}{lat_txt})",
+                "message": f"Redis 已恢复连接 (v{ver}{lat_txt} · 前缀 {status.get('key_prefix')})",
                 "cache": status,
             }
         return {
@@ -761,25 +1178,69 @@ class CacheManager:
             "cache": status,
         }
 
-    def test_target(self, redis_url: str = "", use_current: bool = False) -> dict:
-        url = (redis_url or "").strip()
-        if not url and use_current:
-            url = self._redis_url
-            if not url:
-                return {"ok": False, "pong": False, "detail": "当前尚未配置 Redis URL，请先输入连接串"}
-        return self.test_connection(url)
+    def test_target(
+        self,
+        redis_url: str = "",
+        use_current: bool = False,
+        *,
+        redis_host: Optional[str] = None,
+        redis_port: Optional[int] = 6379,
+        redis_db: Optional[int] = 0,
+        redis_username: Optional[str] = "",
+        redis_password: Optional[str] = None,
+        redis_tls: bool = False,
+        keep_password: bool = True,
+        clear_password: bool = False,
+        key_prefix: Optional[str] = None,
+    ) -> dict:
+        try:
+            cfg, prefix = self.resolve_target_config(
+                redis_url=redis_url,
+                redis_host=redis_host,
+                redis_port=redis_port,
+                redis_db=redis_db,
+                redis_username=redis_username,
+                redis_password=redis_password,
+                redis_tls=redis_tls,
+                keep_password=keep_password,
+                clear_password=clear_password,
+                use_current=use_current,
+                key_prefix=key_prefix,
+            )
+        except ValueError as exc:
+            return {"ok": False, "pong": False, "detail": str(exc)}
+        if not cfg:
+            return {"ok": False, "pong": False, "detail": "请填写 Redis 服务器地址或连接 URL"}
+        return self.test_connection_cfg(cfg, key_prefix=prefix)
 
     @staticmethod
-    def test_connection(redis_url: str) -> dict:
+    def test_connection(redis_url: str, key_prefix: Optional[str] = None) -> dict:
         url = (redis_url or "").strip()
         if not url:
             return {"ok": False, "pong": False, "detail": "Redis URL 不能为空"}
+        try:
+            cfg = parse_redis_url_safe(url)
+        except ValueError as exc:
+            return {"ok": False, "pong": False, "detail": str(exc)}
+        return CacheManager.test_connection_cfg(cfg, key_prefix=key_prefix)
+
+    @staticmethod
+    def test_connection_cfg(cfg: Optional[Dict[str, Any]], key_prefix: Optional[str] = None) -> dict:
+        if not cfg:
+            return {"ok": False, "pong": False, "detail": "Redis 连接参数不能为空"}
         if not HAS_REDIS_LIB:
             return {"ok": False, "pong": False, "detail": "后端未安装 redis 依赖包"}
+        prefix = normalize_key_prefix(key_prefix, DEFAULT_REDIS_KEY_PREFIX, strict=False)
+        masked = mask_redis_config(cfg)
         client = None
         t0 = time.perf_counter()
         try:
-            client = redis.Redis.from_url(url, decode_responses=True, socket_connect_timeout=2.5, socket_timeout=2.5)
+            client = _create_redis_client(
+                cfg,
+                socket_connect_timeout=2.5,
+                socket_timeout=2.5,
+                health_check_interval=0,
+            )
             pong = bool(client.ping())
             lat = round((time.perf_counter() - t0) * 1000, 2)
             srv_info = client.info("server")
@@ -793,10 +1254,18 @@ class CacheManager:
                 "latency_ms": lat,
                 "version": ver,
                 "used_memory_human": mem_human,
-                "message": f"PONG · Redis 连接成功 (v{ver}, {lat}ms{mem_suffix})",
+                "key_prefix": prefix,
+                "redis_url_masked": masked,
+                "message": f"PONG · Redis 连接成功 (v{ver}, {lat}ms{mem_suffix} · 命名空间 {prefix})",
             }
         except Exception as exc:
-            return {"ok": False, "pong": False, "detail": f"Redis PING 失败: {exc}"}
+            return {
+                "ok": False,
+                "pong": False,
+                "key_prefix": prefix,
+                "redis_url_masked": masked,
+                "detail": f"Redis PING 失败: {exc}",
+            }
         finally:
             if client is not None:
                 try:

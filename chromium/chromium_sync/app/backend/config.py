@@ -41,6 +41,7 @@ DEFAULT_MYSQL_USER = (os.getenv("MYSQL_USER") or "root").strip()
 DEFAULT_MYSQL_PASSWORD = os.getenv("MYSQL_PASSWORD") or ""
 DEFAULT_MYSQL_DATABASE = (os.getenv("MYSQL_DATABASE") or "chromium_sync").strip()
 DEFAULT_REDIS_URL = (os.getenv("REDIS_URL") or "").strip()
+DEFAULT_REDIS_KEY_PREFIX = (os.getenv("REDIS_KEY_PREFIX") or os.getenv("CACHE_KEY_PREFIX") or "csync:").strip()
 
 try:
     os.makedirs(KEYS_DIR, exist_ok=True)

@@ -1088,10 +1088,10 @@
               </div>
               <div class="muted mono" style="font-size: 11px; margin-top: 4px; word-break: break-all">
                 <template v-if="runtimeInfo.cache?.redis_configured">
-                  目标: {{ runtimeInfo.cache?.redis_url_masked }}
+                  目标: {{ runtimeInfo.cache?.redis_url_masked }} · 前缀: {{ runtimeInfo.cache?.key_prefix || 'csync_saas:' }}
                 </template>
                 <template v-else>
-                  文件: {{ runtimeInfo.cache?.sqlite_cache?.db_path || '/data/cache.db' }}
+                  文件: {{ runtimeInfo.cache?.sqlite_cache?.db_path || '/data/cache.db' }} · 前缀: {{ runtimeInfo.cache?.key_prefix || 'csync_saas:' }}
                 </template>
               </div>
             </div>
@@ -1108,7 +1108,7 @@
               </div>
               <div class="muted mono" style="font-size: 11px; margin-top: 4px">
                 <template v-if="cacheState === 'redis'">
-                  客户端连接数 {{ runtimeInfo.cache?.redis_info?.connected_clients ?? '-' }} · 兜底 KV {{ runtimeInfo.cache?.sqlite_cache?.entries ?? 0 }} 条
+                  客户端连接数 {{ runtimeInfo.cache?.redis_info?.connected_clients ?? '-' }} · 命名空间 {{ runtimeInfo.cache?.key_prefix || 'csync_saas:' }}
                 </template>
                 <template v-else>
                   WAL 并发安全 · 自动 TTL 清理 · 原子流量计数
@@ -1133,7 +1133,7 @@
                 <strong>Redis 降级告警（已无缝切换至 SQLite WAL Cache 兜底，不影响业务读写）：</strong>
                 <span class="mono">{{ runtimeInfo.cache?.last_error || 'Redis 连接异常' }}</span>
                 <div class="muted mono" style="font-size: 11px; margin-top: 3px; color: #fde68a">
-                  系统每 {{ runtimeInfo.cache?.probe_cooldown_sec || 30 }}s 自动探活恢复
+                  命名空间: {{ runtimeInfo.cache?.key_prefix || 'csync_saas:' }} · 系统每 {{ runtimeInfo.cache?.probe_cooldown_sec || 30 }}s 自动探活恢复
                   <span v-if="(runtimeInfo.cache?.next_probe_in_sec || 0) > 0">（下次自动探测约 {{ runtimeInfo.cache?.next_probe_in_sec }}s 后）</span>
                 </div>
               </div>
@@ -1166,17 +1166,123 @@
           </div>
 
           <template v-if="cacheTargetMode === 'redis'">
+            <div class="row" style="justify-content: space-between; margin-bottom: 10px">
+              <div class="row" style="gap: 6px">
+                <button
+                  type="button"
+                  class="btn btn-sm"
+                  :class="redisInputMode === 'params' ? 'btn-primary' : ''"
+                  @click="redisInputMode = 'params'"
+                >
+                  分项参数表单（推荐 · 密码免转义）
+                </button>
+                <button
+                  type="button"
+                  class="btn btn-sm"
+                  :class="redisInputMode === 'url' ? 'btn-primary' : ''"
+                  @click="redisInputMode = 'url'"
+                >
+                  粘贴完整 URL
+                </button>
+              </div>
+              <span v-if="runtimeInfo.cache?.redis_url_masked" class="muted mono" style="font-size: 11px">
+                当前已保存：{{ runtimeInfo.cache.redis_url_masked }}
+              </span>
+            </div>
+
+            <div v-if="redisInputMode === 'params'" style="margin-bottom: 10px">
+              <div class="grid-3" style="margin-bottom: 8px">
+                <div class="field" style="margin-bottom: 0">
+                  <label>Redis 主机 (Host)</label>
+                  <input class="input mono" placeholder="127.0.0.1 或 redis.prod" v-model="redisForm.host" />
+                </div>
+                <div class="field" style="margin-bottom: 0">
+                  <label>端口 (Port)</label>
+                  <input class="input mono" type="number" min="1" max="65535" placeholder="6379" v-model.number="redisForm.port" />
+                </div>
+                <div class="field" style="margin-bottom: 0">
+                  <label>DB 库号 (0-255)</label>
+                  <input class="input mono" type="number" min="0" max="255" placeholder="0" v-model.number="redisForm.db" />
+                </div>
+              </div>
+              <div class="grid-3" style="margin-bottom: 8px">
+                <div class="field" style="margin-bottom: 0">
+                  <label>统一键命名空间前缀（防冲突）</label>
+                  <input
+                    class="input mono"
+                    placeholder="csync_saas:"
+                    v-model="redisForm.key_prefix"
+                    title="生产环境建议为每套环境设置唯一前缀，如 prod:csync_saas:"
+                  />
+                </div>
+                <div class="field" style="margin-bottom: 0">
+                  <label>用户名 (ACL 选填)</label>
+                  <input class="input mono" placeholder="留空使用默认用户" v-model="redisForm.username" />
+                </div>
+                <div class="field" style="margin-bottom: 0">
+                  <div class="row" style="justify-content: space-between; margin-bottom: 4px">
+                    <label style="margin: 0">认证密码（支持 @ # ! ? / 特殊字符）</label>
+                    <div class="row" style="gap: 8px">
+                      <label
+                        v-if="runtimeInfo.cache?.redis_params?.has_password"
+                        style="margin: 0; font-size: 11px; color: #f59e0b; cursor: pointer; display: inline-flex; align-items: center; gap: 3px"
+                      >
+                        <input type="checkbox" v-model="redisForm.clear_password" /> 清空密码
+                      </label>
+                      <button
+                        type="button"
+                        style="background: none; border: none; color: #38bdf8; cursor: pointer; font-size: 11px; padding: 0"
+                        @click="showRedisPassword = !showRedisPassword"
+                      >
+                        {{ showRedisPassword ? '隐藏' : '显示' }}
+                      </button>
+                    </div>
+                  </div>
+                  <input
+                    class="input mono"
+                    :type="showRedisPassword ? 'text' : 'password'"
+                    :disabled="redisForm.clear_password"
+                    :placeholder="
+                      runtimeInfo.cache?.redis_params?.has_password
+                        ? '已保存密码（留空保持不变）'
+                        : '无密码可留空；原生支持含 @ # ! 等特殊字符'
+                    "
+                    autocomplete="new-password"
+                    v-model="redisForm.password"
+                  />
+                </div>
+              </div>
+              <div class="row" style="justify-content: space-between; gap: 10px">
+                <label style="font-size: 12px; color: var(--text); cursor: pointer; display: inline-flex; align-items: center; gap: 6px">
+                  <input type="checkbox" v-model="redisForm.tls" />
+                  启用 TLS 加密连接 (<code class="mono">rediss://</code>)
+                </label>
+                <span class="muted mono" style="font-size: 11px">
+                  生效键示例：{{ (redisForm.key_prefix || 'csync_saas:').replace(/:+$/, '') }}:setting:*
+                </span>
+              </div>
+            </div>
+
+            <div v-else class="grid-2" style="margin-bottom: 10px">
+              <div class="field" style="margin-bottom: 0">
+                <label>完整连接 URL（后端自动处理密码中的 @ # 等特殊字符）</label>
+                <input
+                  class="input mono"
+                  :placeholder="
+                    runtimeInfo.cache?.redis_url_masked
+                      ? `当前已保存: ${runtimeInfo.cache.redis_url_masked}（留空可测试/沿用当前连接）`
+                      : 'redis://:password@127.0.0.1:6379/0（支持 rediss:// TLS）'
+                  "
+                  v-model="redisUrlInput"
+                />
+              </div>
+              <div class="field" style="margin-bottom: 0">
+                <label>统一键命名空间前缀（生产防冲突）</label>
+                <input class="input mono" placeholder="csync_saas:" v-model="redisForm.key_prefix" />
+              </div>
+            </div>
+
             <div class="row" style="gap: 8px">
-              <input
-                class="input mono"
-                style="flex: 1; min-width: 240px"
-                :placeholder="
-                  runtimeInfo.cache?.redis_url_masked
-                    ? `当前已保存: ${runtimeInfo.cache.redis_url_masked}（留空可测试/沿用当前连接）`
-                    : 'redis://:password@127.0.0.1:6379/0（支持 rediss:// TLS）'
-                "
-                v-model="redisUrlInput"
-              />
               <button class="btn btn-sm" :disabled="testingRedis" @click="testRedisPing">
                 {{ testingRedis ? 'PING 中...' : '在线测试 Redis PING' }}
               </button>
@@ -1191,6 +1297,9 @@
               >
                 切回 SQL Cache
               </button>
+            </div>
+            <div class="muted" style="font-size: 11px; margin-top: 6px">
+              分项密码直接透传至 Redis 驱动（不经 URL 拼接解析），含 <code class="mono">@ # ! ? / %</code> 等任意特殊字符均不会解析失败；所有缓存与限流/流量键统一挂载在指定命名空间前缀下。
             </div>
           </template>
           <template v-else>
@@ -1497,7 +1606,19 @@ const referralSummary = ref({})
 const referralRewards = ref([])
 const runtimeInfo = ref({})
 const cacheTargetMode = ref('sqlite_cache')
+const redisInputMode = ref('params') // 'params' | 'url'
 const redisUrlInput = ref('')
+const showRedisPassword = ref(false)
+const redisForm = reactive({
+  host: '',
+  port: 6379,
+  db: 0,
+  username: '',
+  password: '',
+  tls: false,
+  clear_password: false,
+  key_prefix: 'csync_saas:',
+})
 const refreshingCache = ref(false)
 const testingRedis = ref(false)
 const reconnectingRedis = ref(false)
@@ -1728,7 +1849,7 @@ async function load(showFeedback = false) {
       edit_can_share: Boolean(p.can_share_nodes),
     }))
     runtimeInfo.value = ov.runtime || {}
-    cacheTargetMode.value = runtimeInfo.value?.cache?.redis_configured ? 'redis' : 'sqlite_cache'
+    syncRedisFormFromCache(runtimeInfo.value?.cache)
     recentLeases.value = ov.recent_leases || []
     users.value = us || []
     recharges.value = rc.orders || []
@@ -2103,14 +2224,64 @@ async function refreshCacheStatus(showNotice = true) {
   }
 }
 
+function syncRedisFormFromCache(cacheObj) {
+  if (!cacheObj || typeof cacheObj !== 'object') return
+  cacheTargetMode.value = cacheObj.redis_configured ? 'redis' : 'sqlite_cache'
+  const p = cacheObj.redis_params || {}
+  redisForm.host = p.host || ''
+  redisForm.port = Number(p.port || 6379)
+  redisForm.db = Number(p.db || 0)
+  redisForm.username = p.username || ''
+  redisForm.tls = Boolean(p.tls)
+  redisForm.password = ''
+  redisForm.clear_password = false
+  redisForm.key_prefix = cacheObj.key_prefix || p.key_prefix || cacheObj.default_key_prefix || 'csync_saas:'
+}
+
+function buildRedisPayload(forReload = false) {
+  const prefix = (redisForm.key_prefix || '').trim() || runtimeInfo.value?.cache?.default_key_prefix || 'csync_saas:'
+  if (redisInputMode.value === 'url') {
+    const rawUrl = redisUrlInput.value.trim()
+    const useCurrent = !rawUrl && Boolean(runtimeInfo.value?.cache?.redis_configured)
+    return {
+      ready: Boolean(rawUrl || useCurrent),
+      missingMsg: '请先输入 Redis 连接串，或切换至「分项参数表单」',
+      payload: {
+        ...(forReload ? { mode: 'redis' } : {}),
+        redis_url: rawUrl,
+        key_prefix: prefix,
+        use_current: useCurrent,
+      },
+    }
+  }
+  const host = (redisForm.host || '').trim()
+  const useCurrent = !host && Boolean(runtimeInfo.value?.cache?.redis_configured)
+  return {
+    ready: Boolean(host || useCurrent),
+    missingMsg: '请先输入 Redis 服务器主机地址（如 127.0.0.1）',
+    payload: {
+      ...(forReload ? { mode: 'redis' } : {}),
+      redis_host: host,
+      redis_port: Number(redisForm.port || 6379),
+      redis_db: Number(redisForm.db || 0),
+      redis_username: (redisForm.username || '').trim(),
+      redis_password: redisForm.clear_password ? '' : redisForm.password,
+      redis_tls: Boolean(redisForm.tls),
+      keep_password: !redisForm.clear_password,
+      clear_password: Boolean(redisForm.clear_password),
+      key_prefix: prefix,
+      use_current: useCurrent,
+    },
+  }
+}
+
 async function testRedisPing() {
   if (testingRedis.value) return
-  const rawUrl = redisUrlInput.value.trim()
-  const useCurrent = !rawUrl && Boolean(runtimeInfo.value?.cache?.redis_configured)
-  if (!rawUrl && !useCurrent) {
+  const req = buildRedisPayload(false)
+  if (!req.ready) {
     redisPingResult.value = {
       ok: false,
-      message: '请先输入 Redis 连接串，例如 redis://127.0.0.1:6379/0',
+      message: req.missingMsg,
       testedAt: nowTimeStr(),
     }
     return
@@ -2120,7 +2291,7 @@ async function testRedisPing() {
   try {
     const res = await apiFetch('/api/system/cache/test', {
       method: 'POST',
-      body: JSON.stringify({ redis_url: rawUrl, use_current: useCurrent }),
+      body: JSON.stringify(req.payload),
     })
     const testedAt = nowTimeStr()
     if (res.ok) {
@@ -2153,29 +2324,37 @@ async function testRedisPing() {
 async function reloadRedis(forceSqlite = false) {
   if (reloadingRedis.value) return
   const targetMode = forceSqlite ? 'sqlite_cache' : cacheTargetMode.value
-  const rawUrl = redisUrlInput.value.trim()
-  const useCurrent = targetMode === 'redis' && !rawUrl && Boolean(runtimeInfo.value?.cache?.redis_configured)
-  if (targetMode === 'redis' && !rawUrl && !useCurrent) {
-    emit('notify', { message: '请输入 Redis 连接 URL 后再热切换保存', type: 'error' })
-    return
+  let bodyPayload
+
+  if (targetMode === 'sqlite_cache') {
+    bodyPayload = {
+      mode: 'sqlite_cache',
+      redis_url: '',
+      key_prefix: (redisForm.key_prefix || '').trim() || runtimeInfo.value?.cache?.default_key_prefix || 'csync_saas:',
+    }
+  } else {
+    const req = buildRedisPayload(true)
+    if (!req.ready) {
+      emit('notify', { message: req.missingMsg, type: 'error' })
+      return
+    }
+    bodyPayload = req.payload
   }
 
   reloadingRedis.value = true
   try {
     const res = await apiFetch('/api/system/cache/reload', {
       method: 'POST',
-      body: JSON.stringify({
-        mode: targetMode,
-        redis_url: targetMode === 'redis' ? rawUrl : '',
-        use_current: useCurrent,
-      }),
+      body: JSON.stringify(bodyPayload),
     })
     if (res.cache) {
       runtimeInfo.value = { ...runtimeInfo.value, cache: res.cache }
-      cacheTargetMode.value = res.cache.redis_configured ? 'redis' : 'sqlite_cache'
+      syncRedisFormFromCache(res.cache)
     }
     if (targetMode === 'sqlite_cache' || res.ok) {
       redisUrlInput.value = ''
+      redisForm.password = ''
+      redisForm.clear_password = false
     }
     emit('notify', {
       message: res.message || '缓存后端已热切换并保存',
@@ -2198,7 +2377,7 @@ async function reconnectRedisNow() {
     })
     if (res.cache) {
       runtimeInfo.value = { ...runtimeInfo.value, cache: res.cache }
-      cacheTargetMode.value = res.cache.redis_configured ? 'redis' : 'sqlite_cache'
+      syncRedisFormFromCache(res.cache)
     }
     emit('notify', {
       message: res.message || res.detail || '已完成重连探测',

@@ -18,7 +18,7 @@ from config import (
     apply_hub_network_overrides,
     logger,
 )
-from core.cache import cache_mgr
+from core.cache import build_encoded_redis_url, cache_mgr
 from core.db import (
     create_or_update_initial_admin,
     get_active_db_info,
@@ -59,6 +59,15 @@ class TestDbDTO(BaseModel):
 
 class TestRedisDTO(BaseModel):
     redis_url: str = ""
+    redis_host: Optional[str] = None
+    redis_port: Optional[int] = 6379
+    redis_db: Optional[int] = 0
+    redis_username: Optional[str] = ""
+    redis_password: Optional[str] = None
+    redis_tls: bool = False
+    keep_password: bool = True
+    clear_password: bool = False
+    key_prefix: Optional[str] = None
     use_current: bool = False
 
 
@@ -80,6 +89,13 @@ class CompleteSetupDTO(BaseModel):
     mysql_password: Optional[str] = ""
     mysql_database: Optional[str] = "chromium_sync_saas"
     redis_url: Optional[str] = ""
+    redis_host: Optional[str] = None
+    redis_port: Optional[int] = 6379
+    redis_db: Optional[int] = 0
+    redis_username: Optional[str] = ""
+    redis_password: Optional[str] = None
+    redis_tls: bool = False
+    redis_key_prefix: Optional[str] = None
     admin_username: str = "admin"
     admin_password: str
     admin_email: Optional[str] = ""
@@ -148,7 +164,19 @@ def setup_test_db(data: TestDbDTO, request: Request, auth: dict = Depends(_verif
 @router.post("/api/setup/test-redis", summary="测试 Redis 缓存服务连通性")
 def setup_test_redis(data: TestRedisDTO, request: Request, auth: dict = Depends(_verify_setup_or_admin)):
     enforce_rate_limit("setup", get_client_ip(request), RATE_LIMIT_SETUP_PER_MIN, 60, "Redis 连通性探测过于频繁")
-    res = cache_mgr.test_target(data.redis_url, use_current=bool(data.use_current))
+    res = cache_mgr.test_target(
+        data.redis_url,
+        use_current=bool(data.use_current),
+        redis_host=data.redis_host,
+        redis_port=data.redis_port,
+        redis_db=data.redis_db,
+        redis_username=data.redis_username,
+        redis_password=data.redis_password,
+        redis_tls=bool(data.redis_tls),
+        keep_password=bool(data.keep_password),
+        clear_password=bool(data.clear_password),
+        key_prefix=data.key_prefix,
+    )
     if not res.get("ok"):
         raise HTTPException(status_code=400, detail=res.get("detail", "Redis 连接失败"))
     return res
@@ -208,11 +236,30 @@ def _complete_initial_setup_locked(data: CompleteSetupDTO, client_ip: str):
     if db_type not in {"sqlite", "mysql"}:
         raise HTTPException(status_code=400, detail="不支持的数据库类型，仅支持 sqlite 或 mysql")
 
+    try:
+        resolved_redis_cfg, resolved_prefix = cache_mgr.resolve_target_config(
+            redis_url=data.redis_url or "",
+            redis_host=data.redis_host,
+            redis_port=data.redis_port,
+            redis_db=data.redis_db,
+            redis_username=data.redis_username,
+            redis_password=data.redis_password,
+            redis_tls=bool(data.redis_tls),
+            keep_password=False,
+            clear_password=False,
+            use_current=False,
+            key_prefix=data.redis_key_prefix,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
     boot_cfg = {
         "setup_completed": True,
         "completed_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "db_type": db_type,
-        "redis_url": (data.redis_url or "").strip(),
+        "redis_url": build_encoded_redis_url(resolved_redis_cfg) if resolved_redis_cfg else "",
+        "redis_config": resolved_redis_cfg,
+        "redis_key_prefix": resolved_prefix,
         "hub_public_host": (data.hub_public_host or "").strip(),
         "hub_external_port": int(data.hub_external_port) if data.hub_external_port else None,
     }
@@ -229,7 +276,12 @@ def _complete_initial_setup_locked(data: CompleteSetupDTO, client_ip: str):
     if not db_test.get("ok"):
         raise HTTPException(status_code=400, detail=db_test.get("detail", "目标数据库连接测试失败"))
 
-    cache_mgr.reload_from_config(boot_cfg["redis_url"])
+    cache_mgr.reload_from_config(
+        redis_url="" if not resolved_redis_cfg else None,
+        source="bootstrap",
+        redis_config=resolved_redis_cfg,
+        key_prefix=resolved_prefix,
+    )
     apply_hub_network_overrides(
         public_host=boot_cfg.get("hub_public_host"),
         external_port=boot_cfg.get("hub_external_port"),

@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 from sqlalchemy import case, func, or_
 
-from core.cache import cache_mgr
+from core.cache import build_encoded_redis_url, cache_mgr, normalize_key_prefix
 from core.db import (
     get_active_db_info,
     get_setting,
@@ -157,12 +157,30 @@ class AdminPlanUpdateDTO(BaseModel):
 
 class RedisTestDTO(BaseModel):
     redis_url: str = ""
+    redis_host: Optional[str] = None
+    redis_port: Optional[int] = 6379
+    redis_db: Optional[int] = 0
+    redis_username: Optional[str] = ""
+    redis_password: Optional[str] = None
+    redis_tls: bool = False
+    keep_password: bool = True
+    clear_password: bool = False
+    key_prefix: Optional[str] = None
     use_current: bool = False
 
 
 class RedisReloadDTO(BaseModel):
     mode: Optional[str] = None
     redis_url: str = ""
+    redis_host: Optional[str] = None
+    redis_port: Optional[int] = 6379
+    redis_db: Optional[int] = 0
+    redis_username: Optional[str] = ""
+    redis_password: Optional[str] = None
+    redis_tls: bool = False
+    keep_password: bool = True
+    clear_password: bool = False
+    key_prefix: Optional[str] = None
     use_current: bool = False
     reconnect_only: bool = False
 
@@ -1097,7 +1115,19 @@ def admin_cache_status(admin: dict = Depends(require_admin)):
 
 @router.post("/api/system/cache/test", summary="在线执行 Redis PING 连通性测试（Admin）")
 def admin_test_cache_redis(data: RedisTestDTO, admin: dict = Depends(require_admin)):
-    return cache_mgr.test_target(data.redis_url, use_current=bool(data.use_current))
+    return cache_mgr.test_target(
+        data.redis_url,
+        use_current=bool(data.use_current),
+        redis_host=data.redis_host,
+        redis_port=data.redis_port,
+        redis_db=data.redis_db,
+        redis_username=data.redis_username,
+        redis_password=data.redis_password,
+        redis_tls=bool(data.redis_tls),
+        keep_password=bool(data.keep_password),
+        clear_password=bool(data.clear_password),
+        key_prefix=data.key_prefix,
+    )
 
 
 @router.post("/api/system/cache/reload", summary="一键热切换并持久化缓存引擎配置（Admin）")
@@ -1115,25 +1145,54 @@ def admin_reload_cache(data: RedisReloadDTO, request: Request, admin: dict = Dep
             details={
                 "engine_state": (res.get("cache") or {}).get("engine_state"),
                 "redis_url_masked": (res.get("cache") or {}).get("redis_url_masked"),
+                "key_prefix": (res.get("cache") or {}).get("key_prefix"),
             },
         )
         return res
 
     mode = (data.mode or "").strip().lower()
     if mode in {"sqlite", "sqlite_cache", "sql"}:
+        try:
+            key_prefix = normalize_key_prefix(
+                data.key_prefix if data.key_prefix is not None else cache_mgr.get_key_prefix(),
+                strict=True,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        new_cfg = None
         new_url = ""
-    elif data.use_current and not (data.redis_url or "").strip():
-        new_url = cache_mgr.get_current_redis_url()
     else:
-        new_url = (data.redis_url or "").strip()
-
-    if mode == "redis" and not new_url:
-        raise HTTPException(status_code=400, detail="请填写 Redis 连接 URL（如 redis://127.0.0.1:6379/0）")
+        try:
+            new_cfg, key_prefix = cache_mgr.resolve_target_config(
+                redis_url=data.redis_url,
+                redis_host=data.redis_host,
+                redis_port=data.redis_port,
+                redis_db=data.redis_db,
+                redis_username=data.redis_username,
+                redis_password=data.redis_password,
+                redis_tls=bool(data.redis_tls),
+                keep_password=bool(data.keep_password),
+                clear_password=bool(data.clear_password),
+                use_current=bool(data.use_current),
+                key_prefix=data.key_prefix,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        if mode == "redis" and not new_cfg:
+            raise HTTPException(status_code=400, detail="请填写 Redis 主机地址或连接 URL")
+        new_url = build_encoded_redis_url(new_cfg) if new_cfg else ""
 
     boot = load_bootstrap_config()
     boot["redis_url"] = new_url
+    boot["redis_config"] = new_cfg
+    boot["redis_key_prefix"] = key_prefix
     save_bootstrap_config(boot)
-    cache_mgr.reload_from_config(new_url, source="bootstrap")
+    cache_mgr.reload_from_config(
+        redis_url="" if not new_cfg else None,
+        source="bootstrap",
+        redis_config=new_cfg,
+        key_prefix=key_prefix,
+    )
     status = cache_mgr.get_status()
 
     if status["engine_state"] == "redis":
@@ -1141,10 +1200,10 @@ def admin_reload_cache(data: RedisReloadDTO, request: Request, admin: dict = Dep
         ver = info.get("version") or "?"
         ping_ms = info.get("ping_ms")
         lat_txt = f", {ping_ms}ms" if ping_ms is not None else ""
-        msg = f"已热切换并保存为 Redis 高速缓存 (v{ver}{lat_txt})"
+        msg = f"已热切换并保存为 Redis 高速缓存 (v{ver}{lat_txt} · 命名空间 {status.get('key_prefix')})"
         ok = True
     elif status["engine_state"] == "degraded":
-        msg = f"Redis 配置已保存，但当前连接失败 ({status.get('last_error') or '不可达'})，已自动降级至 SQLite WAL Cache 兜底"
+        msg = f"Redis 配置已保存（前缀 {status.get('key_prefix')}），但当前连接失败 ({status.get('last_error') or '不可达'})，已自动降级至 SQLite WAL Cache 兜底"
         ok = False
     else:
         msg = "已热切换并保存为内置 SQLite WAL Cache"
@@ -1159,11 +1218,12 @@ def admin_reload_cache(data: RedisReloadDTO, request: Request, admin: dict = Dep
         ip=get_client_ip(request),
         status="ok" if ok else "degraded",
         details={
-            "mode": mode or ("redis" if new_url else "sqlite_cache"),
+            "mode": mode or ("redis" if new_cfg else "sqlite_cache"),
             "engine_state": status.get("engine_state"),
             "active_backend": status.get("active_backend"),
             "degraded": bool(status.get("degraded", False)),
             "redis_url_masked": status.get("redis_url_masked", ""),
+            "key_prefix": status.get("key_prefix", ""),
         },
     )
     return {
