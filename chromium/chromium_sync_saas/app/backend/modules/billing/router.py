@@ -233,14 +233,76 @@ def _mark_recharge_order_paid_sync(
     }
 
 
+def _plan_tier_key(plan: Plan) -> tuple:
+    return (
+        int(plan.monthly_price_units or 0),
+        int(plan.max_nodes or 0),
+        int(plan.max_active_leases or 0),
+        int(plan.max_monthly_traffic_bytes or 0),
+        int(plan.platform_fee_discount_bps or 0),
+        int(plan.id or 0),
+    )
+
+
+def _evaluate_plan_relation(target_plan: Plan, current_plan: Optional[Plan]) -> Dict[str, Any]:
+    target_price = max(0, int(target_plan.monthly_price_units or 0))
+    if current_plan is None:
+        return {
+            "relation": "upgrade",
+            "can_upgrade": True,
+            "upgrade_price_units": target_price,
+            "upgrade_price_yuan": units_to_yuan_str(target_price),
+            "is_diff_pricing": False,
+        }
+    if int(target_plan.id) == int(current_plan.id):
+        return {
+            "relation": "current",
+            "can_upgrade": False,
+            "upgrade_price_units": 0,
+            "upgrade_price_yuan": units_to_yuan_str(0),
+            "is_diff_pricing": False,
+        }
+    if _plan_tier_key(target_plan) <= _plan_tier_key(current_plan):
+        return {
+            "relation": "lower",
+            "can_upgrade": False,
+            "upgrade_price_units": 0,
+            "upgrade_price_yuan": units_to_yuan_str(0),
+            "is_diff_pricing": False,
+        }
+    current_price = max(0, int(current_plan.monthly_price_units or 0))
+    diff_units = max(0, target_price - current_price)
+    return {
+        "relation": "upgrade",
+        "can_upgrade": True,
+        "upgrade_price_units": diff_units,
+        "upgrade_price_yuan": units_to_yuan_str(diff_units),
+        "is_diff_pricing": current_price > 0 and diff_units < target_price,
+    }
+
+
 @router.get("/api/plans", summary="获取 SaaS 会员套餐列表")
 def list_plans(user: dict = Depends(verify_token)):
     with session_scope() as db:
-        plans = [p.to_dict() for p in db.query(Plan).order_by(Plan.monthly_price_units.asc(), Plan.id.asc()).all()]
-    return {"plans": plans, "current_plan_id": user.get("plan_id")}
+        u = db.get(User, int(user["id"]))
+        current_plan_id = int(u.plan_id) if u is not None else int(user.get("plan_id") or 0)
+        plan_rows = sorted(db.query(Plan).all(), key=_plan_tier_key)
+        current_plan = next((p for p in plan_rows if int(p.id) == current_plan_id), None)
+        plans = []
+        for idx, p in enumerate(plan_rows, start=1):
+            d = p.to_dict()
+            d["tier_rank"] = idx
+            d.update(_evaluate_plan_relation(p, current_plan))
+            plans.append(d)
+    is_highest_plan = bool(current_plan is not None and all(p["relation"] != "upgrade" for p in plans))
+    return {
+        "plans": plans,
+        "current_plan_id": current_plan_id,
+        "is_highest_plan": is_highest_plan,
+    }
 
 
-@router.post("/api/plans/subscribe", summary="升级或切换会员套餐（按月费余额扣款）")
+@router.post("/api/plans/subscribe", summary="升级会员套餐（仅支持向更高级别升级，按差价扣款）")
 def subscribe_plan(data: PlanSubscribeDTO, request: Request, user: dict = Depends(verify_token)):
     client_ip = get_client_ip(request)
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -249,28 +311,77 @@ def subscribe_plan(data: PlanSubscribeDTO, request: Request, user: dict = Depend
         plan = db.get(Plan, int(data.plan_id))
         if u is None or plan is None:
             raise HTTPException(status_code=404, detail="用户或套餐不存在")
-        if int(u.plan_id) == int(plan.id):
-            raise HTTPException(status_code=400, detail="您当前已处于该套餐")
-        price = int(plan.monthly_price_units or 0)
-        if int(u.balance_units or 0) < price:
-            raise HTTPException(status_code=402, detail=f"余额不足，升级 [{plan.name}] 需要 ¥{units_to_yuan_str(price)}")
 
-        if price > 0:
-            u.balance_units = int(u.balance_units or 0) - price
-            u.total_spent_units = int(u.total_spent_units or 0) + price
+        current_plan_id = int(u.plan_id or 0)
+        current_plan = db.get(Plan, current_plan_id) if current_plan_id else None
+        rel = _evaluate_plan_relation(plan, current_plan)
+
+        if rel["relation"] == "current":
+            raise HTTPException(status_code=400, detail="您当前已处于该套餐")
+        if rel["relation"] == "lower":
+            cur_name = current_plan.name if current_plan is not None else "当前套餐"
+            raise HTTPException(
+                status_code=400,
+                detail=f"您当前已处于更高级别套餐 [{cur_name}]，不可降级至 [{plan.name}]；如需调整套餐请联系管理员",
+            )
+
+        upgrade_price = int(rel["upgrade_price_units"] or 0)
+        cur_balance = int(u.balance_units or 0)
+        if cur_balance < upgrade_price:
+            if rel["is_diff_pricing"] and current_plan is not None:
+                msg = (
+                    f"余额不足，从 [{current_plan.name}] 补差价升级至 [{plan.name}] 需要 "
+                    f"¥{units_to_yuan_str(upgrade_price)}（当前余额 ¥{units_to_yuan_str(cur_balance)}）"
+                )
+            else:
+                msg = (
+                    f"余额不足，升级至 [{plan.name}] 需要 "
+                    f"¥{units_to_yuan_str(upgrade_price)}（当前余额 ¥{units_to_yuan_str(cur_balance)}）"
+                )
+            raise HTTPException(status_code=402, detail=msg)
+
+        if upgrade_price > 0:
+            affected = (
+                db.query(User)
+                .filter(
+                    User.id == u.id,
+                    User.plan_id == current_plan_id,
+                    User.balance_units >= upgrade_price,
+                )
+                .update(
+                    {
+                        User.balance_units: User.balance_units - upgrade_price,
+                        User.total_spent_units: User.total_spent_units + upgrade_price,
+                        User.plan_id: plan.id,
+                    },
+                    synchronize_session=False,
+                )
+            )
+            if affected == 0:
+                raise HTTPException(status_code=409, detail="套餐状态或余额已发生变动，请刷新后重试")
+            db.expire(u)
+            u = db.get(User, int(user["id"]))
+            remark = (
+                f"套餐升级 [{current_plan.name}] → [{plan.name}]（补差价 ¥{units_to_yuan_str(upgrade_price)}）"
+                if (rel["is_diff_pricing"] and current_plan is not None)
+                else f"升级会员套餐 [{plan.name}]"
+            )
             db.add(
                 BillingLedger(
                     user_id=u.id,
                     tx_type="plan_purchase",
-                    amount_units=-price,
-                    balance_after_units=u.balance_units,
-                    platform_spread_units=price,
-                    remark=f"开通/切换会员套餐 [{plan.name}]",
+                    amount_units=-upgrade_price,
+                    balance_after_units=int(u.balance_units or 0),
+                    platform_spread_units=upgrade_price,
+                    remark=remark,
                     created_at=now_str,
                 )
             )
-        u.plan_id = plan.id
+        else:
+            u.plan_id = plan.id
+
         db.flush()
+        from_plan_code = current_plan.code if current_plan is not None else ""
         user_payload = u.to_dict(include_secrets=True)
         plan_payload = plan.to_dict()
 
@@ -282,9 +393,18 @@ def subscribe_plan(data: PlanSubscribeDTO, request: Request, user: dict = Depend
         target_id=plan_payload["id"],
         ip=client_ip,
         status="ok",
-        details={"plan_code": plan_payload["code"], "price_yuan": units_to_yuan_str(price)},
+        details={
+            "from_plan_code": from_plan_code,
+            "plan_code": plan_payload["code"],
+            "price_yuan": units_to_yuan_str(upgrade_price),
+            "is_diff_pricing": bool(rel["is_diff_pricing"]),
+        },
     )
-    return {"message": f"已成功切换至 [{plan_payload['name']}]", "user": user_payload, "plan": plan_payload}
+    return {
+        "message": f"已成功升级至 [{plan_payload['name']}]",
+        "user": user_payload,
+        "plan": plan_payload,
+    }
 
 
 @router.get("/api/billing/overview", summary="查询个人钱包余额、自用双通道计费规则、推广领奖与收支流水")

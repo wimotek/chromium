@@ -138,14 +138,37 @@
 
     <div class="grid-2">
       <div class="card">
-        <div class="card-title">会员套餐与配额升级</div>
+        <div class="card-title">
+          <span>会员套餐与配额升级</span>
+          <span v-if="isHighestPlan" class="tag tag-ok">已达最高等级套餐</span>
+        </div>
         <div class="grid-3">
-          <div v-for="p in plans" :key="p.id" class="subcard">
+          <div
+            v-for="p in plans"
+            :key="p.id"
+            class="subcard"
+            :style="
+              planRelation(p) === 'current'
+                ? 'border-color: rgba(16, 185, 129, 0.45); background: rgba(16, 185, 129, 0.05)'
+                : planRelation(p) === 'lower'
+                  ? 'opacity: 0.72'
+                  : ''
+            "
+          >
             <div class="row" style="justify-content: space-between">
               <strong>{{ p.name }}</strong>
-              <span v-if="p.id === user.plan_id" class="tag tag-ok">当前</span>
+              <span v-if="planRelation(p) === 'current'" class="tag tag-ok">当前</span>
+              <span v-else-if="planRelation(p) === 'lower'" class="tag">已包含</span>
+              <span v-else class="tag tag-info">可升级</span>
             </div>
             <div class="kpi-val" style="font-size: 20px; margin: 8px 0">¥{{ p.monthly_price_yuan }}/月</div>
+            <div
+              v-if="planRelation(p) === 'upgrade' && isDiffPricing(p)"
+              class="mono"
+              style="font-size: 11px; color: #38bdf8; margin: -4px 0 8px"
+            >
+              补差价升级仅需 ¥{{ upgradePriceYuan(p) }}
+            </div>
             <div class="muted" style="font-size: 12px; line-height: 1.65">
               • 节点上限: {{ p.max_nodes }} 个<br />
               • 并发租用: {{ p.max_active_leases }} 路<br />
@@ -153,17 +176,22 @@
               • 市场抽成减免: {{ (p.platform_fee_discount_bps / 100).toFixed(1) }}%
             </div>
             <button
-              class="btn btn-sm btn-primary"
+              class="btn btn-sm"
+              :class="planRelation(p) === 'upgrade' ? 'btn-primary' : ''"
               style="width: 100%; margin-top: 10px"
-              :disabled="p.id === user.plan_id || subscribingPlanId !== null"
-              @click="subscribe(p.id)"
+              :disabled="planRelation(p) !== 'upgrade' || subscribingPlanId !== null"
+              @click="openUpgradeConfirm(p)"
             >
               {{
-                p.id === user.plan_id
-                  ? '已生效'
-                  : subscribingPlanId === p.id
-                    ? '切换中...'
-                    : '立即切换 / 升级'
+                planRelation(p) === 'current'
+                  ? '当前已生效'
+                  : planRelation(p) === 'lower'
+                    ? '已享更高套餐'
+                    : subscribingPlanId === p.id
+                      ? '升级中...'
+                      : isDiffPricing(p)
+                        ? `补差价升级 ¥${upgradePriceYuan(p)}`
+                        : `立即升级 ¥${upgradePriceYuan(p)}`
               }}
             </button>
           </div>
@@ -385,6 +413,66 @@
         </template>
       </div>
     </div>
+
+    <!-- 套餐升级确认弹窗 -->
+    <div v-if="upgradeTargetPlan" class="modal-backdrop" @click.self="closeUpgradeConfirm">
+      <div class="modal-box">
+        <div class="card-title">
+          <span>确认升级会员套餐</span>
+          <button class="btn btn-sm" @click="closeUpgradeConfirm">关闭</button>
+        </div>
+
+        <div class="subcard" style="margin-bottom: 14px">
+          <div class="row" style="justify-content: space-between; margin-bottom: 8px">
+            <span class="muted">升级方案</span>
+            <strong>{{ currentPlanObj?.name || '当前套餐' }} → {{ upgradeTargetPlan.name }}</strong>
+          </div>
+          <div class="row" style="justify-content: space-between; margin-bottom: 6px">
+            <span class="muted">目标套餐原价</span>
+            <span class="mono">¥{{ upgradeTargetPlan.monthly_price_yuan }}/月</span>
+          </div>
+          <div v-if="isDiffPricing(upgradeTargetPlan)" class="row" style="justify-content: space-between; margin-bottom: 6px">
+            <span class="muted">当前套餐已抵扣</span>
+            <span class="mono" style="color: #34d399">-¥{{ currentPlanObj?.monthly_price_yuan || 0 }}</span>
+          </div>
+          <div class="row" style="justify-content: space-between; margin-bottom: 6px">
+            <span class="muted">本次实付扣款</span>
+            <strong class="mono" style="font-size: 18px; color: var(--primary)">¥{{ upgradePriceYuan(upgradeTargetPlan) }}</strong>
+          </div>
+          <div class="row" style="justify-content: space-between">
+            <span class="muted">当前钱包可用余额</span>
+            <span
+              class="mono"
+              :style="{ color: Number(user.balance_units || 0) >= upgradePriceUnits(upgradeTargetPlan) ? '#34d399' : '#f87171' }"
+            >
+              ¥{{ user.balance_yuan || '0.00' }}
+            </span>
+          </div>
+        </div>
+
+        <div
+          v-if="Number(user.balance_units || 0) < upgradePriceUnits(upgradeTargetPlan)"
+          class="banner banner-danger"
+        >
+          当前余额不足，还差
+          <strong class="mono">¥{{ formatUnitsYuan(upgradePriceUnits(upgradeTargetPlan) - Number(user.balance_units || 0)) }}</strong>，请先在右侧收银台完成充值后再升级。
+        </div>
+        <div v-else class="banner banner-info">
+          升级后新配额（{{ upgradeTargetPlan.max_nodes }} 节点 / {{ upgradeTargetPlan.max_active_leases }} 路并发 / {{ fmtBytes(upgradeTargetPlan.max_monthly_traffic_bytes) }} 月流量）将立即生效。套餐仅支持向更高级别升级，不可自助降级。
+        </div>
+
+        <div class="row" style="justify-content: flex-end; margin-top: 14px">
+          <button class="btn" @click="closeUpgradeConfirm">取消</button>
+          <button
+            class="btn btn-primary"
+            :disabled="subscribingPlanId !== null || Number(user.balance_units || 0) < upgradePriceUnits(upgradeTargetPlan)"
+            @click="confirmSubscribeUpgrade"
+          >
+            {{ subscribingPlanId === upgradeTargetPlan.id ? '升级中...' : `确认扣款 ¥${upgradePriceYuan(upgradeTargetPlan)} 并升级` }}
+          </button>
+        </div>
+      </div>
+    </div>
   </div>
 </template>
 
@@ -421,9 +509,73 @@ const claimingDaily = ref(false)
 const creatingOrder = ref(false)
 const checkingOrder = ref(false)
 const subscribingPlanId = ref(null)
+const upgradeTargetPlan = ref(null)
 const sandboxPaying = ref(false)
 const cancellingOrderNo = ref('')
 let pollTimer = null
+
+const currentPlanObj = computed(() => {
+  return plans.value.find((p) => Number(p.id) === Number(user.value.plan_id)) || null
+})
+
+function comparePlanTier(a, b) {
+  const keys = [
+    'monthly_price_units',
+    'max_nodes',
+    'max_active_leases',
+    'max_monthly_traffic_bytes',
+    'platform_fee_discount_bps',
+    'id',
+  ]
+  for (const k of keys) {
+    const diff = Number(a?.[k] || 0) - Number(b?.[k] || 0)
+    if (diff !== 0) return diff
+  }
+  return 0
+}
+
+function planRelation(plan) {
+  if (!plan) return 'lower'
+  if (plan.relation) return plan.relation
+  const cur = currentPlanObj.value
+  if (!cur) return 'upgrade'
+  if (Number(plan.id) === Number(cur.id)) return 'current'
+  return comparePlanTier(plan, cur) > 0 ? 'upgrade' : 'lower'
+}
+
+function upgradePriceUnits(plan) {
+  if (!plan) return 0
+  if (plan.upgrade_price_units !== undefined && plan.upgrade_price_units !== null) {
+    return Math.max(0, Number(plan.upgrade_price_units || 0))
+  }
+  const targetUnits = Math.max(0, Number(plan.monthly_price_units || 0))
+  const curUnits = Math.max(0, Number(currentPlanObj.value?.monthly_price_units || 0))
+  return Math.max(0, targetUnits - curUnits)
+}
+
+function formatUnitsYuan(units) {
+  const val = Math.max(0, Number(units || 0))
+  const yuan = val / 10000
+  return val % 100 !== 0 ? yuan.toFixed(4) : yuan.toFixed(2)
+}
+
+function upgradePriceYuan(plan) {
+  if (plan?.upgrade_price_yuan !== undefined && plan?.upgrade_price_yuan !== null) {
+    return String(plan.upgrade_price_yuan)
+  }
+  return formatUnitsYuan(upgradePriceUnits(plan))
+}
+
+function isDiffPricing(plan) {
+  if (plan?.is_diff_pricing !== undefined) return Boolean(plan.is_diff_pricing)
+  const curUnits = Number(currentPlanObj.value?.monthly_price_units || 0)
+  return curUnits > 0 && upgradePriceUnits(plan) < Number(plan?.monthly_price_units || 0)
+}
+
+const isHighestPlan = computed(() => {
+  if (!currentPlanObj.value || plans.value.length === 0) return false
+  return plans.value.every((p) => planRelation(p) !== 'upgrade')
+})
 
 const enabledPaymentMethods = computed(() => {
   const list = paymentChannels.value.methods || []
@@ -690,6 +842,22 @@ async function cancelRechargeOrder(orderNo) {
   }
 }
 
+function openUpgradeConfirm(plan) {
+  if (!plan || planRelation(plan) !== 'upgrade' || subscribingPlanId.value !== null) return
+  upgradeTargetPlan.value = plan
+}
+
+function closeUpgradeConfirm() {
+  if (subscribingPlanId.value !== null) return
+  upgradeTargetPlan.value = null
+}
+
+async function confirmSubscribeUpgrade() {
+  if (!upgradeTargetPlan.value) return
+  const targetId = upgradeTargetPlan.value.id
+  await subscribe(targetId)
+}
+
 async function subscribe(planId) {
   if (subscribingPlanId.value !== null) return
   subscribingPlanId.value = planId
@@ -699,7 +867,8 @@ async function subscribe(planId) {
       body: JSON.stringify({ plan_id: planId }),
     })
     if (res.user) user.value = { ...user.value, ...res.user }
-    emit('notify', { message: res.message || '套餐切换成功', type: 'ok' })
+    upgradeTargetPlan.value = null
+    emit('notify', { message: res.message || '套餐升级成功', type: 'ok' })
     emit('refresh-profile', res.user || null)
     await loadAll()
   } catch (e) {
