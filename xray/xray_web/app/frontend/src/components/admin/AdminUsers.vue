@@ -3,7 +3,7 @@
     <div class="card-header">
       <div style="display: flex; align-items: center; gap: 8px;">
         <h3>👥 接入用户治理列表</h3>
-        <span class="badge badge-ready">{{ adminUsers.length }} 位用户</span>
+        <span class="badge badge-ready">{{ adminDataLoading && !adminDataLoaded && adminUsers.length === 0 ? '⏳ 加载中...' : `${adminUsers.length} 位用户` }}</span>
       </div>
       <button class="btn-cyber-refresh" @click="$emit('reload-all')">🔄 刷新数据</button>
     </div>
@@ -23,6 +23,16 @@
           </tr>
         </thead>
         <tbody>
+          <tr v-if="adminDataLoading && !adminDataLoaded && adminUsers.length === 0">
+            <td colspan="8" style="text-align: center; color: #38bdf8; padding: 28px;">
+              ⏳ 正在加载用户列表，请稍候...
+            </td>
+          </tr>
+          <tr v-else-if="adminDataLoaded && adminUsers.length === 0">
+            <td colspan="8" style="text-align: center; color: #64748b; padding: 28px;">
+              暂无接入用户记录。
+            </td>
+          </tr>
           <tr v-for="u in adminUsers" :key="u.username">
             <td>
               <b>{{ u.username }}</b>
@@ -208,6 +218,8 @@ import { ElMessage } from 'element-plus'
 
 const props = defineProps({
   adminUsers: { type: Array, default: () => [] },
+  adminDataLoading: { type: Boolean, default: false },
+  adminDataLoaded: { type: Boolean, default: false },
   currentUser: { type: Object, required: true },
   adminPassword: { type: String, required: true }
 })

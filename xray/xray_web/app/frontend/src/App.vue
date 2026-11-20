@@ -55,7 +55,7 @@
               <div class="tab-title">全站用户生命周期管理</div>
               <div class="tab-sub">配额/时效治理、重置UUID与密码、凭证二维码</div>
             </div>
-            <span class="count-tag tag-users">{{ adminUsers.length }} 位用户</span>
+            <span class="count-tag tag-users">{{ !adminDataLoaded && adminDataLoading && adminUsers.length === 0 ? '加载中...' : `${adminUsers.length} 位用户` }}</span>
           </button>
 
           <button class="tab-card-btn tab-card-nodes" :class="{ active: activeTab === 'nodes' }" @click="openNodesTab">
@@ -64,7 +64,7 @@
               <div class="tab-title">远程节点 (xray_core) 集群</div>
               <div class="tab-sub">多节点公钥监管、在线状态、配置修改与接入</div>
             </div>
-            <span class="count-tag tag-nodes">{{ adminNodes.length }} 个节点</span>
+            <span class="count-tag tag-nodes">{{ !adminDataLoaded && adminDataLoading && adminNodes.length === 0 ? '加载中...' : `${adminNodes.length} 个节点` }}</span>
           </button>
 
           <button class="tab-card-btn tab-card-cards" :class="{ active: activeTab === 'cards' }" @click="activeTab = 'cards'">
@@ -73,7 +73,7 @@
               <div class="tab-title">卡密生成与发卡中心</div>
               <div class="tab-sub">批量制卡、库存导出、范围清理、对接 API</div>
             </div>
-            <span class="count-tag tag-cards">{{ adminCards.length }} 张卡密</span>
+            <span class="count-tag tag-cards">{{ !adminDataLoaded && adminDataLoading && adminCards.length === 0 ? '加载中...' : `${adminCards.length} 张卡密` }}</span>
           </button>
 
           <button class="tab-card-btn tab-card-settings" :class="{ active: activeTab === 'settings' }" @click="openSettingsTab">
@@ -86,7 +86,7 @@
           </button>
         </div>
 
-        <div v-if="adminDataLoading && adminUsers.length === 0" class="admin-sync-hint">
+        <div v-if="adminDataLoading && !adminDataLoaded && adminUsers.length === 0" class="admin-sync-hint">
           ⏳ 正在同步全站用户、节点与卡密数据...
         </div>
 
@@ -95,6 +95,8 @@
           :adminUsers="adminUsers"
           :adminNodes="adminNodes"
           :adminCards="adminCards"
+          :adminDataLoading="adminDataLoading"
+          :adminDataLoaded="adminDataLoaded"
           :currentUser="currentUser"
           :adminPassword="adminPassword"
           @copy="copyText"
@@ -133,6 +135,7 @@ import AdminSettings from './components/admin/AdminSettings.vue'
 const setupRequired = ref(false)
 const systemLoading = ref(true)
 const adminDataLoading = ref(false)
+const adminDataLoaded = ref(false)
 const isPureAdmin = ref(false)
 const systemNotice = ref('')
 const prefetchedCaptcha = ref(null)
@@ -279,6 +282,7 @@ const loadAdminData = async () => {
   } catch (_) {}
   finally {
     adminDataLoading.value = false
+    adminDataLoaded.value = true
   }
 }
 

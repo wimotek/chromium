@@ -107,7 +107,9 @@
 
             <div class="strategy-box">
               <label>📅 上次备份执行时间：</label>
-              <div class="time-display font-mono">{{ settingsForm.last_backup_time || '尚未执行' }}</div>
+              <div class="time-display font-mono">
+                {{ (loadingSettings && !backupsLoaded && !settingsForm.last_backup_time) ? '加载中...' : (settingsForm.last_backup_time || '尚未执行') }}
+              </div>
               <span class="input-hint">存储目录: <code>/data/backups/</code></span>
             </div>
           </div>
@@ -133,10 +135,19 @@
               <span class="panel-icon">🗃️</span>
               <div>
                 <strong class="panel-title">历史备份版本与灾难恢复控制台</strong>
-                <div class="panel-sub">当前共 {{ backupList.length }} 份快照 (限定保留上限: {{ settingsForm.backup_max_count }} 份)</div>
+                <div class="panel-sub">
+                  <template v-if="(loadingBackups || !backupsLoaded) && backupList.length === 0">
+                    正在加载历史备份快照列表...
+                  </template>
+                  <template v-else>
+                    当前共 {{ backupList.length }} 份快照 (限定保留上限: {{ settingsForm.backup_max_count }} 份)
+                  </template>
+                </div>
               </div>
             </div>
-            <button class="btn-sm btn-action" @click="loadBackups">🔄 刷新列表</button>
+            <button class="btn-sm btn-action" :disabled="loadingBackups" @click="loadBackups">
+              {{ loadingBackups ? '⏳ 加载中...' : '🔄 刷新列表' }}
+            </button>
           </div>
 
           <div class="table-responsive" style="margin-top: 10px;">
@@ -151,7 +162,17 @@
                 </tr>
               </thead>
               <tbody>
-                <tr v-if="backupList.length === 0">
+                <tr v-if="(loadingBackups || !backupsLoaded) && backupList.length === 0">
+                  <td colSpan="5" style="text-align: center; padding: 30px; color: #38bdf8;">
+                    ⏳ 正在加载历史备份快照列表，请稍候...
+                  </td>
+                </tr>
+                <tr v-else-if="backupsLoadError && backupList.length === 0">
+                  <td colSpan="5" style="text-align: center; padding: 30px; color: #f59e0b;">
+                    ⚠️ 历史备份列表加载失败，请点击右上角「刷新列表」重试
+                  </td>
+                </tr>
+                <tr v-else-if="backupList.length === 0">
                   <td colSpan="5" style="text-align: center; padding: 30px; color: #64748b;">
                     暂无历史备份，请点击上方「立即创建热备份快照」
                   </td>
@@ -254,7 +275,9 @@
                 <span class="tag-badge tag-blue">SYSTEM BROADCAST</span>
                 <span style="font-size: 12px; font-weight: 600; color: #f1f5f9;">📢 全局服务运行通告</span>
               </div>
-              <div class="preview-content font-mono">{{ settingsForm.system_notice || '（暂无公告，前台将仅展示登录凭据表单）' }}</div>
+              <div class="preview-content font-mono">
+                {{ (loadingSettings && !settingsForm.system_notice) ? '正在加载系统公告...' : (settingsForm.system_notice || '（暂无公告，前台将仅展示登录凭据表单）') }}
+              </div>
               <div style="font-size: 11px; color: #64748b;">⚡ 节点由自动化集群全天候巡检，若遇连接波动请关注此栏。</div>
             </div>
           </div>
@@ -490,7 +513,7 @@
               <div class="input-with-addon"><input v-model.number="settingsForm.task_expire_days" type="number" class="cyber-input" /><span class="addon-text">天</span></div>
             </div>
             <div class="inner-divider">
-              <div style="font-size: 12px; color: #94a3b8; margin-bottom: 10px;">最近扫描完成时间：<b class="text-cyan">{{ settingsForm.task_last_run }}</b></div>
+              <div style="font-size: 12px; color: #94a3b8; margin-bottom: 10px;">最近扫描完成时间：<b class="text-cyan">{{ (loadingSettings && !settingsForm.task_last_run) ? '加载中...' : (settingsForm.task_last_run || '尚未执行') }}</b></div>
               <button class="btn-cyber-primary" :disabled="triggeringTask" style="width: auto; padding: 7px 18px; font-size: 12px;" @click="triggerManualTask">
                 {{ triggeringTask ? '扫描中...' : '⚡ 立即执行一次巡检与重置' }}
               </button>
@@ -891,7 +914,7 @@ const settingsForm = reactive({
   task_interval_hours: 12,
   task_traffic_threshold: 80,
   task_expire_days: 3,
-  task_last_run: '尚未执行',
+  task_last_run: '',
   system_notice: '',
   reg_traffic_mb: 1024,
   reg_expire_days: 1,
@@ -905,7 +928,7 @@ const settingsForm = reactive({
   auto_backup_enabled: true,
   backup_interval_hours: 24,
   backup_max_count: 7,
-  last_backup_time: '尚未执行'
+  last_backup_time: ''
 })
 
 const notifyForm = reactive({ notify_type: 'email', serverchan_key: '' })
@@ -920,7 +943,11 @@ const notifyPushForm = reactive({
 const sendingPush = ref(false)
 
 // 数据库备份相关
+const loadingSettings = ref(true)
 const backupList = ref([])
+const loadingBackups = ref(true)
+const backupsLoaded = ref(false)
+const backupsLoadError = ref(false)
 const creatingBackup = ref(false)
 const uploadingBackup = ref(false)
 const fileUploadRef = ref(null)
@@ -988,10 +1015,8 @@ const testEmailTo = ref('')
 const testingEmail = ref(false)
 const triggeringTask = ref(false)
 
-onMounted(async () => {
-  notifyForm.notify_type = props.currentUser.notify_type || 'email'
-  notifyForm.serverchan_key = props.currentUser.serverchan_key || ''
-
+const loadSettings = async () => {
+  loadingSettings.value = true
   try {
     const res = await axios.get(`/api/admin/settings?admin_user=${encodeURIComponent(props.currentUser.username)}&admin_pwd=${encodeURIComponent(props.adminPassword)}`)
     if (res.data.code === 200) {
@@ -1021,17 +1046,31 @@ onMounted(async () => {
       settingsForm.auto_backup_enabled = d.auto_backup_enabled !== 'false'
       settingsForm.backup_interval_hours = Number(d.backup_interval_hours) || 24
       settingsForm.backup_max_count = Number(d.backup_max_count) || 7
-      settingsForm.last_backup_time = d.last_backup_time || '尚未执行'
+      settingsForm.last_backup_time = d.last_backup_time || settingsForm.last_backup_time || '尚未执行'
     }
   } catch (_) {}
+  finally {
+    loadingSettings.value = false
+  }
+}
 
-  loadBackups()
-  loadCertInfo()
-  loadCacheStatus(true)
+onMounted(() => {
+  notifyForm.notify_type = props.currentUser.notify_type || 'email'
+  notifyForm.serverchan_key = props.currentUser.serverchan_key || ''
+
+  // 并行加载配置、备份列表、证书与缓存状态，避免串联等待造成列表短暂误报为空
+  Promise.all([
+    loadSettings(),
+    loadBackups(),
+    loadCertInfo(),
+    loadCacheStatus(true)
+  ])
 })
 
 // 加载备份文件列表
 const loadBackups = async () => {
+  loadingBackups.value = true
+  backupsLoadError.value = false
   try {
     const res = await axios.post('/api/admin/backup/list', {
       admin_user: props.currentUser.username,
@@ -1042,8 +1081,17 @@ const loadBackups = async () => {
       if (res.data.data.last_backup_time) {
         settingsForm.last_backup_time = res.data.data.last_backup_time
       }
+    } else if (!backupsLoaded.value) {
+      backupsLoadError.value = true
     }
-  } catch (_) {}
+  } catch (_) {
+    if (!backupsLoaded.value) {
+      backupsLoadError.value = true
+    }
+  } finally {
+    loadingBackups.value = false
+    backupsLoaded.value = true
+  }
 }
 
 // 立即创建热备份

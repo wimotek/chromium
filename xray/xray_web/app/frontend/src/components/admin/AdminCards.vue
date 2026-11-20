@@ -107,6 +107,16 @@
             </tr>
           </thead>
           <tbody>
+            <tr v-if="adminDataLoading && !adminDataLoaded && adminCards.length === 0">
+              <td colspan="9" style="text-align: center; color: #38bdf8; padding: 28px;">
+                ⏳ 正在加载卡密库存列表，请稍候...
+              </td>
+            </tr>
+            <tr v-else-if="adminDataLoaded && adminCards.length === 0">
+              <td colspan="9" style="text-align: center; color: #64748b; padding: 28px;">
+                暂无卡密记录，可在上方批量生成。
+              </td>
+            </tr>
             <tr v-for="c in adminCards" :key="c.code">
               <td style="text-align: center;"><input type="checkbox" :value="c.code" v-model="selectedCards" /></td>
               <td class="font-mono text-cyan">{{ c.code }}</td>
@@ -196,6 +206,8 @@ import { ElMessage } from 'element-plus'
 
 const props = defineProps({
   adminCards: { type: Array, default: () => [] },
+  adminDataLoading: { type: Boolean, default: false },
+  adminDataLoaded: { type: Boolean, default: false },
   currentUser: { type: Object, required: true },
   adminPassword: { type: String, required: true }
 })

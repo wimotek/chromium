@@ -9,7 +9,7 @@
         <div class="token-title-row">
           <span class="shield-icon">🛡️</span>
           <b style="color: #f8fafc; font-size: 13px;">集群引导令牌 (Cluster Token):</b>
-          <span class="cluster-token-code">{{ maskedClusterToken }}</span>
+          <span class="cluster-token-code">{{ !nodesLoaded && !clusterInfo.cluster_token ? '加载中...' : maskedClusterToken }}</span>
           <button class="btn-banner-action" title="一键复制集群通信令牌" @click="copyText(clusterInfo.cluster_token, '集群通信令牌')">
             📋 复制令牌
           </button>
@@ -85,7 +85,7 @@
         :class="{ active: currentSubTab === 'approved' }"
         @click="currentSubTab = 'approved'"
       >
-        🌐 已准入节点集群 ({{ approvedNodes.length }})
+        🌐 已准入节点集群{{ showInitialNodesLoading ? '' : ` (${approvedNodes.length})` }}
       </button>
       <button
         class="sub-tab-btn"
@@ -123,7 +123,9 @@
       <div class="card-header" style="margin-top: 15px; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px;">
         <div style="display: flex; align-items: center; gap: 8px;">
           <h3>🌐 已准入节点集群治理与多端调度</h3>
-          <span class="badge badge-ready">{{ approvedNodes.length }} 个节点运行中</span>
+          <span class="badge badge-ready">
+            {{ showInitialNodesLoading ? '⏳ 加载节点中...' : `${approvedNodes.length} 个节点运行中` }}
+          </span>
         </div>
         <div style="display: flex; align-items: center; gap: 10px;">
           <span style="font-size: 11px; color: #34d399; font-weight: 600;">🟢 自动轮询中 (每10秒更新)</span>
@@ -260,7 +262,17 @@
                 </div>
               </td>
             </tr>
-            <tr v-if="approvedNodes.length === 0">
+            <tr v-if="showInitialNodesLoading">
+              <td colspan="7" style="text-align: center; color: #38bdf8; padding: 28px;">
+                ⏳ 正在加载已准入节点集群数据，请稍候...
+              </td>
+            </tr>
+            <tr v-else-if="nodesLoadError && approvedNodes.length === 0">
+              <td colspan="7" style="text-align: center; color: #f59e0b; padding: 24px;">
+                ⚠️ 节点集群数据加载失败，请稍后重试或刷新页面。
+              </td>
+            </tr>
+            <tr v-else-if="approvedNodes.length === 0">
               <td colspan="7" style="text-align: center; color: #64748b; padding: 24px;">
                 暂无已准入的在线节点，请在上方复制部署命令并在海外服务器或内网主机启动节点。
               </td>
@@ -350,7 +362,12 @@
                 </div>
               </td>
             </tr>
-            <tr v-if="pendingNodes.length === 0">
+            <tr v-if="showInitialNodesLoading">
+              <td colspan="6" style="text-align: center; color: #38bdf8; padding: 36px;">
+                ⏳ 正在加载待审批节点隔离区，请稍候...
+              </td>
+            </tr>
+            <tr v-else-if="pendingNodes.length === 0">
               <td colspan="6" style="text-align: center; color: #64748b; padding: 36px;">
                 🎉 隔离区当前为空，所有已知节点均已审核上线。
               </td>
@@ -403,7 +420,12 @@
                 {{ log.message }}
               </td>
             </tr>
-            <tr v-if="auditLogsList.length === 0">
+            <tr v-if="!nodesLoaded && auditLogsList.length === 0">
+              <td colspan="5" style="text-align: center; color: #38bdf8; padding: 24px;">
+                ⏳ 正在加载节点安全审计流水，请稍候...
+              </td>
+            </tr>
+            <tr v-else-if="auditLogsList.length === 0">
               <td colspan="5" style="text-align: center; color: #64748b; padding: 24px;">
                 暂无审计流水记录。
               </td>
@@ -740,11 +762,14 @@
 </template>
 
 <script setup>
-import { ref, reactive, computed, onMounted, onUnmounted } from 'vue'
+import { ref, reactive, computed, watch, onMounted, onUnmounted } from 'vue'
 import axios from 'axios'
 import { ElMessage } from 'element-plus'
 
 const props = defineProps({
+  adminNodes: { type: Array, default: () => [] },
+  adminDataLoading: { type: Boolean, default: false },
+  adminDataLoaded: { type: Boolean, default: false },
   currentUser: { type: Object, required: true },
   adminPassword: { type: String, required: true }
 })
@@ -753,8 +778,24 @@ const emit = defineEmits(['reload-all', 'copy', 'open-qr'])
 
 const currentSubTab = ref('approved')
 const deployCoreType = ref('xray')
-const adminNodes = ref([])
+const localNodes = ref(Array.isArray(props.adminNodes) ? [...props.adminNodes] : [])
 const auditLogsList = ref([])
+const nodesLoading = ref(true)
+const nodesLoaded = ref(false)
+const nodesLoadError = ref(false)
+
+watch(
+  () => props.adminNodes,
+  (val) => {
+    if (!nodesLoaded.value && Array.isArray(val) && val.length > 0 && localNodes.value.length === 0) {
+      localNodes.value = [...val]
+    }
+  }
+)
+
+const showInitialNodesLoading = computed(
+  () => localNodes.value.length === 0 && (nodesLoading.value || !nodesLoaded.value || props.adminDataLoading)
+)
 
 const pingResults = reactive({})
 const pingingNodeId = ref('')
@@ -770,8 +811,8 @@ const clusterInfo = reactive({
   panel_url: ''
 })
 
-const approvedNodes = computed(() => adminNodes.value.filter(n => n.is_approved === undefined || n.is_approved === 1))
-const pendingNodes = computed(() => adminNodes.value.filter(n => n.is_approved === 0))
+const approvedNodes = computed(() => localNodes.value.filter(n => n.is_approved === undefined || n.is_approved === 1))
+const pendingNodes = computed(() => localNodes.value.filter(n => n.is_approved === 0))
 
 const showDeployModal = ref(false)
 const showConfigModal = ref(false)
@@ -1204,14 +1245,18 @@ const syncServerClock = (serverTs) => {
 }
 
 const fetchNodes = async (silent = false) => {
+  if (!silent) {
+    nodesLoading.value = true
+  }
   try {
     const res = await axios.post('/api/admin/data', {
       admin_user: props.currentUser.username,
       admin_pwd: props.adminPassword
     })
     if (res.data.code === 200) {
+      nodesLoadError.value = false
       syncServerClock(res.data.server_ts)
-      adminNodes.value = res.data.nodes || []
+      localNodes.value = res.data.nodes || []
       auditLogsList.value = res.data.audit_logs || []
       if (res.data.cluster_info) {
         clusterInfo.cluster_token = res.data.cluster_info.cluster_token
@@ -1219,11 +1264,19 @@ const fetchNodes = async (silent = false) => {
         clusterInfo.auto_approve = res.data.cluster_info.auto_approve !== undefined ? res.data.cluster_info.auto_approve : true
         clusterInfo.panel_url = res.data.cluster_info.panel_url
       }
+    } else if (!nodesLoaded.value) {
+      nodesLoadError.value = true
     }
   } catch (_) {
+    if (!nodesLoaded.value) {
+      nodesLoadError.value = true
+    }
     if (!silent) {
       ElMessage.error('拉取集群数据失败')
     }
+  } finally {
+    nodesLoading.value = false
+    nodesLoaded.value = true
   }
 }
 
@@ -1244,9 +1297,9 @@ const handlePingNode = async (nodeId) => {
       if (res.data.nodes) {
         const updated = res.data.nodes.find(n => n.node_id === nodeId)
         if (updated) {
-          const idx = adminNodes.value.findIndex(n => n.node_id === nodeId)
+          const idx = localNodes.value.findIndex(n => n.node_id === nodeId)
           if (idx !== -1) {
-            adminNodes.value[idx] = updated
+            localNodes.value[idx] = updated
           }
         }
       }
@@ -1277,7 +1330,7 @@ const handlePingAllNodes = async () => {
         Object.assign(pingResults, res.data.data)
       }
       if (res.data.nodes) {
-        adminNodes.value = res.data.nodes
+        localNodes.value = res.data.nodes
       }
       const vals = Object.values(res.data.data || {})
       const badCount = vals.filter(v => !v.healthy).length
