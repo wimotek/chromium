@@ -1,11 +1,11 @@
 import base64
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 import re
 import secrets
 from typing import Any, Dict, Optional
-from urllib.parse import urlencode, urlparse
+from urllib.parse import urlencode, urlparse, urlsplit, urlunsplit
 
 from cryptography import x509
 from cryptography.exceptions import InvalidSignature
@@ -16,9 +16,32 @@ import httpx
 
 from config import logger
 
+_CST_TZ = timezone(timedelta(hours=8))
+_PEM_BLOCK_RE = re.compile(r"-----BEGIN ([A-Z0-9 ]+)-----(.*?)-----END \1-----", flags=re.DOTALL)
+
+
+def _now_cst_str() -> str:
+    return datetime.now(_CST_TZ).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _clean_pem_text(raw: str) -> str:
+    txt = (raw or "").replace("\ufeff", "").replace("\r\n", "\n").replace("\r", "\n").replace("\\n", "\n").strip()
+    if not txt:
+        return ""
+    if "-----BEGIN " not in txt:
+        return txt
+
+    def _reformat_block(match: re.Match) -> str:
+        label = match.group(1).strip()
+        body = "".join(match.group(2).split())
+        lines = [body[i : i + 64] for i in range(0, len(body), 64)]
+        return f"-----BEGIN {label}-----\n" + "\n".join(lines) + f"\n-----END {label}-----"
+
+    return _PEM_BLOCK_RE.sub(_reformat_block, txt)
+
 
 def _wrap_pem(raw: str, begin_marker: str, end_marker: str) -> str:
-    txt = (raw or "").strip().replace("\\n", "\n")
+    txt = _clean_pem_text(raw)
     if not txt:
         return ""
     if "-----BEGIN " in txt:
@@ -29,7 +52,7 @@ def _wrap_pem(raw: str, begin_marker: str, end_marker: str) -> str:
 
 
 def _load_rsa_private_key(raw: str):
-    txt = (raw or "").strip().replace("\\n", "\n")
+    txt = _clean_pem_text(raw)
     if not txt:
         raise ValueError("RSA 私钥为空")
     candidates = [txt]
@@ -48,7 +71,7 @@ def _load_rsa_private_key(raw: str):
 
 
 def _load_rsa_public_key(raw: str):
-    txt = (raw or "").strip().replace("\\n", "\n")
+    txt = _clean_pem_text(raw)
     if not txt:
         raise ValueError("RSA 公钥/证书为空")
     if "-----BEGIN CERTIFICATE-----" in txt:
@@ -72,7 +95,7 @@ def _load_rsa_public_key(raw: str):
 
 
 def _get_alipay_cert_sn(cert_pem: str) -> str:
-    txt = (cert_pem or "").strip()
+    txt = _clean_pem_text(cert_pem)
     if not txt:
         return ""
     cert = x509.load_pem_x509_certificate(txt.encode("utf-8"))
@@ -82,21 +105,106 @@ def _get_alipay_cert_sn(cert_pem: str) -> str:
 
 
 def _get_alipay_root_cert_sn(root_cert_pem: str) -> str:
-    txt = (root_cert_pem or "").strip()
+    txt = _clean_pem_text(root_cert_pem)
     if not txt:
         return ""
     blocks = re.findall(r"-----BEGIN CERTIFICATE-----.*?-----END CERTIFICATE-----", txt, flags=re.DOTALL)
     sns = []
+    rsa_oids = {
+        "1.2.840.113549.1.1.4",   # md5WithRSAEncryption
+        "1.2.840.113549.1.1.5",   # sha1WithRSAEncryption
+        "1.2.840.113549.1.1.11",  # sha256WithRSAEncryption
+        "1.2.840.113549.1.1.12",  # sha384WithRSAEncryption
+        "1.2.840.113549.1.1.13",  # sha512WithRSAEncryption
+    }
     for block in blocks:
         try:
             cert = x509.load_pem_x509_certificate(block.encode("utf-8"))
             oid_dotted = cert.signature_algorithm_oid.dotted_string
             oid_name = (getattr(cert.signature_algorithm_oid, "_name", "") or "").lower()
-            if oid_dotted in {"1.2.840.113549.1.1.4", "1.2.840.113549.1.1.5", "1.2.840.113549.1.1.11"} or "rsa" in oid_name:
+            if oid_dotted in rsa_oids or ("rsa" in oid_name and "sm2" not in oid_name):
                 sns.append(_get_alipay_cert_sn(block))
         except Exception:
             continue
     return "_".join(sns)
+
+
+def _normalize_alipay_gateway_base(raw_gateway: str) -> str:
+    gw = (raw_gateway or "https://openapi.alipay.com/gateway.do").strip()
+    if not gw:
+        return "https://openapi.alipay.com/gateway.do"
+    parts = urlsplit(gw)
+    if not parts.scheme or not parts.netloc:
+        return gw.split("?", 1)[0]
+    return urlunsplit((parts.scheme, parts.netloc, parts.path or "/gateway.do", "", ""))
+
+
+def _decode_alipay_response(resp: httpx.Response) -> str:
+    raw = resp.content or b""
+    ctype = (resp.headers.get("content-type") or "").lower()
+    if any(enc in ctype for enc in ("gbk", "gb2312", "gb18030")):
+        for enc in ("gb18030", "utf-8"):
+            try:
+                return raw.decode(enc)
+            except UnicodeDecodeError:
+                continue
+    for enc in ("utf-8", "gb18030"):
+        try:
+            return raw.decode(enc)
+        except UnicodeDecodeError:
+            continue
+    return raw.decode("utf-8", errors="replace")
+
+
+async def _post_alipay_gateway(gateway: str, signed_params: Dict[str, Any], timeout_sec: float = 12.0) -> str:
+    """
+    按照支付宝官方 SDK 规范发送网关请求：
+    公共请求参数（含 charset=utf-8 与 sign）放在 URL Query，biz_content 放在 UTF-8 POST Form Body，
+    避免支付宝网关因 URL 缺少 charset 参数而按 GBK 解码中文 subject 导致验签失败或乱码。
+    """
+    gateway_base = _normalize_alipay_gateway_base(gateway)
+    query_params = {k: v for k, v in signed_params.items() if k != "biz_content" and v is not None and v != ""}
+    body_params = {}
+    if signed_params.get("biz_content"):
+        body_params["biz_content"] = signed_params["biz_content"]
+
+    url = f"{gateway_base}?{urlencode(query_params)}"
+    body_bytes = urlencode(body_params).encode("utf-8") if body_params else b""
+    headers = {
+        "Content-Type": "application/x-www-form-urlencoded; charset=utf-8",
+        "Accept": "application/json, text/plain, */*",
+        "User-Agent": "ChromiumSyncSaaS/1.0",
+    }
+    timeout = httpx.Timeout(connect=6.0, read=timeout_sec, write=8.0, pool=6.0)
+    try:
+        async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+            resp = await client.post(url, content=body_bytes, headers=headers)
+    except httpx.TimeoutException:
+        raise RuntimeError(f"连接支付宝开放平台网关超时 ({gateway_base})，请检查服务器出站网络或网关地址配置")
+    except httpx.RequestError as exc:
+        raise RuntimeError(f"无法连接支付宝开放平台网关 ({gateway_base}): {exc}")
+
+    if resp.status_code >= 500:
+        raise RuntimeError(f"支付宝网关暂不可用 (HTTP {resp.status_code})，请稍后重试")
+    return _decode_alipay_response(resp)
+
+
+def _format_alipay_error(node: Dict[str, Any], default_prefix: str = "支付宝下单失败") -> str:
+    code = str(node.get("code") or "").strip()
+    sub_code = str(node.get("sub_code") or "").strip()
+    sub_msg = str(node.get("sub_msg") or "").strip()
+    msg = str(node.get("msg") or "").strip()
+    parts = []
+    if sub_msg:
+        parts.append(sub_msg)
+    elif msg:
+        parts.append(msg)
+    code_detail = "/".join(x for x in (code, sub_code) if x)
+    if code_detail:
+        parts.append(f"[{code_detail}]")
+    if not parts:
+        return f"{default_prefix}: 网关未返回有效响应"
+    return f"{default_prefix}: {' '.join(parts)}"
 
 
 def get_effective_alipay_public_key(cfg: Dict[str, Any]) -> str:
@@ -203,11 +311,17 @@ def _verify_alipay_response_signature(raw_json_str: str, response_node_key: str,
         return False
     content_to_verify = raw_json_str[start:end]
     pub = _load_rsa_public_key(alipay_public_key_raw)
-    try:
-        pub.verify(base64.b64decode(sign_b64), content_to_verify.encode("utf-8"), padding.PKCS1v15(), hashes.SHA256())
-        return True
-    except Exception:
-        return False
+    sig_bytes = base64.b64decode(sign_b64)
+    candidates = [content_to_verify]
+    if "\\/" in content_to_verify:
+        candidates.append(content_to_verify.replace("\\/", "/"))
+    for candidate in candidates:
+        try:
+            pub.verify(sig_bytes, candidate.encode("utf-8"), padding.PKCS1v15(), hashes.SHA256())
+            return True
+        except Exception:
+            continue
+    return False
 
 
 async def create_alipay_order(
@@ -224,7 +338,7 @@ async def create_alipay_order(
     pub_key = get_effective_alipay_public_key(cfg)
     app_cert = str(cfg.get("app_cert") or "").strip()
     root_cert = str(cfg.get("root_cert") or "").strip()
-    gateway = str(cfg.get("gateway_url") or "https://openapi.alipay.com/gateway.do").strip()
+    gateway = _normalize_alipay_gateway_base(str(cfg.get("gateway_url") or "https://openapi.alipay.com/gateway.do"))
     notify_url = str(cfg.get("notify_url") or "").strip() or f"{base_url}/api/billing/recharge/notify/alipay"
     return_url = str(cfg.get("return_url") or "").strip() or f"{base_url}/"
     static_qr = str(cfg.get("qr_url") or "").strip()
@@ -244,16 +358,21 @@ async def create_alipay_order(
         common_params: Dict[str, Any] = {
             "app_id": app_id,
             "charset": "utf-8",
+            "format": "JSON",
             "sign_type": "RSA2",
-            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "timestamp": _now_cst_str(),
             "version": "1.0",
             "notify_url": notify_url,
         }
         if sign_mode == "cert":
             if not (app_cert and root_cert):
                 raise RuntimeError("当前支付宝已选「证书模式」，请先在后台填写或上传应用公钥证书与支付宝根证书")
-            common_params["app_cert_sn"] = _get_alipay_cert_sn(app_cert)
-            common_params["alipay_root_cert_sn"] = _get_alipay_root_cert_sn(root_cert)
+            app_sn = _get_alipay_cert_sn(app_cert)
+            root_sn = _get_alipay_root_cert_sn(root_cert)
+            if not app_sn or not root_sn:
+                raise RuntimeError("支付宝应用公钥证书或根证书解析失败，请重新上传正确的 .crt 文件")
+            common_params["app_cert_sn"] = app_sn
+            common_params["alipay_root_cert_sn"] = root_sn
         if mode == "page_pay":
             common_params["method"] = "alipay.trade.page.pay"
             common_params["return_url"] = return_url
@@ -272,7 +391,7 @@ async def create_alipay_order(
             return {
                 "gateway_used": "alipay_page_pay",
                 "pay_url": pay_url,
-                "qr_code_text": pay_url,
+                "qr_code_text": "",
                 "persisted": True,
                 "simulated": False,
                 "message": "已生成支付宝收银台支付链接，请点击跳转到支付宝完成付款",
@@ -291,18 +410,25 @@ async def create_alipay_order(
             separators=(",", ":"),
         )
         common_params["sign"] = _alipay_sign(common_params, priv_key)
-        async with httpx.AsyncClient(timeout=12.0) as client:
-            resp = await client.post(gateway, data=common_params)
-            raw_text = resp.text
-        data = json.loads(raw_text)
+        raw_text = await _post_alipay_gateway(gateway, common_params, timeout_sec=12.0)
+        try:
+            data = json.loads(raw_text)
+        except Exception:
+            snippet = re.sub(r"\s+", " ", raw_text)[:180]
+            raise RuntimeError(f"支付宝网关返回非 JSON 响应，请检查网关地址配置: {snippet}")
+
+        if isinstance(data.get("error_response"), dict):
+            raise RuntimeError(_format_alipay_error(data["error_response"], "支付宝当面付下单失败"))
+
         node_key = "alipay_trade_precreate_response"
         node = data.get(node_key) or {}
+        if str(node.get("code") or "") != "10000" or not node.get("qr_code"):
+            raise RuntimeError(_format_alipay_error(node, "支付宝当面付下单失败"))
+
         if pub_key and data.get("sign"):
             if not _verify_alipay_response_signature(raw_text, node_key, str(data["sign"]), pub_key):
-                raise RuntimeError("支付宝网关响应 RSA2 验签失败，请检查支付宝公钥配置")
-        if str(node.get("code") or "") != "10000" or not node.get("qr_code"):
-            err_msg = node.get("sub_msg") or node.get("msg") or f"code={node.get('code')}"
-            raise RuntimeError(f"支付宝下单失败: {err_msg}")
+                raise RuntimeError("支付宝网关响应 RSA2 验签失败，请检查支付宝公钥或公钥证书配置是否与开放平台一致")
+
         qr_code = str(node["qr_code"]).strip()
         return {
             "gateway_used": "alipay_precreate",
@@ -331,7 +457,7 @@ async def query_alipay_order(order_no: str, cfg: Dict[str, Any]) -> Dict[str, An
     sign_mode = (cfg.get("sign_mode") or "public_key").strip().lower()
     app_cert = str(cfg.get("app_cert") or "").strip()
     root_cert = str(cfg.get("root_cert") or "").strip()
-    gateway = str(cfg.get("gateway_url") or "https://openapi.alipay.com/gateway.do").strip()
+    gateway = _normalize_alipay_gateway_base(str(cfg.get("gateway_url") or "https://openapi.alipay.com/gateway.do"))
     if not app_id or not priv_key:
         return {"supported": False, "paid": False}
 
@@ -339,8 +465,9 @@ async def query_alipay_order(order_no: str, cfg: Dict[str, Any]) -> Dict[str, An
         "app_id": app_id,
         "method": "alipay.trade.query",
         "charset": "utf-8",
+        "format": "JSON",
         "sign_type": "RSA2",
-        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "timestamp": _now_cst_str(),
         "version": "1.0",
         "biz_content": json.dumps({"out_trade_no": order_no}, separators=(",", ":")),
     }
@@ -348,15 +475,18 @@ async def query_alipay_order(order_no: str, cfg: Dict[str, Any]) -> Dict[str, An
         params["app_cert_sn"] = _get_alipay_cert_sn(app_cert)
         params["alipay_root_cert_sn"] = _get_alipay_root_cert_sn(root_cert)
     params["sign"] = _alipay_sign(params, priv_key)
-    async with httpx.AsyncClient(timeout=10.0) as client:
-        resp = await client.post(gateway, data=params)
-        raw_text = resp.text
-    data = json.loads(raw_text)
+    raw_text = await _post_alipay_gateway(gateway, params, timeout_sec=10.0)
+    try:
+        data = json.loads(raw_text)
+    except Exception:
+        raise RuntimeError("支付宝查单网关返回非 JSON 响应，请检查网关地址配置")
+    if isinstance(data.get("error_response"), dict):
+        raise RuntimeError(_format_alipay_error(data["error_response"], "支付宝查单失败"))
     node_key = "alipay_trade_query_response"
     node = data.get(node_key) or {}
-    if pub_key and data.get("sign"):
+    if pub_key and data.get("sign") and str(node.get("code") or "") == "10000":
         if not _verify_alipay_response_signature(raw_text, node_key, str(data["sign"]), pub_key):
-            raise RuntimeError("支付宝查单响应 RSA2 验签失败")
+            raise RuntimeError("支付宝查单响应 RSA2 验签失败，请检查支付宝公钥或公钥证书配置")
     trade_status = str(node.get("trade_status") or "")
     paid = str(node.get("code") or "") == "10000" and trade_status in {"TRADE_SUCCESS", "TRADE_FINISHED"}
     return {

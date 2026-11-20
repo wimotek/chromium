@@ -1,3 +1,4 @@
+import asyncio
 from datetime import datetime, timedelta
 import hashlib
 import hmac
@@ -10,6 +11,7 @@ from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel
 from sqlalchemy import func, or_
 
+from config import logger
 from core.db import get_setting, session_scope
 from core.models import (
     BillingLedger,
@@ -669,9 +671,14 @@ def claim_daily_checkin(request: Request, user: dict = Depends(verify_token)):
 
 @router.post("/api/billing/recharge/create", summary="创建支付宝 / 微信支付充值订单（自动调用官方网关、人工收款码或沙盒不落盘演示）")
 async def create_recharge_order(data: RechargeCreateDTO, request: Request, user: dict = Depends(verify_token)):
-    alipay_cfg = _get_alipay_gateway_cfg()
-    wechat_cfg = _get_wechat_gateway_cfg()
-    methods = _build_payment_methods_matrix(alipay_cfg, wechat_cfg)
+    def _load_create_context():
+        a_cfg = _get_alipay_gateway_cfg()
+        w_cfg = _get_wechat_gateway_cfg()
+        m_list = _build_payment_methods_matrix(a_cfg, w_cfg)
+        allow_sb = get_setting("saas_allow_self_recharge", "1") == "1"
+        return a_cfg, w_cfg, m_list, allow_sb
+
+    alipay_cfg, wechat_cfg, methods, allow_sandbox = await asyncio.to_thread(_load_create_context)
     methods_by_id = {m["id"]: m for m in methods}
 
     req_method = (data.pay_method or "").strip().lower()
@@ -697,7 +704,6 @@ async def create_recharge_order(data: RechargeCreateDTO, request: Request, user:
     if data.amount_yuan < 0.01 or data.amount_yuan > 50000:
         raise HTTPException(status_code=400, detail="单笔充值金额需在 0.01 ~ 50000 元之间")
 
-    allow_sandbox = get_setting("saas_allow_self_recharge", "1") == "1"
     if ch == "alipay":
         alipay_cfg = {**alipay_cfg, "mode": selected_mode}
         if not allow_sandbox:
@@ -721,7 +727,7 @@ async def create_recharge_order(data: RechargeCreateDTO, request: Request, user:
     now_str = now_dt.strftime("%Y-%m-%d %H:%M:%S")
     order_no = f"RC{now_dt.strftime('%Y%m%d%H%M%S')}{secrets.token_hex(4).upper()}"
     base_url = infer_base_url_from_request(request)
-    subject = f"Chromium Sync SaaS 钱包充值 ¥{float(amount_yuan_str):.2f}"
+    subject = f"Chromium Sync SaaS 钱包充值 {float(amount_yuan_str):.2f}元"
 
     try:
         if ch == "alipay":
@@ -741,7 +747,9 @@ async def create_recharge_order(data: RechargeCreateDTO, request: Request, user:
                 base_url=base_url,
             )
     except Exception as exc:
-        raise HTTPException(status_code=502, detail=str(exc))
+        logger.warning(f"💳 [Billing] 支付下单失败 (channel={ch}, mode={selected_mode}, order={order_no}): {exc}")
+        # 使用 HTTP 400 而非 502，避免 Cloudflare / Nginx 反代拦截 502 状态码并替换为 HTML 错误页
+        raise HTTPException(status_code=400, detail=str(exc))
 
     pay_url = str(gw_res.get("pay_url") or "")
     qr_text = str(gw_res.get("qr_code_text") or "")
@@ -774,33 +782,42 @@ async def create_recharge_order(data: RechargeCreateDTO, request: Request, user:
         }
 
     order_remark = (data.remark or "").strip() or gateway_used
+    client_ip = get_client_ip(request)
 
-    with session_scope() as db:
-        order = RechargeOrder(
-            order_no=order_no,
-            user_id=int(user["id"]),
-            channel=ch,
-            amount_units=amount_units,
-            status="pending",
-            pay_url=pay_url,
-            qr_code_text=qr_text,
-            created_at=now_str,
-            remark=order_remark[:255],
+    def _persist_order_and_audit():
+        with session_scope() as db:
+            order = RechargeOrder(
+                order_no=order_no,
+                user_id=int(user["id"]),
+                channel=ch,
+                amount_units=amount_units,
+                status="pending",
+                pay_url=pay_url,
+                qr_code_text=qr_text,
+                created_at=now_str,
+                remark=order_remark[:255],
+            )
+            db.add(order)
+            db.flush()
+            payload = order.to_dict()
+        write_audit_log(
+            action="recharge_order_create",
+            actor_id=user["id"],
+            actor_username=user["username"],
+            target_type="recharge_order",
+            target_id=order_no,
+            ip=client_ip,
+            status="ok",
+            details={"channel": ch, "amount_yuan": payload["amount_yuan"], "gateway_used": gateway_used},
         )
-        db.add(order)
-        db.flush()
-        order_payload = order.to_dict()
+        return payload
 
-    write_audit_log(
-        action="recharge_order_create",
-        actor_id=user["id"],
-        actor_username=user["username"],
-        target_type="recharge_order",
-        target_id=order_no,
-        ip=get_client_ip(request),
-        status="ok",
-        details={"channel": ch, "amount_yuan": order_payload["amount_yuan"], "gateway_used": gateway_used},
-    )
+    try:
+        order_payload = await asyncio.to_thread(_persist_order_and_audit)
+    except Exception as exc:
+        logger.error(f"💳 [Billing] 充值订单落盘失败 (order={order_no}): {exc}")
+        raise HTTPException(status_code=500, detail=f"充值订单写入数据库失败: {exc}")
+
     return {
         "message": gw_res.get("message") or f"充值订单 {order_no} 已创建",
         "gateway_used": gateway_used,

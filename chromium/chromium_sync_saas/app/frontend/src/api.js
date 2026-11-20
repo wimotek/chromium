@@ -19,6 +19,7 @@ export async function apiFetch(path, options = {}) {
   delete fetchOptions.timeoutMs
 
   let res
+  let text = ''
   try {
     res = await fetch(path, {
       cache: 'no-store',
@@ -26,21 +27,39 @@ export async function apiFetch(path, options = {}) {
       headers,
       signal: options.signal || controller.signal,
     })
+    text = await res.text()
   } catch (err) {
     if (err?.name === 'AbortError') {
-      throw new Error('请求超时，请检查网络连接或 CDN 节点状态后重试')
+      throw new Error('请求超时，请检查网络连接或服务端状态后重试')
     }
     throw err
   } finally {
     if (timer) clearTimeout(timer)
   }
 
-  const text = await res.text()
   let data = null
-  try {
-    data = text ? JSON.parse(text) : {}
-  } catch {
-    data = { detail: text }
+  const trimmed = (text || '').trim()
+  const isHtmlResponse = /^<!doctype\s+html|^<html[\s>]/i.test(trimmed) || /<body[\s>]/i.test(trimmed)
+  if (!isHtmlResponse) {
+    try {
+      data = trimmed ? JSON.parse(trimmed) : {}
+    } catch {
+      data = { detail: trimmed }
+    }
+  } else {
+    const titleMatch = trimmed.match(/<title[^>]*>([^<]+)<\/title>/i)
+    const title = titleMatch ? titleMatch[1].replace(/\s+/g, ' ').trim() : ''
+    let friendly = `网关返回异常页面 (HTTP ${res.status})`
+    if (res.status === 502) {
+      friendly = `网关连接异常 (HTTP 502${title ? ` · ${title}` : ''})，请检查后端服务状态或网关配置后重试`
+    } else if (res.status === 503) {
+      friendly = '服务暂时不可用 (HTTP 503)，请稍后重试'
+    } else if (res.status === 504 || res.status === 524) {
+      friendly = `上游网关响应超时 (HTTP ${res.status})，请检查服务器网络或稍后重试`
+    } else if (title) {
+      friendly = `请求失败 (HTTP ${res.status} · ${title})`
+    }
+    data = { detail: friendly }
   }
   if (!res.ok) {
     if (res.status === 401 && !path.includes('/login') && !path.includes('/register')) {

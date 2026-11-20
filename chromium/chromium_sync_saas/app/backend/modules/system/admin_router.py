@@ -933,7 +933,7 @@ async def admin_query_recharge(order_id: int, request: Request, admin: dict = De
         else:
             q_res = await query_wechat_order(order_payload["order_no"], _get_wechat_gateway_cfg())
     except Exception as exc:
-        raise HTTPException(status_code=502, detail=f"官方查单失败: {exc}")
+        raise HTTPException(status_code=400, detail=f"官方查单失败: {exc}")
 
     if not q_res.get("supported"):
         raise HTTPException(status_code=400, detail=f"尚未配置 {ch.upper()} 官方 API 查单密钥")

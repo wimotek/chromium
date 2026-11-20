@@ -346,7 +346,24 @@
             管理员当前开启了沙盒模拟演练，且所选渠道尚未配置官方密钥或收款码。下方「模拟支付」<strong>不会写入数据库，也不会变动您的真实余额</strong>。
           </div>
 
-          <div v-if="isQrImageUrl" style="text-align: center; margin: 14px 0">
+          <div v-if="isPagePayOrder && isHttpPayUrl" class="subcard" style="text-align: center; margin: 14px 0; padding: 18px 16px">
+            <div style="font-size: 14px; font-weight: 600; color: var(--text-strong); margin-bottom: 6px">
+              支付宝电脑网站收银台已就绪
+            </div>
+            <div class="muted" style="font-size: 12px; margin-bottom: 14px">
+              点击下方按钮将在新标签页打开支付宝官方网页收银台完成付款，支付完成后本窗口将每 3 秒自动核验并入账。
+            </div>
+            <a
+              :href="cashierOrder.pay_url"
+              target="_blank"
+              rel="noopener noreferrer"
+              class="btn btn-primary"
+            >
+              立即前往支付宝官方收银台付款
+            </a>
+          </div>
+
+          <div v-else-if="isQrImageUrl" style="text-align: center; margin: 14px 0">
             <div class="qr-frame" style="display: inline-block; padding: 10px; background: #fff; border-radius: 10px">
               <img :src="cashierOrder.qr_code_text" alt="收款二维码" style="width: 204px; height: 204px; object-fit: contain; display: block" />
             </div>
@@ -366,7 +383,7 @@
             </div>
           </div>
 
-          <div v-if="isHttpPayUrl && !isStaticQrOrder" class="row" style="justify-content: center; margin: 12px 0">
+          <div v-if="isHttpPayUrl && !isStaticQrOrder && !isPagePayOrder" class="row" style="justify-content: center; margin: 12px 0">
             <a
               :href="cashierOrder.pay_url"
               target="_blank"
@@ -377,7 +394,7 @@
             </a>
           </div>
 
-          <div v-if="!isQrImageUrl && !cashierQrSvg && (!isHttpPayUrl || isStaticQrOrder)" class="banner banner-warn">
+          <div v-if="!isPagePayOrder && !isQrImageUrl && !cashierQrSvg && (!isHttpPayUrl || isStaticQrOrder)" class="banner banner-warn">
             {{ cashierOrder.pay_url || cashierOrder.qr_code_text || '管理员尚未配置收款参数，请联系管理员处理。' }}
           </div>
 
@@ -606,6 +623,14 @@ const isStaticQrOrder = computed(() => {
   return rmk.includes('static_qr')
 })
 
+const isPagePayOrder = computed(() => {
+  const o = cashierOrder.value
+  if (!o) return false
+  const rmk = String(o.remark || '').toLowerCase()
+  const url = String(o.pay_url || '').toLowerCase()
+  return rmk.includes('page_pay') || url.includes('alipay.trade.page.pay')
+})
+
 const isQrImageUrl = computed(() => {
   const txt = (cashierOrder.value?.qr_code_text || '').trim()
   if (!txt) return false
@@ -613,6 +638,7 @@ const isQrImageUrl = computed(() => {
 })
 
 const cashierQrSvg = computed(() => {
+  if (isPagePayOrder.value) return ''
   const txt = cashierOrder.value?.qr_code_text || ''
   if (!txt || isQrImageUrl.value || txt.startsWith('sandbox://') || txt.startsWith('unconfigured://')) return ''
   try {
@@ -763,21 +789,27 @@ async function createRechargeOrder() {
   try {
     const res = await apiFetch('/api/billing/recharge/create', {
       method: 'POST',
+      timeoutMs: 20000,
       body: JSON.stringify({
         channel: activePayMethod.value.channel,
         pay_method: activePayMethod.value.id,
         amount_yuan: rechargeYuan.value,
       }),
     })
-    emit('notify', res.message)
-    if (!res.simulated) {
-      await loadAll()
-    }
+    emit('notify', { message: res.message || '充值订单已创建', type: 'ok' })
     if (res.order) {
-      openCashierModal({ ...res.order, simulated: Boolean(res.simulated || res.order.simulated) })
+      const orderObj = { ...res.order, simulated: Boolean(res.simulated || res.order.simulated) }
+      if (!orderObj.simulated && !rechargeOrders.value.some((x) => x.order_no === orderObj.order_no)) {
+        rechargeOrders.value = [orderObj, ...rechargeOrders.value].slice(0, 30)
+      }
+      openCashierModal(orderObj)
+    }
+    if (!res.simulated) {
+      // 后台静默刷新余额与历史订单列表，不阻塞收银台弹窗与按钮状态释放
+      loadAll().catch(() => {})
     }
   } catch (e) {
-    emit('notify', e.message)
+    emit('notify', { message: e.message || '下单失败，请稍后重试', type: 'error' })
   } finally {
     creatingOrder.value = false
   }
