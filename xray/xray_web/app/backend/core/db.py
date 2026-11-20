@@ -229,7 +229,7 @@ def _upgrade_legacy_columns(eng):
         [
             ("node_key", "VARCHAR(128) DEFAULT ''"),
             ("pending_key", "VARCHAR(128) DEFAULT ''"),
-            ("dest", "VARCHAR(255) DEFAULT 'www.microsoft.com:443'"),
+            ("dest", "VARCHAR(255) DEFAULT 'www.amd.com:443'"),
             ("server_names", f"TEXT{text_default}"),
             ("allow_all", "INTEGER DEFAULT 1"),
             ("allowed_groups", f"TEXT{text_default}"),
@@ -251,6 +251,8 @@ def _upgrade_legacy_columns(eng):
             ("hy2_sni", "VARCHAR(255) DEFAULT ''"),
             ("hy2_insecure", "INTEGER DEFAULT 1"),
             ("hy2_cert_sha256", "VARCHAR(128) DEFAULT ''"),
+            ("hy2_mport", "VARCHAR(128) DEFAULT ''"),
+            ("block_cn", "INTEGER DEFAULT 1"),
         ],
     )
     ensure_cols(

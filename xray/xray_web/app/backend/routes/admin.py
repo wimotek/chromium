@@ -21,13 +21,17 @@ from core.db import (
 )
 from core.models import AuditLog, Card, Node, User
 from routes import (
+    DEFAULT_REALITY_DEST,
+    DEFAULT_REALITY_SNI,
     HEARTBEAT_ONLINE_SEC,
+    SAFE_REALITY_TARGETS,
     build_node_link,
     check_admin,
     compute_heartbeat_age_sec,
     evaluate_node_sub_health,
     get_node_snis,
     normalize_expire_date,
+    normalize_hy2_mport,
     parse_agent_health,
     parse_last_probe,
     resolve_public_endpoint,
@@ -100,14 +104,19 @@ def admin_data():
             hy2_sni = str(n.get("hy2_sni") or "").strip() or chosen_sni
             hy2_insecure = 1 if int(n.get("hy2_insecure", 1) or 0) != 0 else 0
             hy2_cert_pin = re.sub(r"[^0-9a-fA-F]", "", str(n.get("hy2_cert_sha256") or "")).lower()
+            hy2_mport = normalize_hy2_mport(n.get("hy2_mport"))
             hy2_remark = urllib.parse.quote(f"{n['name']} [Hy2-UDP]")
+            hy2_parts = [f"sni={urllib.parse.quote(hy2_sni, safe='')}"]
+            if hy2_mport:
+                hy2_parts.append(f"mport={hy2_mport}")
             if hy2_insecure == 1 and len(hy2_cert_pin) == 64:
-                hy2_query = f"sni={urllib.parse.quote(hy2_sni, safe='')}&pinSHA256={hy2_cert_pin}&insecure=0"
+                hy2_parts.append(f"pinSHA256={hy2_cert_pin}")
+                hy2_parts.append("insecure=0")
             else:
-                hy2_query = f"sni={urllib.parse.quote(hy2_sni, safe='')}&insecure={hy2_insecure}"
+                hy2_parts.append(f"insecure={hy2_insecure}")
             hy2_suffix = (
                 f"@{formatted_host}:{int(n['hy2_port'])}"
-                f"?{hy2_query}"
+                f"?{'&'.join(hy2_parts)}"
                 f"#{hy2_remark}"
             )
         node_templates.append({
@@ -256,9 +265,9 @@ def admin_save_node_config():
     name = data.get("name", "").strip()
     ip = data.get("ip", "").strip()
     port = int(data.get("port", 443))
-    raw_dest = data.get("dest", "www.microsoft.com:443").strip()
+    raw_dest = data.get("dest", DEFAULT_REALITY_DEST).strip() or DEFAULT_REALITY_DEST
     raw_server_names = data.get("server_names", "").strip()
-    raw_sni = data.get("sni", "www.microsoft.com").strip()
+    raw_sni = data.get("sni", DEFAULT_REALITY_SNI).strip() or DEFAULT_REALITY_SNI
     sid = data.get("sid", "").strip()
     node_key = data.get("node_key", "").strip()
 
@@ -270,7 +279,7 @@ def admin_save_node_config():
         if clean and clean not in snis:
             snis.append(clean)
     server_names_str = ",".join(snis)
-    primary_sni = snis[0] if snis else "www.microsoft.com"
+    primary_sni = snis[0] if snis else DEFAULT_REALITY_SNI
 
     with db_session() as s:
         node_obj = s.scalar(select(Node).where(Node.node_id == node_id))
@@ -284,6 +293,9 @@ def admin_save_node_config():
         node_obj.server_names = server_names_str
         node_obj.sid = node_obj.sid or sid
         node_obj.node_key = node_obj.node_key or node_key
+        if "block_cn" in data:
+            raw_bcn = data.get("block_cn")
+            node_obj.block_cn = 1 if (raw_bcn is True or str(raw_bcn).strip().lower() in ("1", "true", "yes", "on")) else 0
         if "hy2_enabled" in data:
             raw_hy2_en = data.get("hy2_enabled")
             node_obj.hy2_enabled = 1 if (raw_hy2_en is True or str(raw_hy2_en).strip().lower() in ("1", "true", "yes")) else 0
@@ -299,6 +311,15 @@ def admin_save_node_config():
         if "hy2_insecure" in data:
             raw_hy2_ins = data.get("hy2_insecure")
             node_obj.hy2_insecure = 1 if (raw_hy2_ins is True or str(raw_hy2_ins).strip().lower() in ("1", "true", "yes")) else 0
+        if "hy2_mport" in data:
+            raw_mport = str(data.get("hy2_mport") or "").strip()
+            if not raw_mport:
+                node_obj.hy2_mport = ""
+            else:
+                norm_mport = normalize_hy2_mport(raw_mport)
+                if not norm_mport:
+                    return jsonify({"code": 400, "msg": "Hysteria2 跳跃端口格式无效，请填写如 20000-30000 或留空"})
+                node_obj.hy2_mport = norm_mport
         node_obj.last_probe = ""
     invalidate_nodes_cache()
     return jsonify({"code": 200, "msg": "节点网络配置已保存！"})
@@ -339,7 +360,7 @@ def admin_list_nodes():
     now_dt = datetime.datetime.now()
     with db_session(readonly=True) as s:
         nodes = [_enrich_node_dict(n.to_dict(), now_ts, now_dt) for n in s.scalars(select(Node).order_by(Node.id.asc())).all()]
-    return jsonify({"code": 200, "server_ts": now_ts, "data": nodes})
+    return jsonify({"code": 200, "server_ts": now_ts, "data": nodes, "reality_presets": SAFE_REALITY_TARGETS})
 
 
 @admin_bp.route("/api/admin/nodes/ping", methods=["POST"])

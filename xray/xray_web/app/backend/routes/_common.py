@@ -28,6 +28,24 @@ _HB_RECOVERABLE_PROBE_CODES = frozenset({
     "tunnel_disconnected",
 })
 
+# 精选更低噪音、TLS 1.3 + HTTP/2 + X25519、非 Cloudflare 且避开烂大街 microsoft.com 的 REALITY 伪装目标池
+SAFE_REALITY_TARGETS = [
+    {"dest": "www.amd.com:443", "sni": "www.amd.com", "label": "AMD 官网", "region": "全球 Akamai"},
+    {"dest": "www.nvidia.com:443", "sni": "www.nvidia.com", "label": "NVIDIA 官网", "region": "全球低噪"},
+    {"dest": "www.intel.com:443", "sni": "www.intel.com", "label": "Intel 官网", "region": "欧美/全球"},
+    {"dest": "www.logitech.com:443", "sni": "www.logitech.com", "label": "Logitech 罗技", "region": "欧美/亚太"},
+    {"dest": "www.samsung.com:443", "sni": "www.samsung.com", "label": "Samsung 三星", "region": "日韩/亚太优"},
+    {"dest": "www.sony.com:443", "sni": "www.sony.com", "label": "Sony 索尼", "region": "日韩/美西优"},
+    {"dest": "www.asus.com:443", "sni": "www.asus.com", "label": "ASUS 华硕", "region": "亚太/新加坡优"},
+    {"dest": "www.dell.com:443", "sni": "www.dell.com", "label": "Dell 戴尔", "region": "北美/欧洲"},
+    {"dest": "www.cisco.com:443", "sni": "www.cisco.com", "label": "Cisco 思科", "region": "企业网络"},
+    {"dest": "www.oracle.com:443", "sni": "www.oracle.com", "label": "Oracle 甲骨文", "region": "全球云商"},
+    {"dest": "www.siemens.com:443", "sni": "www.siemens.com", "label": "Siemens 西门子", "region": "欧洲节点优"},
+    {"dest": "www.mozilla.org:443", "sni": "www.mozilla.org", "label": "Mozilla 官网", "region": "全球开源"},
+]
+DEFAULT_REALITY_DEST = SAFE_REALITY_TARGETS[0]["dest"]
+DEFAULT_REALITY_SNI = SAFE_REALITY_TARGETS[0]["sni"]
+
 
 def parse_agent_health(raw) -> dict | None:
     if isinstance(raw, dict):
@@ -248,13 +266,13 @@ def normalize_expire_date(raw_str: str) -> str:
 
 
 def get_node_snis(node: dict) -> list[str]:
-    raw = node.get("server_names") or node.get("sni") or "www.microsoft.com"
+    raw = node.get("server_names") or node.get("sni") or DEFAULT_REALITY_SNI
     snis = []
     for part in re.split(r'[,;\s]+', str(raw)):
         clean = part.strip().split(":")[0]
         if clean and clean not in snis:
             snis.append(clean)
-    return snis if snis else ["www.microsoft.com"]
+    return snis if snis else [DEFAULT_REALITY_SNI]
 
 
 def extract_host_and_port(raw_host: str, default_host: str = "hub.example.com", default_port: int = 443) -> tuple[str, int]:
@@ -351,6 +369,34 @@ def build_node_link(uuid_str: str, node: dict, remark: str, chosen_sni: str = No
     )
 
 
+def normalize_hy2_mport(raw) -> str:
+    """规范化并校验 Hysteria2 跳跃端口范围，如 '20000-30000' 或 '20000-25000,30000-35000'"""
+    s = str(raw or "").strip()
+    if not s:
+        return ""
+    s = s.replace("，", ",").replace(";", ",").replace(" ", "")
+    valid_parts: list[str] = []
+    for part in s.split(","):
+        if not part:
+            continue
+        if "-" in part:
+            segs = part.split("-")
+            if len(segs) != 2 or not segs[0].isdigit() or not segs[1].isdigit():
+                return ""
+            p1, p2 = int(segs[0]), int(segs[1])
+            if not (1 <= p1 < p2 <= 65535):
+                return ""
+            valid_parts.append(f"{p1}-{p2}")
+        else:
+            if not part.isdigit():
+                return ""
+            p = int(part)
+            if not (1 <= p <= 65535):
+                return ""
+            valid_parts.append(str(p))
+    return ",".join(valid_parts)[:128]
+
+
 def build_hy2_link(uuid_str: str, node: dict, remark: str) -> str | None:
     """为启用了 Hysteria2 UDP 的 sing-box 公网直连节点生成 hysteria2:// 分享链接"""
     if (node.get("net_mode") or "direct") == "reverse_wss":
@@ -376,13 +422,20 @@ def build_hy2_link(uuid_str: str, node: dict, remark: str) -> str | None:
     hy2_sni = str(node.get("hy2_sni") or "").strip() or (snis[0] if snis else "www.bing.com")
     insecure = 1 if int(node.get("hy2_insecure", 1) or 0) != 0 else 0
     cert_pin = re.sub(r"[^0-9a-fA-F]", "", str(node.get("hy2_cert_sha256") or "")).lower()
+    mport = normalize_hy2_mport(node.get("hy2_mport"))
+
+    query_parts = [f"sni={urllib.parse.quote(hy2_sni, safe='')}"]
+    if mport:
+        query_parts.append(f"mport={mport}")
     if insecure == 1 and len(cert_pin) == 64:
         # 自签证书优先下发 pinSHA256 证书指纹固定 + insecure=0，原生兼容 Xray 26.2.6+ / v2rayNG / v2rayN / Clash / Shadowrocket
-        query_str = f"sni={urllib.parse.quote(hy2_sni, safe='')}&pinSHA256={cert_pin}&insecure=0"
+        query_parts.append(f"pinSHA256={cert_pin}")
+        query_parts.append("insecure=0")
     else:
-        query_str = f"sni={urllib.parse.quote(hy2_sni, safe='')}&insecure={insecure}"
+        query_parts.append(f"insecure={insecure}")
+
     return (
         f"hysteria2://{uuid_str}@{formatted_host}:{hy2_port}"
-        f"?{query_str}"
+        f"?{'&'.join(query_parts)}"
         f"#{urllib.parse.quote(remark + ' [Hy2-UDP]')}"
     )

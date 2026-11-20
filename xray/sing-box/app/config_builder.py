@@ -10,20 +10,21 @@ Sing-box Config Builder (1.11 / 1.12+ 现代原生配置规范，零废弃告警
 3. 全协议统一用户级流量计费：
    - experimental.v2ray_api (127.0.0.1:10085) 同时精准统计 VLESS 与 Hysteria2 用户的上下行流量
 """
+import os
 from typing import List, Dict, Any, Tuple
 from .config import AppConfig
 from .net_detector import detect_listen_address
 
 
 def _parse_dest_host_port(dest: str) -> Tuple[str, int]:
-    raw = (dest or "www.microsoft.com:443").strip()
+    raw = (dest or AppConfig.DEST).strip()
     if ":" in raw and not raw.endswith("]"):
         host, port_str = raw.rsplit(":", 1)
         try:
-            return host.strip("[]") or "www.microsoft.com", int(port_str)
+            return host.strip("[]") or AppConfig.get_first_server_name(), int(port_str)
         except ValueError:
             pass
-    return raw.strip("[]") or "www.microsoft.com", 443
+    return raw.strip("[]") or AppConfig.get_first_server_name(), 443
 
 
 def build_singbox_config(
@@ -32,7 +33,7 @@ def build_singbox_config(
     private_key: str,
     short_id: str,
     port: int = 443,
-    dest: str = "www.microsoft.com:443",
+    dest: str = "",
     server_names: List[str] = None,
     is_standalone: bool = False,
     hy2_enabled: bool = True,
@@ -43,11 +44,12 @@ def build_singbox_config(
     hy2_up_mbps: int = 0,
     hy2_down_mbps: int = 0,
     log_level: str = "",
+    block_cn: bool = True,
 ) -> Dict[str, Any]:
     """根据运行模式 (direct vs reverse_wss) 组装现代 sing-box JSON 配置"""
-    server_names = server_names or ["www.microsoft.com"]
-    primary_sni = server_names[0] if server_names else "www.microsoft.com"
-    dest_host, dest_port = _parse_dest_host_port(dest)
+    server_names = server_names or AppConfig.get_server_name_list()
+    primary_sni = server_names[0] if server_names else AppConfig.get_first_server_name()
+    dest_host, dest_port = _parse_dest_host_port(dest or AppConfig.DEST)
     listen_addr = detect_listen_address()
 
     # 统一组装 VLESS 用户与 Hysteria2 用户，使用相同的 name (email) 以对齐 v2ray_api 流量计费
@@ -148,6 +150,57 @@ def build_singbox_config(
     if effective_log_level == "warning":
         effective_log_level = "warn"
 
+    route_rules: List[Dict[str, Any]] = [
+        {
+            "action": "sniff",
+        },
+        {
+            "ip_is_private": True,
+            "action": "reject",
+        },
+    ]
+    route_rule_sets: List[Dict[str, Any]] = []
+
+    if block_cn:
+        rule_set_dir = AppConfig.RULE_SET_DIR
+        geosite_cn_path = os.path.join(rule_set_dir, "geosite-cn.srs")
+        geoip_cn_path = os.path.join(rule_set_dir, "geoip-cn.srs")
+        cn_tags: List[str] = []
+        if os.path.exists(geosite_cn_path):
+            route_rule_sets.append({
+                "type": "local",
+                "tag": "geosite-cn",
+                "format": "binary",
+                "path": geosite_cn_path,
+            })
+            cn_tags.append("geosite-cn")
+        if os.path.exists(geoip_cn_path):
+            route_rule_sets.append({
+                "type": "local",
+                "tag": "geoip-cn",
+                "format": "binary",
+                "path": geoip_cn_path,
+            })
+            cn_tags.append("geoip-cn")
+        if cn_tags:
+            route_rules.append({
+                "rule_set": cn_tags,
+                "action": "reject",
+            })
+        if "geosite-cn" not in cn_tags:
+            # 兜底策略：若运行环境未预置 .srs 文件，仍拦截 .cn 域名且不影响 sing-box 语法校验
+            route_rules.append({
+                "domain_suffix": [".cn"],
+                "action": "reject",
+            })
+
+    route_cfg: Dict[str, Any] = {
+        "rules": route_rules,
+        "final": "direct",
+    }
+    if route_rule_sets:
+        route_cfg["rule_set"] = route_rule_sets
+
     config: Dict[str, Any] = {
         "log": {
             "level": effective_log_level,
@@ -160,18 +213,7 @@ def build_singbox_config(
                 "tag": "direct",
             }
         ],
-        "route": {
-            "rules": [
-                {
-                    "action": "sniff",
-                },
-                {
-                    "ip_is_private": True,
-                    "action": "reject",
-                },
-            ],
-            "final": "direct",
-        },
+        "route": route_cfg,
     }
 
     # 非单机模式下启用 experimental.v2ray_api (仅绑定 127.0.0.1:10085) 进行精准用户级流量计费

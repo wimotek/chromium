@@ -19,16 +19,18 @@ services:
       # ==================== 以下均为可选参数（镜像已内置合理默认值，按需取消注释覆写） ====================
       # - TZ=Asia/Shanghai                             # 默认 Asia/Shanghai
       # - LOG_LEVEL=fatal                              # 默认 warn；设为 fatal 可屏蔽外网 REALITY 扫描回落日志
+      # - BLOCK_CN=true                                # 默认 true（禁止回国流量，Hub 后台可随时修改）
       # - NET_MODE=auto                                # 默认 auto（Hub 拨测裁决），可选 direct / reverse_wss
       # - SERVER_IP=你的公网IP或域名                     # 可选：手动指定对外上报 IPv4（默认自动探测）
       # - SERVER_IPV6=你的公网IPv6                       # 可选：手动指定对外上报 IPv6（默认自动探测）
       # --- VLESS-REALITY (TCP) 可选参数 ---
       # - PORT=443                                     # 默认 443
-      # - DEST=www.microsoft.com:443                   # 默认 www.microsoft.com:443
-      # - SERVER_NAMES=www.microsoft.com,microsoft.com # 默认 www.microsoft.com,microsoft.com
+      # - DEST=www.amd.com:443                         # 留空首次启动从安全池随机分配并持久化（支持填 127.0.0.1:8443 回落本地站）
+      # - SERVER_NAMES=www.amd.com                     # 留空自动跟随 DEST（Hub 后台支持一键切换）
       # --- Hysteria2 (原生 UDP/QUIC) 可选参数 ---
       # - HY2_ENABLED=true                             # 默认 true（开启双协议）
       # - HY2_PORT=443                                 # 默认跟随 PORT（443/udp 与 REALITY 443/tcp 共存）
+      # - HY2_MPORT=20000-30000                        # 可选：UDP 跳跃端口范围（写入 mport=，需配合宿主机 iptables/nftables 转发）
       # - HY2_SNI=www.bing.com                         # 默认 www.bing.com
       # - HY2_MASQUERADE=https://www.bing.com          # 默认 https://www.bing.com
       # - HY2_UP_MBPS=100                              # 默认 0（自动 BBR）；填机房真实带宽启用 Brutal

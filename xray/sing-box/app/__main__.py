@@ -36,8 +36,9 @@ class SingboxEdgeApplication:
         self.is_running = True
         self._hub_state = ""
 
+        mport_desc = f", mport:{AppConfig.HY2_MPORT}" if AppConfig.HY2_MPORT else ""
         hy2_desc = (
-            f"开启 (UDP:{AppConfig.HY2_PORT}, SNI:{AppConfig.HY2_SNI}, insecure={AppConfig.HY2_INSECURE})"
+            f"开启 (UDP:{AppConfig.HY2_PORT}{mport_desc}, SNI:{AppConfig.HY2_SNI}, insecure={AppConfig.HY2_INSECURE})"
             if AppConfig.HY2_ENABLED
             else "关闭"
         )
@@ -49,6 +50,8 @@ class SingboxEdgeApplication:
         print(f"[*] External IPv6: {self.ext_ipv6 or '无 (None)'}", flush=True)
         print(f"[*] Primary IP   : {self.ext_ip}", flush=True)
         print(f"[*] Initial Mode : {self.net_mode.upper()} (配置策略: {AppConfig.NET_MODE.upper()})", flush=True)
+        print(f"[*] Camouflage   : {AppConfig.DEST} (SNI: {AppConfig.SERVER_NAMES})", flush=True)
+        print(f"[*] Block CN     : {'开启 (禁止回国流量)' if AppConfig.BLOCK_CN else '关闭 (允许回国流量)'}", flush=True)
         print(f"[*] Hysteria2 UDP: {hy2_desc}", flush=True)
         print(f"[*] Log Level    : {AppConfig.LOG_LEVEL}", flush=True)
         print(f"[*] Panel Hub URL: {AppConfig.PANEL_URL or '纯单机模式 (Standalone)'}", flush=True)
@@ -81,6 +84,7 @@ class SingboxEdgeApplication:
             hy2_up_mbps=AppConfig.HY2_UP_MBPS,
             hy2_down_mbps=AppConfig.HY2_DOWN_MBPS,
             log_level=AppConfig.LOG_LEVEL,
+            block_cn=AppConfig.BLOCK_CN,
         )
 
     def write_standalone_client_info(self, client_uuid: str):
@@ -96,24 +100,27 @@ class SingboxEdgeApplication:
         hy2_section = ""
         if AppConfig.HY2_ENABLED and self.net_mode == "direct" and AppConfig.HY2_PORT > 0:
             hy2_sni_q = urllib.parse.quote(AppConfig.HY2_SNI, safe="")
+            mport_val = (AppConfig.HY2_MPORT or "").strip()
+            mport_q = f"&mport={urllib.parse.quote(mport_val, safe='-,')}" if mport_val else ""
             cert_pin = (self.sb_mgr.hy2_cert_sha256 or "").strip().lower()
             if AppConfig.HY2_INSECURE and len(cert_pin) == 64:
                 hy2_link = (
                     f"hysteria2://{client_uuid}@{self.ext_ip}:{AppConfig.HY2_PORT}?"
-                    f"sni={hy2_sni_q}&pinSHA256={cert_pin}&insecure=0#SingBox-Hysteria2-Standalone"
+                    f"sni={hy2_sni_q}{mport_q}&pinSHA256={cert_pin}&insecure=0#SingBox-Hysteria2-Standalone"
                 )
                 cert_verify_desc = f"证书指纹固定 (pinSHA256={cert_pin}，兼容 Xray 26.2.6+ / v2rayNG)"
             else:
                 insecure_val = 1 if AppConfig.HY2_INSECURE else 0
                 hy2_link = (
                     f"hysteria2://{client_uuid}@{self.ext_ip}:{AppConfig.HY2_PORT}?"
-                    f"sni={hy2_sni_q}&insecure={insecure_val}#SingBox-Hysteria2-Standalone"
+                    f"sni={hy2_sni_q}{mport_q}&insecure={insecure_val}#SingBox-Hysteria2-Standalone"
                 )
                 cert_verify_desc = "CA 证书严格校验 (insecure=0)" if insecure_val == 0 else "跳过校验 (insecure=1)"
+            mport_line = f"跳跃端口 (mport): {mport_val}\n" if mport_val else ""
             hy2_section = f"""
 --- Hysteria2 (原生 UDP/QUIC) ---
 UDP 端口: {AppConfig.HY2_PORT}
-认证密码: {client_uuid}
+{mport_line}认证密码: {client_uuid}
 TLS SNI: {AppConfig.HY2_SNI}
 证书校验模式: {cert_verify_desc}
 Hysteria2 导入链接:
@@ -291,8 +298,12 @@ VLESS-REALITY 导入链接:
                         AppConfig.HY2_PORT = int(node_cfg["hy2_port"])
                     if node_cfg.get("hy2_sni"):
                         AppConfig.HY2_SNI = str(node_cfg["hy2_sni"]).strip()
+                    if "hy2_mport" in node_cfg and node_cfg["hy2_mport"] is not None:
+                        AppConfig.HY2_MPORT = str(node_cfg["hy2_mport"]).strip()
                     if "hy2_insecure" in node_cfg and node_cfg["hy2_insecure"] is not None:
                         AppConfig.HY2_INSECURE = bool(int(node_cfg["hy2_insecure"]))
+                    if "block_cn" in node_cfg and node_cfg["block_cn"] is not None:
+                        AppConfig.BLOCK_CN = bool(int(node_cfg["block_cn"]))
 
                     if sync_data is not None:
                         self.current_clients = sync_data.get("users", [])
@@ -300,9 +311,11 @@ VLESS-REALITY 导入链接:
                     new_cfg = self._build_current_config(is_standalone=False, short_id=remote_sid)
                     applied = self.sb_mgr.apply_config(new_cfg)
                     if applied or mode_changed:
-                        hy2_info = f"Hy2=UDP:{AppConfig.HY2_PORT}" if (self.net_mode == "direct" and AppConfig.HY2_ENABLED) else "Hy2=关闭"
+                        mport_tag = f"/mport={AppConfig.HY2_MPORT}" if AppConfig.HY2_MPORT else ""
+                        hy2_info = f"Hy2=UDP:{AppConfig.HY2_PORT}{mport_tag}" if (self.net_mode == "direct" and AppConfig.HY2_ENABLED) else "Hy2=关闭"
+                        cn_info = "禁回国" if AppConfig.BLOCK_CN else "允许回国"
                         print(
-                            f"[HubSync] ✅ 同步最新网络策略 (模式:{self.net_mode}, TCP:{remote_port}, {hy2_info}, 用户数:{len(self.current_clients)})",
+                            f"[HubSync] ✅ 同步最新网络策略 (模式:{self.net_mode}, TCP:{remote_port}, {hy2_info}, {cn_info}, 用户数:{len(self.current_clients)})",
                             flush=True,
                         )
                 elif mode_changed:

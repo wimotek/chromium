@@ -13,15 +13,38 @@ def build_xray_config(
     private_key: str,
     short_id: str,
     port: int = 443,
-    dest: str = "www.microsoft.com:443",
+    dest: str = "",
     server_names: List[str] = None,
-    is_standalone: bool = False
+    is_standalone: bool = False,
+    block_cn: bool = True,
 ) -> Dict[str, Any]:
     """
     根据运行模式 (direct vs reverse_wss) 组装精准的 Xray 原生配置
     """
-    server_names = server_names or ["www.microsoft.com"]
-    
+    dest = (dest or AppConfig.DEST).strip()
+    server_names = server_names or AppConfig.get_server_name_list()
+
+    routing_rules: List[Dict[str, Any]] = [
+        {
+            "type": "field",
+            "ip": ["geoip:private"],
+            "outboundTag": "blocked"
+        }
+    ]
+    if block_cn:
+        routing_rules.extend([
+            {
+                "type": "field",
+                "domain": ["geosite:cn"],
+                "outboundTag": "blocked"
+            },
+            {
+                "type": "field",
+                "ip": ["geoip:cn"],
+                "outboundTag": "blocked"
+            }
+        ])
+
     # 基础路由与出站规则
     base_config: Dict[str, Any] = {
         "log": {"loglevel": "warning"},
@@ -31,13 +54,7 @@ def build_xray_config(
         ],
         "routing": {
             "domainStrategy": "IPIfNonMatch",
-            "rules": [
-                {
-                    "type": "field",
-                    "ip": ["geoip:private"],
-                    "outboundTag": "blocked"
-                }
-            ]
+            "rules": routing_rules
         }
     }
 

@@ -113,6 +113,7 @@ class HubClient:
             "public_key_fingerprint": pbk,
             "net_mode": preferred_mode if preferred_mode in ("direct", "reverse_wss") else "auto",
             "active_net_mode": net_mode,
+            "block_cn": 1 if AppConfig.BLOCK_CN else 0,
         }
         if isinstance(health, dict):
             payload["health"] = health

@@ -163,9 +163,23 @@
                   <span
                     v-if="node.core_type === 'singbox' && node.hy2_enabled === 1 && node.hy2_port > 0 && node.net_mode !== 'reverse_wss'"
                     class="net-mode-pill pill-hy2"
-                    :title="`Hysteria2 UDP 已启用 (端口: ${node.hy2_port}, SNI: ${node.hy2_sni || node.sni})`"
+                    :title="`Hysteria2 UDP 已启用 (端口: ${node.hy2_port}${node.hy2_mport ? `, 跳跃: ${node.hy2_mport}` : ''}, SNI: ${node.hy2_sni || node.sni})`"
                   >
-                    🌀 Hy2:{{ node.hy2_port }}
+                    🌀 Hy2:{{ node.hy2_port }}{{ node.hy2_mport ? ` · 跳:${node.hy2_mport}` : '' }}
+                  </span>
+                  <span
+                    v-if="node.block_cn === undefined || Number(node.block_cn) !== 0"
+                    class="net-mode-pill pill-block-cn"
+                    title="已拦截回国流量 (geosite:cn / geoip:cn)，可在「配置」中修改"
+                  >
+                    🚫 禁回国
+                  </span>
+                  <span
+                    v-else
+                    class="net-mode-pill pill-allow-cn"
+                    title="已允许回国流量，可在「配置」中关闭"
+                  >
+                    🔓 允许回国
                   </span>
                 </div>
                 <div style="font-size: 11px; color: #38bdf8; font-family: var(--font-mono);">{{ node.ip }}:{{ node.port }}</div>
@@ -181,7 +195,7 @@
               <!-- SNI 伪装域名 (恢复展示主 SNI 与多 SNI 数量，端口已在第一列地址中展示) -->
               <td>
                 <div style="font-family: var(--font-mono); font-size: 12px; color: #38bdf8; font-weight: 600;">
-                  {{ node.sni || 'www.microsoft.com' }}
+                  {{ node.sni || 'www.amd.com' }}
                 </div>
                 <div v-if="getServerNamesCount(node) > 1" style="font-size: 10px; color: #64748b; margin-top: 2px;">
                   多SNI: {{ getServerNamesCount(node) }} 个
@@ -528,7 +542,7 @@
 
     <!-- 弹窗 2：⚙️ 节点网络配置 [精确对应图二样式，点外部空白不关闭] -->
     <div v-if="showConfigModal" class="modal-backdrop">
-      <div class="cyber-modal" style="max-width: 520px; text-align: left;">
+      <div class="cyber-modal" style="max-width: 580px; max-height: 88vh; overflow-y: auto; text-align: left;">
         <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
           <h3 style="margin: 0;">⚙️ 节点网络配置 [{{ configForm.name }}]</h3>
           <button class="modal-close-btn" @click="showConfigModal = false" title="关闭窗口">✕</button>
@@ -550,14 +564,55 @@
             <input v-model.number="configForm.port" type="number" class="cyber-input modal-input" />
           </div>
         </div>
+
+        <!-- 安全 REALITY 伪装目标一键切换面板 -->
+        <div class="reality-preset-box">
+          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+            <span style="font-size: 12px; font-weight: 700; color: #38bdf8;">🎯 安全伪装目标一键切换（避开烂大街微软 / 非 CF）</span>
+            <button type="button" class="btn-random-preset" @click="pickRandomRealityPreset">🎲 随机切换</button>
+          </div>
+          <div class="reality-preset-grid">
+            <button
+              v-for="preset in realityPresets"
+              :key="preset.dest"
+              type="button"
+              class="reality-preset-btn"
+              :class="{ active: isPresetActive(preset) }"
+              :title="`${preset.label} (${preset.region}) — 点击自动填入 dest 与 SNI`"
+              @click="applyRealityPreset(preset)"
+            >
+              <span class="preset-domain">{{ preset.sni }}</span>
+              <span class="preset-region">{{ preset.region }}</span>
+            </button>
+          </div>
+          <div class="preset-hint">
+            支持自定义或回落至本机自建 HTTPS 站点（如 dest 填 <code>127.0.0.1:8443</code>，SNI 填自有域名；域名需灰色云朵直连本机，勿套 Cloudflare CDN）。
+          </div>
+        </div>
+
         <div class="form-item">
           <label>伪装目标域名 (dest)</label>
-          <input v-model="configForm.dest" type="text" class="cyber-input modal-input" placeholder="例如: www.amazon.com:443" />
+          <input v-model="configForm.dest" type="text" class="cyber-input modal-input" placeholder="例如: www.amd.com:443 或 127.0.0.1:8443" />
         </div>
         <div class="form-item">
-          <label>多 SNI 域名轮换池 (逗号隔开)</label>
-          <input v-model="configForm.server_names" type="text" class="cyber-input modal-input" placeholder="例如: www.amazon.com,aws.amazon.com" />
+          <label>SNI 域名 (Xray 支持逗号多填，Sing-box 取首个为主 SNI)</label>
+          <input v-model="configForm.server_names" type="text" class="cyber-input modal-input" placeholder="例如: www.amd.com" />
         </div>
+
+        <!-- 回国流量管控策略 -->
+        <div class="cn-policy-box">
+          <div style="display: flex; justify-content: space-between; align-items: center;">
+            <span style="font-size: 12px; font-weight: 700; color: #34d399;">🛡️ 回国流量管控（防滥用 / 节点安全）</span>
+            <label style="display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: #e2e8f0; cursor: pointer;">
+              <input type="checkbox" v-model="configForm.block_cn" />
+              <span>禁止回国流量 (默认开启)</span>
+            </label>
+          </div>
+          <div style="font-size: 11px; color: #94a3b8; margin-top: 6px; line-height: 1.45;">
+            开启后节点将在内核路由层直接拦截中国大陆域名与 IP（geosite-cn / geoip-cn）；关闭则允许经由本节点回访国内站点。保存后约 60 秒内自动同步生效。
+          </div>
+        </div>
+
         <!-- Sing-box 专属：Hysteria2 UDP 双协议配置区 -->
         <div v-if="configForm.core_type === 'singbox'" class="hy2-config-box">
           <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
@@ -577,10 +632,41 @@
               <input v-model="configForm.hy2_sni" type="text" class="cyber-input modal-input" placeholder="www.bing.com" />
             </div>
           </div>
+          <div v-if="configForm.hy2_enabled" style="margin-top: 10px;">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
+              <label style="font-size: 12px; color: #cbd5e1; margin: 0;">UDP 跳跃端口范围 (mport，可选，自动写入订阅链接)</label>
+              <div style="display: flex; gap: 6px;">
+                <button
+                  type="button"
+                  class="btn-copy-tag"
+                  @click="configForm.hy2_mport = '20000-30000'"
+                >
+                  ⚡ 填入 20000-30000
+                </button>
+                <button
+                  v-if="configForm.hy2_mport"
+                  type="button"
+                  class="btn-copy-tag"
+                  @click="configForm.hy2_mport = ''"
+                >
+                  清空
+                </button>
+              </div>
+            </div>
+            <input
+              v-model="configForm.hy2_mport"
+              type="text"
+              class="cyber-input modal-input font-mono"
+              placeholder="例如: 20000-30000 或 20000-25000,30000-35000（留空关闭）"
+            />
+            <div style="font-size: 11px; color: #94a3b8; margin-top: 4px; line-height: 1.45;">
+              填写后，所有订阅链接将自动附加 <code>&amp;mport=...</code>（兼容 v2rayNG / v2rayN / Shadowrocket / Mihomo）。请确保 VPS 宿主机已配置 iptables / nftables 将该 UDP 端口段 DNAT/REDIRECT 转发至主端口 <code>{{ configForm.hy2_port || 443 }}/udp</code>。
+            </div>
+          </div>
           <div v-if="configForm.hy2_enabled" style="margin-top: 8px; display: flex; justify-content: space-between; align-items: center;">
             <label style="display: inline-flex; align-items: center; gap: 6px; font-size: 11px; color: #94a3b8; cursor: pointer;">
               <input type="checkbox" v-model="configForm.hy2_insecure" />
-              <span>客户端跳过自签证书校验 (insecure=1，挂载 CA 域名证书时请取消勾选)</span>
+              <span>自签证书模式（自动下发 pinSHA256 指纹固定；挂载 CA 正式证书时请取消勾选）</span>
             </label>
           </div>
         </div>
@@ -691,6 +777,21 @@ const showDeployModal = ref(false)
 const showConfigModal = ref(false)
 const showPermModal = ref(false)
 
+const realityPresets = ref([
+  { dest: 'www.amd.com:443', sni: 'www.amd.com', label: 'AMD 官网', region: '全球 Akamai' },
+  { dest: 'www.nvidia.com:443', sni: 'www.nvidia.com', label: 'NVIDIA 官网', region: '全球低噪' },
+  { dest: 'www.intel.com:443', sni: 'www.intel.com', label: 'Intel 官网', region: '欧美/全球' },
+  { dest: 'www.logitech.com:443', sni: 'www.logitech.com', label: 'Logitech 罗技', region: '欧美/亚太' },
+  { dest: 'www.samsung.com:443', sni: 'www.samsung.com', label: 'Samsung 三星', region: '日韩/亚太优' },
+  { dest: 'www.sony.com:443', sni: 'www.sony.com', label: 'Sony 索尼', region: '日韩/美西优' },
+  { dest: 'www.asus.com:443', sni: 'www.asus.com', label: 'ASUS 华硕', region: '亚太/新加坡优' },
+  { dest: 'www.dell.com:443', sni: 'www.dell.com', label: 'Dell 戴尔', region: '北美/欧洲' },
+  { dest: 'www.cisco.com:443', sni: 'www.cisco.com', label: 'Cisco 思科', region: '企业网络' },
+  { dest: 'www.oracle.com:443', sni: 'www.oracle.com', label: 'Oracle 甲骨文', region: '全球云商' },
+  { dest: 'www.siemens.com:443', sni: 'www.siemens.com', label: 'Siemens 西门子', region: '欧洲节点优' },
+  { dest: 'www.mozilla.org:443', sni: 'www.mozilla.org', label: 'Mozilla 官网', region: '全球开源' }
+])
+
 const configForm = reactive({
   node_id: '',
   name: '',
@@ -701,11 +802,35 @@ const configForm = reactive({
   sid: '',
   node_key: '',
   core_type: 'xray',
+  block_cn: true,
   hy2_enabled: false,
   hy2_port: 443,
   hy2_sni: '',
+  hy2_mport: '',
   hy2_insecure: true
 })
+
+const isPresetActive = (preset) => {
+  const curDest = String(configForm.dest || '').trim().toLowerCase()
+  const curSni = String(configForm.server_names || '').split(',')[0].trim().toLowerCase()
+  return curDest === preset.dest.toLowerCase() || curSni === preset.sni.toLowerCase()
+}
+
+const applyRealityPreset = (preset) => {
+  if (!preset) return
+  configForm.dest = preset.dest
+  configForm.server_names = preset.sni
+}
+
+const pickRandomRealityPreset = () => {
+  const list = realityPresets.value
+  if (!list.length) return
+  const candidates = list.filter(p => !isPresetActive(p))
+  const pool = candidates.length ? candidates : list
+  const picked = pool[Math.floor(Math.random() * pool.length)]
+  applyRealityPreset(picked)
+  ElMessage.success(`已切换伪装目标：${picked.sni} (${picked.region})`)
+}
 
 const permForm = reactive({
   node_id: '',
@@ -740,8 +865,10 @@ const generatedDockerComposeYaml = computed(() => {
       '      - HY2_ENABLED=true',
       '      - HY2_PORT=443',
       '      - HY2_SNI=www.bing.com',
-      '      # - DEST=www.microsoft.com:443 # 选填: REALITY 伪装目标',
-      '      # - SERVER_NAMES=www.microsoft.com,microsoft.com # 选填: REALITY 多 SNI',
+      '      # - HY2_MPORT=20000-30000 # 选填: UDP 跳跃端口段(需配合宿主机 iptables/nftables 转发，Hub 后台也可随时修改)',
+      '      # - BLOCK_CN=true # 默认关闭回国流量 (Hub 后台可修改)',
+      '      # - DEST=www.amd.com:443 # 留空首次启动自动随机分配安全伪装目标',
+      '      # - SERVER_NAMES=www.amd.com # 留空与 DEST 自动配对',
       '      # - HY2_UP_MBPS=200 # 选填: 宿主机上行带宽上限 (Mbps)',
       '      # - HY2_DOWN_MBPS=500 # 选填: 宿主机下行带宽上限 (Mbps)',
       '    volumes:',
@@ -759,8 +886,9 @@ const generatedDockerComposeYaml = computed(() => {
     `      - PANEL_URL=${panelUrl}`,
     `      # - CLUSTER_TOKEN=${token} # 选填: 主控已开启免审核可省略`,
     '      # - PORT=443 # 选填: 默认443',
-    '      # - DEST=www.microsoft.com:443 # 选填: 默认伪装目标',
-    '      # - SERVER_NAMES=www.microsoft.com,microsoft.com # 选填: 默认SNI域名',
+    '      # - BLOCK_CN=true # 默认关闭回国流量 (Hub 后台可修改)',
+    '      # - DEST=www.amd.com:443 # 留空首次启动自动随机分配安全伪装目标',
+    '      # - SERVER_NAMES=www.amd.com # 留空与 DEST 自动配对',
     '    volumes:',
     '      - ./data:/data'
   ].join('\n')
@@ -790,8 +918,9 @@ const generatedDockerOneLiner = computed(() => {
       '  -e HY2_ENABLED=true \\',
       '  -e HY2_PORT=443 \\',
       '  -e HY2_SNI=www.bing.com \\',
-      '  # -e DEST=www.microsoft.com:443 \\',
-      '  # -e SERVER_NAMES=www.microsoft.com,microsoft.com \\',
+      '  # -e BLOCK_CN=true \\',
+      '  # -e DEST=www.amd.com:443 \\',
+      '  # -e SERVER_NAMES=www.amd.com \\',
       '  -v ./data:/data \\',
       '  wimotek/sing-box:latest'
     ].join('\n')
@@ -804,8 +933,9 @@ const generatedDockerOneLiner = computed(() => {
     `  -e PANEL_URL="${panelUrl}" \\`,
     `  # -e CLUSTER_TOKEN="${token}" \\`,
     '  # -e PORT=443 \\',
-    '  # -e DEST=www.microsoft.com:443 \\',
-    '  # -e SERVER_NAMES=www.microsoft.com,microsoft.com \\',
+    '  # -e BLOCK_CN=true \\',
+    '  # -e DEST=www.amd.com:443 \\',
+    '  # -e SERVER_NAMES=www.amd.com \\',
     '  -v ./data:/data \\',
     '  ghcr.io/wimotek/xray:latest'
   ].join('\n')
@@ -1246,14 +1376,16 @@ const openConfigModal = (node) => {
   configForm.name = node.name
   configForm.ip = node.ip || ''
   configForm.port = node.port
-  configForm.dest = node.dest || 'www.microsoft.com:443'
-  configForm.server_names = node.server_names || node.sni
+  configForm.dest = node.dest || 'www.amd.com:443'
+  configForm.server_names = node.server_names || node.sni || 'www.amd.com'
   configForm.sid = node.sid
   configForm.node_key = node.node_key
   configForm.core_type = node.core_type || 'xray'
+  configForm.block_cn = node.block_cn === undefined ? true : Number(node.block_cn) !== 0
   configForm.hy2_enabled = Number(node.hy2_enabled || 0) === 1
   configForm.hy2_port = Number(node.hy2_port || 0) > 0 ? Number(node.hy2_port) : Number(node.port || 443)
   configForm.hy2_sni = node.hy2_sni || 'www.bing.com'
+  configForm.hy2_mport = node.hy2_mport || ''
   configForm.hy2_insecure = node.hy2_insecure === undefined ? true : Number(node.hy2_insecure) !== 0
   showConfigModal.value = true
 }
@@ -2106,5 +2238,107 @@ const handleRevokeDelete = async (nodeId) => {
   border-radius: 6px;
   padding: 10px 12px;
   margin-bottom: 12px;
+}
+
+.cn-policy-box {
+  background: rgba(16, 185, 129, 0.08);
+  border: 1px solid rgba(16, 185, 129, 0.28);
+  border-radius: 6px;
+  padding: 10px 12px;
+  margin-bottom: 12px;
+}
+
+.reality-preset-box {
+  background: rgba(14, 116, 144, 0.1);
+  border: 1px solid rgba(56, 189, 248, 0.25);
+  border-radius: 6px;
+  padding: 10px 12px;
+  margin-bottom: 12px;
+}
+
+.btn-random-preset {
+  background: rgba(56, 189, 248, 0.16);
+  color: #7dd3fc;
+  border: 1px solid rgba(56, 189, 248, 0.45);
+  border-radius: 5px;
+  padding: 3px 10px;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.btn-random-preset:hover {
+  background: rgba(56, 189, 248, 0.28);
+  color: #e0f2fe;
+}
+
+.reality-preset-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.reality-preset-btn {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  background: rgba(15, 23, 42, 0.78);
+  border: 1px solid rgba(71, 85, 105, 0.5);
+  border-radius: 5px;
+  padding: 6px 8px;
+  cursor: pointer;
+  text-align: left;
+  transition: all 0.15s;
+}
+.reality-preset-btn:hover {
+  border-color: rgba(56, 189, 248, 0.65);
+  background: rgba(30, 41, 59, 0.9);
+}
+.reality-preset-btn.active {
+  border-color: #38bdf8;
+  background: rgba(56, 189, 248, 0.2);
+  box-shadow: 0 0 0 1px rgba(56, 189, 248, 0.35);
+}
+
+.preset-domain {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 600;
+  color: #f1f5f9;
+  width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.preset-region {
+  font-size: 10px;
+  color: #94a3b8;
+}
+
+.preset-hint {
+  margin-top: 7px;
+  font-size: 11px;
+  color: #94a3b8;
+  line-height: 1.45;
+}
+.preset-hint code {
+  color: #7dd3fc;
+  background: rgba(15, 23, 42, 0.7);
+  padding: 1px 4px;
+  border-radius: 3px;
+}
+
+.pill-block-cn {
+  background: rgba(16, 185, 129, 0.14);
+  color: #34d399;
+  border: 1px solid rgba(16, 185, 129, 0.32);
+}
+
+.pill-allow-cn {
+  background: rgba(245, 158, 11, 0.15);
+  color: #fbbf24;
+  border: 1px solid rgba(245, 158, 11, 0.35);
 }
 </style>

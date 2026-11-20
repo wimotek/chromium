@@ -43,6 +43,8 @@ class EdgeCoreApplication:
         print(f"[*] External IPv6: {self.ext_ipv6 or '无 (None)'}", flush=True)
         print(f"[*] Primary IP   : {self.ext_ip}", flush=True)
         print(f"[*] Initial Mode : {self.net_mode.upper()} (配置策略: {AppConfig.NET_MODE.upper()})", flush=True)
+        print(f"[*] Camouflage   : {AppConfig.DEST} (SNI: {AppConfig.SERVER_NAMES})", flush=True)
+        print(f"[*] Block CN     : {'开启 (禁止回国流量)' if AppConfig.BLOCK_CN else '关闭 (允许回国流量)'}", flush=True)
         print(f"[*] Panel Hub URL: {AppConfig.PANEL_URL or '纯单机模式 (Standalone)'}", flush=True)
         if AppConfig.PANEL_URL:
             if self.hub_client.node_key:
@@ -105,7 +107,8 @@ ShortId: {self.xray_mgr.short_id}
             port=AppConfig.PORT,
             dest=AppConfig.DEST,
             server_names=AppConfig.get_server_name_list(),
-            is_standalone=is_standalone
+            is_standalone=is_standalone,
+            block_cn=AppConfig.BLOCK_CN,
         )
 
         self.xray_mgr.apply_config(initial_cfg)
@@ -192,6 +195,7 @@ ShortId: {self.xray_mgr.short_id}
                             dest=AppConfig.DEST,
                             server_names=AppConfig.get_server_name_list(),
                             is_standalone=False,
+                            block_cn=AppConfig.BLOCK_CN,
                         )
                         self.xray_mgr.apply_config(empty_cfg)
                     await asyncio.sleep(30)
@@ -215,6 +219,7 @@ ShortId: {self.xray_mgr.short_id}
                             dest=AppConfig.DEST,
                             server_names=AppConfig.get_server_name_list(),
                             is_standalone=False,
+                            block_cn=AppConfig.BLOCK_CN,
                         )
                         self.xray_mgr.apply_config(empty_cfg)
                     await asyncio.sleep(60)
@@ -255,6 +260,8 @@ ShortId: {self.xray_mgr.short_id}
                     AppConfig.DEST = remote_dest
                     if isinstance(remote_snis, list) and remote_snis:
                         AppConfig.SERVER_NAMES = ",".join(remote_snis)
+                    if "block_cn" in node_cfg and node_cfg["block_cn"] is not None:
+                        AppConfig.BLOCK_CN = bool(int(node_cfg["block_cn"]))
 
                     if sync_data is not None:
                         self.current_clients = sync_data.get("users", [])
@@ -266,12 +273,14 @@ ShortId: {self.xray_mgr.short_id}
                         port=remote_port,
                         dest=remote_dest,
                         server_names=remote_snis,
-                        is_standalone=False
+                        is_standalone=False,
+                        block_cn=AppConfig.BLOCK_CN,
                     )
 
                     applied = self.xray_mgr.apply_config(new_cfg)
                     if applied or mode_changed:
-                        print(f"[HubSync] ✅ 同步最新网络策略 (模式:{self.net_mode}, 端口:{remote_port}, dest:{remote_dest}, 用户数:{len(self.current_clients)})", flush=True)
+                        cn_desc = "禁回国" if AppConfig.BLOCK_CN else "允许回国"
+                        print(f"[HubSync] ✅ 同步最新网络策略 (模式:{self.net_mode}, 端口:{remote_port}, dest:{remote_dest}, {cn_desc}, 用户数:{len(self.current_clients)})", flush=True)
                 elif mode_changed:
                     new_cfg = build_xray_config(
                         net_mode=self.net_mode,
@@ -281,7 +290,8 @@ ShortId: {self.xray_mgr.short_id}
                         port=AppConfig.PORT,
                         dest=AppConfig.DEST,
                         server_names=AppConfig.get_server_name_list(),
-                        is_standalone=False
+                        is_standalone=False,
+                        block_cn=AppConfig.BLOCK_CN,
                     )
                     if self.xray_mgr.apply_config(new_cfg):
                         print(f"[HubSync] ✅ 切换运行模式生效 (模式:{self.net_mode})", flush=True)

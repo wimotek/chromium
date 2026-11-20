@@ -17,13 +17,14 @@ services:
       # - CLUSTER_TOKEN=xray_cluster_secret_key_2026
       # ==================== 以下均为可选参数（镜像已内置合理默认值，按需取消注释覆写） ====================
       # - TZ=Asia/Shanghai                             # 默认 Asia/Shanghai
+      # - BLOCK_CN=true                                # 默认 true（禁止回国流量，Hub 后台可随时修改）
       # - NET_MODE=auto                                # 默认 auto（Hub 拨测裁决），可选 direct / reverse_wss
       # - EDGE_AGENT_REVERSE_TUNNEL=true               # 可选布尔覆写：强制开启反穿
       # - SERVER_IP=你的公网IP或域名                     # 默认自动探测
       # - SERVER_IPV6=你的公网IPv6                       # 默认自动探测
       # - PORT=443                                     # 默认 443
-      # - DEST=www.microsoft.com:443                   # 默认 www.microsoft.com:443
-      # - SERVER_NAMES=www.microsoft.com,microsoft.com # 默认 www.microsoft.com,microsoft.com
+      # - DEST=www.amd.com:443                         # 留空首次启动从安全池随机分配并持久化（支持填 127.0.0.1:8443 回落本地站）
+      # - SERVER_NAMES=www.amd.com                     # 留空自动跟随 DEST（Hub 后台支持一键切换）
       # - LOCAL_BRIDGE_PORT=10086                      # 默认 10086（反穿模式回环桥接端口）
       # - STATS_PORT=10085                             # 默认 10085（回环 StatsService 流量统计端口）
       # - HEALTH_PORT=10087                            # 默认 10087（回环 /healthz 健康检查端口，0 禁用）

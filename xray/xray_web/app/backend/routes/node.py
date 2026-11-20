@@ -27,8 +27,11 @@ from core.rate_limit import (
     reset_rate_counter,
 )
 from routes import (
+    DEFAULT_REALITY_DEST,
+    DEFAULT_REALITY_SNI,
     get_node_snis,
     is_user_allowed_for_node,
+    normalize_hy2_mport,
     parse_last_probe,
     resolve_public_endpoint,
 )
@@ -106,19 +109,23 @@ def _build_node_config_payload(
     hy2_port: int = 0,
     hy2_sni: str = "",
     hy2_insecure: int = 1,
+    hy2_mport: str = "",
+    block_cn: int = 1,
 ) -> dict:
     return {
         "net_mode": net_mode,
         "core_type": core_type or "xray",
         "port": port,
         "dest": dest,
-        "sni": snis[0] if snis else "www.microsoft.com",
+        "sni": snis[0] if snis else DEFAULT_REALITY_SNI,
         "server_names": snis,
         "sid": sid,
         "hy2_enabled": bool(int(hy2_enabled or 0)),
         "hy2_port": int(hy2_port or 0),
         "hy2_sni": str(hy2_sni or "").strip(),
         "hy2_insecure": bool(int(hy2_insecure if hy2_insecure is not None else 1)),
+        "hy2_mport": normalize_hy2_mport(hy2_mport),
+        "block_cn": bool(int(block_cn if block_cn is not None else 1)),
     }
 
 
@@ -155,13 +162,15 @@ def node_heartbeat():
         node_port = int(data.get("port", 443))
         raw_pbk = data.get("pbk", "").strip()
         sid = data.get("sid", "").strip()
-        raw_dest = data.get("dest", "www.microsoft.com:443").strip()
-        raw_sni = data.get("sni", "www.microsoft.com").strip()
+        raw_dest = data.get("dest", DEFAULT_REALITY_DEST).strip()
+        raw_sni = data.get("sni", DEFAULT_REALITY_SNI).strip()
         raw_server_names = data.get("server_names", "").strip()
         now_ts = time.time()
         now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         agent_health_json, agent_health_dict = _serialize_agent_health(data.get("health"))
         reported_core_type, reported_hy2_enabled, reported_hy2_port, reported_hy2_sni, reported_hy2_insecure, reported_hy2_cert_sha256 = _parse_core_and_hy2(data)
+        reported_hy2_mport = normalize_hy2_mport(data.get("hy2_mport")) if reported_core_type == "singbox" else ""
+        reported_block_cn = _parse_bool_int(data.get("block_cn"), default=1)
         effective_core_type = reported_core_type or "xray"
 
         if not node_id:
@@ -175,7 +184,7 @@ def node_heartbeat():
             if clean and clean not in snis:
                 snis.append(clean)
         server_names_str = ",".join(snis)
-        primary_sni = snis[0] if snis else "www.microsoft.com"
+        primary_sni = snis[0] if snis else DEFAULT_REALITY_SNI
 
         pbk = raw_pbk
         if len(pbk) != 43:
@@ -357,6 +366,8 @@ def node_heartbeat():
                     existing.hy2_sni = reported_hy2_sni
                     existing.hy2_insecure = reported_hy2_insecure
                     existing.hy2_cert_sha256 = reported_hy2_cert_sha256
+                    existing.hy2_mport = reported_hy2_mport
+                    existing.block_cn = reported_block_cn
                 else:
                     s.add(
                         Node(
@@ -391,6 +402,8 @@ def node_heartbeat():
                             hy2_sni=reported_hy2_sni,
                             hy2_insecure=reported_hy2_insecure,
                             hy2_cert_sha256=reported_hy2_cert_sha256,
+                            hy2_mport=reported_hy2_mport,
+                            block_cn=reported_block_cn,
                         )
                     )
 
@@ -430,6 +443,8 @@ def node_heartbeat():
                     hy2_port=reported_hy2_port,
                     hy2_sni=reported_hy2_sni,
                     hy2_insecure=reported_hy2_insecure,
+                    hy2_mport=reported_hy2_mport,
+                    block_cn=reported_block_cn,
                 ),
             }
             if net_mode == "reverse_wss":
@@ -530,7 +545,7 @@ def node_heartbeat():
 
             invalidate_nodes_cache()
             resync_snis = get_node_snis(resynced_node)
-            resync_dest = resynced_node["dest"] if (resynced_node.get("dest") and ":" in resynced_node["dest"]) else f"{resynced_node.get('dest', 'www.microsoft.com')}:443"
+            resync_dest = resynced_node["dest"] if (resynced_node.get("dest") and ":" in resynced_node["dest"]) else f"{resynced_node.get('dest', DEFAULT_REALITY_SNI)}:443"
             resync_resp = {
                 "code": 200,
                 "msg": "重新接纳完成，公钥与网络策略已重新绑定！",
@@ -549,6 +564,8 @@ def node_heartbeat():
                     hy2_port=resynced_node.get("hy2_port", 0),
                     hy2_sni=resynced_node.get("hy2_sni", ""),
                     hy2_insecure=resynced_node.get("hy2_insecure", 1),
+                    hy2_mport=resynced_node.get("hy2_mport", ""),
+                    block_cn=resynced_node.get("block_cn", 1),
                 ),
             }
             if client_key != final_node_key:
@@ -696,7 +713,7 @@ def node_heartbeat():
                         need_cache_invalidate = True
 
                     snis = get_node_snis(latest_node)
-                    clean_dest = latest_node["dest"] if (latest_node.get("dest") and ":" in latest_node["dest"]) else f"{latest_node.get('dest', 'www.microsoft.com')}:443"
+                    clean_dest = latest_node["dest"] if (latest_node.get("dest") and ":" in latest_node["dest"]) else f"{latest_node.get('dest', DEFAULT_REALITY_SNI)}:443"
                     stage2_net_mode = latest_node.get("net_mode", "direct")
                     stage2_resp = {
                         "code": 200,
@@ -715,6 +732,8 @@ def node_heartbeat():
                             hy2_port=latest_node.get("hy2_port", 0),
                             hy2_sni=latest_node.get("hy2_sni", ""),
                             hy2_insecure=latest_node.get("hy2_insecure", 1),
+                            hy2_mport=latest_node.get("hy2_mport", ""),
+                            block_cn=latest_node.get("block_cn", 1),
                         ),
                     }
                     if stage2_net_mode == "reverse_wss":
@@ -761,7 +780,7 @@ def node_sync_users():
 
         if int(node.get("is_approved", 1)) == 0 or int(node.get("status", 1)) == 0:
             snis = get_node_snis(node)
-            clean_dest = node["dest"] if (node.get("dest") and ":" in node["dest"]) else f"{node.get('dest', 'www.microsoft.com')}:443"
+            clean_dest = node["dest"] if (node.get("dest") and ":" in node["dest"]) else f"{node.get('dest', DEFAULT_REALITY_SNI)}:443"
             return jsonify({
                 "code": 200,
                 "node_config": _build_node_config_payload(
@@ -775,6 +794,8 @@ def node_sync_users():
                     hy2_port=node.get("hy2_port", 0),
                     hy2_sni=node.get("hy2_sni", ""),
                     hy2_insecure=node.get("hy2_insecure", 1),
+                    hy2_mport=node.get("hy2_mport", ""),
+                    block_cn=node.get("block_cn", 1),
                 ),
                 "users": [],
             })
@@ -787,7 +808,7 @@ def node_sync_users():
         ]
 
         snis = get_node_snis(node)
-        clean_dest = node["dest"] if (node.get("dest") and ":" in node["dest"]) else f"{node.get('dest', 'www.microsoft.com')}:443"
+        clean_dest = node["dest"] if (node.get("dest") and ":" in node["dest"]) else f"{node.get('dest', DEFAULT_REALITY_SNI)}:443"
 
         return jsonify({
             "code": 200,
@@ -802,6 +823,8 @@ def node_sync_users():
                 hy2_port=node.get("hy2_port", 0),
                 hy2_sni=node.get("hy2_sni", ""),
                 hy2_insecure=node.get("hy2_insecure", 1),
+                hy2_mport=node.get("hy2_mport", ""),
+                block_cn=node.get("block_cn", 1),
             ),
             "users": allowed_users,
         })

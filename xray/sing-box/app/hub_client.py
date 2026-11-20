@@ -121,8 +121,10 @@ class HubClient:
             "hy2_enabled": 1 if AppConfig.HY2_ENABLED else 0,
             "hy2_port": int(AppConfig.HY2_PORT or 0),
             "hy2_sni": AppConfig.HY2_SNI,
+            "hy2_mport": AppConfig.HY2_MPORT,
             "hy2_insecure": 1 if AppConfig.HY2_INSECURE else 0,
             "hy2_cert_sha256": (hy2_cert_sha256 or "").strip().lower(),
+            "block_cn": 1 if AppConfig.BLOCK_CN else 0,
         }
         if isinstance(health, dict):
             payload["health"] = health

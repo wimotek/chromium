@@ -149,6 +149,7 @@ def login():
                 "hy2_enabled": int(n.get("hy2_enabled") or 0),
                 "hy2_port": int(n.get("hy2_port") or 0),
                 "hy2_sni": n.get("hy2_sni") or "",
+                "hy2_mport": n.get("hy2_mport") or "",
                 "hy2_link": hy2_link or "",
             })
 

@@ -75,7 +75,7 @@ class Node(Base, DictMixin):
     name = Column(String(191), nullable=False)
     ip = Column(String(128), nullable=False)
     port = Column(Integer, nullable=False)
-    dest = Column(String(255), default="www.microsoft.com:443", nullable=False)
+    dest = Column(String(255), default="www.amd.com:443", nullable=False)
     sni = Column(String(255), nullable=False)
     server_names = Column(Text, default="", nullable=False)
     pbk = Column(String(128), default="", nullable=False)
@@ -102,6 +102,8 @@ class Node(Base, DictMixin):
     hy2_sni = Column(String(255), default="", nullable=False)
     hy2_insecure = Column(Integer, default=1, nullable=False)
     hy2_cert_sha256 = Column(String(128), default="", nullable=False)
+    hy2_mport = Column(String(128), default="", nullable=False)
+    block_cn = Column(Integer, default=1, nullable=False)
 
 
 class Card(Base, DictMixin):

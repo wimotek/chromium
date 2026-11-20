@@ -65,6 +65,15 @@ RUN set -ex && \
     go build -trimpath -ldflags "-s -w -buildid=" -o /out/usr/bin/sb-helper . && \
     chmod 755 /out/usr/bin/sb-helper
 
+# 预置精简版 CN 二进制规则集 (geoip-cn.srs + geosite-cn.srs，合计 <500KB)，实现纯离线零依赖回国流量拦截
+RUN set -ex && \
+    mkdir -p /out/usr/share/sing-box/rule-set && \
+    curl -fsSL https://raw.githubusercontent.com/SagerNet/sing-geoip/rule-set/geoip-cn.srs \
+        -o /out/usr/share/sing-box/rule-set/geoip-cn.srs && \
+    curl -fsSL https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-cn.srs \
+        -o /out/usr/share/sing-box/rule-set/geosite-cn.srs && \
+    chmod 644 /out/usr/share/sing-box/rule-set/*.srs
+
 # =========================================================================
 # Stage 3: 最小化非 root 运行时镜像 (含 dumb-init 完整信号链与防崩溃保障)
 # =========================================================================
@@ -89,9 +98,10 @@ ENV PYTHONUNBUFFERED=1 \
 COPY --from=tz-builder /usr/share/zoneinfo /usr/share/zoneinfo
 RUN ln -sf /usr/share/zoneinfo/Asia/Shanghai /etc/localtime
 
-# 从 Stage 2 复制带 v2ray_api + quic 标签的 sing-box 与 sb-helper
+# 从 Stage 2 复制带 v2ray_api + quic 标签的 sing-box、sb-helper 与精简 CN 规则集
 COPY --from=singbox-builder /out/usr/bin/sing-box /usr/bin/sing-box
 COPY --from=singbox-builder /out/usr/bin/sb-helper /usr/bin/sb-helper
+COPY --from=singbox-builder /out/usr/share/sing-box /usr/share/sing-box
 
 # 创建专用非 root 用户 (UID 10001: appuser)，并赋予 sing-box 与 Python 低特权绑定 443 端口权限
 RUN addgroup -g 10001 appgroup && \

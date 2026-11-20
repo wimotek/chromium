@@ -1,6 +1,9 @@
 from routes._common import (
     BACKEND_DIR,
+    DEFAULT_REALITY_DEST,
+    DEFAULT_REALITY_SNI,
     HEARTBEAT_ONLINE_SEC,
+    SAFE_REALITY_TARGETS,
     build_hy2_link,
     build_node_link,
     check_admin,
@@ -12,6 +15,7 @@ from routes._common import (
     is_node_healthy_for_sub,
     is_user_allowed_for_node,
     normalize_expire_date,
+    normalize_hy2_mport,
     parse_agent_health,
     parse_last_probe,
     pick_node_sni,
@@ -20,7 +24,10 @@ from routes._common import (
 
 __all__ = [
     "BACKEND_DIR",
+    "DEFAULT_REALITY_DEST",
+    "DEFAULT_REALITY_SNI",
     "HEARTBEAT_ONLINE_SEC",
+    "SAFE_REALITY_TARGETS",
     "build_hy2_link",
     "build_node_link",
     "check_admin",
@@ -32,6 +39,7 @@ __all__ = [
     "is_node_healthy_for_sub",
     "is_user_allowed_for_node",
     "normalize_expire_date",
+    "normalize_hy2_mport",
     "parse_agent_health",
     "parse_last_probe",
     "pick_node_sni",

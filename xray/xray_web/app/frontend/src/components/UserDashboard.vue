@@ -137,7 +137,7 @@
           <div class="node-detail">
             <div>地址: {{ node.ip }}:{{ node.port }}</div>
             <div v-if="node.hy2_link" style="font-size: 11px; color: #22d3ee; margin-top: 3px;">
-              Hysteria2 UDP: 端口 {{ node.hy2_port || node.port }} · SNI {{ node.hy2_sni || node.selected_sni || '默认' }}
+              Hysteria2 UDP: 端口 {{ node.hy2_port || node.port }}<span v-if="node.hy2_mport"> · 跳跃 {{ node.hy2_mport }}</span> · SNI {{ node.hy2_sni || node.selected_sni || '默认' }}
             </div>
 
             <!-- 多 SNI 下拉选择器 -->
