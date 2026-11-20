@@ -71,7 +71,12 @@ def _parse_bool_int(val, default: int = 0) -> int:
     return default
 
 
-def _parse_core_and_hy2(data: dict) -> tuple[str, int, int, str, int]:
+def _normalize_cert_sha256(raw) -> str:
+    cleaned = re.sub(r"[^0-9a-fA-F]", "", str(raw or "")).lower()
+    return cleaned if len(cleaned) == 64 else ""
+
+
+def _parse_core_and_hy2(data: dict) -> tuple[str, int, int, str, int, str]:
     raw_core = str(data.get("core_type") or "").strip().lower()
     core_type = raw_core if raw_core in ("xray", "singbox") else ""
     hy2_enabled = _parse_bool_int(data.get("hy2_enabled"), default=0) if core_type == "singbox" else 0
@@ -85,7 +90,8 @@ def _parse_core_and_hy2(data: dict) -> tuple[str, int, int, str, int]:
         hy2_port = 0
     hy2_sni = str(data.get("hy2_sni") or "").strip()[:255] if core_type == "singbox" else ""
     hy2_insecure = _parse_bool_int(data.get("hy2_insecure"), default=1)
-    return core_type, hy2_enabled, hy2_port, hy2_sni, hy2_insecure
+    hy2_cert_sha256 = _normalize_cert_sha256(data.get("hy2_cert_sha256")) if core_type == "singbox" else ""
+    return core_type, hy2_enabled, hy2_port, hy2_sni, hy2_insecure, hy2_cert_sha256
 
 
 def _build_node_config_payload(
@@ -155,7 +161,7 @@ def node_heartbeat():
         now_ts = time.time()
         now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         agent_health_json, agent_health_dict = _serialize_agent_health(data.get("health"))
-        reported_core_type, reported_hy2_enabled, reported_hy2_port, reported_hy2_sni, reported_hy2_insecure = _parse_core_and_hy2(data)
+        reported_core_type, reported_hy2_enabled, reported_hy2_port, reported_hy2_sni, reported_hy2_insecure, reported_hy2_cert_sha256 = _parse_core_and_hy2(data)
         effective_core_type = reported_core_type or "xray"
 
         if not node_id:
@@ -350,6 +356,7 @@ def node_heartbeat():
                     existing.hy2_port = reported_hy2_port
                     existing.hy2_sni = reported_hy2_sni
                     existing.hy2_insecure = reported_hy2_insecure
+                    existing.hy2_cert_sha256 = reported_hy2_cert_sha256
                 else:
                     s.add(
                         Node(
@@ -383,6 +390,7 @@ def node_heartbeat():
                             hy2_port=reported_hy2_port,
                             hy2_sni=reported_hy2_sni,
                             hy2_insecure=reported_hy2_insecure,
+                            hy2_cert_sha256=reported_hy2_cert_sha256,
                         )
                     )
 
@@ -515,6 +523,8 @@ def node_heartbeat():
                         node_obj.hy2_port = reported_hy2_port
                         node_obj.hy2_sni = reported_hy2_sni
                         node_obj.hy2_insecure = reported_hy2_insecure
+                    if reported_hy2_cert_sha256:
+                        node_obj.hy2_cert_sha256 = reported_hy2_cert_sha256
                 s.flush()
                 resynced_node = node_obj.to_dict()
 
@@ -574,6 +584,7 @@ def node_heartbeat():
                 int(node_obj.hy2_port or 0),
                 node_obj.hy2_sni or "",
                 int(node_obj.hy2_insecure if node_obj.hy2_insecure is not None else 1),
+                node_obj.hy2_cert_sha256 or "",
             )
             hb_was_stale = (prev_hb_ts <= 0.0) or ((now_ts - prev_hb_ts) >= 90.0)
 
@@ -587,6 +598,9 @@ def node_heartbeat():
                         n_obj.hy2_port = reported_hy2_port
                         n_obj.hy2_sni = reported_hy2_sni
                         n_obj.hy2_insecure = reported_hy2_insecure
+                    # 节点本地证书 SHA-256 指纹始终以节点实报为准（支持证书续签/重建自动同步 pinSHA256）
+                    if reported_hy2_cert_sha256 and (n_obj.hy2_cert_sha256 or "") != reported_hy2_cert_sha256:
+                        n_obj.hy2_cert_sha256 = reported_hy2_cert_sha256
 
             def _maybe_clear_recoverable_probe(n_obj, health_dict):
                 lp = parse_last_probe(n_obj.last_probe)
@@ -668,6 +682,7 @@ def node_heartbeat():
                         int(node_obj.hy2_port or 0),
                         node_obj.hy2_sni or "",
                         int(node_obj.hy2_insecure if node_obj.hy2_insecure is not None else 1),
+                        node_obj.hy2_cert_sha256 or "",
                     )
                     if (
                         hb_was_stale

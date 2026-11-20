@@ -99,10 +99,15 @@ def admin_data():
             formatted_host = f"[{raw_host}]" if (":" in raw_host and not raw_host.startswith("[")) else raw_host
             hy2_sni = str(n.get("hy2_sni") or "").strip() or chosen_sni
             hy2_insecure = 1 if int(n.get("hy2_insecure", 1) or 0) != 0 else 0
+            hy2_cert_pin = re.sub(r"[^0-9a-fA-F]", "", str(n.get("hy2_cert_sha256") or "")).lower()
             hy2_remark = urllib.parse.quote(f"{n['name']} [Hy2-UDP]")
+            if hy2_insecure == 1 and len(hy2_cert_pin) == 64:
+                hy2_query = f"sni={urllib.parse.quote(hy2_sni, safe='')}&pinSHA256={hy2_cert_pin}&insecure=0"
+            else:
+                hy2_query = f"sni={urllib.parse.quote(hy2_sni, safe='')}&insecure={hy2_insecure}"
             hy2_suffix = (
                 f"@{formatted_host}:{int(n['hy2_port'])}"
-                f"?sni={urllib.parse.quote(hy2_sni, safe='')}&insecure={hy2_insecure}"
+                f"?{hy2_query}"
                 f"#{hy2_remark}"
             )
         node_templates.append({

@@ -101,6 +101,7 @@ class Node(Base, DictMixin):
     hy2_port = Column(Integer, default=0, nullable=False)
     hy2_sni = Column(String(255), default="", nullable=False)
     hy2_insecure = Column(Integer, default=1, nullable=False)
+    hy2_cert_sha256 = Column(String(128), default="", nullable=False)
 
 
 class Card(Base, DictMixin):

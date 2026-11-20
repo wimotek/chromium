@@ -375,8 +375,14 @@ def build_hy2_link(uuid_str: str, node: dict, remark: str) -> str | None:
     snis = get_node_snis(node)
     hy2_sni = str(node.get("hy2_sni") or "").strip() or (snis[0] if snis else "www.bing.com")
     insecure = 1 if int(node.get("hy2_insecure", 1) or 0) != 0 else 0
+    cert_pin = re.sub(r"[^0-9a-fA-F]", "", str(node.get("hy2_cert_sha256") or "")).lower()
+    if insecure == 1 and len(cert_pin) == 64:
+        # 自签证书优先下发 pinSHA256 证书指纹固定 + insecure=0，原生兼容 Xray 26.2.6+ / v2rayNG / v2rayN / Clash / Shadowrocket
+        query_str = f"sni={urllib.parse.quote(hy2_sni, safe='')}&pinSHA256={cert_pin}&insecure=0"
+    else:
+        query_str = f"sni={urllib.parse.quote(hy2_sni, safe='')}&insecure={insecure}"
     return (
         f"hysteria2://{uuid_str}@{formatted_host}:{hy2_port}"
-        f"?sni={urllib.parse.quote(hy2_sni, safe='')}&insecure={insecure}"
+        f"?{query_str}"
         f"#{urllib.parse.quote(remark + ' [Hy2-UDP]')}"
     )

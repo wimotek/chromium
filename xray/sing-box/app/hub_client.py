@@ -92,6 +92,7 @@ class HubClient:
         ipv6: str = "",
         preferred_mode: str = "auto",
         health: Optional[Dict[str, Any]] = None,
+        hy2_cert_sha256: str = "",
     ) -> Tuple[bool, Optional[Dict[str, Any]]]:
         """向 Hub 上报公网双栈地址、Sing-box 内核标识、Hysteria2 UDP 参数及真实健康状态"""
         if not AppConfig.PANEL_URL:
@@ -121,6 +122,7 @@ class HubClient:
             "hy2_port": int(AppConfig.HY2_PORT or 0),
             "hy2_sni": AppConfig.HY2_SNI,
             "hy2_insecure": 1 if AppConfig.HY2_INSECURE else 0,
+            "hy2_cert_sha256": (hy2_cert_sha256 or "").strip().lower(),
         }
         if isinstance(health, dict):
             payload["health"] = health

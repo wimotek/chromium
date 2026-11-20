@@ -250,6 +250,7 @@ def _upgrade_legacy_columns(eng):
             ("hy2_port", "INTEGER DEFAULT 0"),
             ("hy2_sni", "VARCHAR(255) DEFAULT ''"),
             ("hy2_insecure", "INTEGER DEFAULT 1"),
+            ("hy2_cert_sha256", "VARCHAR(128) DEFAULT ''"),
         ],
     )
     ensure_cols(

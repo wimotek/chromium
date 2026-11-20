@@ -95,18 +95,27 @@ class SingboxEdgeApplication:
 
         hy2_section = ""
         if AppConfig.HY2_ENABLED and self.net_mode == "direct" and AppConfig.HY2_PORT > 0:
-            insecure_val = 1 if AppConfig.HY2_INSECURE else 0
             hy2_sni_q = urllib.parse.quote(AppConfig.HY2_SNI, safe="")
-            hy2_link = (
-                f"hysteria2://{client_uuid}@{self.ext_ip}:{AppConfig.HY2_PORT}?"
-                f"sni={hy2_sni_q}&insecure={insecure_val}#SingBox-Hysteria2-Standalone"
-            )
+            cert_pin = (self.sb_mgr.hy2_cert_sha256 or "").strip().lower()
+            if AppConfig.HY2_INSECURE and len(cert_pin) == 64:
+                hy2_link = (
+                    f"hysteria2://{client_uuid}@{self.ext_ip}:{AppConfig.HY2_PORT}?"
+                    f"sni={hy2_sni_q}&pinSHA256={cert_pin}&insecure=0#SingBox-Hysteria2-Standalone"
+                )
+                cert_verify_desc = f"证书指纹固定 (pinSHA256={cert_pin}，兼容 Xray 26.2.6+ / v2rayNG)"
+            else:
+                insecure_val = 1 if AppConfig.HY2_INSECURE else 0
+                hy2_link = (
+                    f"hysteria2://{client_uuid}@{self.ext_ip}:{AppConfig.HY2_PORT}?"
+                    f"sni={hy2_sni_q}&insecure={insecure_val}#SingBox-Hysteria2-Standalone"
+                )
+                cert_verify_desc = "CA 证书严格校验 (insecure=0)" if insecure_val == 0 else "跳过校验 (insecure=1)"
             hy2_section = f"""
 --- Hysteria2 (原生 UDP/QUIC) ---
 UDP 端口: {AppConfig.HY2_PORT}
 认证密码: {client_uuid}
 TLS SNI: {AppConfig.HY2_SNI}
-跳过证书校验 (insecure): {insecure_val}
+证书校验模式: {cert_verify_desc}
 Hysteria2 导入链接:
 {hy2_link}
 """
@@ -187,6 +196,7 @@ VLESS-REALITY 导入链接:
                     ipv6=self.ext_ipv6,
                     preferred_mode=AppConfig.NET_MODE,
                     health=local_health,
+                    hy2_cert_sha256=self.sb_mgr.hy2_cert_sha256,
                 )
 
                 if not ok or not isinstance(hb_data, dict):

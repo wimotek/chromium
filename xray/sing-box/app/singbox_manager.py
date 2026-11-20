@@ -3,6 +3,8 @@
 Sing-box Manager & Process Watchdog
 处理 REALITY X25519 密钥对、ShortId、Hysteria2 自签 TLS 证书、语法预检安全替换与核心看门狗
 """
+import base64
+import hashlib
 import json
 import os
 import secrets
@@ -21,6 +23,7 @@ class SingboxManager:
         self.private_key, self.public_key = self._load_or_generate_reality_keys()
         self.short_id = self._load_or_generate_short_id()
         self.node_id = self._load_or_generate_node_id()
+        self.hy2_cert_sha256 = ""
         self.hy2_cert_path, self.hy2_key_path = self.ensure_hy2_certificates(AppConfig.HY2_SNI)
 
     def _ensure_dirs(self):
@@ -142,10 +145,37 @@ class SingboxManager:
 
         return priv_key, pub_key
 
+    @staticmethod
+    def compute_cert_sha256(cert_path: str) -> str:
+        """计算 PEM 叶子证书 DER 的 64 位小写 Hex SHA-256 指纹（适配 Xray 26.2.6+ / v2rayNG pinSHA256）"""
+        if not cert_path or not os.path.exists(cert_path):
+            return ""
+        try:
+            with open(cert_path, "r", encoding="utf-8") as f:
+                lines = []
+                in_cert = False
+                for line in f:
+                    s = line.strip()
+                    if s == "-----BEGIN CERTIFICATE-----":
+                        in_cert = True
+                        lines = []
+                        continue
+                    if s == "-----END CERTIFICATE-----" and in_cert:
+                        break
+                    if in_cert and s:
+                        lines.append(s)
+            if not lines:
+                return ""
+            der_bytes = base64.b64decode("".join(lines))
+            return hashlib.sha256(der_bytes).hexdigest().lower()
+        except Exception:
+            return ""
+
     def ensure_hy2_certificates(self, sni: str) -> Tuple[str, str]:
         """确保 Hysteria2 使用的 TLS 证书存在；未挂载外部证书时自动通过 sb-helper 生成 ECDSA 自签证书"""
         cert_path, key_path = AppConfig.get_effective_hy2_cert_paths()
         if os.path.exists(cert_path) and os.path.exists(key_path):
+            self.hy2_cert_sha256 = self.compute_cert_sha256(cert_path)
             return cert_path, key_path
 
         # 若用户显式指定了自定义证书路径但文件尚未挂载，回退使用自动自签证书防止启动失败
@@ -158,6 +188,7 @@ class SingboxManager:
             key_path = AppConfig.AUTO_HY2_KEY_FILE
             AppConfig.HY2_INSECURE = True
             if os.path.exists(cert_path) and os.path.exists(key_path):
+                self.hy2_cert_sha256 = self.compute_cert_sha256(cert_path)
                 return cert_path, key_path
 
         target_sni = (sni or AppConfig.HY2_SNI or "www.bing.com").strip()
@@ -184,6 +215,7 @@ class SingboxManager:
         except Exception as e:
             print(f"[Sing-box] ❌ 生成 Hysteria2 证书异常: {e}", flush=True)
 
+        self.hy2_cert_sha256 = self.compute_cert_sha256(cert_path)
         return cert_path, key_path
 
     def test_config_syntax(self, config_dict: Dict[str, Any]) -> bool:
