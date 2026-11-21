@@ -53,6 +53,26 @@
           </div>
         </div>
 
+        <!-- 隐形蜜罐防自动化机器人陷阱 -->
+        <div class="hp-trap" aria-hidden="true">
+          <label for="login-hp">Leave blank</label>
+          <input id="login-hp" name="website" type="text" tabindex="-1" autocomplete="off" />
+        </div>
+
+        <div class="field">
+          <label for="login-captcha">安全图形验证码</label>
+          <div class="captcha-row">
+            <input id="login-captcha" name="captcha" type="text" class="input mono captcha-input" maxlength="6" autocomplete="off" spellcheck="false" placeholder="输入右侧 4 位字符" />
+            <button type="button" id="btn-refresh-captcha" class="captcha-img-btn" title="点击刷新验证码" aria-label="刷新图形验证码">
+              <img id="captcha-img" class="captcha-img" alt="安全验证码" />
+            </button>
+          </div>
+          <div id="pow-shield-bar" class="pow-shield-bar">
+            <span id="pow-shield-dot" class="pow-dot" aria-hidden="true"></span>
+            <span id="pow-shield-text">正在初始化防机器人安全校验...</span>
+          </div>
+        </div>
+
         <button type="submit" id="login-submit" class="btn btn-primary" style="width: 100%; height: 38px; margin-top: 4px;">
           登录控制台
         </button>
@@ -108,6 +128,14 @@
             <span>编译与运行</span>
           </span>
         </button>
+
+        <button type="button" class="nav-item" data-view="mcp">
+          <span class="nav-item-left">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="6" r="2.5"/><circle cx="18" cy="6" r="2.5"/><circle cx="12" cy="18" r="2.5"/><line x1="8.2" y1="7.3" x2="10.8" y2="15.7"/><line x1="15.8" y1="7.3" x2="13.2" y2="15.7"/><line x1="8.5" y1="6" x2="15.5" y2="6"/></svg>
+            <span>MCP / Agent</span>
+          </span>
+          <span id="nav-mcp-state" class="nav-count">关闭</span>
+        </button>
       </nav>
 
       <div class="sidebar-footer">
@@ -120,6 +148,13 @@
             <span id="engine-pid" class="mono engine-status-meta">PID --</span>
           </div>
           <div id="engine-sub-meta" class="engine-status-meta">UID 101 非特权守护</div>
+        </div>
+
+        <div class="sidebar-account-row">
+          <button type="button" id="btn-account-modal" class="btn btn-sm sidebar-account-btn">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="M9 12l2 2 4-4"/></svg>
+            <span id="sidebar-username-label">账号安全 (admin)</span>
+          </button>
         </div>
 
         <div class="sidebar-actions">
@@ -449,6 +484,103 @@
             </div>
           </div>
         </section>
+
+        <!-- ==================== VIEW 5: MCP & AGENT ==================== -->
+        <section id="view-mcp" class="view-panel" aria-label="MCP 与 Agent 接入管理" hidden>
+          <div class="view-scroll">
+            <div class="kpi-strip">
+              <div class="kpi-cell">
+                <div class="kpi-label">MCP 端点状态</div>
+                <div id="mcp-kpi-status" class="kpi-value">已关闭</div>
+                <div class="kpi-sub mono">/mcp · Streamable HTTP</div>
+              </div>
+              <div class="kpi-cell">
+                <div class="kpi-label">权限安全模式</div>
+                <div id="mcp-kpi-mode" class="kpi-value">--</div>
+                <div id="mcp-kpi-tools" class="kpi-sub">0 / 13 个工具已开放</div>
+              </div>
+              <div class="kpi-cell">
+                <div class="kpi-label">Agent 鉴权令牌</div>
+                <div id="mcp-kpi-token-mode" class="kpi-value">--</div>
+                <div id="mcp-kpi-token-preview" class="kpi-sub mono">--</div>
+              </div>
+              <div class="kpi-cell">
+                <div class="kpi-label">配置持久化</div>
+                <div id="mcp-kpi-source" class="kpi-value">--</div>
+                <div class="kpi-sub mono">/data/.mcp.json (0600)</div>
+              </div>
+            </div>
+
+            <div class="section-bar">
+              <div>
+                <h3 class="section-heading">原生 MCP 服务端热开关与鉴权</h3>
+                <p class="section-desc">内置标准 <span class="mono">2025-03-26</span> Streamable HTTP (JSON-RPC 2.0) 协议，开关与只读策略修改后即时生效并持久化，无需重启容器。</p>
+              </div>
+              <button type="button" id="btn-mcp-refresh" class="btn btn-sm">刷新状态</button>
+            </div>
+
+            <div class="builder-surface">
+              <div class="mcp-toggle-grid">
+                <label class="mcp-switch-card" for="mcp-toggle-enabled">
+                  <div class="mcp-switch-text">
+                    <div class="mcp-switch-title">启用原生 MCP 端点 (<span class="mono">/mcp</span>)</div>
+                    <div class="mcp-switch-desc">关闭时所有外部 Agent 请求直接返回 404；开启后需携带有效 Bearer Token 方可调用。</div>
+                  </div>
+                  <span class="toggle-switch">
+                    <input type="checkbox" id="mcp-toggle-enabled" />
+                    <span class="toggle-track" aria-hidden="true"></span>
+                  </span>
+                </label>
+
+                <label class="mcp-switch-card" for="mcp-toggle-readonly">
+                  <div class="mcp-switch-text">
+                    <div class="mcp-switch-title">只读安全模式 (<span class="mono">MCP_READ_ONLY</span>)</div>
+                    <div class="mcp-switch-desc">仅开放 7 个查询与语法干跑工具，服务端自动隐藏并阻断所有保存、删除、重载与签发操作。</div>
+                  </div>
+                  <span class="toggle-switch">
+                    <input type="checkbox" id="mcp-toggle-readonly" />
+                    <span class="toggle-track" aria-hidden="true"></span>
+                  </span>
+                </label>
+              </div>
+
+              <div class="mcp-token-bar">
+                <div class="mcp-token-info">
+                  <div class="mcp-token-label">MCP 专用访问令牌 (推荐与后台登录 Token 隔离)</div>
+                  <div id="mcp-token-desc" class="field-hint">当前复用后台会话 Token；点击右侧按钮可随时生成高强度独立 MCP Token。</div>
+                </div>
+                <div class="mcp-token-actions">
+                  <button type="button" id="btn-mcp-rotate-token" class="btn btn-primary btn-sm">生成 / 轮换独立 Token</button>
+                  <button type="button" id="btn-mcp-clear-token" class="btn btn-sm">回退默认 Token</button>
+                </div>
+              </div>
+
+              <div id="mcp-fresh-token-box" class="mcp-fresh-token" hidden>
+                <div class="mcp-fresh-token-head">
+                  <span>新生成的独立 MCP Token（仅本次明文展示，请妥善保存）</span>
+                  <button type="button" id="btn-mcp-copy-token" class="btn btn-sm">复制 Token</button>
+                </div>
+                <code id="mcp-fresh-token-val" class="mono mcp-fresh-token-code"></code>
+              </div>
+
+              <div class="cmd-box">
+                <div class="cmd-box-head">
+                  <span>AI 客户端直连配置（Cursor / Claude Desktop / Dify 通用）</span>
+                  <button type="button" id="btn-mcp-copy-json" class="btn btn-primary btn-sm">复制接入 JSON</button>
+                </div>
+                <pre id="mcp-client-json" class="cmd-pre"></pre>
+              </div>
+            </div>
+
+            <div class="section-bar">
+              <div>
+                <h3 class="section-heading">内置 MCP Tools 权限矩阵</h3>
+                <p class="section-desc">所有变更工具均受 <span class="mono">nginx -t</span> 原子事务回滚保护；MCP 永不暴露管理员账号密码修改接口与 SSL 私钥文件。</p>
+              </div>
+            </div>
+            <div id="mcp-tools-grid" class="modules-grid"></div>
+          </div>
+        </section>
       </main>
     </div>
   </div>
@@ -565,6 +697,82 @@
         <button type="button" class="btn" data-close-modal="modal-delete">取消</button>
         <button type="button" id="btn-confirm-delete" class="btn btn-danger-solid">确认永久删除</button>
       </div>
+    </div>
+  </div>
+
+  <!-- ==================== MODAL: ACCOUNT & SECURITY ==================== -->
+  <div id="modal-account" class="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="modal-account-title" hidden>
+    <div class="modal-card">
+      <div class="modal-header">
+        <h3 id="modal-account-title" class="modal-title">管理员账号与防刷安全</h3>
+        <button type="button" class="btn btn-ghost btn-sm" data-close-modal="modal-account" aria-label="关闭弹窗">关闭</button>
+      </div>
+      <form id="account-form" novalidate>
+        <div class="modal-body">
+          <div id="account-form-error" class="auth-alert" hidden></div>
+
+          <div class="account-meta-grid">
+            <div class="account-meta-cell">
+              <div class="account-meta-label">当前管理员</div>
+              <div id="acc-meta-user" class="account-meta-val mono">--</div>
+            </div>
+            <div class="account-meta-cell">
+              <div class="account-meta-label">凭证存储</div>
+              <div id="acc-meta-source" class="account-meta-val mono">--</div>
+            </div>
+            <div class="account-meta-cell">
+              <div class="account-meta-label">防刷已拦截</div>
+              <div id="acc-meta-blocked" class="account-meta-val mono">0 次</div>
+            </div>
+            <div class="account-meta-cell">
+              <div class="account-meta-label">动态 PoW 防护</div>
+              <div id="acc-meta-pow" class="account-meta-val mono">14~20 bit</div>
+            </div>
+          </div>
+
+          <div class="field">
+            <label for="acc-new-user">新管理员用户名</label>
+            <input id="acc-new-user" type="text" class="input mono" autocomplete="username" placeholder="3~32 位字母、数字或 . _ -" required />
+          </div>
+
+          <div class="field">
+            <label for="acc-current-pass">当前密码 <span style="color: var(--danger);">*</span></label>
+            <input id="acc-current-pass" type="password" class="input" autocomplete="current-password" placeholder="验证当前管理员密码" required />
+          </div>
+
+          <div class="inline-row">
+            <div class="field">
+              <label for="acc-new-pass">新密码 (不修改可留空)</label>
+              <input id="acc-new-pass" type="password" class="input" autocomplete="new-password" placeholder="至少 8 位含大小写与数字" />
+            </div>
+            <div class="field">
+              <label for="acc-confirm-pass">确认新密码</label>
+              <input id="acc-confirm-pass" type="password" class="input" autocomplete="new-password" placeholder="再次输入新密码" />
+            </div>
+          </div>
+
+          <div id="acc-strength-wrap" class="strength-wrap" hidden>
+            <div class="strength-head">
+              <span>密码强度</span>
+              <strong id="acc-strength-label">--</strong>
+            </div>
+            <div id="acc-strength-bar" class="strength-bar" data-score="0">
+              <span></span><span></span><span></span><span></span>
+            </div>
+            <div id="acc-strength-hint" class="field-hint"></div>
+          </div>
+
+          <label class="checkbox-row">
+            <input type="checkbox" id="acc-rotate-token" checked />
+            <span>保存后自动轮换会话 Token（强制其他旧终端重新登录）</span>
+          </label>
+          <div class="field-hint">新密码使用 PBKDF2-HMAC-SHA256 (210,000 次迭代) 加密持久化至 /data/.auth.json，重启容器不丢失。</div>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn" data-close-modal="modal-account">取消</button>
+          <button type="submit" id="btn-account-submit" class="btn btn-primary">保存账号设置</button>
+        </div>
+      </form>
     </div>
   </div>
 

@@ -6,6 +6,9 @@ import {
   buildDockerCommand,
   formatBytes,
   formatCertCountdown,
+  solvePowChallenge,
+  validateUsername,
+  evaluatePasswordStrength,
 } from './helpers.js';
 
 // ==================== STATE (Token kept strictly in memory, never localStorage) ====================
@@ -23,6 +26,14 @@ const state = {
   newSiteTemplateId: 'wordpress',
   pendingDeleteDomain: '',
   authMode: 'creds',
+  challenge: null, // { challenge_id, salt, difficulty, expires_in }
+  powPromise: null,
+  powResult: null,
+  powAbort: null,
+  lockoutUntil: 0,
+  lockoutTimer: null,
+  mcpConfig: null,
+  freshMcpToken: '',
 };
 
 const DNS_PROVIDER_FIELDS = {
@@ -148,7 +159,9 @@ async function apiFetch(path, opts = {}) {
   }
   if (!resp.ok) {
     const err = new Error(data.error || `请求失败 (${resp.status})`);
+    err.status = resp.status;
     err.output = data.output || '';
+    err.retryAfter = Number(data.retry_after) || 0;
     throw err;
   }
   return data;
@@ -170,7 +183,114 @@ function showAuthError(msg) {
   el.hidden = false;
 }
 
+function setPowShieldStatus(mode, text) {
+  const dot = $('pow-shield-dot');
+  const label = $('pow-shield-text');
+  if (dot) {
+    dot.className = `pow-dot ${mode ? `is-${mode}` : ''}`.trim();
+  }
+  if (label) {
+    label.textContent = text;
+  }
+}
+
+function clearLockoutCountdown() {
+  if (state.lockoutTimer) {
+    window.clearInterval(state.lockoutTimer);
+    state.lockoutTimer = null;
+  }
+  state.lockoutUntil = 0;
+}
+
+function startLockoutCountdown(seconds) {
+  clearLockoutCountdown();
+  const secs = Math.max(1, Math.ceil(Number(seconds) || 0));
+  state.lockoutUntil = Date.now() + secs * 1000;
+
+  const tick = () => {
+    const rem = Math.ceil((state.lockoutUntil - Date.now()) / 1000);
+    const submitBtn = $('login-submit');
+    if (rem <= 0) {
+      clearLockoutCountdown();
+      if (submitBtn) {
+        submitBtn.disabled = false;
+        submitBtn.textContent = '登录控制台';
+      }
+      fetchAuthChallenge();
+      return;
+    }
+    if (submitBtn) {
+      submitBtn.disabled = true;
+      submitBtn.textContent = `防刷冷却中 (${rem}s)`;
+    }
+    setPowShieldStatus('locked', `触发高频防刷保护，请 ${rem} 秒后重试`);
+  };
+
+  tick();
+  state.lockoutTimer = window.setInterval(tick, 1000);
+}
+
+async function fetchAuthChallenge() {
+  if (state.powAbort) {
+    state.powAbort.abort();
+  }
+  const abortCtrl = new AbortController();
+  state.powAbort = abortCtrl;
+  state.challenge = null;
+  state.powResult = null;
+  state.powPromise = null;
+  $('login-captcha').value = '';
+  setPowShieldStatus('working', '正在获取图形验证码与动态算力挑战...');
+
+  try {
+    const res = await apiFetch('/api/auth/challenge', { method: 'GET' });
+    if (abortCtrl.signal.aborted) return;
+    const ch = res.data;
+    state.challenge = ch;
+    $('captcha-img').src = ch.captcha_image;
+
+    if (ch.retry_after > 0) {
+      startLockoutCountdown(ch.retry_after);
+      return;
+    }
+
+    setPowShieldStatus('working', `正在计算防机器人工作量证明 (SHA-256 ${ch.difficulty}-bit)...`);
+    state.powPromise = solvePowChallenge(ch.challenge_id, ch.salt, ch.difficulty, abortCtrl.signal)
+      .then((solved) => {
+        if (abortCtrl.signal.aborted) return null;
+        state.powResult = solved;
+        setPowShieldStatus('ready', `防机器人算力盾就绪 · ${ch.difficulty}-bit PoW (${solved.elapsedMs}ms)`);
+        return solved;
+      })
+      .catch((err) => {
+        if (!abortCtrl.signal.aborted) {
+          setPowShieldStatus('locked', `算力校验初始化失败：${err.message}`);
+        }
+        return null;
+      });
+  } catch (err) {
+    if (err.retryAfter > 0) {
+      startLockoutCountdown(err.retryAfter);
+    } else {
+      setPowShieldStatus('locked', err.message || '获取验证码失败，点击图片重试');
+    }
+  }
+}
+
+function syncSidebarUser() {
+  const el = $('sidebar-username-label');
+  if (el) {
+    el.textContent = `账号安全 (${state.user || 'admin'})`;
+  }
+}
+
 function enterWorkspace() {
+  clearLockoutCountdown();
+  if (state.powAbort) {
+    state.powAbort.abort();
+    state.powAbort = null;
+  }
+  syncSidebarUser();
   $('auth-screen').hidden = true;
   $('app-shell').hidden = false;
   refreshAllData();
@@ -180,23 +300,60 @@ function logout(reason) {
   state.token = '';
   state.user = '';
   state.activeSite = null;
+  state.mcpConfig = null;
+  state.freshMcpToken = '';
   $('app-shell').hidden = true;
   $('auth-screen').hidden = false;
   if (reason) showAuthError(reason);
+  fetchAuthChallenge();
 }
 
 async function handleLoginSubmit(e) {
   e.preventDefault();
+  if (Date.now() < state.lockoutUntil) return;
   $('auth-alert').hidden = true;
+
+  const captchaAnswer = $('login-captcha').value.trim();
+  if (!captchaAnswer) {
+    showAuthError('请输入右侧 4 位图形验证码');
+    $('login-captcha').focus();
+    return;
+  }
+  if (!state.challenge) {
+    showAuthError('安全验证尚未就绪，正在刷新...');
+    fetchAuthChallenge();
+    return;
+  }
+
   const submitBtn = $('login-submit');
   submitBtn.disabled = true;
-  submitBtn.textContent = '验证中...';
+  submitBtn.textContent = '安全校验中...';
 
   try {
-    const payload =
+    let solved = state.powResult;
+    if (!solved && state.powPromise) {
+      solved = await state.powPromise;
+    }
+    if (!solved) {
+      solved = await solvePowChallenge(
+        state.challenge.challenge_id,
+        state.challenge.salt,
+        state.challenge.difficulty
+      );
+    }
+
+    const basePayload =
       state.authMode === 'token'
         ? { token: $('login-token').value.trim() }
         : { user: $('login-user').value.trim(), pass: $('login-pass').value };
+
+    const payload = {
+      ...basePayload,
+      challenge_id: state.challenge.challenge_id,
+      captcha_answer: captchaAnswer,
+      pow_nonce: solved.nonce,
+      hp_field: $('login-hp').value || '',
+    };
 
     const res = await apiFetch('/api/login', {
       method: 'POST',
@@ -206,12 +363,130 @@ async function handleLoginSubmit(e) {
     state.user = res.user || 'admin';
     $('login-pass').value = '';
     $('login-token').value = '';
+    $('login-captcha').value = '';
     enterWorkspace();
   } catch (err) {
     showAuthError(err.message || '登录失败');
+    if (err.retryAfter > 0) {
+      startLockoutCountdown(err.retryAfter);
+    } else {
+      await fetchAuthChallenge();
+    }
+  } finally {
+    if (Date.now() >= state.lockoutUntil) {
+      submitBtn.disabled = false;
+      submitBtn.textContent = '登录控制台';
+    }
+  }
+}
+
+// ==================== ACCOUNT & SECURITY MODAL ====================
+function updatePasswordStrengthUI() {
+  const pwd = $('acc-new-pass').value;
+  const wrap = $('acc-strength-wrap');
+  if (!pwd) {
+    wrap.hidden = true;
+    return;
+  }
+  wrap.hidden = false;
+  const res = evaluatePasswordStrength(pwd);
+  $('acc-strength-label').textContent = res.label;
+  $('acc-strength-bar').setAttribute('data-score', String(res.score));
+  $('acc-strength-hint').textContent = res.valid
+    ? '已满足高强度密码策略（PBKDF2-HMAC-SHA256 210,000 次迭代加密保存）'
+    : res.error;
+}
+
+async function openAccountModal() {
+  $('account-form-error').hidden = true;
+  $('acc-current-pass').value = '';
+  $('acc-new-pass').value = '';
+  $('acc-confirm-pass').value = '';
+  $('acc-strength-wrap').hidden = true;
+  $('acc-rotate-token').checked = true;
+  $('acc-new-user').value = state.user || 'admin';
+  openModal('modal-account');
+
+  try {
+    const res = await apiFetch('/api/account');
+    const acc = res.data?.account || {};
+    const shield = res.data?.shield || {};
+    $('acc-meta-user').textContent = acc.username || state.user || 'admin';
+    $('acc-new-user').value = acc.username || state.user || 'admin';
+    $('acc-meta-source').textContent = acc.source === 'persisted' ? '已持久化 (.auth.json)' : '环境变量初始化';
+    $('acc-meta-blocked').textContent = `${shield.blocked_attempts ?? 0} 次 (锁定 ${shield.locked_ips ?? 0} IP)`;
+    $('acc-meta-pow').textContent = `${shield.base_pow_bits ?? 14}~${shield.max_pow_bits ?? 20} bit`;
+  } catch (err) {
+    $('account-form-error').textContent = err.message || '加载账户信息失败';
+    $('account-form-error').hidden = false;
+  }
+}
+
+async function handleAccountSubmit(e) {
+  e.preventDefault();
+  const errEl = $('account-form-error');
+  errEl.hidden = true;
+
+  const newUsername = $('acc-new-user').value.trim();
+  const currentPassword = $('acc-current-pass').value;
+  const newPassword = $('acc-new-pass').value;
+  const confirmPassword = $('acc-confirm-pass').value;
+  const rotateToken = $('acc-rotate-token').checked;
+
+  const uCheck = validateUsername(newUsername);
+  if (!uCheck.valid) {
+    errEl.textContent = uCheck.error;
+    errEl.hidden = false;
+    return;
+  }
+  if (!currentPassword) {
+    errEl.textContent = '请输入当前管理员密码进行身份核验';
+    errEl.hidden = false;
+    return;
+  }
+  if (newPassword) {
+    const pCheck = evaluatePasswordStrength(newPassword);
+    if (!pCheck.valid) {
+      errEl.textContent = pCheck.error;
+      errEl.hidden = false;
+      return;
+    }
+    if (newPassword !== confirmPassword) {
+      errEl.textContent = '两次输入的新密码不一致';
+      errEl.hidden = false;
+      return;
+    }
+  }
+
+  const submitBtn = $('btn-account-submit');
+  submitBtn.disabled = true;
+  submitBtn.textContent = '加密保存中...';
+
+  try {
+    const res = await apiFetch('/api/account/credentials', {
+      method: 'POST',
+      body: JSON.stringify({
+        current_password: currentPassword,
+        new_username: uCheck.normalized,
+        new_password: newPassword,
+        rotate_token: rotateToken,
+      }),
+    });
+    if (res.token) {
+      state.token = res.token;
+    }
+    if (res.account?.username) {
+      state.user = res.account.username;
+      syncSidebarUser();
+    }
+    closeModal('modal-account');
+    showToast(res.msg || '管理员用户名与密码已安全更新');
+  } catch (err) {
+    errEl.textContent = err.message || '修改凭证失败';
+    errEl.hidden = false;
   } finally {
     submitBtn.disabled = false;
-    submitBtn.textContent = '登录控制台';
+    submitBtn.textContent = '保存账号设置';
   }
 }
 
@@ -221,6 +496,7 @@ const VIEW_META = {
   certs: { title: 'SSL 证书', panelId: 'view-certs' },
   'main-conf': { title: '核心配置', panelId: 'view-main-conf' },
   build: { title: '编译与运行', panelId: 'view-build' },
+  mcp: { title: 'MCP / Agent 接入', panelId: 'view-mcp' },
 };
 
 function switchView(viewId) {
@@ -252,6 +528,9 @@ function switchView(viewId) {
   if (viewId === 'build') {
     loadSystemInfo();
   }
+  if (viewId === 'mcp') {
+    loadMcpConfig();
+  }
 }
 
 function closeMobileDrawer() {
@@ -270,7 +549,7 @@ function updateTopbarSummary() {
 
 // ==================== DATA LOADERS ====================
 async function refreshAllData() {
-  await Promise.all([loadSystemInfo(), loadSites(true), loadCerts()]);
+  await Promise.all([loadSystemInfo(), loadSites(true), loadCerts(), loadMcpConfig()]);
 }
 
 async function loadSystemInfo() {
@@ -785,6 +1064,141 @@ function updateCustomDockerCommand() {
   $('cb-output').textContent = cmd;
 }
 
+// ==================== MCP & AGENT MANAGEMENT ====================
+async function loadMcpConfig() {
+  try {
+    const res = await apiFetch('/api/mcp/config');
+    state.mcpConfig = res.data || null;
+    renderMcpConfig();
+  } catch (err) {
+    if (state.view === 'mcp') {
+      showToast(`加载 MCP 配置失败：${err.message}`, 'err');
+    }
+  }
+}
+
+function buildMcpClientConfigJson() {
+  const endpoint = `${window.location.origin}/mcp`;
+  const tokenPlaceholder = state.freshMcpToken || '<YOUR_MCP_TOKEN>';
+  return JSON.stringify(
+    {
+      mcpServers: {
+        'wimotek-nginx': {
+          type: 'streamable-http',
+          url: endpoint,
+          headers: {
+            Authorization: `Bearer ${tokenPlaceholder}`,
+          },
+        },
+      },
+    },
+    null,
+    2
+  );
+}
+
+function renderMcpConfig() {
+  const cfg = state.mcpConfig;
+  if (!cfg) return;
+
+  const navBadge = $('nav-mcp-state');
+  if (navBadge) {
+    navBadge.textContent = cfg.enabled ? '开启' : '关闭';
+    navBadge.classList.toggle('is-on', Boolean(cfg.enabled));
+  }
+
+  $('mcp-kpi-status').textContent = cfg.enabled ? '已开启' : '已关闭';
+  $('mcp-kpi-mode').textContent = cfg.read_only ? '只读巡检' : '读写管理';
+  $('mcp-kpi-tools').textContent = `${cfg.active_tool_count ?? 0} / ${cfg.total_tool_count ?? 13} 个工具已开放`;
+  $('mcp-kpi-token-mode').textContent = cfg.has_dedicated_token ? '独立 Token' : '复用会话 Token';
+  $('mcp-kpi-token-preview').textContent = cfg.has_dedicated_token
+    ? cfg.token_preview || '••••••••'
+    : '跟随当前 AUTH_TOKEN';
+  $('mcp-kpi-source').textContent = cfg.source === 'persisted' ? '已持久化' : '环境变量默认';
+
+  $('mcp-toggle-enabled').checked = Boolean(cfg.enabled);
+  $('mcp-toggle-readonly').checked = Boolean(cfg.read_only);
+  $('btn-mcp-clear-token').disabled = !cfg.has_dedicated_token;
+
+  $('mcp-token-desc').textContent = cfg.has_dedicated_token
+    ? `当前已启用独立 MCP Token (${cfg.token_preview})，与后台管理员会话完全隔离。`
+    : '当前复用后台会话 AUTH_TOKEN；推荐点击右侧按钮生成高强度独立 MCP Token。';
+
+  if (state.freshMcpToken) {
+    $('mcp-fresh-token-val').textContent = state.freshMcpToken;
+    $('mcp-fresh-token-box').hidden = false;
+  } else {
+    $('mcp-fresh-token-box').hidden = true;
+  }
+
+  $('mcp-client-json').textContent = buildMcpClientConfigJson();
+
+  const grid = $('mcp-tools-grid');
+  grid.textContent = '';
+  const tools = Array.isArray(cfg.tools) ? cfg.tools : [];
+  for (const t of tools) {
+    const cell = document.createElement('div');
+    cell.className = 'module-cell';
+
+    const head = document.createElement('div');
+    head.className = 'module-head';
+
+    const name = document.createElement('span');
+    name.className = 'module-name';
+    name.textContent = t.name;
+
+    const flag = document.createElement('span');
+    if (!cfg.enabled) {
+      flag.className = 'module-flag off';
+      flag.textContent = '服务未开启';
+    } else if (t.allowed) {
+      flag.className = 'module-flag on';
+      flag.textContent = '已开放';
+    } else {
+      flag.className = 'module-flag warn';
+      flag.textContent = '只读拦截';
+    }
+
+    head.append(name, flag);
+
+    const cat = document.createElement('div');
+    cat.className = 'module-cat';
+    cat.textContent = t.mutating ? '变更工具 · 原子校验回滚' : '只读 / 干跑工具';
+
+    const desc = document.createElement('div');
+    desc.className = 'module-desc';
+    desc.textContent = t.description || '';
+
+    cell.append(head, cat, desc);
+    grid.appendChild(cell);
+  }
+}
+
+async function saveMcpSettings(extraPayload = {}, successMsg = '') {
+  const payload = {
+    enabled: $('mcp-toggle-enabled').checked,
+    read_only: $('mcp-toggle-readonly').checked,
+    ...extraPayload,
+  };
+  try {
+    const res = await apiFetch('/api/mcp/config', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+    state.mcpConfig = res.data || state.mcpConfig;
+    if (res.plain_token) {
+      state.freshMcpToken = res.plain_token;
+    } else if (extraPayload.clear_token) {
+      state.freshMcpToken = '';
+    }
+    renderMcpConfig();
+    showToast(successMsg || res.msg || 'MCP 配置已保存并立即生效');
+  } catch (err) {
+    showToast(`更新 MCP 配置失败：${err.message}`, 'err');
+    await loadMcpConfig();
+  }
+}
+
 // ==================== MODALS ====================
 function openModal(id) {
   $(id).hidden = false;
@@ -1066,6 +1480,41 @@ function initEvents() {
     }
   });
 
+  // MCP / Agent management view
+  $('btn-mcp-refresh').addEventListener('click', loadMcpConfig);
+  $('mcp-toggle-enabled').addEventListener('change', () => {
+    const on = $('mcp-toggle-enabled').checked;
+    saveMcpSettings({}, on ? 'MCP 服务已立即开启 (/mcp)' : 'MCP 服务已关闭');
+  });
+  $('mcp-toggle-readonly').addEventListener('change', () => {
+    const ro = $('mcp-toggle-readonly').checked;
+    saveMcpSettings({}, ro ? '已切换为 MCP 只读安全模式' : '已切换为 MCP 读写管理模式');
+  });
+  $('btn-mcp-rotate-token').addEventListener('click', () => {
+    saveMcpSettings({ rotate_token: true }, '已生成新的独立 MCP Token 并立即生效');
+  });
+  $('btn-mcp-clear-token').addEventListener('click', () => {
+    saveMcpSettings({ clear_token: true }, '已清除独立 Token，当前回退复用后台 AUTH_TOKEN');
+  });
+  $('btn-mcp-copy-token').addEventListener('click', async () => {
+    if (!state.freshMcpToken) return;
+    try {
+      await navigator.clipboard.writeText(state.freshMcpToken);
+      showToast('已复制独立 MCP Token');
+    } catch {
+      showToast('请手动复制展示框中的 MCP Token', 'ok');
+    }
+  });
+  $('btn-mcp-copy-json').addEventListener('click', async () => {
+    const jsonText = $('mcp-client-json').textContent;
+    try {
+      await navigator.clipboard.writeText(jsonText);
+      showToast('已复制 MCP 客户端接入 JSON');
+    } catch {
+      showToast('请手动复制客户端接入 JSON', 'ok');
+    }
+  });
+
   // Modals close
   document.querySelectorAll('[data-close-modal]').forEach((btn) => {
     btn.addEventListener('click', () => closeModal(btn.dataset.closeModal));
@@ -1085,6 +1534,10 @@ function initEvents() {
   });
 
   // Modal forms
+  $('btn-refresh-captcha').addEventListener('click', fetchAuthChallenge);
+  $('btn-account-modal').addEventListener('click', openAccountModal);
+  $('acc-new-pass').addEventListener('input', updatePasswordStrengthUI);
+  $('account-form').addEventListener('submit', handleAccountSubmit);
   $('new-site-form').addEventListener('submit', handleNewSiteSubmit);
   $('ssl-type').addEventListener('change', () => {
     $('ssl-dns-section').hidden = $('ssl-type').value !== 'dns';
@@ -1097,3 +1550,4 @@ function initEvents() {
 initTheme();
 initEvents();
 updateCustomDockerCommand();
+fetchAuthChallenge();

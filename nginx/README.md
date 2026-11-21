@@ -194,7 +194,68 @@ networks:
 | `ACME_HOME` | `/data/acme` | `acme.sh` 持久化账户与续期状态目录 |
 | `ACME_WEBROOT` | `/data/www/acme` | HTTP-01 验证根目录 |
 | `LOG_DIR` | `/data/logs` | Nginx 访问与错误日志目录 |
+| `AUTH_FILE` | `/data/.auth.json` | 后台修改用户名/密码后的 PBKDF2-HMAC-SHA256 持久化文件路径（`0600` 权限） |
+| `TRUST_PROXY` | `false` | 仅当部署在可信反代后方时设为 `true`，允许按 `X-Forwarded-For` / `X-Real-IP` 识别客户端防刷 IP |
+| `RESET_ADMIN_AUTH` | `false` | 设为 `true` 启动时强制按环境变量重新初始化管理员账号密码（用于忘记密码找回） |
+| `MCP_ENABLED` | `false` | 设为 `true` 开启原生 MCP Streamable HTTP 端点（`/mcp`，亦可在后台管理「MCP / Agent」页热开关） |
+| `MCP_READ_ONLY` | `false` | 设为 `true` 将 MCP 限制为只读模式（仅暴露查询与 `test_site_config` 干跑工具，服务端拦截所有写入/删除/签发调用） |
+| `MCP_TOKEN` | 复用 `AUTH_TOKEN` | 为 AI Agent 单独签发的 MCP 专用 Bearer Token（推荐与管理面板 `AUTH_TOKEN` 隔离） |
+| `MCP_FILE` | `/data/.mcp.json` | 后台修改 MCP 开关、只读策略与独立 Token 的持久化文件路径（`0600` 权限，重启保留） |
 | `ACME_RENEW_HOURS` | `12` | Go 内置证书自动续签检查间隔（小时） |
+
+---
+
+## 原生 MCP (Model Context Protocol) 与 Agent 对接
+
+Go 微内核已内置零第三方依赖的标准 **MCP Streamable HTTP (`2025-03-26`, JSON-RPC 2.0)** 服务端，端点固定为 `/mcp`。支持通过 **Web 后台管理「MCP / Agent」页面热开关与一键生成独立 Token**（自动持久化至 `/data/.mcp.json`，无需重启容器），也支持环境变量初始化。Cursor、Claude Desktop、Dify、OpenAI Agents 等任意兼容客户端均可直连。
+
+### 1. 开启 MCP（后台热开关 或 环境变量）
+
+```yaml
+environment:
+  - MCP_ENABLED=true
+  - MCP_READ_ONLY=false          # 仅做巡检排障时建议设为 true
+  - MCP_TOKEN=replace-with-dedicated-32-byte-agent-token
+```
+
+### 2. AI 客户端接入配置（Cursor / Claude / Dify 通用）
+
+```json
+{
+  "mcpServers": {
+    "wimotek-nginx": {
+      "type": "streamable-http",
+      "url": "http://<your-host>:8080/mcp",
+      "headers": {
+        "Authorization": "Bearer <MCP_TOKEN>"
+      }
+    }
+  }
+}
+```
+
+### 3. 快速连通性测试 (`curl`)
+
+```bash
+# 1) 握手协商
+curl -sS -X POST http://127.0.0.1:8080/mcp \
+  -H "Authorization: Bearer <MCP_TOKEN>" \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"curl","version":"1.0"}}}'
+
+# 2) 拉取可用工具清单
+curl -sS -X POST http://127.0.0.1:8080/mcp \
+  -H "Authorization: Bearer <MCP_TOKEN>" \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":2,"method":"tools/list"}'
+```
+
+### 4. 内置 Tools 与 Resources
+
+- **只读与干跑 Tools（`MCP_READ_ONLY=true` 下可用）**：`nginx_health`、`nginx_system_info`、`list_sites`、`get_site_config`、`get_main_config`、`list_certs`、`test_site_config`
+- **受原子回滚保护的变更 Tools（写模式可用）**：`save_site_config`、`toggle_site`、`delete_site`、`save_main_config`、`reload_nginx`、`issue_ssl_cert`（全部受 `nginx -t` 原子事务回滚与 DNS 白名单约束）
+- **Resources**：`nginx://system/info`、`nginx://config/main`、`nginx://sites`、`nginx://certs`、模板 `nginx://sites/{domain}`
+- **安全边界**：默认关闭（未开启返回 `404`）；鉴权使用恒定时间比对；若请求带浏览器 `Origin` 头则校验同源以防跨站重绑定；永不暴露管理员账号密码修改接口与 SSL 私钥内容。
 
 ---
 
@@ -203,7 +264,10 @@ networks:
 所有受保护接口支持 `Authorization: Bearer <AUTH_TOKEN>` 或 `X-Auth-Token: <AUTH_TOKEN>` 鉴权：
 
 - `GET /api/health` — 容器健康探针（检测 Nginx Master PID 存活状态）
-- `POST /api/login` — 账号密码或 Token 登录换取凭证（内置 IP 限流）
+- `GET /api/auth/challenge` — 签发一次性防机器人挑战（扭曲 SVG 图形验证码 + 动态难度 SHA-256 PoW）
+- `POST /api/login` — 账号密码或 Token 登录（校验 SVG 验证码、PoW 算力证明、蜜罐、停留时延与多级 IP 指数锁定）
+- `GET /api/account` — 获取当前管理员信息、持久化状态与防刷安全盾实时统计
+- `POST /api/account/credentials` — 校验当前密码并更新管理员用户名/密码（PBKDF2-HMAC-SHA256 持久化并自动轮换会话 Token）
 - `GET /api/system/info` — 获取 Nginx 版本、`nginx -V` 模块矩阵与运行汇总
 - `GET /api/sites` — 获取全部站点及元数据（启用状态、模式、端口、SSL、`gzip_static`）
 - `GET / POST / DELETE /api/site` — 读取、原子校验保存（失败自动回滚）、删除站点配置
@@ -213,3 +277,5 @@ networks:
 - `POST /api/reload` — 语法校验通过后执行 `nginx -s reload` 零停机热重载
 - `GET /api/certs` — 扫描 `/etc/nginx/ssl/*.crt` 返回 X.509 颁发者、SANs 与剩余天数
 - `POST /api/ssl/issue` — 通过 HTTP-01 或白名单 DNS-01（支持泛域名）签发 Let's Encrypt / ZeroSSL 证书
+- `GET / POST /api/mcp/config` — 读取与动态修改 MCP 开关、只读模式与独立 Token（实时生效并持久化至 `/data/.mcp.json`）
+- `POST /mcp` — 原生 MCP Streamable HTTP (`2025-03-26`, JSON-RPC 2.0) 服务端（开启后生效）

@@ -26,6 +26,13 @@ type Config struct {
 	AcmeHome           string
 	AcmeWebRoot        string
 	LogDir             string
+	AuthFile           string
+	TrustProxy         bool
+	ResetAdminAuth     bool
+	MCPEnabled         bool
+	MCPReadOnly        bool
+	MCPToken           string
+	MCPFile            string
 	HttpPort           string
 	AutoRenewInterval  time.Duration
 }
@@ -70,6 +77,13 @@ func Load() *Config {
 		AcmeHome:           getEnv("ACME_HOME", filepath.Join(dataDir, "acme")),
 		AcmeWebRoot:        getEnv("ACME_WEBROOT", filepath.Join(dataDir, "www", "acme")),
 		LogDir:             getEnv("LOG_DIR", filepath.Join(dataDir, "logs")),
+		AuthFile:           getEnv("AUTH_FILE", filepath.Join(dataDir, ".auth.json")),
+		TrustProxy:         os.Getenv("TRUST_PROXY") == "true",
+		ResetAdminAuth:     os.Getenv("RESET_ADMIN_AUTH") == "true",
+		MCPEnabled:         os.Getenv("MCP_ENABLED") == "true",
+		MCPReadOnly:        os.Getenv("MCP_READ_ONLY") == "true",
+		MCPToken:           os.Getenv("MCP_TOKEN"),
+		MCPFile:            getEnv("MCP_FILE", filepath.Join(dataDir, ".mcp.json")),
 		HttpPort:           getEnv("HTTP_PORT", ":8080"),
 		AutoRenewInterval:  time.Duration(renewHours) * time.Hour,
 	}
