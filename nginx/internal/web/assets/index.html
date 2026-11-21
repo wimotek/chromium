@@ -7,7 +7,7 @@
     <style>
         :root {
             --bg-base: #090d16;
-            --card-bg: rgba(22, 30, 49, 0.75);
+            --card-bg: rgba(22, 30, 49, 0.85);
             --card-border: rgba(255, 255, 255, 0.08);
             --primary: #38bdf8;
             --primary-hover: #0ea5e9;
@@ -36,19 +36,42 @@
         }
         .brand { font-size: 1.25rem; font-weight: 700; color: var(--primary); display: flex; align-items: center; gap: 8px; }
         .badge { font-size: 0.75rem; background: rgba(56, 189, 248, 0.15); border: 1px solid var(--primary); padding: 2px 8px; border-radius: 9999px; }
+        
         main { flex: 1; padding: 1.5rem; max-width: 1200px; width: 100%; margin: 0 auto; display: grid; grid-template-columns: 280px 1fr; gap: 1.5rem; }
         @media (max-width: 768px) { main { grid-template-columns: 1fr; } }
+        
         .panel { background: var(--card-bg); border: 1px solid var(--card-border); border-radius: 12px; padding: 1.25rem; backdrop-filter: blur(8px); }
         .site-item { display: flex; justify-content: space-between; align-items: center; padding: 10px 12px; border-radius: 8px; margin-bottom: 6px; background: rgba(255, 255, 255, 0.03); cursor: pointer; }
         .site-item:hover, .site-item.active { background: rgba(56, 189, 248, 0.12); border-left: 3px solid var(--primary); }
-        input, textarea, button { width: 100%; border-radius: 8px; border: 1px solid var(--card-border); background: rgba(15, 23, 42, 0.6); color: var(--text-main); padding: 10px 14px; font-family: monospace; font-size: 0.9rem; }
-        input:focus, textarea:focus { outline: none; border-color: var(--primary); }
+        
+        input, textarea, select, button {
+            width: 100%; border-radius: 8px; border: 1px solid var(--card-border);
+            background: rgba(15, 23, 42, 0.6); color: var(--text-main);
+            padding: 10px 14px; font-family: monospace; font-size: 0.9rem;
+        }
+        input:focus, textarea:focus, select:focus { outline: none; border-color: var(--primary); }
         button { background: var(--primary); color: #0f172a; font-weight: 600; cursor: pointer; display: inline-flex; align-items: center; justify-content: center; gap: 6px; }
         button:hover { background: var(--primary-hover); transform: translateY(-1px); }
         button.danger { background: var(--danger); color: #fff; }
         button.success { background: var(--success); color: #0f172a; }
         .actions { display: flex; gap: 10px; margin-top: 1rem; flex-wrap: wrap; }
         .terminal-log { margin-top: 1rem; background: #000; border-radius: 8px; padding: 12px; color: var(--success); font-family: monospace; font-size: 0.85rem; max-height: 120px; overflow-y: auto; }
+
+        /* 模态弹窗样式 */
+        .modal-overlay {
+            position: fixed; inset: 0; background: rgba(0, 0, 0, 0.75);
+            backdrop-filter: blur(8px); display: none; align-items: center;
+            justify-content: center; z-index: 100;
+        }
+        .modal-card {
+            background: #1e293b; border: 1px solid var(--card-border);
+            border-radius: 12px; width: 92%; max-width: 520px; padding: 1.5rem;
+            box-shadow: 0 20px 25px -5px rgba(0,0,0,0.5);
+        }
+        .modal-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem; }
+        .close-btn { background: none; border: none; color: var(--text-muted); font-size: 1.25rem; width: auto; padding: 4px 8px; cursor: pointer; }
+        .close-btn:hover { color: #fff; }
+        .form-label { display: block; font-size: 0.85rem; color: var(--text-muted); margin: 10px 0 4px 0; font-family: sans-serif; }
     </style>
 </head>
 <body>
@@ -69,19 +92,64 @@
                 <input type="text" id="domainInput" placeholder="输入绑定域名 (如: app.example.com)" />
                 <button onclick="applyTemplate('php83')" style="width:auto;font-size:0.8rem;background:#334155;">PHP8.3</button>
                 <button onclick="applyTemplate('proxy')" style="width:auto;font-size:0.8rem;background:#334155;">反向代理</button>
+                <button onclick="applyTemplate('static')" style="width:auto;font-size:0.8rem;background:#334155;">静态SPA</button>
             </div>
             
             <textarea id="editor" rows="18" spellcheck="false"></textarea>
             
             <div class="actions">
                 <button onclick="saveCurrentSite()" style="flex:1;">保存并校验配置</button>
-                <button onclick="issueSSL()" class="success" style="width:auto;">申请 SSL 证书</button>
+                <button onclick="openSSLModal()" class="success" style="width:auto;">🔐 申请 SSL 证书</button>
                 <button onclick="deleteCurrentSite()" class="danger" style="width:auto;">删除此站</button>
             </div>
             
-            <div class="terminal-log" id="terminalLog">> 守护看门狗与 ACME 引擎已就绪。</div>
+            <div class="terminal-log" id="terminalLog">> 守护中枢就绪，支持 HTTP / DNS 泛域名 ACME 签发。</div>
         </div>
     </main>
+
+    <!-- 【新增】ACME SSL 设置弹窗 -->
+    <div id="sslModal" class="modal-overlay">
+        <div class="modal-card">
+            <div class="modal-header">
+                <h3>🔐 ACME 证书签发设置</h3>
+                <button class="close-btn" onclick="closeSSLModal()">✕</button>
+            </div>
+            <div class="modal-body">
+                <label class="form-label">申请域名</label>
+                <input type="text" id="sslTargetDomain" readonly style="opacity:0.8; background:#0f172a;">
+
+                <label class="form-label">验证方式</label>
+                <select id="sslTypeSelect" onchange="onSSLTypeChange()">
+                    <option value="http">HTTP-01 验证 (默认/免配置，需公网 80 端口)</option>
+                    <option value="dns">DNS-01 验证 (支持泛域名/内网/无 80 端口)</option>
+                </select>
+
+                <!-- DNS 模式专属配置区 -->
+                <div id="dnsConfigArea" style="display:none; margin-top:10px;">
+                    <label class="form-label">DNS 托管厂商</label>
+                    <select id="dnsProviderSelect" onchange="onDNSProviderChange()">
+                        <option value="dns_cf">Cloudflare (推荐)</option>
+                        <option value="dns_ali">阿里云 (Aliyun DNS)</option>
+                        <option value="dns_dp">腾讯云 (DNSPod)</option>
+                    </select>
+
+                    <div style="margin: 12px 0;">
+                        <label style="display:flex; align-items:center; gap:8px; cursor:pointer; font-size:0.9rem;">
+                            <input type="checkbox" id="sslWildcardCheck" style="width:auto; margin:0;">
+                            同时签发通配符泛域名 (*.域名)
+                        </label>
+                    </div>
+
+                    <!-- 动态凭证字段注入区 -->
+                    <div id="dynamicApiFields"></div>
+                </div>
+            </div>
+            <div class="actions" style="justify-content: flex-end; margin-top:1.5rem;">
+                <button onclick="closeSSLModal()" style="background:#334155; width:auto;">取消</button>
+                <button id="btnSubmitSSL" onclick="submitSSLIssue()" class="success" style="width:auto;">立即签发部署</button>
+            </div>
+        </div>
+    </div>
 
     <script src="app.js"></script>
 </body>
