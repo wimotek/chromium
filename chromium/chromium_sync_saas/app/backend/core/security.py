@@ -282,7 +282,7 @@ def ensure_ssl_certificates():
 
 
 def _load_active_user_by_id(uid: int) -> Optional[Dict[str, Any]]:
-    with session_scope() as db:
+    with session_scope(readonly=True) as db:
         u = db.get(User, int(uid))
         if u is None:
             return None
@@ -293,7 +293,7 @@ def resolve_user_by_api_key(presented: Optional[str]) -> Optional[Dict[str, Any]
     key = (presented or "").strip()
     if not key:
         return None
-    with session_scope() as db:
+    with session_scope(readonly=True) as db:
         u = db.query(User).filter(User.api_key == key).first()
         if u is None:
             return None

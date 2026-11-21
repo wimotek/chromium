@@ -205,7 +205,16 @@
             {{ headerChannelBadge.label }}
           </span>
         </div>
-        <div v-if="enabledPaymentMethods.length === 0" class="banner banner-warn" style="margin-bottom: 12px">
+        <div v-if="!channelsLoaded && loadingBilling" class="banner banner-info" style="margin-bottom: 12px">
+          正在加载可用线上支付渠道与收银台配置，请稍候...
+        </div>
+        <div v-else-if="!channelsLoaded && billingLoadError" class="banner banner-warn" style="margin-bottom: 12px">
+          <div class="row" style="justify-content: space-between; align-items: center; gap: 8px">
+            <span>加载支付渠道失败：{{ billingLoadError }}</span>
+            <button type="button" class="btn btn-sm" :disabled="loadingBilling" @click="loadAll()">重新加载</button>
+          </div>
+        </div>
+        <div v-else-if="enabledPaymentMethods.length === 0" class="banner banner-warn" style="margin-bottom: 12px">
           管理员当前已关闭全部线上支付渠道，前台已自动隐藏充值入口。如需充值，请联系平台管理员人工入账。
         </div>
         <template v-else>
@@ -494,11 +503,14 @@
 </template>
 
 <script setup>
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { apiFetch, fmtBytes } from '../../api'
 import { renderQrSvg } from '../../utils/qrcode'
 
-const emit = defineEmits(['notify', 'refresh-profile'])
+const props = defineProps({
+  returnOrderNo: { type: String, default: '' },
+})
+const emit = defineEmits(['notify', 'refresh-profile', 'return-order-handled'])
 const user = ref({})
 const quotas = ref({})
 const levelProgress = ref({})
@@ -513,6 +525,9 @@ const paymentChannels = ref({
   wechat_configured: false,
   methods: [],
 })
+const loadingBilling = ref(true)
+const channelsLoaded = ref(false)
+const billingLoadError = ref('')
 const rechargeOrders = ref([])
 const cashierOrder = ref(null)
 const selectedPayMethod = ref('alipay_f2f')
@@ -604,6 +619,11 @@ const activePayMethod = computed(() => {
 })
 
 const headerChannelBadge = computed(() => {
+  if (!channelsLoaded.value) {
+    return billingLoadError.value
+      ? { label: '渠道加载失败', cls: 'tag-warn' }
+      : { label: '加载支付渠道中...', cls: 'tag-info' }
+  }
   const list = enabledPaymentMethods.value
   if (list.length === 0) return { label: '线上充值已关闭', cls: 'tag-warn' }
   if (paymentChannels.value.alipay_configured || paymentChannels.value.wechat_configured) {
@@ -718,25 +738,63 @@ function copyText(text) {
   emit('notify', '已复制到剪贴板')
 }
 
-async function loadAll() {
+async function loadAll(options = {}) {
+  const silent = Boolean(options?.silent)
+  if (!silent) {
+    loadingBilling.value = true
+    billingLoadError.value = ''
+  }
   try {
-    const [bRes, pRes] = await Promise.all([apiFetch('/api/billing/overview'), apiFetch('/api/plans')])
-    user.value = bRes.user || {}
-    quotas.value = bRes.quotas || {}
-    levelProgress.value = bRes.level_progress || {}
-    selfUseBilling.value = bRes.self_use_billing || {}
-    promo.value = bRes.promo || {}
-    paymentChannels.value = bRes.payment_channels || paymentChannels.value
-    rechargeOrders.value = bRes.recharge_orders || []
-    const enabledList = (paymentChannels.value.methods || []).filter((m) => Boolean(m.enabled))
-    if (!enabledList.find((m) => m.id === selectedPayMethod.value)) {
-      selectedPayMethod.value = enabledList[0]?.id || ''
+    const overviewReq = apiFetch('/api/billing/overview', { timeoutMs: 25000 })
+      .then((bRes) => {
+        user.value = bRes.user || {}
+        quotas.value = bRes.quotas || {}
+        levelProgress.value = bRes.level_progress || {}
+        selfUseBilling.value = bRes.self_use_billing || {}
+        promo.value = bRes.promo || {}
+        paymentChannels.value = bRes.payment_channels || paymentChannels.value
+        channelsLoaded.value = true
+        billingLoadError.value = ''
+        rechargeOrders.value = bRes.recharge_orders || []
+        const enabledList = (paymentChannels.value.methods || []).filter((m) => Boolean(m.enabled))
+        if (!enabledList.find((m) => m.id === selectedPayMethod.value)) {
+          selectedPayMethod.value = enabledList[0]?.id || ''
+        }
+        ledger.value = bRes.ledger || []
+        allowSelfRecharge.value = Boolean(bRes.allow_self_recharge)
+        emit('refresh-profile', {
+          user: bRes.user || null,
+          plan: bRes.plan || null,
+          level: bRes.level || null,
+          channel_fees: bRes.channel_fees || null,
+          quotas: bRes.quotas || null,
+          skipFetch: true,
+        })
+      })
+      .catch((e) => {
+        if (!channelsLoaded.value) {
+          billingLoadError.value = e?.message || '加载财务数据失败'
+        }
+        if (!silent) {
+          emit('notify', { message: e?.message || '加载财务数据失败', type: 'error' })
+        }
+      })
+
+    const plansReq = apiFetch('/api/plans', { timeoutMs: 25000 })
+      .then((pRes) => {
+        plans.value = pRes.plans || []
+      })
+      .catch((e) => {
+        if (!silent && plans.value.length === 0) {
+          emit('notify', { message: e?.message || '加载套餐列表失败', type: 'error' })
+        }
+      })
+
+    await Promise.allSettled([overviewReq, plansReq])
+  } finally {
+    if (!silent) {
+      loadingBilling.value = false
     }
-    ledger.value = bRes.ledger || []
-    allowSelfRecharge.value = Boolean(bRes.allow_self_recharge)
-    plans.value = pRes.plans || []
-  } catch (e) {
-    emit('notify', e.message)
   }
 }
 
@@ -753,7 +811,7 @@ async function claimMonthly() {
     if (res.user) user.value = { ...user.value, ...res.user }
     emit('notify', res.message)
     emit('refresh-profile', res.user || null)
-    await loadAll()
+    await loadAll({ silent: true })
   } catch (e) {
     emit('notify', e.message)
   } finally {
@@ -775,7 +833,7 @@ async function claimDaily() {
     if (res.user) user.value = { ...user.value, ...res.user }
     emit('notify', res.message)
     emit('refresh-profile', res.user || null)
-    await loadAll()
+    await loadAll({ silent: true })
   } catch (e) {
     emit('notify', e.message)
   } finally {
@@ -789,7 +847,7 @@ async function createRechargeOrder() {
   try {
     const res = await apiFetch('/api/billing/recharge/create', {
       method: 'POST',
-      timeoutMs: 20000,
+      timeoutMs: 30000,
       body: JSON.stringify({
         channel: activePayMethod.value.channel,
         pay_method: activePayMethod.value.id,
@@ -805,8 +863,8 @@ async function createRechargeOrder() {
       openCashierModal(orderObj)
     }
     if (!res.simulated) {
-      // 后台静默刷新余额与历史订单列表，不阻塞收银台弹窗与按钮状态释放
-      loadAll().catch(() => {})
+      // 后台静默刷新余额与历史订单列表，不阻塞收银台弹窗，也不在付款期间弹出无关报错
+      loadAll({ silent: true }).catch(() => {})
     }
   } catch (e) {
     emit('notify', { message: e.message || '下单失败，请稍后重试', type: 'error' })
@@ -910,6 +968,38 @@ async function subscribe(planId) {
   }
 }
 
-onMounted(loadAll)
+async function handleReturnedOrder(orderNo) {
+  const no = String(orderNo || '').trim()
+  if (!no) return
+  emit('return-order-handled')
+  try {
+    const res = await apiFetch(`/api/billing/recharge/orders/${encodeURIComponent(no)}`, { timeoutMs: 20000 })
+    if (res?.order?.status === 'paid') {
+      if (res.user) user.value = { ...user.value, ...res.user }
+      emit('notify', { message: `支付成功！订单 ${no} 已入账 ¥${res.order.amount_yuan}`, type: 'ok' })
+      emit('refresh-profile', res.user || null)
+      await loadAll({ silent: true })
+    } else if (res?.order) {
+      openCashierModal(res.order)
+      emit('notify', { message: `已返回钱包页面，正在核验订单 ${no} 付款结果...`, type: 'info' })
+    }
+  } catch {
+    // 即使查单暂时失败也保持停留在钱包页面并正常展示订单列表
+  }
+}
+
+watch(
+  () => props.returnOrderNo,
+  (val) => {
+    if (val) handleReturnedOrder(val)
+  },
+)
+
+onMounted(async () => {
+  await loadAll()
+  if (props.returnOrderNo) {
+    handleReturnedOrder(props.returnOrderNo)
+  }
+})
 onBeforeUnmount(stopOrderPolling)
 </script>

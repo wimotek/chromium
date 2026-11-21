@@ -14,6 +14,7 @@ from sqlalchemy import delete, select
 from core.db import (
     db_session,
     get_setting,
+    get_settings_batch,
     hash_pwd,
     invalidate_nodes_cache,
     invalidate_users_cache,
@@ -30,11 +31,17 @@ from routes import (
     compute_heartbeat_age_sec,
     evaluate_node_sub_health,
     get_node_snis,
+    get_reality_presets,
     normalize_expire_date,
     normalize_hy2_mport,
+    normalize_reality_dest,
+    normalize_sni_domain,
+    normalize_sni_list,
     parse_agent_health,
     parse_last_probe,
     resolve_public_endpoint,
+    save_reality_presets,
+    verify_reality_sni_target,
 )
 from services.notify_service import notify_user
 
@@ -59,14 +66,44 @@ def admin_data():
     if not check_admin(data.get("admin_user"), data.get("admin_pwd")):
         return jsonify({"code": 403, "msg": "无权限"})
 
+    scope = str(data.get("scope") or "all").strip().lower()
+    nodes_only = scope == "nodes"
+
     with db_session(readonly=True) as s:
-        cards = [c.to_dict() for c in s.scalars(select(Card).order_by(Card.created_at.desc()).limit(200)).all()]
         active_nodes = [n.to_dict() for n in s.scalars(select(Node).order_by(Node.id.asc())).all()]
         audit_logs = [a.to_dict() for a in s.scalars(select(AuditLog).order_by(AuditLog.id.desc()).limit(150)).all()]
-        raw_users = s.scalars(select(User)).all()
-        user_dicts = [u.to_dict() for u in raw_users]
+        if not nodes_only:
+            cards = [c.to_dict() for c in s.scalars(select(Card).order_by(Card.created_at.desc()).limit(200)).all()]
+            raw_users = s.scalars(select(User)).all()
+            user_dicts = [u.to_dict() for u in raw_users]
+        else:
+            cards = []
+            user_dicts = []
 
     hub_host, hub_port, host_prefix = resolve_public_endpoint(request)
+
+    if nodes_only:
+        cluster_cfg = get_settings_batch({
+            "cluster_token": "",
+            "node_auto_approve": "true",
+            "tofu_enabled": "true",
+        })
+        now_ts = time.time()
+        now_dt = datetime.datetime.now()
+        enriched_nodes = [_enrich_node_dict(n, now_ts, now_dt) for n in active_nodes]
+        return jsonify({
+            "code": 200,
+            "server_ts": now_ts,
+            "nodes": enriched_nodes,
+            "audit_logs": audit_logs,
+            "reality_presets": get_reality_presets(),
+            "cluster_info": {
+                "cluster_token": cluster_cfg["cluster_token"],
+                "tofu_enabled": cluster_cfg["tofu_enabled"].lower() == "true",
+                "auto_approve": cluster_cfg["node_auto_approve"].lower() == "true",
+                "panel_url": host_prefix,
+            },
+        })
 
     # 预构建每个节点的链接前缀与后缀模板，避免在 N_users x M_nodes 循环中重复解析 SNI 与 URL 编码
     node_templates = []
@@ -176,9 +213,14 @@ def admin_data():
             ],
         })
 
-    cluster_token = get_setting("cluster_token", "")
-    auto_approve = get_setting("node_auto_approve", "true").lower() == "true"
-    tofu_enabled = get_setting("tofu_enabled", "true").lower() == "true"
+    cluster_cfg = get_settings_batch({
+        "cluster_token": "",
+        "node_auto_approve": "true",
+        "tofu_enabled": "true",
+    })
+    cluster_token = cluster_cfg["cluster_token"]
+    auto_approve = cluster_cfg["node_auto_approve"].lower() == "true"
+    tofu_enabled = cluster_cfg["tofu_enabled"].lower() == "true"
     now_ts = time.time()
     now_dt = datetime.datetime.now()
     enriched_nodes = [_enrich_node_dict(n, now_ts, now_dt) for n in active_nodes]
@@ -190,6 +232,7 @@ def admin_data():
         "users": users,
         "nodes": enriched_nodes,
         "audit_logs": audit_logs,
+        "reality_presets": get_reality_presets(),
         "cluster_info": {
             "cluster_token": cluster_token,
             "tofu_enabled": tofu_enabled,
@@ -206,11 +249,16 @@ def admin_cluster_token():
         admin_pwd = request.args.get("admin_pwd")
         if not check_admin(admin_user, admin_pwd):
             return jsonify({"code": 403, "msg": "无权限"})
+        cluster_cfg = get_settings_batch({
+            "cluster_token": "",
+            "tofu_enabled": "true",
+            "node_auto_approve": "true",
+        })
         return jsonify({
             "code": 200,
-            "cluster_token": get_setting("cluster_token", ""),
-            "tofu_enabled": get_setting("tofu_enabled", "true").lower() == "true",
-            "auto_approve": get_setting("node_auto_approve", "true").lower() == "true",
+            "cluster_token": cluster_cfg["cluster_token"],
+            "tofu_enabled": cluster_cfg["tofu_enabled"].lower() == "true",
+            "auto_approve": cluster_cfg["node_auto_approve"].lower() == "true",
         })
 
     data = request.json or {}
@@ -360,7 +408,106 @@ def admin_list_nodes():
     now_dt = datetime.datetime.now()
     with db_session(readonly=True) as s:
         nodes = [_enrich_node_dict(n.to_dict(), now_ts, now_dt) for n in s.scalars(select(Node).order_by(Node.id.asc())).all()]
-    return jsonify({"code": 200, "server_ts": now_ts, "data": nodes, "reality_presets": SAFE_REALITY_TARGETS})
+    return jsonify({"code": 200, "server_ts": now_ts, "data": nodes, "reality_presets": get_reality_presets()})
+
+
+@admin_bp.route("/api/admin/sni/presets", methods=["POST"])
+def admin_sni_presets():
+    """管理全局多 SNI 伪装目标列表：查询 / 新增 / 删除 / 恢复默认"""
+    data = request.json or {}
+    if not check_admin(data.get("admin_user"), data.get("admin_pwd")):
+        return jsonify({"code": 403, "msg": "无权限"})
+
+    action = str(data.get("action") or "list").strip().lower()
+    presets = get_reality_presets()
+
+    if action == "list":
+        return jsonify({"code": 200, "data": presets})
+
+    if action == "add":
+        raw_snis = data.get("server_names") if data.get("server_names") not in (None, "") else data.get("sni", "")
+        snis = normalize_sni_list(raw_snis, max_items=20)
+        if not snis:
+            return jsonify({"code": 400, "msg": "SNI 域名格式无效，请输入有效域名（多 SNI 用逗号分隔，如 www.apple.com,apple.com）"})
+        primary_sni = snis[0]
+        raw_dest = str(data.get("dest") or "").strip()
+        dest = normalize_reality_dest(raw_dest, fallback_sni=primary_sni)
+        if not dest:
+            return jsonify({"code": 400, "msg": "回落目标 (dest) 格式无效"})
+        label = str(data.get("label") or "").strip()[:48]
+        region = str(data.get("region") or "").strip()[:32]
+
+        new_key = f"{dest}|{','.join(snis)}"
+        for item in presets:
+            item_snis = normalize_sni_list(item.get("server_names") or item.get("sni") or "")
+            item_dest = normalize_reality_dest(item.get("dest") or "", fallback_sni=item_snis[0] if item_snis else "")
+            if f"{item_dest}|{','.join(item_snis)}" == new_key:
+                return jsonify({"code": 400, "msg": f"该 SNI 组 [{','.join(snis)}] 已存在于列表中"})
+
+        presets.append({
+            "sni": primary_sni,
+            "server_names": snis,
+            "dest": dest,
+            "label": label,
+            "region": region,
+        })
+        saved = save_reality_presets(presets)
+        return jsonify({"code": 200, "msg": f"已新增 SNI 组（{len(snis)} 个域名）：{', '.join(snis)}", "data": saved})
+
+    if action == "delete":
+        target_key = str(data.get("key") or "").strip().lower()
+        target_sni = normalize_sni_domain(data.get("sni") or "") or str(data.get("sni") or "").strip().lower()
+        target_dest = str(data.get("dest") or "").strip().lower()
+        if not target_key and not target_sni and not target_dest:
+            return jsonify({"code": 400, "msg": "请指定要删除的 SNI 预设"})
+
+        def _matches(item: dict) -> bool:
+            item_snis = normalize_sni_list(item.get("server_names") or item.get("sni") or "")
+            item_dest = (normalize_reality_dest(item.get("dest") or "", fallback_sni=item_snis[0] if item_snis else "") or "").lower()
+            item_key = f"{item_dest}|{','.join(item_snis)}"
+            if target_key and item_key == target_key:
+                return True
+            if target_dest and target_sni:
+                return item_dest == target_dest and (item.get("sni") or "").strip().lower() == target_sni
+            if target_sni:
+                return (item.get("sni") or "").strip().lower() == target_sni
+            return False
+
+        remaining = [item for item in presets if not _matches(item)]
+        if len(remaining) == len(presets):
+            return jsonify({"code": 404, "msg": "列表中未找到对应的 SNI 预设"})
+        if not remaining:
+            return jsonify({"code": 400, "msg": "至少需要保留 1 组可用 SNI，无法全部清空"})
+        saved = save_reality_presets(remaining)
+        return jsonify({"code": 200, "msg": "已从全局列表删除该 SNI 预设", "data": saved})
+
+    if action == "reset":
+        saved = save_reality_presets([
+            {
+                "sni": item["sni"],
+                "server_names": list(item["server_names"]),
+                "dest": item["dest"],
+                "label": item.get("label", ""),
+                "region": item.get("region", ""),
+            }
+            for item in SAFE_REALITY_TARGETS
+        ])
+        return jsonify({"code": 200, "msg": "已恢复内置安全默认多 SNI 列表", "data": saved})
+
+    return jsonify({"code": 400, "msg": "未知操作"})
+
+
+@admin_bp.route("/api/admin/sni/verify", methods=["POST"])
+def admin_verify_sni():
+    """实时探测单/多 SNI 组是否满足 REALITY TLS 1.3 + HTTP/2 + 证书有效要求"""
+    data = request.json or {}
+    if not check_admin(data.get("admin_user"), data.get("admin_pwd")):
+        return jsonify({"code": 403, "msg": "无权限"})
+
+    raw_snis = data.get("server_names") if data.get("server_names") not in (None, "") else data.get("sni", "")
+    raw_dest = str(data.get("dest") or "").strip()
+    result = verify_reality_sni_target(raw_snis, raw_dest, timeout=4.5)
+    return jsonify({"code": 200, "data": result})
 
 
 @admin_bp.route("/api/admin/nodes/ping", methods=["POST"])

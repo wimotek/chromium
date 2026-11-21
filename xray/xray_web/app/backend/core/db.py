@@ -51,12 +51,17 @@ def _create_sqlalchemy_engine(db_url: str):
             parent = os.path.dirname(file_part)
             if parent:
                 os.makedirs(parent, exist_ok=True)
-        eng = create_engine(
-            db_url,
-            connect_args={"timeout": 30.0, "check_same_thread": False},
-            pool_pre_ping=True,
-            future=True,
-        )
+        is_memory = ":memory:" in db_url.lower()
+        sqlite_kwargs = {
+            "connect_args": {"timeout": 30.0, "check_same_thread": False},
+            "pool_pre_ping": True,
+            "future": True,
+        }
+        if not is_memory:
+            sqlite_kwargs["pool_size"] = max(10, Config.DB_POOL_SIZE)
+            sqlite_kwargs["max_overflow"] = max(20, Config.DB_MAX_OVERFLOW)
+            sqlite_kwargs["pool_timeout"] = max(5, Config.DB_POOL_TIMEOUT)
+        eng = create_engine(db_url, **sqlite_kwargs)
 
         @event.listens_for(eng, "connect")
         def _set_sqlite_pragmas(dbapi_conn, _conn_record):
@@ -64,6 +69,11 @@ def _create_sqlalchemy_engine(db_url: str):
             cur.execute("PRAGMA busy_timeout=30000;")
             cur.execute("PRAGMA synchronous=NORMAL;")
             cur.execute("PRAGMA temp_store=MEMORY;")
+            cur.execute("PRAGMA cache_size=-16000;")
+            try:
+                cur.execute("PRAGMA mmap_size=67108864;")
+            except Exception:
+                pass
             cur.close()
 
         try:
@@ -394,10 +404,15 @@ def is_setup_required() -> bool:
 def get_setting(key: str, default: str = "") -> str:
     from core.cache import cache
 
-    cache_key = f"setting:{key}"
-    cached = cache.get(cache_key)
-    if cached is not None:
-        return cached
+    redis_vals = cache.get_many_redis([f"setting:{key}"])
+    if redis_vals is not None:
+        cached = redis_vals.get(f"setting:{key}")
+        if cached is not None:
+            return cached
+    else:
+        local_val = cache.get_local_setting(key)
+        if local_val is not None:
+            return local_val
 
     val = None
     with db_session(readonly=True) as s:
@@ -406,17 +421,77 @@ def get_setting(key: str, default: str = "") -> str:
             val = str(row.value)
 
     if val is not None:
-        cache.set(cache_key, val, ttl=300)
+        if redis_vals is not None:
+            cache.set_many_redis({f"setting:{key}": val}, ttl=300)
+        else:
+            cache.set_local_settings({key: val})
         return val
     return default
 
 
-def set_setting(key: str, value: str):
+def get_settings_batch(defaults: dict[str, str]) -> dict[str, str]:
+    """单次批量读取多个系统配置：Redis 活跃时 1 次 MGET，未命中部分合并为 1 次 IN 查询，杜绝只读路径写入 kv_cache"""
+    if not defaults:
+        return {}
     from core.cache import cache
 
+    keys = list(defaults.keys())
+    result: dict[str, str] = {}
+    missing: list[str] = []
+
+    redis_vals = cache.get_many_redis([f"setting:{k}" for k in keys])
+    if redis_vals is not None:
+        for k in keys:
+            v = redis_vals.get(f"setting:{k}")
+            if v is not None:
+                result[k] = v
+            else:
+                missing.append(k)
+    else:
+        for k in keys:
+            v = cache.get_local_setting(k)
+            if v is not None:
+                result[k] = v
+            else:
+                missing.append(k)
+
+    if missing:
+        fetched: dict[str, str] = {}
+        with db_session(readonly=True) as s:
+            rows = s.execute(
+                select(SystemSetting.key, SystemSetting.value).where(SystemSetting.key.in_(missing))
+            ).all()
+            for r_key, r_val in rows:
+                if r_val is not None:
+                    fetched[str(r_key)] = str(r_val)
+        if fetched:
+            if redis_vals is not None:
+                cache.set_many_redis({f"setting:{k}": v for k, v in fetched.items()}, ttl=300)
+            else:
+                cache.set_local_settings(fetched)
+        for k in missing:
+            result[k] = fetched.get(k, defaults[k])
+
+    return result
+
+
+def set_setting(key: str, value: str):
+    set_settings_batch({key: str(value)})
+
+
+def set_settings_batch(items: dict[str, str]):
+    """单事务批量写入系统配置并同步刷新 Redis / 本地短时缓存，避免循环提交导致 SQLite 写锁争抢"""
+    if not items:
+        return
+    from core.cache import cache
+
+    normalized = {str(k): str(v) for k, v in items.items()}
     with db_session() as s:
-        upsert_system_setting(s, key, str(value))
-    cache.set(f"setting:{key}", str(value), ttl=300)
+        for k, v in normalized.items():
+            upsert_system_setting(s, k, v)
+
+    cache.set_local_settings(normalized)
+    cache.set_many_redis({f"setting:{k}": v for k, v in normalized.items()}, ttl=300)
 
 
 def get_cached_active_users() -> list[dict]:

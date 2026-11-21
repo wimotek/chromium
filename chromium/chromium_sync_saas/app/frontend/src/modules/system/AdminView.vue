@@ -166,9 +166,15 @@
             >
               {{ settingsSaveFeedback.text }}
             </span>
-            <button class="btn btn-sm btn-primary" :disabled="savingSettings" @click="saveSettings('rates')">
-              {{ savingSettings ? '保存中...' : '保存差价与评级策略' }}
+            <button class="btn btn-sm btn-primary" :disabled="savingSettings || !settingsLoaded" @click="saveSettings('rates')">
+              {{ savingSettings ? '保存中...' : !settingsLoaded && settingsLoading ? '读取配置中...' : '保存差价与评级策略' }}
             </button>
+          </div>
+        </div>
+        <div v-if="!settingsLoaded" class="banner" :class="settingsLoadError ? 'banner-warn' : 'banner-info'" style="font-size: 12px; margin-bottom: 12px">
+          <div class="row" style="justify-content: space-between; align-items: center; gap: 8px">
+            <span>{{ settingsLoadError ? `配置读取失败：${settingsLoadError}` : '正在读取数据库已保存的策略配置，读取完成后自动回填...' }}</span>
+            <button v-if="settingsLoadError" type="button" class="btn btn-sm" :disabled="settingsLoading" @click="loadSettingsOnly(true)">重新读取配置</button>
           </div>
         </div>
         <div class="grid-3">
@@ -331,9 +337,15 @@
             >
               {{ settingsSaveFeedback.text }}
             </span>
-            <button class="btn btn-sm btn-primary" :disabled="savingSettings" @click="saveSettings('growth')">
-              {{ savingSettings ? '保存中...' : '保存成长与补贴配置' }}
+            <button class="btn btn-sm btn-primary" :disabled="savingSettings || !settingsLoaded" @click="saveSettings('growth')">
+              {{ savingSettings ? '保存中...' : !settingsLoaded && settingsLoading ? '读取配置中...' : '保存成长与补贴配置' }}
             </button>
+          </div>
+        </div>
+        <div v-if="!settingsLoaded" class="banner" :class="settingsLoadError ? 'banner-warn' : 'banner-info'" style="font-size: 12px; margin-bottom: 12px">
+          <div class="row" style="justify-content: space-between; align-items: center; gap: 8px">
+            <span>{{ settingsLoadError ? `配置读取失败：${settingsLoadError}` : '正在读取数据库已保存的成长与补贴配置，读取完成后自动回填...' }}</span>
+            <button v-if="settingsLoadError" type="button" class="btn btn-sm" :disabled="settingsLoading" @click="loadSettingsOnly(true)">重新读取配置</button>
           </div>
         </div>
 
@@ -468,9 +480,15 @@
             >
               {{ settingsSaveFeedback.text }}
             </span>
-            <button class="btn btn-sm btn-primary" :disabled="savingSettings" @click="saveSettings('payments')">
-              {{ savingSettings ? '保存中...' : '保存全部支付网关参数' }}
+            <button class="btn btn-sm btn-primary" :disabled="savingSettings || !settingsLoaded" @click="saveSettings('payments')">
+              {{ savingSettings ? '保存中...' : !settingsLoaded && settingsLoading ? '读取配置中...' : '保存全部支付网关参数' }}
             </button>
+          </div>
+        </div>
+        <div v-if="!settingsLoaded" class="banner" :class="settingsLoadError ? 'banner-warn' : 'banner-info'" style="font-size: 12px; margin-bottom: 12px">
+          <div class="row" style="justify-content: space-between; align-items: center; gap: 8px">
+            <span>{{ settingsLoadError ? `已保存的支付参数读取失败：${settingsLoadError}` : '正在读取已保存的支付网关配置（读取完成前暂不可保存，避免覆盖原配置）...' }}</span>
+            <button v-if="settingsLoadError" type="button" class="btn btn-sm" :disabled="settingsLoading" @click="loadSettingsOnly(true)">重新读取配置</button>
           </div>
         </div>
 
@@ -579,7 +597,8 @@
               </span>
             </div>
             <div class="banner banner-info" style="font-size: 12px; margin-bottom: 12px">
-              <strong>开放平台对接提示：</strong>支付宝开放平台里的「授权回调地址」「应用网关」「接口内容加密方式 (AES)」均<strong>留空/未设置</strong>即可；支付所需的 <code>notify_url</code> 会在每次下单时由本系统自动携带。加签方式如在开放平台选了<strong>「密钥/普通公钥」</strong>请选公钥模式，选了<strong>「证书」</strong>请切换为公钥证书模式并读取 3 个 <code>.crt</code> 证书文件。
+              <strong>开放平台对接提示：</strong>支付宝开放平台里的「授权回调地址」「应用网关」「接口内容加密方式 (AES)」均<strong>留空/未设置</strong>即可；支付所需的 <code>notify_url</code> 会在每次下单时由本系统自动携带。加签方式如在开放平台选了<strong>「密钥/普通公钥」</strong>请选公钥模式，选了<strong>「证书」</strong>请切换为公钥证书模式并读取 3 个 <code>.crt</code> 证书文件。<br />
+              <strong>产品权限提示：</strong>「电脑网站支付」需企业在支付宝商家中心单独签约并绑定到当前 AppID 且应用已上线；若跳转后支付宝提示 <code>insufficient-isv-permissions</code>（ISV权限不足），说明该 AppID 仅开通了当面付或未生效「电脑网站支付」签约，请直接关闭上方「支付宝电脑网站支付」开关即可。
             </div>
             <div class="grid-2">
               <div class="field">
@@ -919,8 +938,8 @@
           >
             {{ settingsSaveFeedback.text }}
           </span>
-          <button class="btn btn-primary" :disabled="savingSettings" @click="saveSettings('payments')">
-            {{ savingSettings ? '正在保存支付网关参数...' : '保存全部支付网关参数' }}
+          <button class="btn btn-primary" :disabled="savingSettings || !settingsLoaded" @click="saveSettings('payments')">
+            {{ savingSettings ? '正在保存支付网关参数...' : !settingsLoaded && settingsLoading ? '正在读取已保存配置...' : '保存全部支付网关参数' }}
           </button>
         </div>
       </div>
@@ -1626,6 +1645,9 @@ const redisPingResult = ref(null)
 const geoipUrlInput = ref('')
 const geoipUpdating = ref(false)
 const refreshing = ref(false)
+const settingsLoading = ref(true)
+const settingsLoaded = ref(false)
+const settingsLoadError = ref('')
 const savingSettings = ref(false)
 const settingsSaveFeedback = reactive({ section: '', ok: true, text: '' })
 const savingLevelId = ref(null)
@@ -1725,7 +1747,7 @@ const baseOrigin = computed(() => {
 
 const defaultAlipayNotifyUrl = computed(() => `${baseOrigin.value}/api/billing/recharge/notify/alipay`)
 const defaultWechatNotifyUrl = computed(() => `${baseOrigin.value}/api/billing/recharge/notify/wechat`)
-const defaultReturnUrl = computed(() => `${baseOrigin.value}/`)
+const defaultReturnUrl = computed(() => `${baseOrigin.value}/?tab=billing`)
 
 const activePaymentHelp = ref('')
 function togglePaymentHelp(key) {
@@ -1824,43 +1846,126 @@ function loadTextFile(event, targetKey) {
   event.target.value = ''
 }
 
+function applySettingsPayload(rawSettings) {
+  if (!rawSettings || typeof rawSettings !== 'object') return
+  Object.assign(settings, rawSettings)
+  // Always keep write-only secret inputs empty after load
+  settings.saas_alipay_private_key = ''
+  settings.saas_wechat_private_key = ''
+  settings.saas_wechat_api_v3_key = ''
+  settings.saas_payment_notify_secret = ''
+  settingsLoaded.value = true
+  settingsLoadError.value = ''
+}
+
+async function loadSettingsOnly(showFeedback = false) {
+  settingsLoading.value = true
+  settingsLoadError.value = ''
+  try {
+    const res = await apiFetch('/api/admin/settings')
+    if (res?.settings) {
+      applySettingsPayload(res.settings)
+      if (showFeedback) {
+        emit('notify', { message: '已读取最新保存的配置', type: 'ok' })
+      }
+      return true
+    }
+    return false
+  } catch (e) {
+    if (!settingsLoaded.value) {
+      settingsLoadError.value = e?.message || '读取配置失败'
+    }
+    if (showFeedback) {
+      emit('notify', { message: e?.message || '读取配置失败', type: 'error' })
+    }
+    return false
+  } finally {
+    settingsLoading.value = false
+  }
+}
+
 async function load(showFeedback = false) {
   if (showFeedback) refreshing.value = true
-  try {
-    const [ov, us, rc, refRes] = await Promise.all([
-      apiFetch('/api/admin/overview'),
-      apiFetch('/api/admin/users'),
-      apiFetch('/api/admin/recharges'),
-      apiFetch('/api/admin/referrals'),
-    ])
-    metrics.value = ov.metrics || {}
-    Object.assign(settings, ov.settings || {})
-    // Always keep write-only secret inputs empty after load
-    settings.saas_alipay_private_key = ''
-    settings.saas_wechat_private_key = ''
-    settings.saas_wechat_api_v3_key = ''
-    settings.saas_payment_notify_secret = ''
+  settingsLoading.value = true
+  let settingsAppliedThisLoad = false
+  const errors = []
 
-    levels.value = ov.levels || []
-    plans.value = (ov.plans || []).map((p) => ({
-      ...p,
-      edit_price_yuan: Number(((p.monthly_price_units || 0) / 10000).toFixed(2)),
-      edit_traffic_gb: Math.max(1, Math.round((p.max_monthly_traffic_bytes || 0) / 1024 ** 3)),
-      edit_can_share: Boolean(p.can_share_nodes),
-    }))
-    runtimeInfo.value = ov.runtime || {}
-    syncRedisFormFromCache(runtimeInfo.value?.cache)
-    recentLeases.value = ov.recent_leases || []
-    users.value = us || []
-    recharges.value = rc.orders || []
-    referralSummary.value = refRes.summary || {}
-    referralRewards.value = refRes.rewards || []
-    if (showFeedback) {
+  const settingsReq = apiFetch('/api/admin/settings')
+    .then((res) => {
+      if (res?.settings) {
+        applySettingsPayload(res.settings)
+        settingsAppliedThisLoad = true
+      }
+    })
+    .catch((e) => {
+      // Fallback to /api/admin/overview.settings if lightweight endpoint fails
+      return e
+    })
+    .finally(() => {
+      if (settingsAppliedThisLoad) {
+        settingsLoading.value = false
+      }
+    })
+
+  const overviewReq = apiFetch('/api/admin/overview')
+    .then((ov) => {
+      metrics.value = ov.metrics || {}
+      if (!settingsAppliedThisLoad && ov.settings) {
+        applySettingsPayload(ov.settings)
+        settingsAppliedThisLoad = true
+      }
+      levels.value = ov.levels || []
+      plans.value = (ov.plans || []).map((p) => ({
+        ...p,
+        edit_price_yuan: Number(((p.monthly_price_units || 0) / 10000).toFixed(2)),
+        edit_traffic_gb: Math.max(1, Math.round((p.max_monthly_traffic_bytes || 0) / 1024 ** 3)),
+        edit_can_share: Boolean(p.can_share_nodes),
+      }))
+      runtimeInfo.value = ov.runtime || {}
+      syncRedisFormFromCache(runtimeInfo.value?.cache)
+      recentLeases.value = ov.recent_leases || []
+    })
+    .catch((e) => {
+      errors.push(e?.message || '加载大盘数据失败')
+    })
+
+  const usersReq = apiFetch('/api/admin/users')
+    .then((us) => {
+      users.value = us || []
+    })
+    .catch((e) => {
+      errors.push(e?.message || '加载用户列表失败')
+    })
+
+  const rechargesReq = apiFetch('/api/admin/recharges')
+    .then((rc) => {
+      recharges.value = rc.orders || []
+    })
+    .catch((e) => {
+      errors.push(e?.message || '加载充值订单失败')
+    })
+
+  const referralsReq = apiFetch('/api/admin/referrals')
+    .then((refRes) => {
+      referralSummary.value = refRes.summary || {}
+      referralRewards.value = refRes.rewards || []
+    })
+    .catch((e) => {
+      errors.push(e?.message || '加载邀请流水失败')
+    })
+
+  try {
+    await Promise.allSettled([settingsReq, overviewReq, usersReq, rechargesReq, referralsReq])
+    if (!settingsLoaded.value) {
+      settingsLoadError.value = errors[0] || '未能加载已保存配置，请点击重试'
+    }
+    if (errors.length > 0) {
+      emit('notify', { message: errors[0], type: 'error' })
+    } else if (showFeedback) {
       emit('notify', { message: '管理台数据已刷新', type: 'ok' })
     }
-  } catch (e) {
-    emit('notify', { message: e.message || '加载管理台数据失败', type: 'error' })
   } finally {
+    settingsLoading.value = false
     if (showFeedback) refreshing.value = false
   }
 }
@@ -1881,7 +1986,7 @@ const NUMERIC_SETTING_KEYS = [
 ]
 
 async function saveSettings(section = activeSection.value) {
-  if (savingSettings.value) return
+  if (savingSettings.value || !settingsLoaded.value) return
   savingSettings.value = true
   try {
     const payload = { ...settings }
@@ -1908,9 +2013,13 @@ async function saveSettings(section = activeSection.value) {
 
     const res = await apiFetch('/api/admin/settings', { method: 'POST', body: JSON.stringify(payload) })
     const msg = res?.message || '设置已保存生效'
+    if (res?.settings) {
+      applySettingsPayload(res.settings)
+    } else {
+      await loadSettingsOnly(false)
+    }
     setSaveFeedback(section, true, `✓ 已保存 ${nowTimeStr()}`)
     emit('notify', { message: msg, type: 'ok' })
-    await load(false)
   } catch (e) {
     const errMsg = e?.message || '保存设置失败'
     setSaveFeedback(section, false, `✕ 保存失败`)

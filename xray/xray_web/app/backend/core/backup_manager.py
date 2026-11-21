@@ -96,7 +96,7 @@ def prune_old_backups(max_keep: int = 7) -> int:
 
 def _export_logical_snapshot(dest_path: str):
     """通过 SQLAlchemy 导出全表 JSON 逻辑快照（兼容 MySQL 与 SQLite）"""
-    with db_session() as s:
+    with db_session(readonly=True) as s:
         payload = {
             "version": 2,
             "dialect": current_dialect(),
@@ -194,7 +194,8 @@ def create_database_backup(tag: str = "manual") -> tuple[bool, str, dict]:
     try:
         source_conn = sqlite3.connect(db_path, timeout=30.0)
         dest_conn = sqlite3.connect(dest_path)
-        source_conn.backup(dest_conn)
+        # 分批让出锁片（每 250 页休眠 10ms），避免大库热备期间阻塞并发心跳与业务写入
+        source_conn.backup(dest_conn, pages=250, sleep=0.01)
         dest_conn.commit()
         dest_conn.close()
         dest_conn = None

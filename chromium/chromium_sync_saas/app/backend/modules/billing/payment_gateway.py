@@ -156,6 +156,19 @@ def _decode_alipay_response(resp: httpx.Response) -> str:
     return raw.decode("utf-8", errors="replace")
 
 
+_gateway_http_client: Optional[httpx.AsyncClient] = None
+
+
+def _get_gateway_http_client() -> httpx.AsyncClient:
+    global _gateway_http_client
+    if _gateway_http_client is None or _gateway_http_client.is_closed:
+        _gateway_http_client = httpx.AsyncClient(
+            follow_redirects=True,
+            limits=httpx.Limits(max_connections=20, max_keepalive_connections=10, keepalive_expiry=60.0),
+        )
+    return _gateway_http_client
+
+
 async def _post_alipay_gateway(gateway: str, signed_params: Dict[str, Any], timeout_sec: float = 12.0) -> str:
     """
     按照支付宝官方 SDK 规范发送网关请求：
@@ -175,10 +188,10 @@ async def _post_alipay_gateway(gateway: str, signed_params: Dict[str, Any], time
         "Accept": "application/json, text/plain, */*",
         "User-Agent": "ChromiumSyncSaaS/1.0",
     }
-    timeout = httpx.Timeout(connect=6.0, read=timeout_sec, write=8.0, pool=6.0)
+    timeout = httpx.Timeout(connect=10.0, read=timeout_sec, write=10.0, pool=8.0)
     try:
-        async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
-            resp = await client.post(url, content=body_bytes, headers=headers)
+        client = _get_gateway_http_client()
+        resp = await client.post(url, content=body_bytes, headers=headers, timeout=timeout)
     except httpx.TimeoutException:
         raise RuntimeError(f"连接支付宝开放平台网关超时 ({gateway_base})，请检查服务器出站网络或网关地址配置")
     except httpx.RequestError as exc:
@@ -340,7 +353,7 @@ async def create_alipay_order(
     root_cert = str(cfg.get("root_cert") or "").strip()
     gateway = _normalize_alipay_gateway_base(str(cfg.get("gateway_url") or "https://openapi.alipay.com/gateway.do"))
     notify_url = str(cfg.get("notify_url") or "").strip() or f"{base_url}/api/billing/recharge/notify/alipay"
-    return_url = str(cfg.get("return_url") or "").strip() or f"{base_url}/"
+    return_url = str(cfg.get("return_url") or "").strip() or f"{base_url}/?tab=billing"
     static_qr = str(cfg.get("qr_url") or "").strip()
 
     if mode == "static_qr":
@@ -410,7 +423,7 @@ async def create_alipay_order(
             separators=(",", ":"),
         )
         common_params["sign"] = _alipay_sign(common_params, priv_key)
-        raw_text = await _post_alipay_gateway(gateway, common_params, timeout_sec=12.0)
+        raw_text = await _post_alipay_gateway(gateway, common_params, timeout_sec=18.0)
         try:
             data = json.loads(raw_text)
         except Exception:

@@ -888,7 +888,7 @@ docker run -d -p 3000:8443 \
 </template>
 
 <script setup>
-import { ref, reactive, computed, onMounted } from 'vue'
+import { ref, reactive, computed, onMounted, onActivated } from 'vue'
 import axios from 'axios'
 import { ElMessage, ElMessageBox } from 'element-plus'
 
@@ -1065,6 +1065,12 @@ onMounted(() => {
     loadCertInfo(),
     loadCacheStatus(true)
   ])
+})
+
+onActivated(() => {
+  if (backupsLoadError.value && !loadingBackups.value) {
+    loadBackups()
+  }
 })
 
 // 加载备份文件列表

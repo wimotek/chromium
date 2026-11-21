@@ -12,7 +12,7 @@ from pydantic import BaseModel
 from sqlalchemy import func, or_
 
 from config import logger
-from core.db import get_setting, session_scope
+from core.db import get_all_settings_map, get_setting, session_scope
 from core.models import (
     BillingLedger,
     Node,
@@ -45,54 +45,61 @@ from modules.users.level_service import get_user_level_progress
 router = APIRouter(tags=["财务系统（套餐 · 钱包 · 充值 · 账单）"])
 
 
-def _get_alipay_gateway_cfg() -> Dict[str, Any]:
-    f2f_on = get_setting("saas_alipay_f2f_enabled", "1") == "1"
-    page_on = get_setting("saas_alipay_page_enabled", "1") == "1"
-    static_on = get_setting("saas_alipay_static_enabled", "0") == "1"
+def _get_alipay_gateway_cfg(settings_map: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
+    s = settings_map if settings_map is not None else get_all_settings_map()
+    f2f_on = s.get("saas_alipay_f2f_enabled", "1") == "1"
+    page_on = s.get("saas_alipay_page_enabled", "1") == "1"
+    static_on = s.get("saas_alipay_static_enabled", "0") == "1"
     return {
         "enabled": f2f_on or page_on or static_on,
-        "mode": get_setting("saas_alipay_mode", "precreate") or "precreate",
-        "sign_mode": get_setting("saas_alipay_sign_mode", "public_key") or "public_key",
-        "app_id": get_setting("saas_alipay_app_id", ""),
-        "private_key": get_setting("saas_alipay_private_key", ""),
-        "public_key": get_setting("saas_alipay_public_key", ""),
-        "app_cert": get_setting("saas_alipay_app_cert", ""),
-        "cert_public_key": get_setting("saas_alipay_cert_public_key", ""),
-        "root_cert": get_setting("saas_alipay_root_cert", ""),
-        "gateway_url": get_setting("saas_alipay_gateway_url", "https://openapi.alipay.com/gateway.do"),
-        "notify_url": get_setting("saas_alipay_notify_url", ""),
-        "return_url": get_setting("saas_alipay_return_url", ""),
-        "qr_url": get_setting("saas_alipay_qr_url", ""),
+        "mode": s.get("saas_alipay_mode", "precreate") or "precreate",
+        "sign_mode": s.get("saas_alipay_sign_mode", "public_key") or "public_key",
+        "app_id": s.get("saas_alipay_app_id", ""),
+        "private_key": s.get("saas_alipay_private_key", ""),
+        "public_key": s.get("saas_alipay_public_key", ""),
+        "app_cert": s.get("saas_alipay_app_cert", ""),
+        "cert_public_key": s.get("saas_alipay_cert_public_key", ""),
+        "root_cert": s.get("saas_alipay_root_cert", ""),
+        "gateway_url": s.get("saas_alipay_gateway_url", "https://openapi.alipay.com/gateway.do") or "https://openapi.alipay.com/gateway.do",
+        "notify_url": s.get("saas_alipay_notify_url", ""),
+        "return_url": s.get("saas_alipay_return_url", ""),
+        "qr_url": s.get("saas_alipay_qr_url", ""),
     }
 
 
-def _get_wechat_gateway_cfg() -> Dict[str, Any]:
-    native_on = get_setting("saas_wechat_native_enabled", "1") == "1"
-    static_on = get_setting("saas_wechat_static_enabled", "0") == "1"
+def _get_wechat_gateway_cfg(settings_map: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
+    s = settings_map if settings_map is not None else get_all_settings_map()
+    native_on = s.get("saas_wechat_native_enabled", "1") == "1"
+    static_on = s.get("saas_wechat_static_enabled", "0") == "1"
     return {
         "enabled": native_on or static_on,
-        "mode": get_setting("saas_wechat_mode", "native_v3") or "native_v3",
-        "app_id": get_setting("saas_wechat_app_id", ""),
-        "mch_id": get_setting("saas_wechat_mch_id", ""),
-        "serial_no": get_setting("saas_wechat_serial_no", ""),
-        "private_key": get_setting("saas_wechat_private_key", ""),
-        "api_v3_key": get_setting("saas_wechat_api_v3_key", ""),
-        "platform_public_key": get_setting("saas_wechat_platform_public_key", ""),
-        "gateway_url": get_setting("saas_wechat_gateway_url", "https://api.mch.weixin.qq.com"),
-        "notify_url": get_setting("saas_wechat_notify_url", ""),
-        "qr_url": get_setting("saas_wechat_qr_url", ""),
+        "mode": s.get("saas_wechat_mode", "native_v3") or "native_v3",
+        "app_id": s.get("saas_wechat_app_id", ""),
+        "mch_id": s.get("saas_wechat_mch_id", ""),
+        "serial_no": s.get("saas_wechat_serial_no", ""),
+        "private_key": s.get("saas_wechat_private_key", ""),
+        "api_v3_key": s.get("saas_wechat_api_v3_key", ""),
+        "platform_public_key": s.get("saas_wechat_platform_public_key", ""),
+        "gateway_url": s.get("saas_wechat_gateway_url", "https://api.mch.weixin.qq.com") or "https://api.mch.weixin.qq.com",
+        "notify_url": s.get("saas_wechat_notify_url", ""),
+        "qr_url": s.get("saas_wechat_qr_url", ""),
     }
 
 
-def _build_payment_methods_matrix(alipay_cfg: Dict[str, Any], wechat_cfg: Dict[str, Any]) -> list:
+def _build_payment_methods_matrix(
+    alipay_cfg: Dict[str, Any],
+    wechat_cfg: Dict[str, Any],
+    settings_map: Optional[Dict[str, str]] = None,
+) -> list:
+    s = settings_map if settings_map is not None else get_all_settings_map()
     alipay_api_ok = is_alipay_api_configured(alipay_cfg)
     wechat_api_ok = is_wechat_v3_configured(wechat_cfg)
 
-    f2f_on = get_setting("saas_alipay_f2f_enabled", "1") == "1"
-    page_on = get_setting("saas_alipay_page_enabled", "1") == "1"
-    alipay_static_on = get_setting("saas_alipay_static_enabled", "0") == "1"
-    wechat_native_on = get_setting("saas_wechat_native_enabled", "1") == "1"
-    wechat_static_on = get_setting("saas_wechat_static_enabled", "0") == "1"
+    f2f_on = s.get("saas_alipay_f2f_enabled", "1") == "1"
+    page_on = s.get("saas_alipay_page_enabled", "1") == "1"
+    alipay_static_on = s.get("saas_alipay_static_enabled", "0") == "1"
+    wechat_native_on = s.get("saas_wechat_native_enabled", "1") == "1"
+    wechat_static_on = s.get("saas_wechat_static_enabled", "0") == "1"
 
     return [
         {
@@ -285,7 +292,7 @@ def _evaluate_plan_relation(target_plan: Plan, current_plan: Optional[Plan]) -> 
 
 @router.get("/api/plans", summary="获取 SaaS 会员套餐列表")
 def list_plans(user: dict = Depends(verify_token)):
-    with session_scope() as db:
+    with session_scope(readonly=True) as db:
         u = db.get(User, int(user["id"]))
         current_plan_id = int(u.plan_id) if u is not None else int(user.get("plan_id") or 0)
         plan_rows = sorted(db.query(Plan).all(), key=_plan_tier_key)
@@ -416,7 +423,7 @@ def billing_overview(user: dict = Depends(verify_token)):
     current_ym = now_dt.strftime("%Y-%m")
     today_str = now_dt.strftime("%Y-%m-%d")
 
-    with session_scope() as db:
+    with session_scope(readonly=True) as db:
         u = db.get(User, uid)
         if u is None:
             raise HTTPException(status_code=404, detail="用户不存在")
@@ -442,12 +449,31 @@ def billing_overview(user: dict = Depends(verify_token)):
         user_payload = u.to_dict(include_secrets=True)
         plan_payload = plan.to_dict() if plan else None
 
-    self_rev_units = get_self_reverse_hub_gb_units()
-    monthly_claim_units = max(0, int(get_setting("saas_monthly_claim_units", "100000") or 0))
-    daily_checkin_units = max(0, int(get_setting("saas_daily_checkin_units", "5000") or 0))
-    daily_streak_units = max(0, int(get_setting("saas_daily_streak_bonus_units", "1000") or 0))
-    ref_inviter_units = max(0, int(get_setting("saas_referral_inviter_bonus_units", "50000") or 0))
-    ref_invitee_units = max(0, int(get_setting("saas_referral_invitee_bonus_units", "30000") or 0))
+    s = get_all_settings_map()
+    alipay_cfg = _get_alipay_gateway_cfg(s)
+    wechat_cfg = _get_wechat_gateway_cfg(s)
+    methods_matrix = _build_payment_methods_matrix(alipay_cfg, wechat_cfg, s)
+
+    def _s_int(key: str, default: int) -> int:
+        raw = s.get(key)
+        try:
+            return max(0, int(raw) if raw not in (None, "") else default)
+        except (TypeError, ValueError):
+            return default
+
+    self_rev_units = _s_int("saas_self_reverse_hub_gb_units", 2000)
+    monthly_claim_units = _s_int("saas_monthly_claim_units", 100000)
+    daily_checkin_units = _s_int("saas_daily_checkin_units", 5000)
+    daily_streak_units = _s_int("saas_daily_streak_bonus_units", 1000)
+    ref_inviter_units = _s_int("saas_referral_inviter_bonus_units", 50000)
+    ref_invitee_units = _s_int("saas_referral_invitee_bonus_units", 30000)
+    allow_self_recharge = s.get("saas_allow_self_recharge", "1") == "1"
+
+    f2f_on = s.get("saas_alipay_f2f_enabled", "1") == "1"
+    page_on = s.get("saas_alipay_page_enabled", "1") == "1"
+    alipay_static_on = s.get("saas_alipay_static_enabled", "0") == "1"
+    wechat_native_on = s.get("saas_wechat_native_enabled", "1") == "1"
+    wechat_static_on = s.get("saas_wechat_static_enabled", "0") == "1"
 
     return {
         "user": user_payload,
@@ -464,7 +490,7 @@ def billing_overview(user: dict = Depends(verify_token)):
             "max_monthly_traffic_bytes": int(plan_payload["max_monthly_traffic_bytes"]) if plan_payload else 10 * 1024 * 1024 * 1024,
         },
         "referral": {
-            "enabled": get_setting("saas_referral_enabled", "1") == "1",
+            "enabled": s.get("saas_referral_enabled", "1") == "1",
             "invite_code": user_payload.get("invite_code", ""),
             "invited_count": int(invited_count),
             "earned_yuan": units_to_yuan_str(int(earned_referral_units)),
@@ -482,11 +508,11 @@ def billing_overview(user: dict = Depends(verify_token)):
             "self_reverse_billed_yuan": user_payload.get("self_reverse_billed_yuan", "0.00"),
         },
         "promo": {
-            "monthly_claim_enabled": get_setting("saas_monthly_claim_enabled", "1") == "1",
+            "monthly_claim_enabled": s.get("saas_monthly_claim_enabled", "1") == "1",
             "monthly_claim_yuan": units_to_yuan_str(monthly_claim_units),
             "monthly_claimed_this_month": user_payload.get("last_monthly_claim_ym") == current_ym,
             "current_ym": current_ym,
-            "daily_checkin_enabled": get_setting("saas_daily_checkin_enabled", "1") == "1",
+            "daily_checkin_enabled": s.get("saas_daily_checkin_enabled", "1") == "1",
             "daily_checkin_yuan": units_to_yuan_str(daily_checkin_units),
             "daily_streak_bonus_yuan": units_to_yuan_str(daily_streak_units),
             "checked_in_today": user_payload.get("last_checkin_date") == today_str,
@@ -494,30 +520,23 @@ def billing_overview(user: dict = Depends(verify_token)):
             "today": today_str,
         },
         "payment_channels": {
-            "alipay_enabled": (
-                (get_setting("saas_alipay_f2f_enabled", "1") == "1")
-                or (get_setting("saas_alipay_page_enabled", "1") == "1")
-                or (get_setting("saas_alipay_static_enabled", "0") == "1")
-            ),
-            "alipay_mode": get_setting("saas_alipay_mode", "precreate") or "precreate",
-            "alipay_f2f_enabled": get_setting("saas_alipay_f2f_enabled", "1") == "1",
-            "alipay_page_enabled": get_setting("saas_alipay_page_enabled", "1") == "1",
-            "alipay_static_enabled": get_setting("saas_alipay_static_enabled", "0") == "1",
-            "alipay_configured": is_alipay_api_configured(_get_alipay_gateway_cfg()),
-            "wechat_enabled": (
-                (get_setting("saas_wechat_native_enabled", "1") == "1")
-                or (get_setting("saas_wechat_static_enabled", "0") == "1")
-            ),
-            "wechat_mode": get_setting("saas_wechat_mode", "native_v3") or "native_v3",
-            "wechat_native_enabled": get_setting("saas_wechat_native_enabled", "1") == "1",
-            "wechat_static_enabled": get_setting("saas_wechat_static_enabled", "0") == "1",
-            "wechat_configured": is_wechat_v3_configured(_get_wechat_gateway_cfg()),
-            "allow_self_recharge": get_setting("saas_allow_self_recharge", "1") == "1",
-            "alipay_qr_url": get_setting("saas_alipay_qr_url", ""),
-            "wechat_qr_url": get_setting("saas_wechat_qr_url", ""),
-            "methods": _build_payment_methods_matrix(_get_alipay_gateway_cfg(), _get_wechat_gateway_cfg()),
+            "alipay_enabled": f2f_on or page_on or alipay_static_on,
+            "alipay_mode": alipay_cfg["mode"],
+            "alipay_f2f_enabled": f2f_on,
+            "alipay_page_enabled": page_on,
+            "alipay_static_enabled": alipay_static_on,
+            "alipay_configured": is_alipay_api_configured(alipay_cfg),
+            "wechat_enabled": wechat_native_on or wechat_static_on,
+            "wechat_mode": wechat_cfg["mode"],
+            "wechat_native_enabled": wechat_native_on,
+            "wechat_static_enabled": wechat_static_on,
+            "wechat_configured": is_wechat_v3_configured(wechat_cfg),
+            "allow_self_recharge": allow_self_recharge,
+            "alipay_qr_url": alipay_cfg["qr_url"],
+            "wechat_qr_url": wechat_cfg["qr_url"],
+            "methods": methods_matrix,
         },
-        "allow_self_recharge": get_setting("saas_allow_self_recharge", "1") == "1",
+        "allow_self_recharge": allow_self_recharge,
         "recharge_orders": orders,
         "ledger": ledger,
     }
@@ -672,10 +691,11 @@ def claim_daily_checkin(request: Request, user: dict = Depends(verify_token)):
 @router.post("/api/billing/recharge/create", summary="创建支付宝 / 微信支付充值订单（自动调用官方网关、人工收款码或沙盒不落盘演示）")
 async def create_recharge_order(data: RechargeCreateDTO, request: Request, user: dict = Depends(verify_token)):
     def _load_create_context():
-        a_cfg = _get_alipay_gateway_cfg()
-        w_cfg = _get_wechat_gateway_cfg()
-        m_list = _build_payment_methods_matrix(a_cfg, w_cfg)
-        allow_sb = get_setting("saas_allow_self_recharge", "1") == "1"
+        s = get_all_settings_map()
+        a_cfg = _get_alipay_gateway_cfg(s)
+        w_cfg = _get_wechat_gateway_cfg(s)
+        m_list = _build_payment_methods_matrix(a_cfg, w_cfg, s)
+        allow_sb = s.get("saas_allow_self_recharge", "1") == "1"
         return a_cfg, w_cfg, m_list, allow_sb
 
     alipay_cfg, wechat_cfg, methods, allow_sandbox = await asyncio.to_thread(_load_create_context)
@@ -829,7 +849,7 @@ async def create_recharge_order(data: RechargeCreateDTO, request: Request, user:
 
 @router.get("/api/billing/recharge/orders", summary="查询我的钱包充值订单列表")
 def list_my_recharge_orders(user: dict = Depends(verify_token)):
-    with session_scope() as db:
+    with session_scope(readonly=True) as db:
         rows = (
             db.query(RechargeOrder)
             .filter(RechargeOrder.user_id == int(user["id"]))
@@ -842,13 +862,21 @@ def list_my_recharge_orders(user: dict = Depends(verify_token)):
 
 @router.get("/api/billing/recharge/orders/{order_no}", summary="查询单笔充值订单状态（如配置了官方网关将自动主动查单同步）")
 async def get_recharge_order_status(order_no: str, request: Request, user: dict = Depends(verify_token)):
-    with session_scope() as db:
-        order = db.query(RechargeOrder).filter(RechargeOrder.order_no == order_no).first()
-        if order is None:
-            raise HTTPException(status_code=404, detail="充值订单不存在")
-        if int(order.user_id) != int(user["id"]) and user.get("role") != "admin":
-            raise HTTPException(status_code=403, detail="无权查询他人充值订单")
-        order_payload = order.to_dict()
+    def _load_order_and_cfg():
+        with session_scope(readonly=True) as db:
+            order = db.query(RechargeOrder).filter(RechargeOrder.order_no == order_no).first()
+            if order is None:
+                return None, None
+            payload = order.to_dict()
+        s = get_all_settings_map()
+        ch_cfg = _get_alipay_gateway_cfg(s) if payload["channel"] == "alipay" else _get_wechat_gateway_cfg(s)
+        return payload, ch_cfg
+
+    order_payload, ch_cfg = await asyncio.to_thread(_load_order_and_cfg)
+    if order_payload is None:
+        raise HTTPException(status_code=404, detail="充值订单不存在")
+    if int(order_payload["user_id"]) != int(user["id"]) and user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="无权查询他人充值订单")
 
     synced_paid = False
     user_payload = None
@@ -857,9 +885,9 @@ async def get_recharge_order_status(order_no: str, request: Request, user: dict 
         q_res: Dict[str, Any] = {"supported": False, "paid": False}
         try:
             if ch == "alipay":
-                q_res = await query_alipay_order(order_no, _get_alipay_gateway_cfg())
+                q_res = await query_alipay_order(order_no, ch_cfg)
             elif ch == "wechat":
-                q_res = await query_wechat_order(order_no, _get_wechat_gateway_cfg())
+                q_res = await query_wechat_order(order_no, ch_cfg)
         except Exception:
             q_res = {"supported": False, "paid": False}
 
@@ -873,40 +901,52 @@ async def get_recharge_order_status(order_no: str, request: Request, user: dict 
 
             if amt_ok:
                 ext_no = q_res.get("trade_no") or f"{ch.upper()}-{secrets.token_hex(6).upper()}"
-                with session_scope() as db:
-                    res = _mark_recharge_order_paid_sync(
-                        db,
-                        order_no=order_no,
-                        expected_channel=ch,
-                        external_trade_no=ext_no,
-                        paid_remark=f"{ch.upper()} 官方主动查单入账 ({order_no})",
-                        allow_cancelled=True,
-                    )
-                    order_payload = res["order"]
-                    user_payload = res["user"]
-                    synced_paid = not res["already_paid"]
-                if synced_paid:
-                    write_audit_log(
-                        action="recharge_query_paid",
-                        actor_id=order_payload["user_id"],
-                        actor_username=user["username"],
-                        target_type="recharge_order",
-                        target_id=order_no,
-                        ip=get_client_ip(request),
-                        status="ok",
-                        details={"channel": ch, "amount_yuan": order_payload["amount_yuan"], "trade_no": ext_no},
-                    )
+                client_ip = get_client_ip(request)
+
+                def _credit_paid_and_audit():
+                    with session_scope() as db:
+                        res = _mark_recharge_order_paid_sync(
+                            db,
+                            order_no=order_no,
+                            expected_channel=ch,
+                            external_trade_no=ext_no,
+                            paid_remark=f"{ch.upper()} 官方主动查单入账 ({order_no})",
+                            allow_cancelled=True,
+                        )
+                        ord_p = res["order"]
+                        usr_p = res["user"]
+                        is_new = not res["already_paid"]
+                    if is_new:
+                        write_audit_log(
+                            action="recharge_query_paid",
+                            actor_id=ord_p["user_id"],
+                            actor_username=user["username"],
+                            target_type="recharge_order",
+                            target_id=order_no,
+                            ip=client_ip,
+                            status="ok",
+                            details={"channel": ch, "amount_yuan": ord_p["amount_yuan"], "trade_no": ext_no},
+                        )
+                    return ord_p, usr_p, is_new
+
+                order_payload, user_payload, synced_paid = await asyncio.to_thread(_credit_paid_and_audit)
         elif (q_res.get("trade_status") == "TRADE_CLOSED") or (q_res.get("trade_state") == "CLOSED"):
-            with session_scope() as db:
-                row = db.query(RechargeOrder).filter(
-                    RechargeOrder.order_no == order_no,
-                    RechargeOrder.status == "pending",
-                ).first()
-                if row is not None:
-                    row.status = "cancelled"
-                    row.remark = f"{(row.remark + ' | ') if row.remark else ''}官方网关交易已关闭"[:255]
-                    db.flush()
-                    order_payload = row.to_dict()
+            def _mark_closed():
+                with session_scope() as db:
+                    row = db.query(RechargeOrder).filter(
+                        RechargeOrder.order_no == order_no,
+                        RechargeOrder.status == "pending",
+                    ).first()
+                    if row is not None:
+                        row.status = "cancelled"
+                        row.remark = f"{(row.remark + ' | ') if row.remark else ''}官方网关交易已关闭"[:255]
+                        db.flush()
+                        return row.to_dict()
+                return None
+
+            closed_payload = await asyncio.to_thread(_mark_closed)
+            if closed_payload is not None:
+                order_payload = closed_payload
 
     return {"order": order_payload, "user": user_payload, "synced_paid": synced_paid}
 

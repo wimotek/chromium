@@ -85,7 +85,13 @@
           @go-my-nodes="selectTab('nodes')"
         />
         <SyncPolicyView v-else-if="tab === 'sync'" @notify="showToast" />
-        <BillingView v-else-if="tab === 'billing'" @notify="showToast" @refresh-profile="refreshProfile" />
+        <BillingView
+          v-else-if="tab === 'billing'"
+          :return-order-no="billingReturnOrderNo"
+          @return-order-handled="billingReturnOrderNo = ''"
+          @notify="showToast"
+          @refresh-profile="refreshProfile"
+        />
         <ReferralView v-else-if="tab === 'referrals'" @notify="showToast" />
         <AuditView v-else-if="tab === 'audit'" @notify="showToast" />
         <AdminView v-else-if="tab === 'admin' && user.role === 'admin'" :current-user-id="user.id" @notify="showToast" />
@@ -131,16 +137,58 @@ const plan = ref(null)
 const level = ref(null)
 const channelFees = ref({ reverse: 2500, public_wss: 1000 })
 const quotas = ref({})
-const tab = ref('nodes')
+const VALID_TABS = new Set(['nodes', 'market', 'sync', 'billing', 'referrals', 'audit', 'admin'])
+
+function resolveInitialNavigation() {
+  if (typeof window === 'undefined') {
+    return { initialTab: 'nodes', returnOrderNo: '', cleanUrl: false }
+  }
+  const params = new URLSearchParams(window.location.search || '')
+  const reqTab = String(params.get('tab') || '').trim().toLowerCase()
+  const outTradeNo = String(params.get('out_trade_no') || '').trim()
+  const method = String(params.get('method') || '').trim().toLowerCase()
+  const hasAlipayReturn = Boolean(
+    outTradeNo || params.get('trade_no') || method.includes('alipay.trade.page.pay.return'),
+  )
+  let initialTab = VALID_TABS.has(reqTab) ? reqTab : 'nodes'
+  if (hasAlipayReturn) {
+    initialTab = 'billing'
+  }
+  return {
+    initialTab,
+    returnOrderNo: outTradeNo,
+    cleanUrl: hasAlipayReturn,
+  }
+}
+
+const _initNav = resolveInitialNavigation()
+const tab = ref(_initNav.initialTab)
+const billingReturnOrderNo = ref(_initNav.returnOrderNo)
 const mobileMenuOpen = ref(false)
 const toastMsg = ref('')
 const toastType = ref('ok')
 const toastKey = ref(0)
 let toastTimer = null
 
+function syncTabToUrl(nextTab) {
+  if (typeof window === 'undefined' || !window.history?.replaceState) return
+  try {
+    const url = new URL(window.location.href)
+    if (nextTab === 'nodes') {
+      url.searchParams.delete('tab')
+    } else {
+      url.searchParams.set('tab', nextTab)
+    }
+    window.history.replaceState({}, '', `${url.pathname}${url.search}${url.hash}`)
+  } catch {
+    // ignore
+  }
+}
+
 function selectTab(nextTab) {
   tab.value = nextTab
   mobileMenuOpen.value = false
+  syncTabToUrl(nextTab)
 }
 
 function inferToastType(text) {
@@ -166,9 +214,17 @@ function showToast(payload, explicitType = '') {
   }, toastType.value === 'error' ? 5200 : 3800)
 }
 
-async function refreshProfile(updatedUser = null) {
-  if (updatedUser && typeof updatedUser === 'object') {
-    user.value = { ...user.value, ...updatedUser }
+async function refreshProfile(updatedPayload = null) {
+  if (updatedPayload && typeof updatedPayload === 'object') {
+    if (updatedPayload.skipFetch) {
+      if (updatedPayload.user) user.value = { ...user.value, ...updatedPayload.user }
+      if (updatedPayload.plan !== undefined) plan.value = updatedPayload.plan
+      if (updatedPayload.level !== undefined) level.value = updatedPayload.level
+      if (updatedPayload.channel_fees) channelFees.value = updatedPayload.channel_fees
+      if (updatedPayload.quotas) quotas.value = updatedPayload.quotas
+      return
+    }
+    user.value = { ...user.value, ...updatedPayload }
   }
   try {
     const res = await apiFetch('/api/billing/overview')
@@ -204,8 +260,13 @@ async function boot() {
       user.value = prof.user || {}
       plan.value = prof.plan || null
       level.value = prof.level || null
+      if (tab.value === 'admin' && user.value.role !== 'admin') {
+        tab.value = 'nodes'
+      }
       authed.value = true
-      refreshProfile()
+      if (tab.value !== 'billing') {
+        refreshProfile()
+      }
     } else {
       authed.value = false
     }
@@ -257,6 +318,13 @@ function logout() {
 }
 
 onMounted(() => {
+  if (_initNav.cleanUrl && typeof window !== 'undefined' && window.history?.replaceState) {
+    try {
+      window.history.replaceState({}, '', `${window.location.pathname}?tab=billing`)
+    } catch {
+      // ignore
+    }
+  }
   window.addEventListener('saas:unauthorized', onUnauthorized)
   boot()
 })

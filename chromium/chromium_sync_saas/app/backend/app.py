@@ -80,7 +80,9 @@ async def global_antispam_middleware(request: Request, call_next):
     if path.startswith("/api/") or path.startswith("/cdp/"):
         client_ip = get_client_ip(request)
         if not (path == "/api/auth/status" and is_loopback_ip(client_ip)):
-            allowed, _, retry_after = check_rate_limit("global", client_ip, RATE_LIMIT_GLOBAL_PER_MIN, 60)
+            allowed, _, retry_after = await asyncio.to_thread(
+                check_rate_limit, "global", client_ip, RATE_LIMIT_GLOBAL_PER_MIN, 60
+            )
             if not allowed:
                 return JSONResponse(
                     status_code=429,

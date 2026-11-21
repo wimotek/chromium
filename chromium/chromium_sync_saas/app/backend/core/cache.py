@@ -255,53 +255,65 @@ def _create_redis_client(
 
 
 class SQLiteCacheBackend:
-    """SQLite WAL 本地缓存与原子计数器后端"""
+    """SQLite WAL 本地缓存与原子计数器后端（复用单连接，避免每次读写重复建连与 WAL PRAGMA 锁竞争）"""
 
     def __init__(self, db_path: str):
         self.db_path = db_path
         self._lock = threading.Lock()
+        self._conn: Optional[sqlite3.Connection] = None
         self._init_schema()
 
-    def _connect(self) -> sqlite3.Connection:
+    def _open_connection(self) -> sqlite3.Connection:
         os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
         conn = sqlite3.connect(self.db_path, timeout=10.0, check_same_thread=False)
         conn.execute("PRAGMA journal_mode=WAL;")
-        conn.execute("PRAGMA busy_timeout=3000;")
+        conn.execute("PRAGMA busy_timeout=5000;")
         conn.execute("PRAGMA synchronous=NORMAL;")
+        conn.execute("PRAGMA temp_store=MEMORY;")
         return conn
+
+    def _get_conn(self) -> sqlite3.Connection:
+        if self._conn is None:
+            self._conn = self._open_connection()
+        return self._conn
+
+    def _reset_conn(self):
+        if self._conn is not None:
+            try:
+                self._conn.close()
+            except Exception:
+                pass
+            self._conn = None
 
     def _init_schema(self):
         with self._lock:
-            conn = self._connect()
-            try:
-                conn.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS cache_entries (
-                        k TEXT PRIMARY KEY,
-                        v TEXT NOT NULL,
-                        expires_at REAL
-                    )
-                    """
+            conn = self._get_conn()
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS cache_entries (
+                    k TEXT PRIMARY KEY,
+                    v TEXT NOT NULL,
+                    expires_at REAL
                 )
-                conn.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS cache_hash_counters (
-                        hkey TEXT NOT NULL,
-                        field TEXT NOT NULL,
-                        val INTEGER NOT NULL DEFAULT 0,
-                        PRIMARY KEY (hkey, field)
-                    )
-                    """
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS cache_hash_counters (
+                    hkey TEXT NOT NULL,
+                    field TEXT NOT NULL,
+                    val INTEGER NOT NULL DEFAULT 0,
+                    PRIMARY KEY (hkey, field)
                 )
-                conn.commit()
-            finally:
-                conn.close()
+                """
+            )
+            conn.commit()
 
     def get(self, key: str) -> Optional[str]:
         now = time.time()
         with self._lock:
-            conn = self._connect()
             try:
+                conn = self._get_conn()
                 cur = conn.cursor()
                 cur.execute("SELECT v, expires_at FROM cache_entries WHERE k=?", (key,))
                 row = cur.fetchone()
@@ -313,21 +325,23 @@ class SQLiteCacheBackend:
                     conn.commit()
                     return None
                 return val
-            finally:
-                conn.close()
+            except sqlite3.Error:
+                self._reset_conn()
+                raise
 
     def set(self, key: str, value: str, ttl: Optional[int] = None):
         exp = (time.time() + ttl) if (ttl and ttl > 0) else None
         with self._lock:
-            conn = self._connect()
             try:
+                conn = self._get_conn()
                 conn.execute(
                     "INSERT OR REPLACE INTO cache_entries (k, v, expires_at) VALUES (?, ?, ?)",
                     (key, str(value), exp),
                 )
                 conn.commit()
-            finally:
-                conn.close()
+            except sqlite3.Error:
+                self._reset_conn()
+                raise
 
     def mset_batch(self, items: Dict[str, str], ttl: Optional[int] = None):
         if not items:
@@ -335,32 +349,34 @@ class SQLiteCacheBackend:
         exp = (time.time() + ttl) if (ttl and ttl > 0) else None
         rows = [(str(k), str(v), exp) for k, v in items.items()]
         with self._lock:
-            conn = self._connect()
             try:
+                conn = self._get_conn()
                 conn.executemany(
                     "INSERT OR REPLACE INTO cache_entries (k, v, expires_at) VALUES (?, ?, ?)",
                     rows,
                 )
                 conn.commit()
-            finally:
-                conn.close()
+            except sqlite3.Error:
+                self._reset_conn()
+                raise
 
     def delete(self, key: str):
         with self._lock:
-            conn = self._connect()
             try:
+                conn = self._get_conn()
                 conn.execute("DELETE FROM cache_entries WHERE k=?", (key,))
                 conn.commit()
-            finally:
-                conn.close()
+            except sqlite3.Error:
+                self._reset_conn()
+                raise
 
     def incr_window(self, key: str, window_sec: int, delta: int = 1) -> tuple[int, int]:
         win = max(1, int(window_sec or 60))
         step = int(delta or 1)
         now = time.time()
         with self._lock:
-            conn = self._connect()
             try:
+                conn = self._get_conn()
                 cur = conn.cursor()
                 cur.execute("SELECT v, expires_at FROM cache_entries WHERE k=?", (key,))
                 row = cur.fetchone()
@@ -383,13 +399,14 @@ class SQLiteCacheBackend:
                 )
                 conn.commit()
                 return new_val, win
-            finally:
-                conn.close()
+            except sqlite3.Error:
+                self._reset_conn()
+                raise
 
     def hincrby(self, hkey: str, field: str, delta: int) -> int:
         with self._lock:
-            conn = self._connect()
             try:
+                conn = self._get_conn()
                 cur = conn.cursor()
                 cur.execute(
                     """
@@ -402,23 +419,25 @@ class SQLiteCacheBackend:
                 row = cur.fetchone()
                 conn.commit()
                 return int(row[0]) if row else 0
-            finally:
-                conn.close()
+            except sqlite3.Error:
+                self._reset_conn()
+                raise
 
     def hgetall_readonly(self, hkey: str) -> Dict[str, int]:
         with self._lock:
-            conn = self._connect()
             try:
+                conn = self._get_conn()
                 cur = conn.cursor()
                 cur.execute("SELECT field, val FROM cache_hash_counters WHERE hkey=?", (hkey,))
                 return {str(f): int(v or 0) for f, v in cur.fetchall() if int(v or 0) != 0}
-            finally:
-                conn.close()
+            except sqlite3.Error:
+                self._reset_conn()
+                raise
 
     def hgetall_and_reset(self, hkey: str) -> Dict[str, int]:
         with self._lock:
-            conn = self._connect()
             try:
+                conn = self._get_conn()
                 cur = conn.cursor()
                 cur.execute("SELECT field, val FROM cache_hash_counters WHERE hkey=?", (hkey,))
                 rows = cur.fetchall()
@@ -426,18 +445,20 @@ class SQLiteCacheBackend:
                     cur.execute("DELETE FROM cache_hash_counters WHERE hkey=?", (hkey,))
                     conn.commit()
                 return {str(f): int(v or 0) for f, v in rows if int(v or 0) != 0}
-            finally:
-                conn.close()
+            except sqlite3.Error:
+                self._reset_conn()
+                raise
 
     def keys_with_prefix(self, prefix: str) -> List[str]:
         with self._lock:
-            conn = self._connect()
             try:
+                conn = self._get_conn()
                 cur = conn.cursor()
                 cur.execute("SELECT DISTINCT hkey FROM cache_hash_counters WHERE hkey LIKE ?", (f"{prefix}%",))
                 return [str(r[0]) for r in cur.fetchall()]
-            finally:
-                conn.close()
+            except sqlite3.Error:
+                self._reset_conn()
+                raise
 
     def hincrby_batch(self, ops: Dict[str, Dict[str, int]]):
         if not ops:
@@ -451,8 +472,8 @@ class SQLiteCacheBackend:
         if not params:
             return
         with self._lock:
-            conn = self._connect()
             try:
+                conn = self._get_conn()
                 conn.executemany(
                     """
                     INSERT INTO cache_hash_counters (hkey, field, val) VALUES (?, ?, ?)
@@ -461,8 +482,9 @@ class SQLiteCacheBackend:
                     params,
                 )
                 conn.commit()
-            finally:
-                conn.close()
+            except sqlite3.Error:
+                self._reset_conn()
+                raise
 
     def hgetall_batch(self, hkeys: List[str]) -> Dict[str, Dict[str, int]]:
         result: Dict[str, Dict[str, int]] = {}
@@ -470,8 +492,8 @@ class SQLiteCacheBackend:
             return result
         unique_keys = list(dict.fromkeys(hkeys))
         with self._lock:
-            conn = self._connect()
             try:
+                conn = self._get_conn()
                 cur = conn.cursor()
                 for i in range(0, len(unique_keys), 400):
                     chunk = unique_keys[i : i + 400]
@@ -485,8 +507,9 @@ class SQLiteCacheBackend:
                         if iv != 0:
                             result.setdefault(str(hk), {})[str(f)] = iv
                 return result
-            finally:
-                conn.close()
+            except sqlite3.Error:
+                self._reset_conn()
+                raise
 
     def mget_batch(self, keys: List[str]) -> Dict[str, Optional[str]]:
         result: Dict[str, Optional[str]] = {}
@@ -496,8 +519,8 @@ class SQLiteCacheBackend:
         now = time.time()
         expired_keys = []
         with self._lock:
-            conn = self._connect()
             try:
+                conn = self._get_conn()
                 cur = conn.cursor()
                 for i in range(0, len(unique_keys), 400):
                     chunk = unique_keys[i : i + 400]
@@ -515,31 +538,34 @@ class SQLiteCacheBackend:
                     conn.executemany("DELETE FROM cache_entries WHERE k=?", expired_keys)
                     conn.commit()
                 return result
-            finally:
-                conn.close()
+            except sqlite3.Error:
+                self._reset_conn()
+                raise
 
     def cleanup_expired(self):
         now = time.time()
         with self._lock:
-            conn = self._connect()
             try:
+                conn = self._get_conn()
                 conn.execute("DELETE FROM cache_entries WHERE expires_at IS NOT NULL AND expires_at <= ?", (now,))
                 conn.commit()
-            finally:
-                conn.close()
+            except sqlite3.Error:
+                self._reset_conn()
+                raise
 
     def stats(self) -> dict:
         with self._lock:
-            conn = self._connect()
             try:
+                conn = self._get_conn()
                 cur = conn.cursor()
                 cur.execute("SELECT count(*) FROM cache_entries")
                 kv_cnt = cur.fetchone()[0]
                 cur.execute("SELECT count(DISTINCT hkey) FROM cache_hash_counters")
                 hash_cnt = cur.fetchone()[0]
                 return {"entries": kv_cnt, "buffered_hashes": hash_cnt, "db_path": self.db_path}
-            finally:
-                conn.close()
+            except sqlite3.Error:
+                self._reset_conn()
+                raise
 
 
 class CacheManager:
@@ -557,6 +583,7 @@ class CacheManager:
         self._hits = 0
         self._misses = 0
         self._fallbacks = 0
+        self._probe_in_flight = False
         self._lock = threading.Lock()
         self.reload_from_config()
 
@@ -766,17 +793,40 @@ class CacheManager:
                 logger.warning(f"⚠️ [Cache] Redis 连接失败 ({exc})，已自动无缝回退至 SQLite Cache")
             return self._active_backend
 
+    def _schedule_bg_redis_probe(self):
+        with self._lock:
+            if self._probe_in_flight or self._redis_client is not None:
+                return
+            if not (self._redis_config or self._redis_url):
+                return
+            if (time.monotonic() - self._last_probe_ts) < self._probe_cooldown_sec:
+                return
+            self._probe_in_flight = True
+            self._last_probe_ts = time.monotonic()
+            cfg_copy = dict(self._redis_config) if self._redis_config else None
+            url_copy = self._redis_url
+            src_copy = self._config_source
+            prefix_copy = self._key_prefix
+
+        def _probe_worker():
+            try:
+                self.reload_from_config(
+                    redis_url=url_copy if cfg_copy is None else None,
+                    source=src_copy,
+                    redis_config=cfg_copy,
+                    key_prefix=prefix_copy,
+                )
+            finally:
+                with self._lock:
+                    self._probe_in_flight = False
+
+        threading.Thread(target=_probe_worker, name="redis-reconnect-probe", daemon=True).start()
+
     def _get_redis(self):
         if self._redis_client is not None:
             return self._redis_client
         if (self._redis_config or self._redis_url) and (time.monotonic() - self._last_probe_ts) >= self._probe_cooldown_sec:
-            self.reload_from_config(
-                redis_url=self._redis_url if self._redis_config is None else None,
-                source=self._config_source,
-                redis_config=self._redis_config,
-                key_prefix=self._key_prefix,
-            )
-            return self._redis_client
+            self._schedule_bg_redis_probe()
         return None
 
     def _trip_fallback(self, exc: Exception):

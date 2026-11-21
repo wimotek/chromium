@@ -1,6 +1,6 @@
 from datetime import datetime
 import re
-from typing import Optional
+from typing import Any, Dict, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
@@ -9,6 +9,7 @@ from sqlalchemy import case, func, or_
 from core.cache import build_encoded_redis_url, cache_mgr, normalize_key_prefix
 from core.db import (
     get_active_db_info,
+    get_all_settings_map,
     get_setting,
     issue_user_api_key,
     issue_user_invite_code,
@@ -189,9 +190,109 @@ class GeoipUpdateDTO(BaseModel):
     url: str = ""
 
 
+def _parse_int_setting(settings_map: Dict[str, str], key: str, default: int, *, min_val: int = 0, max_val: Optional[int] = None) -> int:
+    raw = settings_map.get(key)
+    try:
+        val = int(raw) if raw not in (None, "") else default
+    except (TypeError, ValueError):
+        val = default
+    if val < min_val:
+        val = min_val
+    if max_val is not None and val > max_val:
+        val = max_val
+    return val
+
+
+def _build_admin_settings_payload(settings_map: Dict[str, str]) -> Dict[str, Any]:
+    def _s(key: str, default: str = "") -> str:
+        val = settings_map.get(key)
+        return default if val is None else val
+
+    raw_reverse = settings_map.get("saas_reverse_fee_bps")
+    if raw_reverse in (None, ""):
+        raw_reverse = settings_map.get("saas_platform_fee_bps")
+    try:
+        reverse_bps = max(0, min(10000, int(raw_reverse) if raw_reverse not in (None, "") else 2500))
+    except (TypeError, ValueError):
+        reverse_bps = 2500
+
+    public_wss_bps = _parse_int_setting(settings_map, "saas_public_wss_fee_bps", 1000, min_val=0, max_val=10000)
+    market_hour_units = _parse_int_setting(settings_map, "saas_market_base_hour_units", 5000, min_val=0)
+    market_gb_units = _parse_int_setting(settings_map, "saas_market_base_gb_units", 10000, min_val=0)
+    self_rev_units = _parse_int_setting(settings_map, "saas_self_reverse_hub_gb_units", 2000, min_val=0)
+
+    f2f_enabled = _s("saas_alipay_f2f_enabled", "1") == "1"
+    page_enabled = _s("saas_alipay_page_enabled", "1") == "1"
+    alipay_static_enabled = _s("saas_alipay_static_enabled", "0") == "1"
+    wechat_native_enabled = _s("saas_wechat_native_enabled", "1") == "1"
+    wechat_static_enabled = _s("saas_wechat_static_enabled", "0") == "1"
+
+    return {
+        "saas_platform_fee_bps": reverse_bps,
+        "saas_reverse_fee_bps": reverse_bps,
+        "saas_public_wss_fee_bps": public_wss_bps,
+        "saas_market_base_hour_yuan": float(units_to_yuan_str(market_hour_units)),
+        "saas_market_base_gb_yuan": float(units_to_yuan_str(market_gb_units)),
+        "saas_self_reverse_hub_gb_yuan": float(units_to_yuan_str(self_rev_units)),
+        "saas_auto_level_enabled": _s("saas_auto_level_enabled", "1") == "1",
+        "saas_allow_public_register": _s("saas_allow_public_register", "1") == "1",
+        "saas_require_email_verify": _s("saas_require_email_verify", "1") == "1",
+        "saas_referral_enabled": _s("saas_referral_enabled", "1") == "1",
+        "saas_referral_inviter_bonus_yuan": float(units_to_yuan_str(_parse_int_setting(settings_map, "saas_referral_inviter_bonus_units", 50000))),
+        "saas_referral_invitee_bonus_yuan": float(units_to_yuan_str(_parse_int_setting(settings_map, "saas_referral_invitee_bonus_units", 30000))),
+        "saas_allow_self_recharge": _s("saas_allow_self_recharge", "1") == "1",
+        "saas_welcome_bonus_yuan": float(units_to_yuan_str(_parse_int_setting(settings_map, "saas_welcome_bonus_units", 100000))),
+        "saas_monthly_claim_enabled": _s("saas_monthly_claim_enabled", "1") == "1",
+        "saas_monthly_claim_yuan": float(units_to_yuan_str(_parse_int_setting(settings_map, "saas_monthly_claim_units", 100000))),
+        "saas_daily_checkin_enabled": _s("saas_daily_checkin_enabled", "1") == "1",
+        "saas_daily_checkin_yuan": float(units_to_yuan_str(_parse_int_setting(settings_map, "saas_daily_checkin_units", 5000))),
+        "saas_daily_streak_bonus_yuan": float(units_to_yuan_str(_parse_int_setting(settings_map, "saas_daily_streak_bonus_units", 1000))),
+        "saas_alipay_enabled": f2f_enabled or page_enabled or alipay_static_enabled,
+        "saas_alipay_mode": _s("saas_alipay_mode", "precreate") or "precreate",
+        "saas_alipay_sign_mode": _s("saas_alipay_sign_mode", "public_key") or "public_key",
+        "saas_alipay_f2f_enabled": f2f_enabled,
+        "saas_alipay_page_enabled": page_enabled,
+        "saas_alipay_static_enabled": alipay_static_enabled,
+        "saas_alipay_app_id": _s("saas_alipay_app_id", ""),
+        "saas_alipay_private_key": "",
+        "saas_alipay_private_key_set": bool(_s("saas_alipay_private_key", "").strip()),
+        "saas_alipay_public_key": _s("saas_alipay_public_key", ""),
+        "saas_alipay_app_cert": _s("saas_alipay_app_cert", ""),
+        "saas_alipay_cert_public_key": _s("saas_alipay_cert_public_key", ""),
+        "saas_alipay_root_cert": _s("saas_alipay_root_cert", ""),
+        "saas_alipay_gateway_url": _s("saas_alipay_gateway_url", "https://openapi.alipay.com/gateway.do") or "https://openapi.alipay.com/gateway.do",
+        "saas_alipay_notify_url": _s("saas_alipay_notify_url", ""),
+        "saas_alipay_return_url": _s("saas_alipay_return_url", ""),
+        "saas_alipay_qr_url": _s("saas_alipay_qr_url", ""),
+        "saas_wechat_enabled": wechat_native_enabled or wechat_static_enabled,
+        "saas_wechat_mode": _s("saas_wechat_mode", "native_v3") or "native_v3",
+        "saas_wechat_native_enabled": wechat_native_enabled,
+        "saas_wechat_static_enabled": wechat_static_enabled,
+        "saas_wechat_app_id": _s("saas_wechat_app_id", ""),
+        "saas_wechat_mch_id": _s("saas_wechat_mch_id", ""),
+        "saas_wechat_serial_no": _s("saas_wechat_serial_no", ""),
+        "saas_wechat_private_key": "",
+        "saas_wechat_private_key_set": bool(_s("saas_wechat_private_key", "").strip()),
+        "saas_wechat_api_v3_key": "",
+        "saas_wechat_api_v3_key_set": bool(_s("saas_wechat_api_v3_key", "").strip()),
+        "saas_wechat_platform_public_key": _s("saas_wechat_platform_public_key", ""),
+        "saas_wechat_gateway_url": _s("saas_wechat_gateway_url", "https://api.mch.weixin.qq.com") or "https://api.mch.weixin.qq.com",
+        "saas_wechat_notify_url": _s("saas_wechat_notify_url", ""),
+        "saas_wechat_qr_url": _s("saas_wechat_qr_url", ""),
+        "saas_payment_notify_secret": "",
+        "saas_payment_notify_secret_set": bool(_s("saas_payment_notify_secret", "").strip()),
+    }
+
+
+@router.get("/api/admin/settings", summary="快速读取平台策略与支付网关配置（Admin）")
+def admin_get_settings(admin: dict = Depends(require_admin)):
+    settings_map = get_all_settings_map()
+    return {"settings": _build_admin_settings_payload(settings_map)}
+
+
 @router.get("/api/admin/overview", summary="平台总营收、差价抽成、租户与共享节点大盘（Admin）")
 def admin_overview(admin: dict = Depends(require_admin)):
-    with session_scope() as db:
+    with session_scope(readonly=True) as db:
         total_users = db.query(User).count()
         active_users = db.query(User).filter(User.status == "active").count()
         total_nodes = db.query(Node).count()
@@ -212,9 +313,8 @@ def admin_overview(admin: dict = Depends(require_admin)):
         levels = [lv.to_dict() for lv in db.query(UserLevel).order_by(UserLevel.rank_order.asc()).all()]
         plans = [p.to_dict() for p in db.query(Plan).order_by(Plan.monthly_price_units.asc(), Plan.id.asc()).all()]
         referral_count = db.query(ReferralReward).count()
+        settings_map = get_all_settings_map(db)
 
-    ch_fees = get_all_channel_fee_bps()
-    self_rev_units = get_self_reverse_hub_gb_units()
     return {
         "metrics": {
             "total_users": total_users,
@@ -235,68 +335,7 @@ def admin_overview(admin: dict = Depends(require_admin)):
             "seller_payout_units": int(seller_sum),
             "seller_payout_yuan": units_to_yuan_str(int(seller_sum)),
         },
-        "settings": {
-            "saas_platform_fee_bps": ch_fees["reverse"],
-            "saas_reverse_fee_bps": ch_fees["reverse"],
-            "saas_public_wss_fee_bps": ch_fees["public_wss"],
-            "saas_market_base_hour_yuan": float(units_to_yuan_str(get_market_base_hour_units())),
-            "saas_market_base_gb_yuan": float(units_to_yuan_str(get_market_base_gb_units())),
-            "saas_self_reverse_hub_gb_yuan": float(units_to_yuan_str(self_rev_units)),
-            "saas_auto_level_enabled": get_setting("saas_auto_level_enabled", "1") == "1",
-            "saas_allow_public_register": get_setting("saas_allow_public_register", "1") == "1",
-            "saas_require_email_verify": get_setting("saas_require_email_verify", "1") == "1",
-            "saas_referral_enabled": get_setting("saas_referral_enabled", "1") == "1",
-            "saas_referral_inviter_bonus_yuan": float(units_to_yuan_str(int(get_setting("saas_referral_inviter_bonus_units", "50000") or 0))),
-            "saas_referral_invitee_bonus_yuan": float(units_to_yuan_str(int(get_setting("saas_referral_invitee_bonus_units", "30000") or 0))),
-            "saas_allow_self_recharge": get_setting("saas_allow_self_recharge", "1") == "1",
-            "saas_welcome_bonus_yuan": float(units_to_yuan_str(int(get_setting("saas_welcome_bonus_units", "100000") or 0))),
-            "saas_monthly_claim_enabled": get_setting("saas_monthly_claim_enabled", "1") == "1",
-            "saas_monthly_claim_yuan": float(units_to_yuan_str(int(get_setting("saas_monthly_claim_units", "100000") or 0))),
-            "saas_daily_checkin_enabled": get_setting("saas_daily_checkin_enabled", "1") == "1",
-            "saas_daily_checkin_yuan": float(units_to_yuan_str(int(get_setting("saas_daily_checkin_units", "5000") or 0))),
-            "saas_daily_streak_bonus_yuan": float(units_to_yuan_str(int(get_setting("saas_daily_streak_bonus_units", "1000") or 0))),
-            "saas_alipay_enabled": (
-                (get_setting("saas_alipay_f2f_enabled", "1") == "1")
-                or (get_setting("saas_alipay_page_enabled", "1") == "1")
-                or (get_setting("saas_alipay_static_enabled", "0") == "1")
-            ),
-            "saas_alipay_mode": get_setting("saas_alipay_mode", "precreate") or "precreate",
-            "saas_alipay_sign_mode": get_setting("saas_alipay_sign_mode", "public_key") or "public_key",
-            "saas_alipay_f2f_enabled": get_setting("saas_alipay_f2f_enabled", "1") == "1",
-            "saas_alipay_page_enabled": get_setting("saas_alipay_page_enabled", "1") == "1",
-            "saas_alipay_static_enabled": get_setting("saas_alipay_static_enabled", "0") == "1",
-            "saas_alipay_app_id": get_setting("saas_alipay_app_id", ""),
-            "saas_alipay_private_key": "",
-            "saas_alipay_private_key_set": bool(get_setting("saas_alipay_private_key", "").strip()),
-            "saas_alipay_public_key": get_setting("saas_alipay_public_key", ""),
-            "saas_alipay_app_cert": get_setting("saas_alipay_app_cert", ""),
-            "saas_alipay_cert_public_key": get_setting("saas_alipay_cert_public_key", ""),
-            "saas_alipay_root_cert": get_setting("saas_alipay_root_cert", ""),
-            "saas_alipay_gateway_url": get_setting("saas_alipay_gateway_url", "https://openapi.alipay.com/gateway.do"),
-            "saas_alipay_notify_url": get_setting("saas_alipay_notify_url", ""),
-            "saas_alipay_return_url": get_setting("saas_alipay_return_url", ""),
-            "saas_alipay_qr_url": get_setting("saas_alipay_qr_url", ""),
-            "saas_wechat_enabled": (
-                (get_setting("saas_wechat_native_enabled", "1") == "1")
-                or (get_setting("saas_wechat_static_enabled", "0") == "1")
-            ),
-            "saas_wechat_mode": get_setting("saas_wechat_mode", "native_v3") or "native_v3",
-            "saas_wechat_native_enabled": get_setting("saas_wechat_native_enabled", "1") == "1",
-            "saas_wechat_static_enabled": get_setting("saas_wechat_static_enabled", "0") == "1",
-            "saas_wechat_app_id": get_setting("saas_wechat_app_id", ""),
-            "saas_wechat_mch_id": get_setting("saas_wechat_mch_id", ""),
-            "saas_wechat_serial_no": get_setting("saas_wechat_serial_no", ""),
-            "saas_wechat_private_key": "",
-            "saas_wechat_private_key_set": bool(get_setting("saas_wechat_private_key", "").strip()),
-            "saas_wechat_api_v3_key": "",
-            "saas_wechat_api_v3_key_set": bool(get_setting("saas_wechat_api_v3_key", "").strip()),
-            "saas_wechat_platform_public_key": get_setting("saas_wechat_platform_public_key", ""),
-            "saas_wechat_gateway_url": get_setting("saas_wechat_gateway_url", "https://api.mch.weixin.qq.com"),
-            "saas_wechat_notify_url": get_setting("saas_wechat_notify_url", ""),
-            "saas_wechat_qr_url": get_setting("saas_wechat_qr_url", ""),
-            "saas_payment_notify_secret": "",
-            "saas_payment_notify_secret_set": bool(get_setting("saas_payment_notify_secret", "").strip()),
-        },
+        "settings": _build_admin_settings_payload(settings_map),
         "levels": levels,
         "plans": plans,
         "runtime": {
@@ -472,12 +511,16 @@ def admin_update_settings(data: AdminSettingsDTO, request: Request, admin: dict 
         status="ok",
         details=audit_details,
     )
-    return {"message": "平台策略与支付配置已保存生效", "updated_keys": len(updates)}
+    return {
+        "message": "平台策略与支付配置已保存生效",
+        "updated_keys": len(updates),
+        "settings": _build_admin_settings_payload(get_all_settings_map()),
+    }
 
 
 @router.get("/api/admin/users", summary="查看全部租户、邮箱认证、推荐关系、等级与钱包情况")
 def admin_list_users(admin: dict = Depends(require_admin)):
-    with session_scope() as db:
+    with session_scope(readonly=True) as db:
         plans_map = {p.id: p.name for p in db.query(Plan).all()}
         levels_map = {lv.id: lv for lv in db.query(UserLevel).all()}
         node_counts = dict(db.query(Node.owner_id, func.count(Node.id)).group_by(Node.owner_id).all())

@@ -211,7 +211,7 @@ def get_subscription():
     if not token:
         abort(400)
 
-    with db_session() as s:
+    with db_session(readonly=True) as s:
         user_obj = s.scalar(select(User).where(User.uuid == token, User.status == 1))
         user = user_obj.to_dict() if user_obj else None
     if not user:

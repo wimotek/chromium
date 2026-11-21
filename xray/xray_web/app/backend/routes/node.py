@@ -30,9 +30,11 @@ from routes import (
     DEFAULT_REALITY_DEST,
     DEFAULT_REALITY_SNI,
     get_node_snis,
+    is_placeholder_reality_target,
     is_user_allowed_for_node,
     normalize_hy2_mport,
     parse_last_probe,
+    pick_random_reality_preset,
     resolve_public_endpoint,
 )
 
@@ -162,8 +164,8 @@ def node_heartbeat():
         node_port = int(data.get("port", 443))
         raw_pbk = data.get("pbk", "").strip()
         sid = data.get("sid", "").strip()
-        raw_dest = data.get("dest", DEFAULT_REALITY_DEST).strip()
-        raw_sni = data.get("sni", DEFAULT_REALITY_SNI).strip()
+        raw_dest = data.get("dest", "").strip()
+        raw_sni = data.get("sni", "").strip()
         raw_server_names = data.get("server_names", "").strip()
         now_ts = time.time()
         now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -176,14 +178,16 @@ def node_heartbeat():
         if not node_id:
             return jsonify({"code": 400, "msg": "缺少 node_id"}), 400
 
-        dest = raw_dest if ":" in raw_dest else f"{raw_dest}:443"
-
         snis = []
         for part in re.split(r"[,;\s]+", raw_server_names or raw_sni):
             clean = part.strip().split(":")[0]
             if clean and clean not in snis:
                 snis.append(clean)
-        server_names_str = ",".join(snis)
+        dest = (raw_dest if ":" in raw_dest else f"{raw_dest}:443") if raw_dest else ""
+        reported_is_placeholder = is_placeholder_reality_target(dest, snis)
+        if not dest:
+            dest = f"{snis[0]}:443" if snis else DEFAULT_REALITY_DEST
+        server_names_str = ",".join(snis) if snis else DEFAULT_REALITY_SNI
         primary_sni = snis[0] if snis else DEFAULT_REALITY_SNI
 
         pbk = raw_pbk
@@ -201,8 +205,8 @@ def node_heartbeat():
         next_challenge_nonce = "xp_chal_" + secrets.token_hex(16)
         source_ip = get_client_ip(request)
 
-        # 第一步：超短事务读取节点当前状态（避免在 DB 事务锁内执行耗时网络拨测）
-        with db_session() as s:
+        # 第一步：超短只读事务读取节点当前状态（避免在 DB 事务锁内执行耗时网络拨测）
+        with db_session(readonly=True) as s:
             node_obj = s.scalar(select(Node).where(Node.node_id == node_id))
             node_snapshot = node_obj.to_dict() if node_obj else None
 
@@ -328,6 +332,12 @@ def node_heartbeat():
             normalized_ip_col = func.replace(func.replace(Node.ip, "[", ""), "]", "")
             resync_priority = case((Node.pending_key == "FORCE_RESYNC", 0), else_=1)
 
+            assigned_dest = dest
+            assigned_primary_sni = primary_sni
+            assigned_server_names_str = server_names_str
+            assigned_snis = list(snis) if snis else [DEFAULT_REALITY_SNI]
+            hub_random_assigned = False
+
             with db_session() as s:
                 # 再次检查是否并发请求已先一步建档（防止高并发同时上线产生主键冲突）
                 existing = s.scalar(select(Node).where(Node.node_id == node_id).limit(1))
@@ -351,9 +361,27 @@ def node_heartbeat():
                     existing.last_heartbeat_ts = now_ts
                     if agent_health_json:
                         existing.agent_health = agent_health_json
-                    existing.dest = dest
-                    existing.sni = primary_sni
-                    existing.server_names = server_names_str
+
+                    # 老节点重建/重新 TOFU 时：若节点上报的是默认占位 SNI，则优先保留 Hub 库中原有 SNI；若原库也为空/占位则从全局池随机分配
+                    existing_snis = get_node_snis(existing.to_dict()) if (existing.server_names or existing.sni) else []
+                    existing_is_placeholder = is_placeholder_reality_target(existing.dest or "", existing_snis)
+                    if reported_is_placeholder:
+                        if not existing_is_placeholder and existing.dest and existing_snis:
+                            assigned_dest = existing.dest if ":" in existing.dest else f"{existing.dest}:443"
+                            assigned_snis = existing_snis
+                            assigned_primary_sni = existing_snis[0]
+                            assigned_server_names_str = ",".join(existing_snis)
+                        else:
+                            assigned_dest, assigned_primary_sni, assigned_server_names_str, assigned_snis = pick_random_reality_preset()
+                            hub_random_assigned = True
+                            existing.dest = assigned_dest
+                            existing.sni = assigned_primary_sni
+                            existing.server_names = assigned_server_names_str
+                    else:
+                        existing.dest = assigned_dest
+                        existing.sni = assigned_primary_sni
+                        existing.server_names = assigned_server_names_str
+
                     existing.node_public_key = node_pubkey
                     existing.key_lock_status = key_lock_status
                     existing.last_challenge_nonce = next_challenge_nonce
@@ -369,6 +397,10 @@ def node_heartbeat():
                     existing.hy2_mport = reported_hy2_mport
                     existing.block_cn = reported_block_cn
                 else:
+                    # 首次接入的新节点：若未手动指定自定义 SNI（上报默认占位），由 Hub 从全局多 SNI 预设池随机分配
+                    if reported_is_placeholder:
+                        assigned_dest, assigned_primary_sni, assigned_server_names_str, assigned_snis = pick_random_reality_preset()
+                        hub_random_assigned = True
                     s.add(
                         Node(
                             node_id=node_id,
@@ -377,9 +409,9 @@ def node_heartbeat():
                             name=f"节点-{node_ip}",
                             ip=str(node_ip),
                             port=node_port,
-                            dest=dest,
-                            sni=primary_sni,
-                            server_names=server_names_str,
+                            dest=assigned_dest,
+                            sni=assigned_primary_sni,
+                            server_names=assigned_server_names_str,
                             pbk=pbk,
                             sid=sid,
                             status=status,
@@ -410,15 +442,23 @@ def node_heartbeat():
                 log_level = "success" if is_approved == 1 else "warn"
                 event_type = "NODE_TOFU_APPROVED" if is_approved == 1 else "NODE_TOFU_QUARANTINED"
                 mode_desc = "WSS 反向穿透 (NAT4/内网)" if net_mode == "reverse_wss" else "公网直连 (Reality)"
+                sni_audit_note = (
+                    f"，Hub 已随机分配多 SNI: {assigned_server_names_str}"
+                    if hub_random_assigned
+                    else f"，SNI: {assigned_server_names_str}"
+                )
                 s.add(
                     AuditLog(
                         level=log_level,
                         event_type=event_type,
                         node_id=node_id,
                         ip=str(node_ip),
-                        message=f"TOFU 首次接入 ({mode_desc}): {admit_reason}，公钥锁定: {bool(node_pubkey)}",
+                        message=f"TOFU 首次接入 ({mode_desc}): {admit_reason}，公钥锁定: {bool(node_pubkey)}{sni_audit_note}",
                     )
                 )
+
+            dest = assigned_dest
+            snis = assigned_snis
 
             invalidate_nodes_cache()
             tip = f"TOFU 首次接入成功 ({admit_reason})！拨测结果: {det_result.network_mode} ({mode_desc})，公私钥绑定: {'已锁定 (Ed25519)' if node_pubkey else '未锁定'}。"
@@ -676,9 +716,16 @@ def node_heartbeat():
                     node_obj.port = node_obj.port or node_port
                     node_obj.pbk = pbk
                     node_obj.sid = node_obj.sid or sid
-                    node_obj.dest = node_obj.dest or dest
-                    node_obj.sni = node_obj.sni or primary_sni
-                    node_obj.server_names = node_obj.server_names or server_names_str
+                    if not node_obj.dest or not node_obj.server_names:
+                        if reported_is_placeholder:
+                            fb_dest, fb_sni, fb_snis_str, _ = pick_random_reality_preset()
+                            node_obj.dest = node_obj.dest or fb_dest
+                            node_obj.sni = node_obj.sni or fb_sni
+                            node_obj.server_names = node_obj.server_names or fb_snis_str
+                        else:
+                            node_obj.dest = node_obj.dest or dest
+                            node_obj.sni = node_obj.sni or primary_sni
+                            node_obj.server_names = node_obj.server_names or server_names_str
                     node_obj.status = 1
                     node_obj.last_heartbeat = now_str
                     node_obj.last_heartbeat_ts = now_ts
@@ -769,7 +816,7 @@ def node_sync_users():
         node_id = request.args.get("node_id", "").strip()
         token = request.args.get("token", "").strip()
 
-        with db_session() as s:
+        with db_session(readonly=True) as s:
             node_obj = s.scalar(select(Node).where(Node.node_id == node_id))
             if not node_obj:
                 return jsonify({"code": 403, "msg": "节点未授权"}), 403

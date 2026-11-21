@@ -215,48 +215,73 @@ def reload_granian_server() -> bool:
         print(f"[SSL Reload Warn] 无法向父进程发送 SIGHUP: {e}", flush=True)
     return False
 
+_CERT_INFO_CACHE: tuple[tuple[str, int, int], dict] | None = None
+
+
+def _parse_x509_meta_output(stdout_text: str) -> dict:
+    issuer_line = ""
+    subject_line = ""
+    enddate_line = ""
+    for raw_line in (stdout_text or "").splitlines():
+        line = raw_line.strip()
+        if line.startswith("issuer="):
+            issuer_line = line
+        elif line.startswith("subject="):
+            subject_line = line
+        elif line.startswith("notAfter="):
+            enddate_line = line
+
+    issuer = issuer_line.replace("issuer=", "", 1).strip() or "Unknown"
+    subject = subject_line.replace("subject=", "", 1).strip()
+    is_self_signed = (
+        (bool(issuer) and issuer == subject)
+        or ("wimotek.internal" in issuer_line)
+        or ("xray.internal" in issuer_line)
+    )
+
+    days_left = 0
+    if "notAfter=" in enddate_line:
+        date_str = enddate_line.replace("notAfter=", "", 1).strip()
+        try:
+            exp_date = datetime.datetime.strptime(date_str, "%b %d %H:%M:%S %Y %Z")
+            days_left = (exp_date - datetime.datetime.utcnow()).days
+        except Exception:
+            days_left = 365
+
+    return {
+        "status": "valid" if days_left > 0 else "expired",
+        "is_self_signed": is_self_signed,
+        "issuer": issuer,
+        "days_left": max(0, days_left),
+        "cert_path": CERT_PATH,
+        "key_path": KEY_PATH,
+    }
+
+
 def get_cert_info() -> dict:
-    """原生 openssl 解析当前 /app/certs/fullchain.pem 证书状态与过期时间"""
-    if not os.path.exists(CERT_PATH):
+    """原生 openssl 单次调用解析当前 /app/certs/fullchain.pem 证书状态与过期时间（附带 mtime/size 缓存）"""
+    global _CERT_INFO_CACHE
+    try:
+        st = os.stat(CERT_PATH)
+    except OSError:
+        _CERT_INFO_CACHE = None
         return {"status": "none", "is_self_signed": True, "issuer": "", "days_left": 0}
 
+    cache_sig = (CERT_PATH, st.st_mtime_ns, st.st_size)
+    cached = _CERT_INFO_CACHE
+    if cached is not None and cached[0] == cache_sig:
+        return dict(cached[1])
+
     try:
-        res_issuer = subprocess.run(
-            ["openssl", "x509", "-in", CERT_PATH, "-noout", "-issuer"],
+        res = subprocess.run(
+            ["openssl", "x509", "-in", CERT_PATH, "-noout", "-issuer", "-subject", "-enddate"],
             capture_output=True, text=True, timeout=5
         )
-        issuer_line = res_issuer.stdout.strip() if res_issuer.returncode == 0 else ""
-        issuer = issuer_line.replace("issuer=", "").strip() or "Unknown"
-
-        res_subject = subprocess.run(
-            ["openssl", "x509", "-in", CERT_PATH, "-noout", "-subject"],
-            capture_output=True, text=True, timeout=5
-        )
-        subject_line = res_subject.stdout.strip() if res_subject.returncode == 0 else ""
-        is_self_signed = (issuer_line == subject_line) or ("wimotek.internal" in issuer_line) or ("xray.internal" in issuer_line)
-
-        res_date = subprocess.run(
-            ["openssl", "x509", "-in", CERT_PATH, "-noout", "-enddate"],
-            capture_output=True, text=True, timeout=5
-        )
-        enddate_line = res_date.stdout.strip()
-        days_left = 0
-        if "notAfter=" in enddate_line:
-            date_str = enddate_line.replace("notAfter=", "").strip()
-            try:
-                exp_date = datetime.datetime.strptime(date_str, "%b %d %H:%M:%S %Y %Z")
-                days_left = (exp_date - datetime.datetime.utcnow()).days
-            except Exception:
-                days_left = 365
-
-        return {
-            "status": "valid" if days_left > 0 else "expired",
-            "is_self_signed": is_self_signed,
-            "issuer": issuer,
-            "days_left": max(0, days_left),
-            "cert_path": CERT_PATH,
-            "key_path": KEY_PATH
-        }
+        if res.returncode != 0:
+            return {"status": "error", "is_self_signed": True, "issuer": "Error", "days_left": 0}
+        info = _parse_x509_meta_output(res.stdout)
+        _CERT_INFO_CACHE = (cache_sig, info)
+        return dict(info)
     except Exception as e:
         print(f"[Cert Info Error] {e}", flush=True)
         return {"status": "error", "is_self_signed": True, "issuer": "Error", "days_left": 0}

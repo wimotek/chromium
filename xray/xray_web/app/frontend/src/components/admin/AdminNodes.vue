@@ -587,38 +587,208 @@
           </div>
         </div>
 
-        <!-- 安全 REALITY 伪装目标一键切换面板 -->
+        <!-- 多 SNI 伪装目标列表框（紧凑布局：下拉切换多 SNI 组 + 增删 + 实时 TLS 1.3/H2 批量验证） -->
         <div class="reality-preset-box">
-          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
-            <span style="font-size: 12px; font-weight: 700; color: #38bdf8;">🎯 安全伪装目标一键切换（避开烂大街微软 / 非 CF）</span>
-            <button type="button" class="btn-random-preset" @click="pickRandomRealityPreset">🎲 随机切换</button>
+          <div class="sni-header-row">
+            <span style="font-size: 12px; font-weight: 700; color: #38bdf8;">🎯 REALITY 多 SNI 预设列表（{{ realityPresets.length }} 组）</span>
+            <div style="display: flex; align-items: center; gap: 6px;">
+              <button
+                type="button"
+                class="btn-sni-mini"
+                :class="{ active: showAddSniBar }"
+                @click="toggleAddSniBar"
+              >
+                {{ showAddSniBar ? '✕ 收起' : '➕ 新增组' }}
+              </button>
+              <button
+                type="button"
+                class="btn-sni-mini"
+                title="随机切换列表中的另一组多 SNI 预设"
+                @click="pickRandomRealityPreset"
+              >
+                🎲 随机
+              </button>
+            </div>
           </div>
-          <div class="reality-preset-grid">
-            <button
-              v-for="preset in realityPresets"
-              :key="preset.dest"
-              type="button"
-              class="reality-preset-btn"
-              :class="{ active: isPresetActive(preset) }"
-              :title="`${preset.label} (${preset.region}) — 点击自动填入 dest 与 SNI`"
-              @click="applyRealityPreset(preset)"
+
+          <!-- 主操作行：下拉列表框 + 批量验证 + 删除 -->
+          <div class="sni-select-row">
+            <select
+              v-model="selectedPresetKey"
+              class="sni-select-box"
+              @change="onSelectRealityPreset"
             >
-              <span class="preset-domain">{{ preset.sni }}</span>
-              <span class="preset-region">{{ preset.region }}</span>
+              <option
+                v-if="!isPresetKeyInList(selectedPresetKey)"
+                :value="selectedPresetKey"
+              >
+                {{ currentSniList.length ? `${currentSniList[0]}${currentSniList.length > 1 ? ` (+${currentSniList.length - 1} SNI)` : ''}（当前自定义 · 未加入列表）` : '自定义配置' }}
+              </option>
+              <option
+                v-for="preset in realityPresets"
+                :key="getPresetKey(preset)"
+                :value="getPresetKey(preset)"
+              >
+                {{ formatPresetOptionLabel(preset) }}
+              </option>
+            </select>
+            <button
+              type="button"
+              class="btn-sni-verify"
+              :disabled="verifyingSni || currentSniList.length === 0"
+              title="并发探测当前所有 SNI 是否在目标 dest 上支持 TLS 1.3 + HTTP/2 且证书有效"
+              @click="handleVerifySni(configForm.server_names, configForm.dest, 'form')"
+            >
+              {{ verifyingSni ? '⏳ 检测中' : '🔍 验证' }}
+            </button>
+            <button
+              type="button"
+              class="btn-sni-del"
+              :disabled="!isPresetKeyInList(selectedPresetKey) || realityPresets.length <= 1 || savingSniPreset"
+              :title="isPresetKeyInList(selectedPresetKey) ? '从全局预设列表中删除当前选中组' : '当前为未保存的自定义配置'"
+              @click="handleDeleteSniPreset(selectedPresetKey)"
+            >
+              🗑️
             </button>
           </div>
-          <div class="preset-hint">
-            支持自定义或回落至本机自建 HTTPS 站点（如 dest 填 <code>127.0.0.1:8443</code>，SNI 填自有域名；域名需灰色云朵直连本机，勿套 Cloudflare CDN）。
-          </div>
-        </div>
 
-        <div class="form-item">
-          <label>伪装目标域名 (dest)</label>
-          <input v-model="configForm.dest" type="text" class="cyber-input modal-input" placeholder="例如: www.amd.com:443 或 127.0.0.1:8443" />
-        </div>
-        <div class="form-item">
-          <label>SNI 域名 (Xray 支持逗号多填，Sing-box 取首个为主 SNI)</label>
-          <input v-model="configForm.server_names" type="text" class="cyber-input modal-input" placeholder="例如: www.amd.com" />
+          <!-- 可折叠新增多 SNI 预设紧凑行 -->
+          <div v-if="showAddSniBar" class="sni-add-bar">
+            <div class="sni-add-inputs">
+              <input
+                v-model="newSniForm.server_names"
+                type="text"
+                class="cyber-input sni-add-input font-mono"
+                placeholder="输入多 SNI（逗号分隔），如 www.apple.com,apple.com"
+                @keyup.enter="handleAddSniPreset"
+              />
+            </div>
+            <div class="sni-add-inputs">
+              <input
+                v-model="newSniForm.dest"
+                type="text"
+                class="cyber-input sni-add-note font-mono"
+                placeholder="dest 回落目标（留空默认 首个SNI:443）"
+                @keyup.enter="handleAddSniPreset"
+              />
+              <input
+                v-model="newSniForm.label"
+                type="text"
+                class="cyber-input sni-add-note"
+                placeholder="备注(可选，如 Apple 官网)"
+                @keyup.enter="handleAddSniPreset"
+              />
+            </div>
+            <div class="sni-add-actions">
+              <button
+                type="button"
+                class="btn-sni-verify"
+                :disabled="verifyingSni || !newSniForm.server_names.trim()"
+                @click="handleVerifySni(newSniForm.server_names, newSniForm.dest, 'add')"
+              >
+                {{ verifyingSni ? '⏳' : '🔍 先验证' }}
+              </button>
+              <button
+                type="button"
+                class="btn-sni-add-confirm"
+                :disabled="savingSniPreset || !newSniForm.server_names.trim()"
+                @click="handleAddSniPreset"
+              >
+                {{ savingSniPreset ? '保存中...' : '✅ 添加并选用' }}
+              </button>
+              <button
+                type="button"
+                class="btn-sni-mini"
+                :disabled="savingSniPreset"
+                title="恢复内置安全默认多 SNI 预设列表"
+                @click="handleResetSniPresets"
+              >
+                ↺ 恢复默认
+              </button>
+            </div>
+          </div>
+
+          <!-- 有效性验证结果条（支持多 SNI 逐项展示与一键剔除失效项） -->
+          <div
+            v-if="sniVerifyResult"
+            class="sni-verify-banner"
+            :class="`verify-${sniVerifyResult.grade || 'invalid'}`"
+          >
+            <div class="verify-top-line">
+              <span>
+                <strong>{{ sniVerifyResult.valid ? (sniVerifyResult.grade === 'warn' ? '⚠️' : '✅') : (sniVerifyResult.grade === 'local' ? '🏠' : '❌') }}</strong>
+                <span style="margin-left: 4px;">{{ sniVerifyResult.summary }}</span>
+              </span>
+              <div style="display: flex; align-items: center; gap: 6px; flex-shrink: 0;">
+                <button
+                  v-if="sniVerifyResult.passed_snis && sniVerifyResult.passed_snis.length > 0 && sniVerifyResult.failed_snis && sniVerifyResult.failed_snis.length > 0"
+                  type="button"
+                  class="btn-sni-prune"
+                  @click="keepOnlyPassedSnis"
+                >
+                  ✂️ 仅保留通过的 {{ sniVerifyResult.passed_snis.length }} 个
+                </button>
+                <button type="button" class="verify-close-btn" @click="sniVerifyResult = null">✕</button>
+              </div>
+            </div>
+
+            <!-- 逐项 SNI 探测明细 -->
+            <div v-if="sniVerifyResult.items && sniVerifyResult.items.length > 0" class="verify-item-list">
+              <div
+                v-for="item in sniVerifyResult.items"
+                :key="item.sni"
+                class="verify-item-row"
+                :class="`item-${item.grade || 'invalid'}`"
+              >
+                <span class="font-mono">
+                  {{ item.valid ? (item.grade === 'warn' ? '⚠️' : '✅') : '❌' }} {{ item.sni }}
+                </span>
+                <span class="verify-item-detail">
+                  <template v-if="item.valid">
+                    {{ item.tls_version }} / {{ item.alpn || '无H2' }} · {{ item.rtt_ms }}ms<template v-if="item.is_cloudflare"> · CF证书</template>
+                  </template>
+                  <template v-else>
+                    {{ item.summary }}
+                  </template>
+                </span>
+              </div>
+            </div>
+            <div v-else-if="sniVerifyResult.warnings && sniVerifyResult.warnings.length" class="verify-warn-list">
+              <div v-for="(w, idx) in sniVerifyResult.warnings" :key="idx">• {{ w }}</div>
+            </div>
+          </div>
+
+          <!-- 多 SNI 域名池与回落目标 (dest) 双列紧凑输入框 -->
+          <div class="sni-dest-row">
+            <div class="form-item" style="flex: 1.45; margin-bottom: 0;">
+              <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
+                <label style="margin: 0;">多 SNI 域名池（逗号分隔）</label>
+                <span class="sni-count-tag">
+                  {{ currentSniList.length }} 个 SNI · {{ configForm.core_type === 'singbox' ? 'Sing-box 取首个' : '订阅随机分配' }}
+                </span>
+              </div>
+              <input
+                :value="configForm.server_names"
+                type="text"
+                class="cyber-input modal-input font-mono"
+                placeholder="例如: www.amd.com,amd.com"
+                @input="onManualSniInput($event.target.value)"
+              />
+            </div>
+            <div class="form-item" style="flex: 1; margin-bottom: 0;">
+              <label>回落目标 (dest)</label>
+              <input
+                v-model="configForm.dest"
+                type="text"
+                class="cyber-input modal-input font-mono"
+                placeholder="例如: www.amd.com:443 或 127.0.0.1:8443"
+                @input="syncSelectedPresetKey"
+              />
+            </div>
+          </div>
+          <div class="preset-hint">
+            Xray 节点支持多 SNI，每次拉取订阅会从域名池中<strong>随机下发</strong>一个 SNI（需确保所填域名均在同一 <code>dest</code> 证书/服务下有效，可点右侧「🔍 验证」批量核验）。
+          </div>
         </div>
 
         <!-- 回国流量管控策略 -->
@@ -762,7 +932,7 @@
 </template>
 
 <script setup>
-import { ref, reactive, computed, watch, onMounted, onUnmounted } from 'vue'
+import { ref, reactive, computed, watch, onMounted, onUnmounted, onActivated, onDeactivated } from 'vue'
 import axios from 'axios'
 import { ElMessage } from 'element-plus'
 
@@ -803,6 +973,8 @@ const pingingAll = ref(false)
 const serverOffsetMs = ref(0)
 const lastFetchMs = ref(Date.now())
 let pollTimer = null
+let isFetchingNodes = false
+let isTabActive = true
 
 const clusterInfo = reactive({
   cluster_token: '',
@@ -819,18 +991,18 @@ const showConfigModal = ref(false)
 const showPermModal = ref(false)
 
 const realityPresets = ref([
-  { dest: 'www.amd.com:443', sni: 'www.amd.com', label: 'AMD 官网', region: '全球 Akamai' },
-  { dest: 'www.nvidia.com:443', sni: 'www.nvidia.com', label: 'NVIDIA 官网', region: '全球低噪' },
-  { dest: 'www.intel.com:443', sni: 'www.intel.com', label: 'Intel 官网', region: '欧美/全球' },
-  { dest: 'www.logitech.com:443', sni: 'www.logitech.com', label: 'Logitech 罗技', region: '欧美/亚太' },
-  { dest: 'www.samsung.com:443', sni: 'www.samsung.com', label: 'Samsung 三星', region: '日韩/亚太优' },
-  { dest: 'www.sony.com:443', sni: 'www.sony.com', label: 'Sony 索尼', region: '日韩/美西优' },
-  { dest: 'www.asus.com:443', sni: 'www.asus.com', label: 'ASUS 华硕', region: '亚太/新加坡优' },
-  { dest: 'www.dell.com:443', sni: 'www.dell.com', label: 'Dell 戴尔', region: '北美/欧洲' },
-  { dest: 'www.cisco.com:443', sni: 'www.cisco.com', label: 'Cisco 思科', region: '企业网络' },
-  { dest: 'www.oracle.com:443', sni: 'www.oracle.com', label: 'Oracle 甲骨文', region: '全球云商' },
-  { dest: 'www.siemens.com:443', sni: 'www.siemens.com', label: 'Siemens 西门子', region: '欧洲节点优' },
-  { dest: 'www.mozilla.org:443', sni: 'www.mozilla.org', label: 'Mozilla 官网', region: '全球开源' }
+  { dest: 'www.amd.com:443', sni: 'www.amd.com', server_names: ['www.amd.com', 'amd.com'], label: 'AMD 官网', region: '全球 Akamai' },
+  { dest: 'www.nvidia.com:443', sni: 'www.nvidia.com', server_names: ['www.nvidia.com', 'nvidia.com', 'developer.nvidia.com'], label: 'NVIDIA 官网', region: '全球低噪' },
+  { dest: 'www.intel.com:443', sni: 'www.intel.com', server_names: ['www.intel.com', 'intel.com'], label: 'Intel 官网', region: '欧美/全球' },
+  { dest: 'www.logitech.com:443', sni: 'www.logitech.com', server_names: ['www.logitech.com', 'logitech.com'], label: 'Logitech 罗技', region: '欧美/亚太' },
+  { dest: 'www.samsung.com:443', sni: 'www.samsung.com', server_names: ['www.samsung.com', 'samsung.com'], label: 'Samsung 三星', region: '日韩/亚太优' },
+  { dest: 'www.sony.com:443', sni: 'www.sony.com', server_names: ['www.sony.com', 'sony.com'], label: 'Sony 索尼', region: '日韩/美西优' },
+  { dest: 'www.asus.com:443', sni: 'www.asus.com', server_names: ['www.asus.com', 'asus.com'], label: 'ASUS 华硕', region: '亚太/新加坡优' },
+  { dest: 'www.dell.com:443', sni: 'www.dell.com', server_names: ['www.dell.com', 'dell.com'], label: 'Dell 戴尔', region: '北美/欧洲' },
+  { dest: 'www.cisco.com:443', sni: 'www.cisco.com', server_names: ['www.cisco.com', 'cisco.com'], label: 'Cisco 思科', region: '企业网络' },
+  { dest: 'www.oracle.com:443', sni: 'www.oracle.com', server_names: ['www.oracle.com', 'oracle.com'], label: 'Oracle 甲骨文', region: '全球云商' },
+  { dest: 'www.siemens.com:443', sni: 'www.siemens.com', server_names: ['www.siemens.com', 'siemens.com'], label: 'Siemens 西门子', region: '欧洲节点优' },
+  { dest: 'www.mozilla.org:443', sni: 'www.mozilla.org', server_names: ['www.mozilla.org', 'addons.mozilla.org', 'developer.mozilla.org'], label: 'Mozilla 官网', region: '全球开源' }
 ])
 
 const configForm = reactive({
@@ -851,26 +1023,275 @@ const configForm = reactive({
   hy2_insecure: true
 })
 
-const isPresetActive = (preset) => {
-  const curDest = String(configForm.dest || '').trim().toLowerCase()
-  const curSni = String(configForm.server_names || '').split(',')[0].trim().toLowerCase()
-  return curDest === preset.dest.toLowerCase() || curSni === preset.sni.toLowerCase()
+const selectedPresetKey = ref('')
+const showAddSniBar = ref(false)
+const savingSniPreset = ref(false)
+const verifyingSni = ref(false)
+const verifySource = ref('form')
+const sniVerifyResult = ref(null)
+const newSniForm = reactive({
+  server_names: '',
+  dest: '',
+  label: ''
+})
+
+const cleanSingleSni = (raw) => {
+  return String(raw || '')
+    .replace(/^https?:\/\//i, '')
+    .split('/')[0]
+    .split('?')[0]
+    .split('#')[0]
+    .split(':')[0]
+    .replace(/\.+$/, '')
+    .trim()
+    .toLowerCase()
+}
+
+const parseSniList = (raw) => {
+  const parts = Array.isArray(raw) ? raw : String(raw || '').split(/[,;\s]+/)
+  const seen = new Set()
+  const list = []
+  for (const part of parts) {
+    const cleaned = cleanSingleSni(part)
+    if (cleaned && !seen.has(cleaned)) {
+      seen.add(cleaned)
+      list.push(cleaned)
+    }
+  }
+  return list
+}
+
+const getPresetSnis = (preset) => {
+  if (!preset) return []
+  return parseSniList(preset.server_names && preset.server_names.length ? preset.server_names : preset.sni)
+}
+
+const getPresetKey = (preset) => {
+  const snis = getPresetSnis(preset)
+  const dest = String(preset?.dest || (snis[0] ? `${snis[0]}:443` : '')).trim().toLowerCase()
+  return `${dest}|${snis.join(',')}`
+}
+
+const currentSniList = computed(() => parseSniList(configForm.server_names))
+
+const buildCurrentFormKey = () => {
+  const snis = parseSniList(configForm.server_names)
+  const dest = String(configForm.dest || (snis[0] ? `${snis[0]}:443` : '')).trim().toLowerCase()
+  return `${dest}|${snis.join(',')}`
+}
+
+const syncSelectedPresetKey = () => {
+  selectedPresetKey.value = buildCurrentFormKey()
+}
+
+const isPresetKeyInList = (key) => {
+  if (!key) return false
+  return realityPresets.value.some(p => getPresetKey(p) === key)
+}
+
+const formatPresetOptionLabel = (preset) => {
+  if (!preset) return ''
+  const snis = getPresetSnis(preset)
+  const head = snis[0] || preset.sni || ''
+  const extraCount = snis.length > 1 ? ` (+${snis.length - 1} SNI)` : ''
+  const meta = [preset.label, preset.region].filter(Boolean).join(' · ')
+  return meta ? `${head}${extraCount} — ${meta}` : `${head}${extraCount}`
 }
 
 const applyRealityPreset = (preset) => {
   if (!preset) return
-  configForm.dest = preset.dest
-  configForm.server_names = preset.sni
+  const snis = getPresetSnis(preset)
+  if (!snis.length) return
+  configForm.server_names = snis.join(',')
+  configForm.dest = preset.dest || `${snis[0]}:443`
+  selectedPresetKey.value = getPresetKey(preset)
+  sniVerifyResult.value = null
+}
+
+const onSelectRealityPreset = () => {
+  const found = realityPresets.value.find(p => getPresetKey(p) === selectedPresetKey.value)
+  if (found) {
+    applyRealityPreset(found)
+  }
+}
+
+const onManualSniInput = (val) => {
+  const prevFirst = currentSniList.value[0] || ''
+  const prevDest = String(configForm.dest || '').trim().toLowerCase()
+  configForm.server_names = String(val || '')
+  const nextList = parseSniList(val)
+  const nextFirst = nextList[0] || ''
+  sniVerifyResult.value = null
+  // 若当前 dest 为空或与旧主 SNI 处于默认 :443 绑定状态，则自动跟随新的主 SNI 更新
+  if (nextFirst && (!prevDest || prevDest === `${prevFirst}:443` || prevDest === prevFirst)) {
+    configForm.dest = `${nextFirst}:443`
+  }
+  syncSelectedPresetKey()
 }
 
 const pickRandomRealityPreset = () => {
   const list = realityPresets.value
   if (!list.length) return
-  const candidates = list.filter(p => !isPresetActive(p))
+  const curKey = selectedPresetKey.value
+  const candidates = list.filter(p => getPresetKey(p) !== curKey)
   const pool = candidates.length ? candidates : list
   const picked = pool[Math.floor(Math.random() * pool.length)]
   applyRealityPreset(picked)
-  ElMessage.success(`已切换伪装目标：${picked.sni} (${picked.region})`)
+  const snis = getPresetSnis(picked)
+  ElMessage.success(`已切换多 SNI 预设（${snis.length} 个）：${snis.join(', ')}`)
+}
+
+const toggleAddSniBar = () => {
+  showAddSniBar.value = !showAddSniBar.value
+  if (showAddSniBar.value) {
+    newSniForm.server_names = ''
+    newSniForm.dest = ''
+    newSniForm.label = ''
+  }
+}
+
+const handleVerifySni = async (rawSnis, rawDest = '', source = 'form') => {
+  const snis = parseSniList(rawSnis)
+  if (!snis.length) {
+    ElMessage.warning('请先输入或选择有效的 SNI 域名（多 SNI 用逗号分隔）')
+    return
+  }
+  verifySource.value = source
+  verifyingSni.value = true
+  try {
+    const res = await axios.post('/api/admin/sni/verify', {
+      admin_user: props.currentUser.username,
+      admin_pwd: props.adminPassword,
+      sni: snis[0],
+      server_names: snis.join(','),
+      dest: String(rawDest || '').trim()
+    }, { timeout: 15000 })
+    if (res.data.code === 200 && res.data.data) {
+      sniVerifyResult.value = res.data.data
+      if (res.data.data.valid && res.data.data.grade === 'excellent') {
+        ElMessage.success(res.data.data.summary)
+      } else if (res.data.data.valid) {
+        ElMessage.warning(res.data.data.summary)
+      } else {
+        ElMessage.error(res.data.data.summary || 'SNI 验证未通过')
+      }
+    } else {
+      ElMessage.error(res.data.msg || '验证失败')
+    }
+  } catch (_) {
+    ElMessage.error('SNI 有效性探测请求失败')
+  } finally {
+    verifyingSni.value = false
+  }
+}
+
+const keepOnlyPassedSnis = () => {
+  const passed = sniVerifyResult.value?.passed_snis || []
+  if (!passed.length) return
+  if (verifySource.value === 'add') {
+    newSniForm.server_names = passed.join(',')
+  } else {
+    configForm.server_names = passed.join(',')
+    syncSelectedPresetKey()
+  }
+  ElMessage.success(`已仅保留通过验证的 ${passed.length} 个 SNI：${passed.join(', ')}`)
+}
+
+const handleAddSniPreset = async () => {
+  const snis = parseSniList(newSniForm.server_names)
+  if (!snis.length) {
+    ElMessage.warning('请输入合法的 SNI 域名（多 SNI 用逗号分隔，如 www.apple.com,apple.com）')
+    return
+  }
+  const dest = newSniForm.dest.trim() || `${snis[0]}:443`
+  savingSniPreset.value = true
+  try {
+    const res = await axios.post('/api/admin/sni/presets', {
+      admin_user: props.currentUser.username,
+      admin_pwd: props.adminPassword,
+      action: 'add',
+      sni: snis[0],
+      server_names: snis,
+      dest,
+      label: newSniForm.label.trim()
+    }, { timeout: 10000 })
+    if (res.data.code === 200 && Array.isArray(res.data.data)) {
+      realityPresets.value = res.data.data
+      const targetKey = `${dest.toLowerCase()}|${snis.join(',')}`
+      const added = res.data.data.find(p => getPresetKey(p) === targetKey) || res.data.data[res.data.data.length - 1]
+      if (added) {
+        applyRealityPreset(added)
+      }
+      newSniForm.server_names = ''
+      newSniForm.dest = ''
+      newSniForm.label = ''
+      showAddSniBar.value = false
+      ElMessage.success(res.data.msg || `已新增 SNI 组：${snis.join(', ')}`)
+    } else {
+      ElMessage.error(res.data.msg || '新增 SNI 组失败')
+    }
+  } catch (_) {
+    ElMessage.error('新增 SNI 组请求失败')
+  } finally {
+    savingSniPreset.value = false
+  }
+}
+
+const handleDeleteSniPreset = async (targetKey) => {
+  const found = realityPresets.value.find(p => getPresetKey(p) === targetKey)
+  if (!found) return
+  if (realityPresets.value.length <= 1) {
+    ElMessage.warning('至少保留 1 组可用 SNI 预设')
+    return
+  }
+  const snis = getPresetSnis(found)
+  if (!confirm(`确定从全局列表中删除 SNI 组 [${snis.join(', ')}] 吗？`)) return
+  savingSniPreset.value = true
+  try {
+    const res = await axios.post('/api/admin/sni/presets', {
+      admin_user: props.currentUser.username,
+      admin_pwd: props.adminPassword,
+      action: 'delete',
+      key: targetKey,
+      sni: found.sni,
+      dest: found.dest
+    }, { timeout: 10000 })
+    if (res.data.code === 200 && Array.isArray(res.data.data)) {
+      realityPresets.value = res.data.data
+      if (selectedPresetKey.value === targetKey && res.data.data.length > 0) {
+        applyRealityPreset(res.data.data[0])
+      }
+      ElMessage.success(res.data.msg || '已删除该 SNI 预设')
+    } else {
+      ElMessage.error(res.data.msg || '删除 SNI 预设失败')
+    }
+  } catch (_) {
+    ElMessage.error('删除 SNI 预设请求失败')
+  } finally {
+    savingSniPreset.value = false
+  }
+}
+
+const handleResetSniPresets = async () => {
+  if (!confirm('确定恢复为内置默认安全多 SNI 预设列表吗？（自定义新增项将被覆盖）')) return
+  savingSniPreset.value = true
+  try {
+    const res = await axios.post('/api/admin/sni/presets', {
+      admin_user: props.currentUser.username,
+      admin_pwd: props.adminPassword,
+      action: 'reset'
+    }, { timeout: 10000 })
+    if (res.data.code === 200 && Array.isArray(res.data.data)) {
+      realityPresets.value = res.data.data
+      ElMessage.success(res.data.msg || '已恢复默认多 SNI 列表')
+    } else {
+      ElMessage.error(res.data.msg || '恢复失败')
+    }
+  } catch (_) {
+    ElMessage.error('恢复默认列表失败')
+  } finally {
+    savingSniPreset.value = false
+  }
 }
 
 const permForm = reactive({
@@ -1245,19 +1666,25 @@ const syncServerClock = (serverTs) => {
 }
 
 const fetchNodes = async (silent = false) => {
+  if (isFetchingNodes) return
+  isFetchingNodes = true
   if (!silent) {
     nodesLoading.value = true
   }
   try {
     const res = await axios.post('/api/admin/data', {
       admin_user: props.currentUser.username,
-      admin_pwd: props.adminPassword
-    })
+      admin_pwd: props.adminPassword,
+      scope: 'nodes'
+    }, { timeout: 15000 })
     if (res.data.code === 200) {
       nodesLoadError.value = false
       syncServerClock(res.data.server_ts)
       localNodes.value = res.data.nodes || []
       auditLogsList.value = res.data.audit_logs || []
+      if (Array.isArray(res.data.reality_presets) && res.data.reality_presets.length > 0) {
+        realityPresets.value = res.data.reality_presets
+      }
       if (res.data.cluster_info) {
         clusterInfo.cluster_token = res.data.cluster_info.cluster_token
         clusterInfo.tofu_enabled = res.data.cluster_info.tofu_enabled !== undefined ? res.data.cluster_info.tofu_enabled : true
@@ -1275,6 +1702,7 @@ const fetchNodes = async (silent = false) => {
       ElMessage.error('拉取集群数据失败')
     }
   } finally {
+    isFetchingNodes = false
     nodesLoading.value = false
     nodesLoaded.value = true
   }
@@ -1347,16 +1775,56 @@ const handlePingAllNodes = async () => {
   }
 }
 
-onMounted(() => {
-  fetchNodes()
-  // 10秒后台静默轮询心跳数据，无感刷新，杜绝手动 F5！
+const startPolling = () => {
+  if (pollTimer) return
   pollTimer = setInterval(() => {
-    fetchNodes(true)
+    if (isTabActive && (typeof document === 'undefined' || !document.hidden)) {
+      fetchNodes(true)
+    }
   }, 10000)
+}
+
+const stopPolling = () => {
+  if (pollTimer) {
+    clearInterval(pollTimer)
+    pollTimer = null
+  }
+}
+
+const handleVisibilityChange = () => {
+  if (typeof document !== 'undefined' && !document.hidden && isTabActive) {
+    fetchNodes(true)
+  }
+}
+
+onMounted(() => {
+  isTabActive = true
+  fetchNodes()
+  startPolling()
+  if (typeof document !== 'undefined') {
+    document.addEventListener('visibilitychange', handleVisibilityChange)
+  }
+})
+
+onActivated(() => {
+  isTabActive = true
+  startPolling()
+  if (nodesLoaded.value) {
+    fetchNodes(true)
+  }
+})
+
+onDeactivated(() => {
+  isTabActive = false
+  stopPolling()
 })
 
 onUnmounted(() => {
-  if (pollTimer) clearInterval(pollTimer)
+  isTabActive = false
+  stopPolling()
+  if (typeof document !== 'undefined') {
+    document.removeEventListener('visibilitychange', handleVisibilityChange)
+  }
 })
 
 const handleToggleTofuEnabled = async () => {
@@ -1425,12 +1893,21 @@ const handleApproveNode = async (node) => {
 }
 
 const openConfigModal = (node) => {
+  const sniList = parseSniList(
+    Array.isArray(node.server_names) && node.server_names.length
+      ? node.server_names
+      : (node.server_names || node.sni || 'www.amd.com,amd.com')
+  )
+  const effectiveSnis = sniList.length ? sniList : ['www.amd.com', 'amd.com']
   configForm.node_id = node.node_id
   configForm.name = node.name
   configForm.ip = node.ip || ''
   configForm.port = node.port
-  configForm.dest = node.dest || 'www.amd.com:443'
-  configForm.server_names = node.server_names || node.sni || 'www.amd.com'
+  configForm.dest = node.dest || `${effectiveSnis[0]}:443`
+  configForm.server_names = effectiveSnis.join(',')
+  syncSelectedPresetKey()
+  showAddSniBar.value = false
+  sniVerifyResult.value = null
   configForm.sid = node.sid
   configForm.node_key = node.node_key
   configForm.core_type = node.core_type || 'xray'
@@ -1444,11 +1921,19 @@ const openConfigModal = (node) => {
 }
 
 const submitNodeConfig = async () => {
+  const snis = parseSniList(configForm.server_names)
+  if (!snis.length) {
+    ElMessage.warning('请填写至少一个合法的 SNI 域名（多 SNI 用逗号分隔）')
+    return
+  }
+  configForm.server_names = snis.join(',')
   try {
     const res = await axios.post('/api/admin/nodes/save_config', {
       admin_user: props.currentUser.username,
       admin_pwd: props.adminPassword,
-      ...configForm
+      ...configForm,
+      sni: snis[0],
+      server_names: snis.join(',')
     })
     if (res.data.code === 200) {
       delete pingResults[configForm.node_id]
@@ -2309,65 +2794,255 @@ const handleRevokeDelete = async (nodeId) => {
   margin-bottom: 12px;
 }
 
-.btn-random-preset {
-  background: rgba(56, 189, 248, 0.16);
-  color: #7dd3fc;
-  border: 1px solid rgba(56, 189, 248, 0.45);
+.sni-header-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.sni-select-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.sni-select-box {
+  flex: 1;
+  min-width: 0;
+  background: #0f172a;
+  border: 1px solid rgba(56, 189, 248, 0.4);
+  color: #f1f5f9;
+  border-radius: 6px;
+  padding: 7px 10px;
+  font-size: 12px;
+  font-family: var(--font-mono);
+  outline: none;
+  cursor: pointer;
+}
+.sni-select-box:focus {
+  border-color: #38bdf8;
+  box-shadow: 0 0 0 2px rgba(56, 189, 248, 0.18);
+}
+
+.btn-sni-mini,
+.btn-sni-verify,
+.btn-sni-del,
+.btn-sni-add-confirm {
   border-radius: 5px;
-  padding: 3px 10px;
   font-size: 11px;
   font-weight: 600;
   cursor: pointer;
+  white-space: nowrap;
   transition: all 0.15s;
 }
-.btn-random-preset:hover {
+
+.btn-sni-mini {
+  background: rgba(56, 189, 248, 0.14);
+  color: #7dd3fc;
+  border: 1px solid rgba(56, 189, 248, 0.4);
+  padding: 3px 9px;
+}
+.btn-sni-mini:hover:not(:disabled),
+.btn-sni-mini.active {
   background: rgba(56, 189, 248, 0.28);
   color: #e0f2fe;
 }
 
-.reality-preset-grid {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+.btn-sni-verify {
+  background: rgba(16, 185, 129, 0.16);
+  color: #34d399;
+  border: 1px solid rgba(16, 185, 129, 0.45);
+  padding: 6px 10px;
+}
+.btn-sni-verify:hover:not(:disabled) {
+  background: rgba(16, 185, 129, 0.28);
+  color: #ecfdf5;
+}
+
+.btn-sni-del {
+  background: rgba(239, 68, 68, 0.14);
+  color: #f87171;
+  border: 1px solid rgba(239, 68, 68, 0.4);
+  padding: 6px 9px;
+}
+.btn-sni-del:hover:not(:disabled) {
+  background: rgba(239, 68, 68, 0.28);
+  color: #fef2f2;
+}
+
+.btn-sni-add-confirm {
+  background: rgba(2, 132, 199, 0.85);
+  color: #ffffff;
+  border: 1px solid #38bdf8;
+  padding: 5px 10px;
+}
+.btn-sni-add-confirm:hover:not(:disabled) {
+  background: #0284c7;
+}
+
+.btn-sni-mini:disabled,
+.btn-sni-verify:disabled,
+.btn-sni-del:disabled,
+.btn-sni-add-confirm:disabled {
+  opacity: 0.42;
+  cursor: not-allowed;
+}
+
+.sni-add-bar {
+  margin-top: 8px;
+  padding: 8px;
+  border-radius: 6px;
+  background: rgba(15, 23, 42, 0.72);
+  border: 1px dashed rgba(56, 189, 248, 0.35);
+  display: flex;
+  flex-direction: column;
   gap: 6px;
 }
 
-.reality-preset-btn {
+.sni-add-inputs {
   display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 2px;
-  background: rgba(15, 23, 42, 0.78);
-  border: 1px solid rgba(71, 85, 105, 0.5);
-  border-radius: 5px;
-  padding: 6px 8px;
-  cursor: pointer;
-  text-align: left;
-  transition: all 0.15s;
+  gap: 6px;
 }
-.reality-preset-btn:hover {
-  border-color: rgba(56, 189, 248, 0.65);
-  background: rgba(30, 41, 59, 0.9);
+.sni-add-input {
+  flex: 1.5;
+  width: auto !important;
+  min-width: 0 !important;
+  max-width: none !important;
+  padding: 6px 10px !important;
+  font-size: 12px !important;
 }
-.reality-preset-btn.active {
-  border-color: #38bdf8;
-  background: rgba(56, 189, 248, 0.2);
-  box-shadow: 0 0 0 1px rgba(56, 189, 248, 0.35);
+.sni-add-note {
+  flex: 1;
+  width: auto !important;
+  min-width: 0 !important;
+  max-width: none !important;
+  padding: 6px 10px !important;
+  font-size: 12px !important;
 }
 
-.preset-domain {
-  font-family: var(--font-mono);
+.sni-add-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.sni-verify-banner {
+  margin-top: 8px;
+  padding: 7px 10px;
+  border-radius: 6px;
   font-size: 11px;
-  font-weight: 600;
-  color: #f1f5f9;
-  width: 100%;
+  line-height: 1.5;
+}
+.sni-verify-banner.verify-excellent {
+  background: rgba(16, 185, 129, 0.14);
+  border: 1px solid rgba(16, 185, 129, 0.4);
+  color: #a7f3d0;
+}
+.sni-verify-banner.verify-warn,
+.sni-verify-banner.verify-local {
+  background: rgba(245, 158, 11, 0.14);
+  border: 1px solid rgba(245, 158, 11, 0.4);
+  color: #fde68a;
+}
+.sni-verify-banner.verify-invalid {
+  background: rgba(239, 68, 68, 0.14);
+  border: 1px solid rgba(239, 68, 68, 0.4);
+  color: #fecaca;
+}
+
+.verify-top-line {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 8px;
+}
+.verify-close-btn {
+  background: transparent;
+  border: none;
+  color: inherit;
+  opacity: 0.7;
+  cursor: pointer;
+  padding: 0 3px;
+  font-size: 12px;
+}
+.verify-close-btn:hover {
+  opacity: 1;
+}
+.verify-meta-line {
+  margin-top: 2px;
+  opacity: 0.85;
+  font-family: var(--font-mono);
+  font-size: 10px;
+}
+.verify-warn-list {
+  margin-top: 3px;
+  opacity: 0.92;
+}
+
+.verify-item-list {
+  margin-top: 5px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  max-height: 120px;
+  overflow-y: auto;
+}
+
+.verify-item-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: rgba(15, 23, 42, 0.45);
+  font-size: 10.5px;
+}
+.verify-item-row.item-excellent {
+  color: #a7f3d0;
+}
+.verify-item-row.item-warn {
+  color: #fde68a;
+}
+.verify-item-row.item-invalid {
+  color: #fca5a5;
+}
+.verify-item-detail {
+  opacity: 0.88;
+  text-align: right;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.preset-region {
-  font-size: 10px;
-  color: #94a3b8;
+.btn-sni-prune {
+  background: rgba(245, 158, 11, 0.2);
+  color: #fde68a;
+  border: 1px solid rgba(245, 158, 11, 0.48);
+  border-radius: 4px;
+  padding: 2px 7px;
+  font-size: 10.5px;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.btn-sni-prune:hover {
+  background: rgba(245, 158, 11, 0.34);
+}
+
+.sni-count-tag {
+  font-size: 10.5px;
+  color: #7dd3fc;
+  font-family: var(--font-mono);
+}
+
+.sni-dest-row {
+  display: flex;
+  gap: 10px;
+  margin-top: 8px;
 }
 
 .preset-hint {

@@ -90,19 +90,21 @@
           ⏳ 正在同步全站用户、节点与卡密数据...
         </div>
 
-        <component
-          :is="currentAdminComponent"
-          :adminUsers="adminUsers"
-          :adminNodes="adminNodes"
-          :adminCards="adminCards"
-          :adminDataLoading="adminDataLoading"
-          :adminDataLoaded="adminDataLoaded"
-          :currentUser="currentUser"
-          :adminPassword="adminPassword"
-          @copy="copyText"
-          @open-qr="openQrModalFromChild"
-          @reload-all="reloadAllAdminData"
-        />
+        <keep-alive>
+          <component
+            :is="currentAdminComponent"
+            :adminUsers="adminUsers"
+            :adminNodes="adminNodes"
+            :adminCards="adminCards"
+            :adminDataLoading="adminDataLoading"
+            :adminDataLoaded="adminDataLoaded"
+            :currentUser="currentUser"
+            :adminPassword="adminPassword"
+            @copy="copyText"
+            @open-qr="openQrModalFromChild"
+            @reload-all="reloadAllAdminData"
+          />
+        </keep-alive>
       </div>
     </main>
 
@@ -119,18 +121,29 @@
 </template>
 
 <script setup>
-import { ref, reactive, computed, onMounted } from 'vue'
+import { ref, reactive, computed, defineAsyncComponent, h, onMounted } from 'vue'
 import axios from 'axios'
 import { ElMessage } from 'element-plus'
 
 import AuthView from './components/AuthView.vue'
-import SetupWizard from './components/SetupWizard.vue'
-import UserDashboard from './components/UserDashboard.vue'
-import QrModal from './components/common/QrModal.vue'
-import AdminUsers from './components/admin/AdminUsers.vue'
-import AdminNodes from './components/admin/AdminNodes.vue'
-import AdminCards from './components/admin/AdminCards.vue'
-import AdminSettings from './components/admin/AdminSettings.vue'
+
+const AsyncLoadingFallback = {
+  render: () => h('div', { class: 'boot-loading-panel' }, '⏳ 正在加载功能模块...')
+}
+
+const lazyView = (loader) => defineAsyncComponent({
+  loader,
+  loadingComponent: AsyncLoadingFallback,
+  delay: 120
+})
+
+const SetupWizard = lazyView(() => import('./components/SetupWizard.vue'))
+const UserDashboard = lazyView(() => import('./components/UserDashboard.vue'))
+const QrModal = defineAsyncComponent(() => import('./components/common/QrModal.vue'))
+const AdminUsers = lazyView(() => import('./components/admin/AdminUsers.vue'))
+const AdminNodes = lazyView(() => import('./components/admin/AdminNodes.vue'))
+const AdminCards = lazyView(() => import('./components/admin/AdminCards.vue'))
+const AdminSettings = lazyView(() => import('./components/admin/AdminSettings.vue'))
 
 const setupRequired = ref(false)
 const systemLoading = ref(true)

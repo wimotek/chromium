@@ -24,6 +24,8 @@ except ImportError:
 
 
 class CacheManager:
+    _LOCAL_SETTING_TTL = 2.0
+
     def __init__(self):
         self._lock = threading.RLock()
         self._client = None
@@ -33,6 +35,9 @@ class CacheManager:
         self._was_degraded: bool = False
         self._last_error: str = ""
         self._sql_dirty: bool = False
+        self._connecting: bool = False
+        self._local_lock = threading.Lock()
+        self._local_settings: dict[str, tuple[float, str]] = {}
 
     def _prefixed(self, key: str) -> str:
         prefix = Config.normalize_redis_key_prefix(Config.REDIS_KEY_PREFIX)
@@ -48,6 +53,36 @@ class CacheManager:
             except Exception:
                 pass
 
+    def clear_local_settings(self, *keys: str):
+        with self._local_lock:
+            if not keys:
+                self._local_settings.clear()
+            else:
+                for k in keys:
+                    self._local_settings.pop(k, None)
+
+    def get_local_setting(self, key: str) -> Optional[str]:
+        now = time.monotonic()
+        with self._local_lock:
+            entry = self._local_settings.get(key)
+            if entry is None:
+                return None
+            exp, val = entry
+            if now >= exp:
+                self._local_settings.pop(key, None)
+                return None
+            return val
+
+    def set_local_settings(self, items: dict[str, str], ttl: float = 0.0):
+        if not items:
+            return
+        exp = time.monotonic() + (ttl if ttl > 0 else self._LOCAL_SETTING_TTL)
+        with self._local_lock:
+            if len(self._local_settings) > 512:
+                self._local_settings.clear()
+            for k, v in items.items():
+                self._local_settings[k] = (exp, str(v))
+
     def reset_client(self):
         with self._lock:
             self._close_client_locked()
@@ -55,6 +90,11 @@ class CacheManager:
             self._cooldown_until = 0.0
             self._was_degraded = False
             self._last_error = ""
+            self._connecting = False
+        self.clear_local_settings()
+
+    def is_redis_active(self) -> bool:
+        return self._get_redis() is not None
 
     def _get_redis(self):
         if redis_lib is None:
@@ -68,12 +108,19 @@ class CacheManager:
                     self._cooldown_until = 0.0
                     self._was_degraded = False
                     self._last_error = ""
+                    self._connecting = False
             return None
+
+        # 无锁快路径：已连接且地址未变化时直接返回，零锁竞争
+        client = self._client
+        if client is not None and self._client_url == url:
+            return client
 
         now = time.monotonic()
         if url == self._last_attempted_url and now < self._cooldown_until:
             return None
 
+        # Singleflight 抢占建连权：绝不在持有 self._lock 期间执行网络 I/O (ping)
         with self._lock:
             url = Config.effective_redis_url()
             if not url:
@@ -82,6 +129,7 @@ class CacheManager:
                 self._cooldown_until = 0.0
                 self._was_degraded = False
                 self._last_error = ""
+                self._connecting = False
                 return None
 
             now = time.monotonic()
@@ -95,18 +143,35 @@ class CacheManager:
             if self._client is not None and self._client_url == url:
                 return self._client
 
+            # 若已有其它线程正在探测建连，当前线程立即回退 SQL Cache，杜绝多请求互锁堆积
+            if self._connecting:
+                return None
+
+            self._connecting = True
             self._last_attempted_url = url
-            try:
-                client = redis_lib.Redis.from_url(
-                    url,
-                    socket_connect_timeout=Config.REDIS_TIMEOUT,
-                    socket_timeout=Config.REDIS_TIMEOUT,
-                    decode_responses=True,
-                    health_check_interval=30,
-                )
-                client.ping()
+            timeout_sec = Config.REDIS_TIMEOUT
+
+        # 在锁外执行耗时的 TCP 建连与 PING 握手
+        new_client = None
+        try:
+            new_client = redis_lib.Redis.from_url(
+                url,
+                socket_connect_timeout=timeout_sec,
+                socket_timeout=timeout_sec,
+                decode_responses=True,
+                health_check_interval=30,
+            )
+            new_client.ping()
+            with self._lock:
+                # 若建连期间配置被并发修改，丢弃过期连接
+                if Config.effective_redis_url() != url:
+                    try:
+                        new_client.close()
+                    except Exception:
+                        pass
+                    return None
                 self._close_client_locked()
-                self._client = client
+                self._client = new_client
                 self._client_url = url
                 self._last_error = ""
                 self._cooldown_until = 0.0
@@ -114,9 +179,17 @@ class CacheManager:
                     print("==> [Cache] Redis 连接已恢复，重新启用 Redis 加速！", flush=True)
                     self._was_degraded = False
                 return self._client
-            except Exception as exc:
-                self._trip_breaker(exc)
-                return None
+        except Exception as exc:
+            if new_client is not None:
+                try:
+                    new_client.close()
+                except Exception:
+                    pass
+            self._trip_breaker(exc)
+            return None
+        finally:
+            with self._lock:
+                self._connecting = False
 
     def _trip_breaker(self, exc: Exception):
         with self._lock:
@@ -140,20 +213,15 @@ class CacheManager:
 
     def _sql_get(self, key: str) -> Optional[str]:
         now = time.time()
-        expired = False
         with db_session(readonly=True) as s:
             row = s.get(KvCache, key)
             if not row:
                 return None
             exp = float(row.expire_at or 0.0)
             if exp > 0 and exp <= now:
-                expired = True
-            else:
-                return row.cache_val
-        if expired:
-            with db_session() as s:
-                s.execute(delete(KvCache).where(KvCache.cache_key == key, KvCache.expire_at > 0, KvCache.expire_at <= now))
-        return None
+                # 避免在只读路径触发同步写事务，过期条目交由后台 cleanup_expired_sql 批量清理
+                return None
+            return row.cache_val
 
     def _sql_set(self, key: str, value: str, ttl: int = 0) -> bool:
         self._sql_dirty = True
@@ -293,9 +361,50 @@ class CacheManager:
                 self._trip_breaker(exc)
         return self._sql_set(key, value, ttl=ttl)
 
+    def get_many_redis(self, keys: list[str]) -> Optional[dict[str, Optional[str]]]:
+        """仅当 Redis 活跃时单次 MGET 批量读取；非 Redis 模式返回 None"""
+        if not keys:
+            return {}
+        r = self._get_redis()
+        if r is None:
+            return None
+        try:
+            prefixed = [self._prefixed(k) for k in keys]
+            vals = r.mget(prefixed)
+            self._mark_redis_ok()
+            return {k: v for k, v in zip(keys, vals)}
+        except Exception as exc:
+            self._trip_breaker(exc)
+            return None
+
+    def set_many_redis(self, items: dict[str, str], ttl: int = 0) -> bool:
+        """仅当 Redis 活跃时通过单次 pipeline 批量写入"""
+        if not items:
+            return True
+        r = self._get_redis()
+        if r is None:
+            return False
+        try:
+            pipe = r.pipeline(transaction=False)
+            for k, v in items.items():
+                pkey = self._prefixed(k)
+                if ttl > 0:
+                    pipe.setex(pkey, ttl, v)
+                else:
+                    pipe.set(pkey, v)
+            pipe.execute()
+            self._mark_redis_ok()
+            return True
+        except Exception as exc:
+            self._trip_breaker(exc)
+            return False
+
     def delete(self, *keys: str) -> int:
         if not keys:
             return 0
+        setting_keys = [k[len("setting:"):] for k in keys if k.startswith("setting:")]
+        if setting_keys:
+            self.clear_local_settings(*setting_keys)
         r = self._get_redis()
         if r is not None:
             try:
@@ -313,6 +422,8 @@ class CacheManager:
         return self._sql_delete(*keys)
 
     def delete_prefix(self, prefix: str) -> int:
+        if prefix == "setting:" or prefix.startswith("setting:"):
+            self.clear_local_settings()
         r = self._get_redis()
         if r is not None:
             try:

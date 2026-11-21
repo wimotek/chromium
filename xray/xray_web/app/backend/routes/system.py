@@ -4,7 +4,15 @@ import sqlite3
 from datetime import datetime
 from flask import Blueprint, request, jsonify, send_file
 from config import Config
-from core.db import get_setting, set_setting, is_setup_required, invalidate_nodes_cache, invalidate_users_cache
+from core.db import (
+    get_setting,
+    get_settings_batch,
+    set_setting,
+    set_settings_batch,
+    is_setup_required,
+    invalidate_nodes_cache,
+    invalidate_users_cache,
+)
 from core.cache import cache, test_redis_connection
 from services.notify_service import send_smtp_email
 from core.cert_manager import get_cert_info, generate_self_signed_cert
@@ -272,14 +280,20 @@ def admin_backup_list():
     if not check_admin(data.get('admin_user'), data.get('admin_pwd')):
         return jsonify({"code": 403, "msg": "无权限"})
     backups = list_backups()
+    cfg = get_settings_batch({
+        "auto_backup_enabled": "true",
+        "backup_interval_hours": "24",
+        "backup_max_count": "7",
+        "last_backup_time": "尚未执行",
+    })
     return jsonify({
         "code": 200,
         "data": {
             "backups": backups,
-            "auto_backup_enabled": get_setting("auto_backup_enabled", "true") == "true",
-            "backup_interval_hours": int(get_setting("backup_interval_hours", "24") or 24),
-            "backup_max_count": int(get_setting("backup_max_count", "7") or 7),
-            "last_backup_time": get_setting("last_backup_time", "尚未执行")
+            "auto_backup_enabled": cfg["auto_backup_enabled"] == "true",
+            "backup_interval_hours": int(cfg["backup_interval_hours"] or 24),
+            "backup_max_count": int(cfg["backup_max_count"] or 7),
+            "last_backup_time": cfg["last_backup_time"],
         }
     })
 
@@ -418,9 +432,37 @@ def handle_settings():
         if not check_admin(admin_user, admin_pwd):
             return jsonify({"code": 403, "msg": "无权限"})
 
-        smtp_host = get_setting("smtp_host", "")
-        smtp_user = get_setting("smtp_user", "")
-        smtp_pass = get_setting("smtp_pass", "")
+        cfg = get_settings_batch({
+            "smtp_host": "",
+            "smtp_port": "465",
+            "smtp_user": "",
+            "smtp_pass": "",
+            "smtp_sender": "Xray 节点运营中心",
+            "smtp_ssl": "true",
+            "task_notify_enable": "true",
+            "task_interval_hours": "12",
+            "task_traffic_threshold": "80",
+            "task_expire_days": "3",
+            "task_last_run": "尚未执行",
+            "faka_api_enable": "true",
+            "faka_api_token": Config.FAKA_API_TOKEN,
+            "system_notice": "",
+            "reg_traffic_mb": "1024",
+            "reg_expire_days": "1",
+            "referral_enabled": "true",
+            "referral_inviter_traffic_gb": "10",
+            "referral_inviter_days": "30",
+            "referral_invitee_traffic_gb": "5",
+            "referral_invitee_days": "30",
+            "referral_max_per_user": "50",
+            "auto_backup_enabled": "true",
+            "backup_interval_hours": "24",
+            "backup_max_count": "7",
+            "last_backup_time": "尚未执行",
+        })
+        smtp_host = cfg["smtp_host"]
+        smtp_user = cfg["smtp_user"]
+        smtp_pass = cfg["smtp_pass"]
         has_smtp_pass = bool(smtp_pass.strip())
         is_smtp_configured = bool(smtp_host.strip() and smtp_user.strip() and has_smtp_pass)
 
@@ -428,33 +470,33 @@ def handle_settings():
             "code": 200,
             "data": {
                 "smtp_host": smtp_host,
-                "smtp_port": get_setting("smtp_port", "465"),
+                "smtp_port": cfg["smtp_port"],
                 "smtp_user": smtp_user,
                 "has_smtp_pass": has_smtp_pass,
                 "is_smtp_configured": is_smtp_configured,
-                "smtp_sender": get_setting("smtp_sender", "Xray 节点运营中心"),
-                "smtp_ssl": get_setting("smtp_ssl", "true"),
-                "task_notify_enable": get_setting("task_notify_enable", "true"),
-                "task_interval_hours": get_setting("task_interval_hours", "12"),
-                "task_traffic_threshold": get_setting("task_traffic_threshold", "80"),
-                "task_expire_days": get_setting("task_expire_days", "3"),
-                "task_last_run": get_setting("task_last_run", "尚未执行"),
-                "faka_api_enable": get_setting("faka_api_enable", "true"),
-                "faka_api_token": get_setting("faka_api_token", Config.FAKA_API_TOKEN),
-                "system_notice": get_setting("system_notice", "").strip(),
-                "reg_traffic_mb": get_setting("reg_traffic_mb", "1024"),
-                "reg_expire_days": get_setting("reg_expire_days", "1"),
-                "referral_enabled": get_setting("referral_enabled", "true"),
-                "referral_inviter_traffic_gb": get_setting("referral_inviter_traffic_gb", "10"),
-                "referral_inviter_days": get_setting("referral_inviter_days", "30"),
-                "referral_invitee_traffic_gb": get_setting("referral_invitee_traffic_gb", "5"),
-                "referral_invitee_days": get_setting("referral_invitee_days", "30"),
-                "referral_max_per_user": get_setting("referral_max_per_user", "50"),
+                "smtp_sender": cfg["smtp_sender"],
+                "smtp_ssl": cfg["smtp_ssl"],
+                "task_notify_enable": cfg["task_notify_enable"],
+                "task_interval_hours": cfg["task_interval_hours"],
+                "task_traffic_threshold": cfg["task_traffic_threshold"],
+                "task_expire_days": cfg["task_expire_days"],
+                "task_last_run": cfg["task_last_run"],
+                "faka_api_enable": cfg["faka_api_enable"],
+                "faka_api_token": cfg["faka_api_token"],
+                "system_notice": cfg["system_notice"].strip(),
+                "reg_traffic_mb": cfg["reg_traffic_mb"],
+                "reg_expire_days": cfg["reg_expire_days"],
+                "referral_enabled": cfg["referral_enabled"],
+                "referral_inviter_traffic_gb": cfg["referral_inviter_traffic_gb"],
+                "referral_inviter_days": cfg["referral_inviter_days"],
+                "referral_invitee_traffic_gb": cfg["referral_invitee_traffic_gb"],
+                "referral_invitee_days": cfg["referral_invitee_days"],
+                "referral_max_per_user": cfg["referral_max_per_user"],
                 # 数据库定期备份配置
-                "auto_backup_enabled": get_setting("auto_backup_enabled", "true"),
-                "backup_interval_hours": get_setting("backup_interval_hours", "24"),
-                "backup_max_count": get_setting("backup_max_count", "7"),
-                "last_backup_time": get_setting("last_backup_time", "尚未执行")
+                "auto_backup_enabled": cfg["auto_backup_enabled"],
+                "backup_interval_hours": cfg["backup_interval_hours"],
+                "backup_max_count": cfg["backup_max_count"],
+                "last_backup_time": cfg["last_backup_time"],
             }
         })
     else:
@@ -462,9 +504,10 @@ def handle_settings():
         if not check_admin(data.get('admin_user'), data.get('admin_pwd')):
             return jsonify({"code": 403, "msg": "无权限"})
 
-        new_pass = data.get("smtp_pass", "").strip()
+        updates: dict[str, str] = {}
+        new_pass = str(data.get("smtp_pass") or "").strip()
         if new_pass:
-            set_setting("smtp_pass", new_pass)
+            updates["smtp_pass"] = new_pass
 
         keys = [
             "smtp_host", "smtp_port", "smtp_user", "smtp_sender", "smtp_ssl",
@@ -478,7 +521,9 @@ def handle_settings():
         ]
         for k in keys:
             if k in data:
-                set_setting(k, str(data[k]).strip())
+                updates[k] = str(data[k]).strip()
+        if updates:
+            set_settings_batch(updates)
         return jsonify({"code": 200, "msg": "系统运维与数据库备份配置已成功保存"})
 
 @system_bp.route('/api/admin/test_email', methods=['POST'])

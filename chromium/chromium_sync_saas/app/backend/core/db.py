@@ -38,6 +38,10 @@ _active_db_config: Dict[str, Any] = {}
 _active_session_tls = threading.local()
 
 SETTINGS_CACHE_PREFIX = "cfg:setting:"
+_SETTINGS_L1_TTL_SEC = 15.0
+_settings_l1_lock = threading.Lock()
+_settings_l1_map: Optional[Dict[str, str]] = None
+_settings_l1_expires_at: float = 0.0
 
 
 def load_bootstrap_config() -> Dict[str, Any]:
@@ -125,7 +129,10 @@ def _create_orm_engine(db_type: str, url: str):
 
     @event.listens_for(engine, "begin")
     def _do_sqlite_begin(conn):
-        conn.exec_driver_sql("BEGIN IMMEDIATE")
+        if getattr(_active_session_tls, "readonly", False):
+            conn.exec_driver_sql("BEGIN")
+        else:
+            conn.exec_driver_sql("BEGIN IMMEDIATE")
 
     return engine
 
@@ -142,6 +149,7 @@ def init_engine(cfg: Optional[Dict[str, Any]] = None):
         _engine = _create_orm_engine(db_type, url)
         _SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=_engine)
         _active_db_config = meta
+        invalidate_settings_l1_cache()
         logger.info(f"🗄️ [SaaS ORM] 数据库引擎已就绪: {db_type.upper()}")
         return _engine
 
@@ -166,22 +174,26 @@ def _get_thread_active_session() -> Optional[Session]:
 
 
 @contextmanager
-def session_scope():
+def session_scope(readonly: bool = False):
     session = get_session()
     stack = getattr(_active_session_tls, "stack", None)
     if stack is None:
         stack = []
         _active_session_tls.stack = stack
+    prev_readonly = getattr(_active_session_tls, "readonly", False)
+    _active_session_tls.readonly = bool(readonly)
     stack.append(session)
     try:
         yield session
-        session.commit()
+        if not readonly:
+            session.commit()
     except Exception:
         session.rollback()
         raise
     finally:
         if stack and stack[-1] is session:
             stack.pop()
+        _active_session_tls.readonly = prev_readonly
         session.close()
 
 
@@ -646,25 +658,64 @@ def is_setup_required() -> bool:
     return get_setting("setup_completed", "0") != "1"
 
 
+def _set_settings_l1_snapshot(data: Dict[str, str]):
+    global _settings_l1_map, _settings_l1_expires_at
+    with _settings_l1_lock:
+        _settings_l1_map = dict(data)
+        _settings_l1_expires_at = time.monotonic() + _SETTINGS_L1_TTL_SEC
+
+
+def _update_settings_l1_keys(items: Dict[str, str]):
+    global _settings_l1_map, _settings_l1_expires_at
+    with _settings_l1_lock:
+        if _settings_l1_map is not None:
+            _settings_l1_map.update(items)
+            _settings_l1_expires_at = time.monotonic() + _SETTINGS_L1_TTL_SEC
+
+
+def invalidate_settings_l1_cache():
+    global _settings_l1_map, _settings_l1_expires_at
+    with _settings_l1_lock:
+        _settings_l1_map = None
+        _settings_l1_expires_at = 0.0
+
+
+def get_all_settings_map(db: Optional[Session] = None, force_refresh: bool = False) -> Dict[str, str]:
+    """Fetch all settings rows in a single query with fast in-process L1 TTL cache."""
+    if not force_refresh and db is None:
+        now_m = time.monotonic()
+        with _settings_l1_lock:
+            if _settings_l1_map is not None and now_m < _settings_l1_expires_at:
+                return dict(_settings_l1_map)
+
+    if db is not None:
+        rows = db.query(Setting).all()
+    else:
+        active_sess = _get_thread_active_session()
+        if active_sess is not None:
+            rows = active_sess.query(Setting).all()
+        else:
+            with session_scope(readonly=True) as sess:
+                rows = sess.query(Setting).all()
+    result = {str(row.key): ("" if row.value is None else str(row.value)) for row in rows}
+    _set_settings_l1_snapshot(result)
+    if result:
+        cache_mgr.mset_batch({f"{SETTINGS_CACHE_PREFIX}{k}": v for k, v in result.items()}, ttl=120)
+    return result
+
+
 def get_setting(key: str, default: str = "") -> str:
-    cache_key = f"{SETTINGS_CACHE_PREFIX}{key}"
-    cached = cache_mgr.get(cache_key)
-    if cached is not None:
-        return cached
+    now_m = time.monotonic()
+    with _settings_l1_lock:
+        if _settings_l1_map is not None and now_m < _settings_l1_expires_at:
+            val = _settings_l1_map.get(key)
+            return default if val is None else val
 
-    active_sess = _get_thread_active_session()
-    if active_sess is not None:
-        row = active_sess.get(Setting, key)
-        if row is not None and row.value is not None:
-            cache_mgr.set(cache_key, row.value, ttl=120)
-            return row.value
-        return default
-
-    with session_scope() as db:
-        row = db.get(Setting, key)
-        if row is not None and row.value is not None:
-            cache_mgr.set(cache_key, row.value, ttl=120)
-            return row.value
+    # Populate L1 snapshot in one query if missing/expired (eliminates N+1 per-key round trips)
+    all_map = get_all_settings_map()
+    val = all_map.get(key)
+    if val is not None:
+        return val
     return default
 
 
@@ -676,6 +727,7 @@ def set_setting(key: str, value: str):
             db.add(Setting(key=key, value=str_val))
         else:
             row.value = str_val
+    _update_settings_l1_keys({str(key): str_val})
     cache_mgr.set(f"{SETTINGS_CACHE_PREFIX}{key}", str_val, ttl=120)
 
 
@@ -692,6 +744,7 @@ def set_settings_batch(items: Dict[str, Any]):
                 db.add(Setting(key=k, value=str_val))
             else:
                 row.value = str_val
+    _update_settings_l1_keys(normalized)
     cache_mgr.mset_batch({f"{SETTINGS_CACHE_PREFIX}{k}": v for k, v in normalized.items()}, ttl=120)
 
 
