@@ -27,13 +27,15 @@ ARG ACME_EMAIL="admin@example.com"
 # ==============================================================================
 # Stage 1: Go 控制平面微内核编译（静态单二进制，零 CGO 依赖）
 # ==============================================================================
-FROM golang:${GO_VERSION}-alpine AS go-builder
+FROM --platform=$BUILDPLATFORM golang:${GO_VERSION}-alpine AS go-builder
+ARG TARGETOS=linux
+ARG TARGETARCH
 WORKDIR /src
 COPY go.mod ./
 COPY cmd ./cmd
 COPY internal ./internal
 RUN --mount=type=cache,target=/root/.cache/go-build \
-    CGO_ENABLED=0 GOOS=linux go build \
+    CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build \
     -trimpath \
     -ldflags="-s -w" \
     -o /out/nano-server ./cmd/server

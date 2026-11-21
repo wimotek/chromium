@@ -215,46 +215,6 @@ async function handleLoginSubmit(e) {
   }
 }
 
-async function probeHealthOnBoot() {
-  try {
-    const resp = await fetch('/api/health');
-    if (resp.ok) {
-      const data = await resp.json();
-      if (data.preview) {
-        $('preview-hint').hidden = false;
-        const topBtn = $('btn-preview-download-zip');
-        if (topBtn) topBtn.hidden = false;
-      }
-    }
-  } catch {
-    // ignore boot probe failure
-  }
-}
-
-async function downloadAllProjectFiles(triggerBtn) {
-  if (triggerBtn) triggerBtn.disabled = true;
-  try {
-    const resp = await fetch('/api/preview/download-zip');
-    if (!resp.ok) {
-      throw new Error(`HTTP ${resp.status}`);
-    }
-    const blob = await resp.blob();
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = 'wimotek-nginx-all.zip';
-    document.body.appendChild(link);
-    link.click();
-    link.remove();
-    window.setTimeout(() => URL.revokeObjectURL(url), 1000);
-    showToast('已开始下载完整 Nginx 项目压缩包 (wimotek-nginx-all.zip)');
-  } catch (err) {
-    showToast(`打包下载失败：${err.message}`, 'err');
-  } finally {
-    if (triggerBtn) triggerBtn.disabled = false;
-  }
-}
-
 // ==================== NAVIGATION & TOPBAR ====================
 const VIEW_META = {
   sites: { title: '站点配置', panelId: 'view-sites' },
@@ -985,14 +945,6 @@ function initEvents() {
   $('tab-creds').addEventListener('click', () => switchAuthTab('creds'));
   $('tab-token').addEventListener('click', () => switchAuthTab('token'));
   $('login-form').addEventListener('submit', handleLoginSubmit);
-  $('btn-fill-demo').addEventListener('click', () => {
-    switchAuthTab('creds');
-    $('login-user').value = 'admin';
-    $('login-pass').value = 'admin123';
-    $('login-submit').focus();
-  });
-  $('btn-auth-download-zip').addEventListener('click', (e) => downloadAllProjectFiles(e.currentTarget));
-  $('btn-preview-download-zip').addEventListener('click', (e) => downloadAllProjectFiles(e.currentTarget));
   $('btn-theme-toggle').addEventListener('click', () => {
     setTheme(!document.documentElement.classList.contains('dark'));
   });
@@ -1145,4 +1097,3 @@ function initEvents() {
 initTheme();
 initEvents();
 updateCustomDockerCommand();
-probeHealthOnBoot();
