@@ -18,7 +18,7 @@ from .config import AppConfig
 from .config_builder import build_singbox_config
 from .health import evaluate_health, start_health_server
 from .hub_client import HubClient
-from .net_detector import detect_network_profile
+from .net_detector import detect_listen_address, detect_network_profile
 from .singbox_manager import SingboxManager
 from .tunnel import WssTunnelSupervisor
 
@@ -28,6 +28,7 @@ class SingboxEdgeApplication:
         self.sb_mgr = SingboxManager()
         self.net_mode, self.ext_ipv4, self.ext_ipv6 = detect_network_profile(AppConfig.NET_MODE)
         self.ext_ip = self.ext_ipv4 or (f"[{self.ext_ipv6}]" if self.ext_ipv6 else "127.0.0.1")
+        self.listen_addr = detect_listen_address()
         self.hub_client = HubClient(self.sb_mgr.node_id)
         self.tunnel_supervisor: Optional[WssTunnelSupervisor] = None
         self.tunnel_task: Optional[asyncio.Task] = None
@@ -42,6 +43,12 @@ class SingboxEdgeApplication:
             if AppConfig.HY2_ENABLED
             else "关闭"
         )
+        listen_desc = f"{self.listen_addr} ({'IPv4+IPv6 双栈' if self.listen_addr == '::' else '仅 IPv4'})"
+        camo_suffix = (
+            " [默认占位，连上 Hub 后自动替换为真实分配 SNI]"
+            if (AppConfig.PANEL_URL and AppConfig.DEST == "www.microsoft.com:443")
+            else ""
+        )
         print("==================================================================", flush=True)
         print("      Wimotek Sing-box Edge Core (VLESS-REALITY + Hysteria2)      ", flush=True)
         print("==================================================================", flush=True)
@@ -49,8 +56,9 @@ class SingboxEdgeApplication:
         print(f"[*] External IPv4: {self.ext_ipv4 or '无 (None)'}", flush=True)
         print(f"[*] External IPv6: {self.ext_ipv6 or '无 (None)'}", flush=True)
         print(f"[*] Primary IP   : {self.ext_ip}", flush=True)
+        print(f"[*] Listen Addr  : {listen_desc}", flush=True)
         print(f"[*] Initial Mode : {self.net_mode.upper()} (配置策略: {AppConfig.NET_MODE.upper()})", flush=True)
-        print(f"[*] Camouflage   : {AppConfig.DEST} (SNI: {AppConfig.SERVER_NAMES})", flush=True)
+        print(f"[*] Camouflage   : {AppConfig.DEST} (SNI: {AppConfig.SERVER_NAMES}){camo_suffix}", flush=True)
         print(f"[*] Block CN     : {'开启 (禁止回国流量)' if AppConfig.BLOCK_CN else '关闭 (允许回国流量)'}", flush=True)
         print(f"[*] Hysteria2 UDP: {hy2_desc}", flush=True)
         print(f"[*] Log Level    : {AppConfig.LOG_LEVEL}", flush=True)
@@ -315,7 +323,7 @@ VLESS-REALITY 导入链接:
                         hy2_info = f"Hy2=UDP:{AppConfig.HY2_PORT}{mport_tag}" if (self.net_mode == "direct" and AppConfig.HY2_ENABLED) else "Hy2=关闭"
                         cn_info = "禁回国" if AppConfig.BLOCK_CN else "允许回国"
                         print(
-                            f"[HubSync] ✅ 同步最新网络策略 (模式:{self.net_mode}, TCP:{remote_port}, {hy2_info}, {cn_info}, 用户数:{len(self.current_clients)})",
+                            f"[HubSync] ✅ 同步最新网络策略 (模式:{self.net_mode}, TCP:{remote_port}, dest:{remote_dest}, SNI:{AppConfig.get_first_server_name()}, {hy2_info}, {cn_info}, 用户数:{len(self.current_clients)})",
                             flush=True,
                         )
                 elif mode_changed:

@@ -65,12 +65,12 @@ RUN set -ex && \
     go build -trimpath -ldflags "-s -w -buildid=" -o /out/usr/bin/sb-helper . && \
     chmod 755 /out/usr/bin/sb-helper
 
-# 预置精简版 CN 二进制规则集 (geoip-cn.srs + geosite-cn.srs，合计 <500KB)，实现纯离线零依赖回国流量拦截
+# 预置与 Xray-core (Loyalsoldier/v2ray-rules-dat) 同源的 CN 二进制规则集 (geoip-cn.srs + geosite-cn.srs)
 RUN set -ex && \
     mkdir -p /out/usr/share/sing-box/rule-set && \
-    curl -fsSL https://raw.githubusercontent.com/SagerNet/sing-geoip/rule-set/geoip-cn.srs \
+    curl -fsSL https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geoip/cn.srs \
         -o /out/usr/share/sing-box/rule-set/geoip-cn.srs && \
-    curl -fsSL https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-cn.srs \
+    curl -fsSL https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/cn.srs \
         -o /out/usr/share/sing-box/rule-set/geosite-cn.srs && \
     chmod 644 /out/usr/share/sing-box/rule-set/*.srs
 

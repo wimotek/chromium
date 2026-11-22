@@ -98,9 +98,13 @@ def get_public_ipv6() -> str:
 
 
 def detect_listen_address() -> str:
-    """检测本机内核是否支持 IPv4+IPv6 双栈 :: 监听，否则安全回退 0.0.0.0"""
+    """检测本机内核是否支持 IPv4+IPv6 双栈 :: 监听（主动尝试 IPV6_V6ONLY=0，与 Go/sing-box 保持一致），否则安全回退 0.0.0.0"""
     try:
         with socket.socket(socket.AF_INET6, socket.SOCK_STREAM) as s:
+            try:
+                s.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
+            except OSError:
+                pass
             v6only = s.getsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY)
             s.bind(("::", 0))
             return "::" if v6only == 0 else "0.0.0.0"

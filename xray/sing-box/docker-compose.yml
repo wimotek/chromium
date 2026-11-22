@@ -18,7 +18,7 @@ services:
       # - CLUSTER_TOKEN=xray_cluster_secret_key_2026
       # ==================== 以下均为可选参数（镜像已内置合理默认值，按需取消注释覆写） ====================
       # - TZ=Asia/Shanghai                             # 默认 Asia/Shanghai
-      # - LOG_LEVEL=fatal                              # 默认 warn；设为 fatal 可屏蔽外网 REALITY 扫描回落日志
+      # - LOG_LEVEL=warn                               # 默认 warn；排查时改 info，屏蔽扫库日志可改 fatal（修改后需 docker compose up -d 生效）
       # - BLOCK_CN=true                                # 默认 true（禁止回国流量，Hub 后台可随时修改）
       # - NET_MODE=auto                                # 默认 auto（Hub 拨测裁决），可选 direct / reverse_wss
       # - SERVER_IP=你的公网IP或域名                     # 可选：手动指定对外上报 IPv4（默认自动探测）

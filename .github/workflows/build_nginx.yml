@@ -137,7 +137,7 @@ jobs:
         with:
           images: |
             name=${{ secrets.DOCKERHUB_USERNAME || 'disabled' }}/nginx,enable=${{ steps.nginx_meta.outputs.dockerhub_enabled == 'true' }}
-            ghcr.io/${{ github.repository }}-nginx
+            ghcr.io/${{ github.repository_owner }}/nginx
           tags: |
             type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' && steps.nginx_meta.outputs.tag_suffix == '' }}
             type=raw,value=${{ steps.nginx_meta.outputs.nginx_version }},enable=${{ steps.nginx_meta.outputs.tag_suffix == '' }}

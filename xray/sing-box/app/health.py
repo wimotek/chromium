@@ -18,8 +18,31 @@ from typing import Optional
 from .config import AppConfig
 
 
+def _check_tcp_listening_proc(port: int) -> Optional[bool]:
+    """通过 Linux /proc/net/tcp(6) 零发包检查本机是否处于 TCP LISTEN (0A) 状态，避免触发 REALITY invalid connection 刷屏日志"""
+    if not port or port <= 0:
+        return False
+    hex_port = f":{int(port):04X}"
+    readable_any = False
+    for proc_path in ("/proc/net/tcp6", "/proc/net/tcp"):
+        try:
+            with open(proc_path, "r", encoding="utf-8") as f:
+                readable_any = True
+                next(f, None)  # skip header
+                for line in f:
+                    parts = line.split()
+                    if len(parts) >= 4 and parts[3].upper() == "0A" and parts[1].upper().endswith(hex_port):
+                        return True
+        except Exception:
+            continue
+    return False if readable_any else None
+
+
 def _check_tcp_local(port: int, timeout: float = 1.5) -> bool:
-    """探测本机 TCP 监听端口是否可达（兼容 127.0.0.1 与 ::1）"""
+    """探测本机 TCP 监听端口是否就绪（优先 /proc/net/tcp(6) 零发包检测，非 Linux 回退 connect_ex）"""
+    proc_res = _check_tcp_listening_proc(port)
+    if proc_res is not None:
+        return proc_res
     for family, host in ((socket.AF_INET, "127.0.0.1"), (socket.AF_INET6, "::1")):
         try:
             with socket.socket(family, socket.SOCK_STREAM) as s:
