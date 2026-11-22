@@ -272,6 +272,7 @@ body {
 
 /* ==================== LOGIN VIEW ==================== */
 .auth-screen {
+  position: relative;
   min-height: 100dvh;
   display: flex;
   align-items: center;
@@ -280,9 +281,54 @@ body {
   background: var(--bg-canvas);
 }
 
+.auth-lang-bar {
+  position: absolute;
+  top: 16px;
+  inset-inline-end: 20px;
+  z-index: 5;
+}
+
+.lang-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px;
+  height: 30px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--bg-subtle);
+  flex-shrink: 0;
+}
+
+.lang-switch-btn {
+  height: 24px;
+  padding: 0 8px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-secondary);
+  font-family: var(--font-display);
+  font-size: 11.5px;
+  font-weight: 600;
+  line-height: 1;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background-color 0.12s ease, color 0.12s ease;
+}
+
+.lang-switch-btn:hover {
+  color: var(--text-primary);
+}
+
+.lang-switch-btn[aria-pressed='true'] {
+  background: var(--bg-surface);
+  color: var(--text-primary);
+  box-shadow: var(--shadow-sm);
+}
+
 .auth-card {
   width: 100%;
-  max-width: 400px;
+  max-width: 416px;
   background: var(--bg-surface);
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
@@ -385,12 +431,12 @@ body {
 }
 
 .sidebar {
-  width: 228px;
+  width: 244px;
   flex-shrink: 0;
   display: flex;
   flex-direction: column;
   background: var(--bg-surface);
-  border-right: 1px solid var(--border);
+  border-inline-end: 1px solid var(--border);
   z-index: 30;
 }
 
@@ -457,6 +503,13 @@ body {
   align-items: center;
   gap: 9px;
   min-width: 0;
+  flex: 1;
+}
+
+.nav-item-left span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .nav-item svg {
@@ -513,6 +566,7 @@ body {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 8px;
   font-size: 12px;
 }
 
@@ -522,6 +576,13 @@ body {
   display: inline-flex;
   align-items: center;
   gap: 6px;
+  min-width: 0;
+}
+
+.engine-status-label span:last-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .status-indicator {
@@ -702,6 +763,8 @@ body {
 
 .segmented-btn {
   height: 26px;
+  min-width: 0;
+  padding: 0 6px;
   border: none;
   border-radius: 4px;
   background: transparent;
@@ -710,6 +773,8 @@ body {
   font-weight: 500;
   cursor: pointer;
   white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .segmented-btn[aria-pressed='true'] {
@@ -829,6 +894,7 @@ body {
   align-items: center;
   gap: 10px;
   min-width: 0;
+  flex: 1 1 180px;
 }
 
 .editor-filename {
@@ -900,9 +966,9 @@ body {
 }
 
 .editor-statusbar {
-  height: 32px;
+  min-height: 32px;
   flex-shrink: 0;
-  padding: 0 16px;
+  padding: 5px 16px;
   background: var(--bg-surface);
   border-top: 1px solid var(--border);
   display: flex;
@@ -911,6 +977,12 @@ body {
   gap: 12px;
   font-size: 12px;
   color: var(--text-muted);
+}
+
+.editor-statusbar span:last-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .editor-empty-state {
@@ -1016,11 +1088,13 @@ body {
 .kpi-value {
   margin-top: 4px;
   font-family: var(--font-display);
-  font-size: 22px;
+  font-size: clamp(16px, 1.55vw, 22px);
+  line-height: 1.25;
   font-weight: 700;
   letter-spacing: -0.02em;
   color: var(--text-primary);
   font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
 }
 
 .kpi-sub {
@@ -1370,7 +1444,8 @@ body {
 
 .inline-row {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  align-items: end;
   gap: 12px;
 }
 
@@ -1869,5 +1944,23 @@ body {
     grid-template-columns: 1fr;
   }
 }
+
+/* ==================== LOCALE TYPOGRAPHY & EXPANSION RESILIENCE ==================== */
+html:lang(en) body {
+  line-height: 1.46;
+}
+
+html:lang(en) .btn,
+html:lang(en) .nav-item {
+  letter-spacing: -0.005em;
+}
+
+.section-desc,
+.mcp-switch-desc,
+.module-desc,
+.field-hint {
+  overflow-wrap: break-word;
+}
+
 
 

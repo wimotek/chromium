@@ -79,7 +79,6 @@ def build_singbox_config(
         })
 
     inbounds: List[Dict[str, Any]] = []
-    stat_inbounds: List[str] = []
 
     # =========================================================================
     # 模式 1：公网直连模式 (VLESS-REALITY TCP + 可选 Hysteria2 UDP)
@@ -106,7 +105,6 @@ def build_singbox_config(
             },
         }
         inbounds.append(vless_inbound)
-        stat_inbounds.append("vless-direct")
 
         if hy2_enabled and int(hy2_port or 0) > 0 and hy2_cert_path and hy2_key_path:
             hy2_inbound: Dict[str, Any] = {
@@ -130,7 +128,6 @@ def build_singbox_config(
                 hy2_inbound["masquerade"] = hy2_masquerade
 
             inbounds.append(hy2_inbound)
-            stat_inbounds.append("hysteria2-in")
 
     # =========================================================================
     # 模式 2：WSS 反穿模式 (Local Loopback on 127.0.0.1:10086)
@@ -144,7 +141,6 @@ def build_singbox_config(
             "users": vless_users,
         }
         inbounds.append(bridge_inbound)
-        stat_inbounds.append("vless-bridge")
 
     effective_log_level = (log_level or AppConfig.LOG_LEVEL or "warn").strip().lower()
     if effective_log_level == "warning":
@@ -223,8 +219,6 @@ def build_singbox_config(
                 "listen": f"127.0.0.1:{AppConfig.STATS_PORT}",
                 "stats": {
                     "enabled": True,
-                    "inbounds": stat_inbounds,
-                    "outbounds": ["direct"],
                     "users": stat_user_names,
                 },
             }

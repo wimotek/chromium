@@ -12,7 +12,14 @@
 </head>
 <body>
   <!-- ==================== LOGIN SCREEN ==================== -->
-  <section id="auth-screen" class="auth-screen" aria-label="管理员登录">
+  <section id="auth-screen" class="auth-screen" aria-label="管理员登录" data-i18n-aria="auth.regionLabel">
+    <div class="auth-lang-bar">
+      <div class="lang-switch" role="group" aria-label="切换界面语言" data-i18n-aria="common.switchLangAria">
+        <button type="button" class="lang-switch-btn" data-lang-btn="zh-CN" aria-pressed="true">中文</button>
+        <button type="button" class="lang-switch-btn" data-lang-btn="en-US" aria-pressed="false">EN</button>
+      </div>
+    </div>
+
     <div class="auth-card">
       <div class="auth-brand">
         <div class="brand-mark" aria-hidden="true">
@@ -23,13 +30,13 @@
         </div>
         <div>
           <h1 class="auth-title">Wimotek Nginx</h1>
-          <p class="auth-subtitle">云原生 Nginx 微内核控制台</p>
+          <p class="auth-subtitle" data-i18n="auth.subtitle">云原生 Nginx 微内核控制台</p>
         </div>
       </div>
 
-      <div class="auth-tabs" role="tablist" aria-label="登录方式">
-        <button type="button" id="tab-creds" class="auth-tab" role="tab" aria-selected="true">账号密码</button>
-        <button type="button" id="tab-token" class="auth-tab" role="tab" aria-selected="false">API Token</button>
+      <div class="auth-tabs" role="tablist" aria-label="登录方式" data-i18n-aria="auth.methodsAria">
+        <button type="button" id="tab-creds" class="auth-tab" role="tab" aria-selected="true" data-i18n="auth.tabCreds">账号密码</button>
+        <button type="button" id="tab-token" class="auth-tab" role="tab" aria-selected="false" data-i18n="auth.tabToken">API Token</button>
       </div>
 
       <form id="login-form" class="auth-form" novalidate>
@@ -37,19 +44,19 @@
 
         <div id="creds-fields">
           <div class="field" style="margin-bottom: 12px;">
-            <label for="login-user">管理员账号</label>
-            <input id="login-user" name="user" type="text" class="input" autocomplete="username" placeholder="admin" />
+            <label for="login-user" data-i18n="auth.usernameLabel">管理员账号</label>
+            <input id="login-user" name="user" type="text" class="input" autocomplete="username" placeholder="admin" data-i18n-placeholder="auth.usernamePlaceholder" />
           </div>
           <div class="field">
-            <label for="login-pass">管理员密码</label>
-            <input id="login-pass" name="pass" type="password" class="input" autocomplete="current-password" placeholder="输入密码" />
+            <label for="login-pass" data-i18n="auth.passwordLabel">管理员密码</label>
+            <input id="login-pass" name="pass" type="password" class="input" autocomplete="current-password" placeholder="输入密码" data-i18n-placeholder="auth.passwordPlaceholder" />
           </div>
         </div>
 
         <div id="token-fields" hidden>
           <div class="field">
-            <label for="login-token">授权 Token</label>
-            <input id="login-token" name="token" type="password" class="input mono" autocomplete="off" placeholder="输入 AUTH_TOKEN" />
+            <label for="login-token" data-i18n="auth.tokenLabel">授权 Token</label>
+            <input id="login-token" name="token" type="password" class="input mono" autocomplete="off" placeholder="输入 AUTH_TOKEN" data-i18n-placeholder="auth.tokenPlaceholder" />
           </div>
         </div>
 
@@ -60,20 +67,20 @@
         </div>
 
         <div class="field">
-          <label for="login-captcha">安全图形验证码</label>
+          <label for="login-captcha" data-i18n="auth.captchaLabel">安全图形验证码</label>
           <div class="captcha-row">
-            <input id="login-captcha" name="captcha" type="text" class="input mono captcha-input" maxlength="6" autocomplete="off" spellcheck="false" placeholder="输入右侧 4 位字符" />
-            <button type="button" id="btn-refresh-captcha" class="captcha-img-btn" title="点击刷新验证码" aria-label="刷新图形验证码">
-              <img id="captcha-img" class="captcha-img" alt="安全验证码" />
+            <input id="login-captcha" name="captcha" type="text" class="input mono captcha-input" maxlength="6" autocomplete="off" spellcheck="false" placeholder="输入右侧 4 位字符" data-i18n-placeholder="auth.captchaPlaceholder" />
+            <button type="button" id="btn-refresh-captcha" class="captcha-img-btn" title="点击刷新验证码" aria-label="刷新图形验证码" data-i18n-title="auth.captchaRefreshTitle" data-i18n-aria="auth.captchaRefreshAria">
+              <img id="captcha-img" class="captcha-img" alt="安全验证码" data-i18n-alt="auth.captchaAlt" />
             </button>
           </div>
           <div id="pow-shield-bar" class="pow-shield-bar">
             <span id="pow-shield-dot" class="pow-dot" aria-hidden="true"></span>
-            <span id="pow-shield-text">正在初始化防机器人安全校验...</span>
+            <span id="pow-shield-text" data-i18n="auth.powInit">正在初始化防机器人安全校验...</span>
           </div>
         </div>
 
-        <button type="submit" id="login-submit" class="btn btn-primary" style="width: 100%; height: 38px; margin-top: 4px;">
+        <button type="submit" id="login-submit" class="btn btn-primary" style="width: 100%; height: 38px; margin-top: 4px;" data-i18n="auth.submitBtn">
           登录控制台
         </button>
       </form>
@@ -84,7 +91,7 @@
   <div id="app-shell" class="app-shell" hidden>
     <div id="drawer-backdrop" class="drawer-backdrop"></div>
 
-    <aside id="sidebar" class="sidebar" aria-label="主导航">
+    <aside id="sidebar" class="sidebar" aria-label="主导航" data-i18n-aria="nav.mainAria">
       <div class="sidebar-header">
         <div class="brand-mark" aria-hidden="true">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round">
@@ -98,43 +105,43 @@
         </div>
       </div>
 
-      <nav class="sidebar-nav" aria-label="功能视图">
-        <button type="button" class="nav-item" data-view="sites" aria-current="page">
+      <nav class="sidebar-nav" aria-label="功能视图" data-i18n-aria="nav.viewsAria">
+        <button type="button" class="nav-item" data-view="sites" aria-current="page" data-i18n-title="nav.sites">
           <span class="nav-item-left">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><line x1="9" y1="4" x2="9" y2="20"/></svg>
-            <span>站点配置</span>
+            <span data-i18n="nav.sites">站点配置</span>
           </span>
           <span id="nav-count-sites" class="nav-count">0</span>
         </button>
 
-        <button type="button" class="nav-item" data-view="certs">
+        <button type="button" class="nav-item" data-view="certs" data-i18n-title="nav.certs">
           <span class="nav-item-left">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>
-            <span>SSL 证书</span>
+            <span data-i18n="nav.certs">SSL 证书</span>
           </span>
           <span id="nav-count-certs" class="nav-count">0</span>
         </button>
 
-        <button type="button" class="nav-item" data-view="main-conf">
+        <button type="button" class="nav-item" data-view="main-conf" data-i18n-title="nav.mainConf">
           <span class="nav-item-left">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="8" y1="13" x2="16" y2="13"/><line x1="8" y1="17" x2="13" y2="17"/></svg>
-            <span>核心配置</span>
+            <span data-i18n="nav.mainConf">核心配置</span>
           </span>
         </button>
 
-        <button type="button" class="nav-item" data-view="build">
+        <button type="button" class="nav-item" data-view="build" data-i18n-title="nav.build">
           <span class="nav-item-left">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
-            <span>编译与运行</span>
+            <span data-i18n="nav.build">编译与运行</span>
           </span>
         </button>
 
-        <button type="button" class="nav-item" data-view="mcp">
+        <button type="button" class="nav-item" data-view="mcp" data-i18n-title="nav.mcp">
           <span class="nav-item-left">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="6" r="2.5"/><circle cx="18" cy="6" r="2.5"/><circle cx="12" cy="18" r="2.5"/><line x1="8.2" y1="7.3" x2="10.8" y2="15.7"/><line x1="15.8" y1="7.3" x2="13.2" y2="15.7"/><line x1="8.5" y1="6" x2="15.5" y2="6"/></svg>
-            <span>MCP / Agent</span>
+            <span data-i18n="nav.mcp">MCP / Agent</span>
           </span>
-          <span id="nav-mcp-state" class="nav-count">关闭</span>
+          <span id="nav-mcp-state" class="nav-count" data-i18n="common.off">关闭</span>
         </button>
       </nav>
 
@@ -143,26 +150,26 @@
           <div class="engine-status-row">
             <span class="engine-status-label">
               <span id="engine-dot" class="status-indicator" aria-hidden="true"></span>
-              <span id="engine-state-text">Nginx 运行中</span>
+              <span id="engine-state-text" data-i18n="nav.engineRunning">Nginx 运行中</span>
             </span>
             <span id="engine-pid" class="mono engine-status-meta">PID --</span>
           </div>
-          <div id="engine-sub-meta" class="engine-status-meta">UID 101 非特权守护</div>
+          <div id="engine-sub-meta" class="engine-status-meta" data-i18n="nav.engineSubMeta">UID 101 非特权守护</div>
         </div>
 
         <div class="sidebar-account-row">
-          <button type="button" id="btn-account-modal" class="btn btn-sm sidebar-account-btn">
+          <button type="button" id="btn-account-modal" class="btn btn-sm sidebar-account-btn" data-i18n-title="nav.accountSecurityTitle">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="M9 12l2 2 4-4"/></svg>
             <span id="sidebar-username-label">账号安全 (admin)</span>
           </button>
         </div>
 
         <div class="sidebar-actions">
-          <button type="button" id="btn-theme-toggle" class="btn btn-sm" aria-label="切换明暗主题">
+          <button type="button" id="btn-theme-toggle" class="btn btn-sm" aria-label="切换明暗主题" data-i18n-aria="common.switchThemeAria">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"/></svg>
-            <span id="theme-label">深色</span>
+            <span id="theme-label" data-i18n="common.themeDark">深色</span>
           </button>
-          <button type="button" id="btn-logout" class="btn btn-sm">退出</button>
+          <button type="button" id="btn-logout" class="btn btn-sm" data-i18n="common.logout">退出</button>
         </div>
       </div>
     </aside>
@@ -170,96 +177,100 @@
     <div class="main-column">
       <header class="topbar">
         <div class="topbar-left">
-          <button type="button" id="btn-mobile-menu" class="btn btn-icon mobile-menu-btn" aria-label="打开导航菜单">
+          <button type="button" id="btn-mobile-menu" class="btn btn-icon mobile-menu-btn" aria-label="打开导航菜单" data-i18n-aria="common.openNavAria">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="4" y1="7" x2="20" y2="7"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="17" x2="20" y2="17"/></svg>
           </button>
           <div class="topbar-title-group">
-            <h2 id="topbar-title" class="topbar-title">站点配置</h2>
-            <div id="topbar-meta" class="topbar-meta">加载系统状态中...</div>
+            <h2 id="topbar-title" class="topbar-title" data-i18n="nav.sites">站点配置</h2>
+            <div id="topbar-meta" class="topbar-meta" data-i18n="topbar.loadingSummary">加载系统状态中...</div>
           </div>
         </div>
 
         <div class="topbar-right">
-          <button type="button" id="btn-global-test" class="btn btn-sm">
+          <div class="lang-switch" role="group" aria-label="切换界面语言" data-i18n-aria="common.switchLangAria">
+            <button type="button" class="lang-switch-btn" data-lang-btn="zh-CN" aria-pressed="true">中文</button>
+            <button type="button" class="lang-switch-btn" data-lang-btn="en-US" aria-pressed="false">EN</button>
+          </div>
+          <button type="button" id="btn-global-test" class="btn btn-sm" data-i18n-title="topbar.btnTestAria" data-i18n-aria="topbar.btnTestAria">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
-            <span>语法校验</span>
+            <span class="hide-xs" data-i18n="topbar.btnTest">语法校验</span>
           </button>
-          <button type="button" id="btn-global-reload" class="btn btn-sm">
+          <button type="button" id="btn-global-reload" class="btn btn-sm" data-i18n-title="topbar.btnReloadAria" data-i18n-aria="topbar.btnReloadAria">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
-            <span>热重载</span>
+            <span class="hide-xs" data-i18n="topbar.btnReload">热重载</span>
           </button>
         </div>
       </header>
 
       <main class="view-container">
         <!-- ==================== VIEW 1: SITES ==================== -->
-        <section id="view-sites" class="view-panel" aria-label="站点配置管理">
+        <section id="view-sites" class="view-panel" aria-label="站点配置管理" data-i18n-aria="sites.panelAria">
           <div class="sites-split">
             <div class="sites-rail">
               <div class="rail-controls">
                 <div class="rail-search-row">
                   <div class="search-wrap">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><line x1="20" y1="20" x2="16.65" y2="16.65"/></svg>
-                    <input id="site-search" type="search" class="input input-sm" placeholder="筛选域名..." aria-label="筛选站点域名" />
+                    <input id="site-search" type="search" class="input input-sm" placeholder="筛选域名..." aria-label="筛选站点域名" data-i18n-placeholder="sites.searchPlaceholder" data-i18n-aria="sites.searchAria" />
                   </div>
-                  <button type="button" id="btn-open-new-site" class="btn btn-primary btn-sm">新建</button>
+                  <button type="button" id="btn-open-new-site" class="btn btn-primary btn-sm" data-i18n="sites.btnNew">新建</button>
                 </div>
 
-                <div class="segmented" role="group" aria-label="站点状态筛选">
-                  <button type="button" class="segmented-btn" data-filter="all" aria-pressed="true">全部</button>
-                  <button type="button" class="segmented-btn" data-filter="enabled" aria-pressed="false">已启用</button>
-                  <button type="button" class="segmented-btn" data-filter="disabled" aria-pressed="false">已停用</button>
+                <div class="segmented" role="group" aria-label="站点状态筛选" data-i18n-aria="sites.filterAria">
+                  <button type="button" class="segmented-btn" data-filter="all" aria-pressed="true" data-i18n="sites.filterAll" data-i18n-title="sites.filterAll">全部</button>
+                  <button type="button" class="segmented-btn" data-filter="enabled" aria-pressed="false" data-i18n="sites.filterEnabled" data-i18n-title="sites.filterEnabled">已启用</button>
+                  <button type="button" class="segmented-btn" data-filter="disabled" aria-pressed="false" data-i18n="sites.filterDisabled" data-i18n-title="sites.filterDisabled">已停用</button>
                 </div>
               </div>
 
-              <ul id="site-list" class="site-list" aria-label="站点列表"></ul>
+              <ul id="site-list" class="site-list" aria-label="站点列表" data-i18n-aria="sites.listAria"></ul>
             </div>
 
             <div class="editor-workspace">
               <div id="site-editor-empty" class="editor-empty-state">
-                <h3>选择或新建一个站点配置</h3>
-                <p>所有修改在落盘后自动执行 <span class="mono">nginx -t</span> 事务校验，语法错误将秒级自动回滚，杜绝线上故障。</p>
-                <button type="button" id="btn-empty-new-site" class="btn btn-primary">新建站点配置</button>
+                <h3 data-i18n="sites.emptyHeading">选择或新建一个站点配置</h3>
+                <p><span data-i18n="sites.emptyDescPrefix">所有修改在落盘后自动执行 </span><span class="mono">nginx -t</span><span data-i18n="sites.emptyDescSuffix"> 事务校验，语法错误将秒级自动回滚，杜绝线上故障。</span></p>
+                <button type="button" id="btn-empty-new-site" class="btn btn-primary" data-i18n="sites.emptyBtnNew">新建站点配置</button>
               </div>
 
               <div id="site-editor-wrap" class="editor-workspace" style="flex: 1;" hidden>
                 <div class="editor-toolbar">
                   <div class="editor-file-info">
                     <span id="editor-filename" class="editor-filename">/etc/nginx/conf.d/example.conf</span>
-                    <span id="editor-dirty" class="dirty-flag" hidden>未保存</span>
+                    <span id="editor-dirty" class="dirty-flag" hidden data-i18n="sites.dirtyUnsaved">未保存</span>
                   </div>
 
                   <div class="editor-actions">
-                    <select id="template-apply-select" class="select select-sm" style="width: auto; max-width: 170px;" aria-label="插入预设配置模板">
-                      <option value="">切换模板...</option>
-                      <option value="wordpress">WordPress 站点</option>
-                      <option value="proxy">反向代理 (WS)</option>
-                      <option value="static_spa">静态 / SPA</option>
-                      <option value="php83">Laravel / PHP 8.3</option>
-                      <option value="redirect_https">HTTPS 强制跳转</option>
+                    <select id="template-apply-select" class="select select-sm" style="width: auto; max-width: 210px;" aria-label="插入预设配置模板" data-i18n-aria="sites.templateSelectAria">
+                      <option value="" data-i18n="sites.templatePlaceholder">切换模板...</option>
+                      <option value="wordpress" data-i18n="templates.wordpress.shortName">WordPress 站点</option>
+                      <option value="proxy" data-i18n="templates.proxy.shortName">反向代理 (WS)</option>
+                      <option value="static_spa" data-i18n="templates.static_spa.shortName">静态 / SPA</option>
+                      <option value="php83" data-i18n="templates.php83.shortName">Laravel / PHP 8.3</option>
+                      <option value="redirect_https" data-i18n="templates.redirect_https.shortName">HTTPS 强制跳转</option>
                     </select>
-                    <button type="button" id="btn-site-toggle" class="btn btn-sm">停用</button>
-                    <button type="button" id="btn-site-ssl" class="btn btn-sm">签发 SSL</button>
-                    <button type="button" id="btn-site-test" class="btn btn-sm">预检</button>
-                    <button type="button" id="btn-site-delete" class="btn btn-danger btn-sm">删除</button>
-                    <button type="button" id="btn-site-save" class="btn btn-primary btn-sm">保存配置</button>
+                    <button type="button" id="btn-site-toggle" class="btn btn-sm" data-i18n="sites.btnDisable">停用</button>
+                    <button type="button" id="btn-site-ssl" class="btn btn-sm" data-i18n="sites.btnIssueSsl">签发 SSL</button>
+                    <button type="button" id="btn-site-test" class="btn btn-sm" data-i18n="sites.btnPrecheck">预检</button>
+                    <button type="button" id="btn-site-delete" class="btn btn-danger btn-sm" data-i18n="sites.btnDelete">删除</button>
+                    <button type="button" id="btn-site-save" class="btn btn-primary btn-sm" data-i18n="sites.btnSave">保存配置</button>
                   </div>
                 </div>
 
                 <div class="editor-body">
                   <div id="site-gutter" class="line-gutter" aria-hidden="true">1</div>
-                  <textarea id="site-textarea" class="code-textarea" spellcheck="false" autocomplete="off" autocorrect="off" autocapitalize="off" aria-label="站点 Nginx 配置编辑器"></textarea>
+                  <textarea id="site-textarea" class="code-textarea" spellcheck="false" autocomplete="off" autocorrect="off" autocapitalize="off" aria-label="站点 Nginx 配置编辑器" data-i18n-aria="sites.editorAria"></textarea>
                 </div>
 
                 <div class="editor-statusbar">
                   <span id="site-status-left" class="mono">0 行 · 0 B</span>
-                  <span class="hide-sm">Ctrl/⌘ + S 原子校验并保存 · Tab 缩进 4 空格</span>
+                  <span class="hide-sm" data-i18n="sites.shortcutHint">Ctrl/⌘ + S 原子校验并保存 · Tab 缩进 4 空格</span>
                 </div>
 
                 <div id="site-output-bar" class="output-bar" hidden>
                   <div class="output-bar-head">
-                    <span id="site-output-title">执行结果</span>
-                    <button type="button" id="btn-close-site-output" class="btn btn-ghost btn-sm" style="height: 24px; padding: 0 6px;">关闭</button>
+                    <span id="site-output-title" data-i18n="common.resultTitle">执行结果</span>
+                    <button type="button" id="btn-close-site-output" class="btn btn-ghost btn-sm" style="height: 24px; padding: 0 6px;" data-i18n="common.close">关闭</button>
                   </div>
                   <pre id="site-output-pre" class="output-pre"></pre>
                 </div>
@@ -269,39 +280,39 @@
         </section>
 
         <!-- ==================== VIEW 2: SSL CERTS ==================== -->
-        <section id="view-certs" class="view-panel" aria-label="SSL 证书管理" hidden>
+        <section id="view-certs" class="view-panel" aria-label="SSL 证书管理" data-i18n-aria="certs.panelAria" hidden>
           <div class="view-scroll">
             <div class="kpi-strip">
               <div class="kpi-cell">
-                <div class="kpi-label">已托管证书</div>
+                <div class="kpi-label" data-i18n="certs.kpiTotal">已托管证书</div>
                 <div id="kpi-certs-total" class="kpi-value">0</div>
-                <div class="kpi-sub">扫描自 /data/ssl</div>
+                <div class="kpi-sub" data-i18n="certs.kpiTotalSub">扫描自 /data/ssl</div>
               </div>
               <div class="kpi-cell">
-                <div class="kpi-label">正常有效</div>
+                <div class="kpi-label" data-i18n="certs.kpiValid">正常有效</div>
                 <div id="kpi-certs-valid" class="kpi-value">0</div>
-                <div class="kpi-sub">剩余有效期 &gt; 30 天</div>
+                <div class="kpi-sub" data-i18n="certs.kpiValidSub">剩余有效期 &gt; 30 天</div>
               </div>
               <div class="kpi-cell">
-                <div class="kpi-label">即将到期 / 已过期</div>
+                <div class="kpi-label" data-i18n="certs.kpiWarn">即将到期 / 已过期</div>
                 <div id="kpi-certs-warn" class="kpi-value">0</div>
-                <div class="kpi-sub">建议检查 DNS/ACME 续签</div>
+                <div class="kpi-sub" data-i18n="certs.kpiWarnSub">建议检查 DNS/ACME 续签</div>
               </div>
               <div class="kpi-cell">
-                <div class="kpi-label">自动续签周期</div>
+                <div class="kpi-label" data-i18n="certs.kpiAutoRenew">自动续签周期</div>
                 <div class="kpi-value">12h</div>
-                <div class="kpi-sub">Go 内置调度器静默续期</div>
+                <div class="kpi-sub" data-i18n="certs.kpiAutoRenewSub">Go 内置调度器静默续期</div>
               </div>
             </div>
 
             <div class="section-bar">
               <div>
-                <h3 class="section-heading">TLS 证书清单</h3>
-                <p class="section-desc">支持 Let's Encrypt 与 ZeroSSL，签发后可一键向对应站点 <span class="mono">server {}</span> 块内注入 TLS 1.2/1.3 与 HTTP/2 配置。</p>
+                <h3 class="section-heading" data-i18n="certs.heading">TLS 证书清单</h3>
+                <p class="section-desc"><span data-i18n="certs.descPrefix">支持 Let's Encrypt 与 ZeroSSL，签发后可一键向对应站点 </span><span class="mono">server {}</span><span data-i18n="certs.descSuffix"> 块内注入 TLS 1.2/1.3 与 HTTP/2 配置。</span></p>
               </div>
               <div style="display: flex; gap: 8px;">
-                <button type="button" id="btn-refresh-certs" class="btn btn-sm">刷新清单</button>
-                <button type="button" id="btn-open-issue-ssl" class="btn btn-primary btn-sm">签发新证书</button>
+                <button type="button" id="btn-refresh-certs" class="btn btn-sm" data-i18n="certs.btnRefresh">刷新清单</button>
+                <button type="button" id="btn-open-issue-ssl" class="btn btn-primary btn-sm" data-i18n="certs.btnIssueNew">签发新证书</button>
               </div>
             </div>
 
@@ -309,12 +320,12 @@
               <table class="data-table">
                 <thead>
                   <tr>
-                    <th>主域名</th>
-                    <th>签发机构</th>
-                    <th>覆盖域名 (SANs)</th>
-                    <th>到期日期</th>
-                    <th>状态与剩余天数</th>
-                    <th style="text-align: right;">操作</th>
+                    <th data-i18n="certs.colDomain">主域名</th>
+                    <th data-i18n="certs.colIssuer">签发机构</th>
+                    <th data-i18n="certs.colSans">SANs 域名</th>
+                    <th data-i18n="certs.colExpiry">到期日期</th>
+                    <th data-i18n="certs.colStatus">剩余状态</th>
+                    <th style="text-align: right;" data-i18n="certs.colActions">操作</th>
                   </tr>
                 </thead>
                 <tbody id="certs-tbody"></tbody>
@@ -324,33 +335,33 @@
         </section>
 
         <!-- ==================== VIEW 3: MAIN NGINX.CONF ==================== -->
-        <section id="view-main-conf" class="view-panel" aria-label="核心配置 nginx.conf" hidden>
+        <section id="view-main-conf" class="view-panel" aria-label="核心配置 nginx.conf" data-i18n-aria="mainConf.panelAria" hidden>
           <div class="editor-workspace" style="flex: 1;">
             <div class="editor-toolbar">
               <div class="editor-file-info">
                 <span class="editor-filename">/data/nginx.conf</span>
-                <span id="main-dirty" class="dirty-flag" hidden>未保存</span>
+                <span id="main-dirty" class="dirty-flag" hidden data-i18n="sites.dirtyUnsaved">未保存</span>
               </div>
               <div class="editor-actions">
-                <button type="button" id="btn-main-reload-read" class="btn btn-sm">重新读取</button>
-                <button type="button" id="btn-main-save" class="btn btn-primary btn-sm">保存主配置</button>
+                <button type="button" id="btn-main-reload-read" class="btn btn-sm" data-i18n="mainConf.btnReloadRead">重新读取</button>
+                <button type="button" id="btn-main-save" class="btn btn-primary btn-sm" data-i18n="mainConf.btnSave">保存主配置</button>
               </div>
             </div>
 
             <div class="editor-body">
               <div id="main-gutter" class="line-gutter" aria-hidden="true">1</div>
-              <textarea id="main-textarea" class="code-textarea" spellcheck="false" autocomplete="off" aria-label="全局 nginx.conf 编辑器"></textarea>
+              <textarea id="main-textarea" class="code-textarea" spellcheck="false" autocomplete="off" aria-label="全局 nginx.conf 编辑器" data-i18n-aria="mainConf.editorAria"></textarea>
             </div>
 
             <div class="editor-statusbar">
               <span id="main-status-left" class="mono">0 行 · 0 B</span>
-              <span class="hide-sm">行业对齐默认配置（兼容 WordPress / FastCGI / WebSocket），保存自动执行 nginx -t 回滚保护</span>
+              <span class="hide-sm" data-i18n="mainConf.shortcutHint">行业对齐默认配置（兼容 WordPress / FastCGI / WebSocket），保存自动执行 nginx -t 回滚保护</span>
             </div>
 
             <div id="main-output-bar" class="output-bar" hidden>
               <div class="output-bar-head">
-                <span id="main-output-title">执行结果</span>
-                <button type="button" id="btn-close-main-output" class="btn btn-ghost btn-sm" style="height: 24px; padding: 0 6px;">关闭</button>
+                <span id="main-output-title" data-i18n="common.resultTitle">执行结果</span>
+                <button type="button" id="btn-close-main-output" class="btn btn-ghost btn-sm" style="height: 24px; padding: 0 6px;" data-i18n="common.close">关闭</button>
               </div>
               <pre id="main-output-pre" class="output-pre"></pre>
             </div>
@@ -358,58 +369,58 @@
         </section>
 
         <!-- ==================== VIEW 4: BUILD & RUNTIME ==================== -->
-        <section id="view-build" class="view-panel" aria-label="编译模块与自定义构建" hidden>
+        <section id="view-build" class="view-panel" aria-label="编译模块与自定义构建" data-i18n-aria="build.panelAria" hidden>
           <div class="view-scroll">
             <div class="kpi-strip">
               <div class="kpi-cell">
-                <div class="kpi-label">Nginx 版本</div>
+                <div class="kpi-label" data-i18n="build.kpiVersion">Nginx 版本</div>
                 <div id="build-version" class="kpi-value mono">--</div>
-                <div id="build-compiler" class="kpi-sub">源码分阶段编译</div>
+                <div id="build-compiler" class="kpi-sub" data-i18n="build.kpiVersionSubFallback">源码分阶段编译</div>
               </div>
               <div class="kpi-cell">
-                <div class="kpi-label">Master 进程</div>
+                <div class="kpi-label" data-i18n="build.kpiMaster">Master 进程</div>
                 <div id="build-pid" class="kpi-value mono">--</div>
-                <div id="build-uptime" class="kpi-sub">Watchdog 守护</div>
+                <div id="build-uptime" class="kpi-sub" data-i18n="build.kpiMasterSubFallback">Watchdog 守护</div>
               </div>
               <div class="kpi-cell">
-                <div class="kpi-label">已启用核心模块</div>
+                <div class="kpi-label" data-i18n="build.kpiModules">已启用核心模块</div>
                 <div id="build-mod-count" class="kpi-value">0 / 0</div>
-                <div class="kpi-sub">含 gzip_static / HTTP3 / Brotli</div>
+                <div class="kpi-sub" data-i18n="build.kpiModulesSub">含 gzip_static / HTTP3 / Brotli</div>
               </div>
               <div class="kpi-cell">
-                <div class="kpi-label">站点与 HTTPS 覆盖</div>
+                <div class="kpi-label" data-i18n="build.kpiSites">站点与 HTTPS 覆盖</div>
                 <div id="build-site-summary" class="kpi-value">0 / 0</div>
-                <div class="kpi-sub">Zero-DB 原生文件托管</div>
+                <div class="kpi-sub" data-i18n="build.kpiSitesSub">Zero-DB 原生文件托管</div>
               </div>
             </div>
 
             <div class="section-bar">
               <div>
-                <h3 class="section-heading">当前实例已编译模块矩阵</h3>
-                <p class="section-desc">实时解析 <span class="mono">nginx -V</span> 编译参数，默认模块与官方 <span class="mono">nginx:alpine</span> 行业基线对齐，<span class="mono">gzip_static</span> / <span class="mono">brotli</span> 等作为按需自定义参数。</p>
+                <h3 class="section-heading" data-i18n="build.matrixHeading">当前实例已编译模块矩阵</h3>
+                <p class="section-desc"><span data-i18n="build.matrixDescPrefix">实时解析 </span><span class="mono">nginx -V</span><span data-i18n="build.matrixDescMid"> 编译参数，默认模块与官方 </span><span class="mono">nginx:alpine</span><span data-i18n="build.matrixDescSuffix"> 行业基线对齐，gzip_static / brotli 等作为按需自定义参数。</span></p>
               </div>
             </div>
             <div id="modules-grid" class="modules-grid"></div>
 
             <div class="section-bar">
               <div>
-                <h3 class="section-heading">Dockerfile 自定义编译参数生成器</h3>
-                <p class="section-desc">默认自动拉取官方最新 Nginx 版本并编译行业标准模块；按需勾选 <span class="mono">ENABLE_GZIP_STATIC</span> 等可选插件或追加任意 <span class="mono">./configure</span> 参数。</p>
+                <h3 class="section-heading" data-i18n="build.customizerHeading">Dockerfile 自定义编译参数生成器</h3>
+                <p class="section-desc" data-i18n="build.customizerDesc">默认自动拉取官方最新 Nginx 版本并编译行业标准模块；按需勾选可选插件或追加任意 ./configure 参数。</p>
               </div>
             </div>
 
             <div class="builder-surface">
               <div class="builder-grid">
                 <div class="field">
-                  <label for="cb-version">Nginx 版本 (NGINX_VERSION)</label>
+                  <label for="cb-version" data-i18n="build.fieldVersion">Nginx 版本 (NGINX_VERSION)</label>
                   <input id="cb-version" type="text" class="input mono" value="latest" placeholder="latest / stable / 1.27.5" />
                 </div>
                 <div class="field">
-                  <label for="cb-tag">目标镜像标签</label>
+                  <label for="cb-tag" data-i18n="build.fieldTag">目标镜像标签</label>
                   <input id="cb-tag" type="text" class="input mono" value="wimotek/nginx:custom" />
                 </div>
                 <div class="field">
-                  <label for="cb-cflags">编译优化参数 (NGINX_EXTRA_CFLAGS)</label>
+                  <label for="cb-cflags" data-i18n="build.fieldCflags">编译优化参数 (NGINX_EXTRA_CFLAGS)</label>
                   <input id="cb-cflags" type="text" class="input mono" value="-O2 -pipe" />
                 </div>
               </div>
@@ -419,56 +430,56 @@
                   <input type="checkbox" id="cb-gzip-static" />
                   <div>
                     <div class="check-item-title">ENABLE_GZIP_STATIC</div>
-                    <div class="check-item-desc">开启 --with-http_gzip_static_module（.gz 预压缩直出）</div>
+                    <div class="check-item-desc" data-i18n="build.cbGzipDesc">开启 --with-http_gzip_static_module（.gz 预压缩直出）</div>
                   </div>
                 </label>
                 <label class="check-item">
                   <input type="checkbox" id="cb-brotli" />
                   <div>
                     <div class="check-item-title">ENABLE_BROTLI</div>
-                    <div class="check-item-desc">编译 Google ngx_brotli（.br 静态/动态压缩）</div>
+                    <div class="check-item-desc" data-i18n="build.cbBrotliDesc">编译 Google ngx_brotli（.br 静态/动态压缩）</div>
                   </div>
                 </label>
                 <label class="check-item">
                   <input type="checkbox" id="cb-headers-more" />
                   <div>
                     <div class="check-item-title">ENABLE_HEADERS_MORE</div>
-                    <div class="check-item-desc">编译 headers-more-nginx-module</div>
+                    <div class="check-item-desc" data-i18n="build.cbHeadersMoreDesc">编译 headers-more-nginx-module</div>
                   </div>
                 </label>
                 <label class="check-item">
                   <input type="checkbox" id="cb-zstd" />
                   <div>
                     <div class="check-item-title">ENABLE_ZSTD</div>
-                    <div class="check-item-desc">编译 zstd-nginx-module（Zstandard 压缩）</div>
+                    <div class="check-item-desc" data-i18n="build.cbZstdDesc">编译 zstd-nginx-module（Zstandard 压缩）</div>
                   </div>
                 </label>
                 <label class="check-item">
                   <input type="checkbox" class="cb-extra-flag" value="--with-debug" />
                   <div>
                     <div class="check-item-title">--with-debug</div>
-                    <div class="check-item-desc">启用调试日志支持（用于排障分析）</div>
+                    <div class="check-item-desc" data-i18n="build.cbDebugDesc">启用调试日志支持（用于排障分析）</div>
                   </div>
                 </label>
                 <label class="check-item">
                   <input type="checkbox" class="cb-extra-flag" value="--without-http_autoindex_module" />
                   <div>
                     <div class="check-item-title">--without-http_autoindex</div>
-                    <div class="check-item-desc">裁剪目录浏览模块以进一步精简</div>
+                    <div class="check-item-desc" data-i18n="build.cbNoAutoindexDesc">裁剪目录浏览模块以进一步精简</div>
                   </div>
                 </label>
               </div>
 
               <div class="field">
-                <label for="cb-extra-raw">追加自定义编译参数 (NGINX_EXTRA_CONFIGURE_ARGS)</label>
-                <input id="cb-extra-raw" type="text" class="input mono" placeholder="例如：--with-http_gzip_static_module --with-http_sub_module" />
-                <span class="field-hint">提示：官方标准模块（SSL/HTTP2/HTTP3/RealIP/DAV/MP4/FLV/Gunzip/Slice/Stream 等）已默认对齐开启，无需重复填写；NGINX_VERSION 填 latest 将自动拉取官网最新版。</span>
+                <label for="cb-extra-raw" data-i18n="build.fieldExtraRaw">追加自定义编译参数 (NGINX_EXTRA_CONFIGURE_ARGS)</label>
+                <input id="cb-extra-raw" type="text" class="input mono" placeholder="例如：--with-http_gzip_static_module --with-http_sub_module" data-i18n-placeholder="build.fieldExtraRawPlaceholder" />
+                <span class="field-hint" data-i18n="build.fieldExtraRawHint">提示：官方标准模块（SSL/HTTP2/HTTP3/RealIP/DAV/MP4/FLV/Gunzip/Slice/Stream 等）已默认对齐开启，无需重复填写；NGINX_VERSION 填 latest 将自动拉取官网最新版。</span>
               </div>
 
               <div class="cmd-box">
                 <div class="cmd-box-head">
-                  <span>可复现的多阶段构建命令</span>
-                  <button type="button" id="btn-copy-docker-cmd" class="btn btn-primary btn-sm">复制构建命令</button>
+                  <span data-i18n="build.cmdBoxTitle">可复现的多阶段构建命令</span>
+                  <button type="button" id="btn-copy-docker-cmd" class="btn btn-primary btn-sm" data-i18n="build.btnCopyCmd">复制构建命令</button>
                 </div>
                 <pre id="cb-output" class="cmd-pre"></pre>
               </div>
@@ -476,36 +487,36 @@
 
             <div class="section-bar">
               <div>
-                <h3 class="section-heading">原始 <span class="mono">nginx -V</span> 编译签名</h3>
+                <h3 class="section-heading"><span data-i18n="build.rawHeadingPrefix">原始 </span><span class="mono">nginx -V</span><span data-i18n="build.rawHeadingSuffix"> 编译签名</span></h3>
               </div>
             </div>
             <div class="cmd-box" style="margin-top: 0;">
-              <pre id="raw-nginx-v" class="cmd-pre" style="white-space: pre-wrap; word-break: break-all;">加载中...</pre>
+              <pre id="raw-nginx-v" class="cmd-pre" style="white-space: pre-wrap; word-break: break-all;" data-i18n="common.loading">加载中...</pre>
             </div>
           </div>
         </section>
 
         <!-- ==================== VIEW 5: MCP & AGENT ==================== -->
-        <section id="view-mcp" class="view-panel" aria-label="MCP 与 Agent 接入管理" hidden>
+        <section id="view-mcp" class="view-panel" aria-label="MCP 与 Agent 接入管理" data-i18n-aria="mcp.panelAria" hidden>
           <div class="view-scroll">
             <div class="kpi-strip">
               <div class="kpi-cell">
-                <div class="kpi-label">MCP 端点状态</div>
-                <div id="mcp-kpi-status" class="kpi-value">已关闭</div>
+                <div class="kpi-label" data-i18n="mcp.kpiStatus">MCP 端点状态</div>
+                <div id="mcp-kpi-status" class="kpi-value" data-i18n="common.inactive">已关闭</div>
                 <div class="kpi-sub mono">/mcp · Streamable HTTP</div>
               </div>
               <div class="kpi-cell">
-                <div class="kpi-label">权限安全模式</div>
+                <div class="kpi-label" data-i18n="mcp.kpiMode">权限安全模式</div>
                 <div id="mcp-kpi-mode" class="kpi-value">--</div>
-                <div id="mcp-kpi-tools" class="kpi-sub">0 / 13 个工具已开放</div>
+                <div id="mcp-kpi-tools" class="kpi-sub">0 / 13</div>
               </div>
               <div class="kpi-cell">
-                <div class="kpi-label">Agent 鉴权令牌</div>
+                <div class="kpi-label" data-i18n="mcp.kpiTokenMode">Agent 鉴权令牌</div>
                 <div id="mcp-kpi-token-mode" class="kpi-value">--</div>
                 <div id="mcp-kpi-token-preview" class="kpi-sub mono">--</div>
               </div>
               <div class="kpi-cell">
-                <div class="kpi-label">配置持久化</div>
+                <div class="kpi-label" data-i18n="mcp.kpiSource">配置持久化</div>
                 <div id="mcp-kpi-source" class="kpi-value">--</div>
                 <div class="kpi-sub mono">/data/.mcp.json (0600)</div>
               </div>
@@ -513,18 +524,18 @@
 
             <div class="section-bar">
               <div>
-                <h3 class="section-heading">原生 MCP 服务端热开关与鉴权</h3>
-                <p class="section-desc">内置标准 <span class="mono">2025-03-26</span> Streamable HTTP (JSON-RPC 2.0) 协议，开关与只读策略修改后即时生效并持久化，无需重启容器。</p>
+                <h3 class="section-heading" data-i18n="mcp.heading">原生 MCP 服务端热开关与鉴权</h3>
+                <p class="section-desc"><span data-i18n="mcp.descPrefix">内置标准 </span><span class="mono">2025-03-26</span><span data-i18n="mcp.descSuffix"> Streamable HTTP (JSON-RPC 2.0) 协议，开关与只读策略修改后即时生效并持久化，无需重启容器。</span></p>
               </div>
-              <button type="button" id="btn-mcp-refresh" class="btn btn-sm">刷新状态</button>
+              <button type="button" id="btn-mcp-refresh" class="btn btn-sm" data-i18n="mcp.btnRefresh">刷新状态</button>
             </div>
 
             <div class="builder-surface">
               <div class="mcp-toggle-grid">
                 <label class="mcp-switch-card" for="mcp-toggle-enabled">
                   <div class="mcp-switch-text">
-                    <div class="mcp-switch-title">启用原生 MCP 端点 (<span class="mono">/mcp</span>)</div>
-                    <div class="mcp-switch-desc">关闭时所有外部 Agent 请求直接返回 404；开启后需携带有效 Bearer Token 方可调用。</div>
+                    <div class="mcp-switch-title"><span data-i18n="mcp.switchEnableTitlePrefix">启用原生 MCP 端点 (</span><span class="mono">/mcp</span><span data-i18n="mcp.switchEnableTitleSuffix">)</span></div>
+                    <div class="mcp-switch-desc" data-i18n="mcp.switchEnableDesc">关闭时所有外部 Agent 请求直接返回 404；开启后需携带有效 Bearer Token 方可调用。</div>
                   </div>
                   <span class="toggle-switch">
                     <input type="checkbox" id="mcp-toggle-enabled" />
@@ -534,8 +545,8 @@
 
                 <label class="mcp-switch-card" for="mcp-toggle-readonly">
                   <div class="mcp-switch-text">
-                    <div class="mcp-switch-title">只读安全模式 (<span class="mono">MCP_READ_ONLY</span>)</div>
-                    <div class="mcp-switch-desc">仅开放 7 个查询与语法干跑工具，服务端自动隐藏并阻断所有保存、删除、重载与签发操作。</div>
+                    <div class="mcp-switch-title"><span data-i18n="mcp.switchReadOnlyTitlePrefix">只读安全模式 (</span><span class="mono">MCP_READ_ONLY</span><span data-i18n="mcp.switchReadOnlyTitleSuffix">)</span></div>
+                    <div class="mcp-switch-desc" data-i18n="mcp.switchReadOnlyDesc">仅开放 7 个查询与语法干跑工具，服务端自动隐藏并阻断所有保存、删除、重载与签发操作。</div>
                   </div>
                   <span class="toggle-switch">
                     <input type="checkbox" id="mcp-toggle-readonly" />
@@ -546,27 +557,27 @@
 
               <div class="mcp-token-bar">
                 <div class="mcp-token-info">
-                  <div class="mcp-token-label">MCP 专用访问令牌 (推荐与后台登录 Token 隔离)</div>
-                  <div id="mcp-token-desc" class="field-hint">当前复用后台会话 Token；点击右侧按钮可随时生成高强度独立 MCP Token。</div>
+                  <div class="mcp-token-label" data-i18n="mcp.tokenBarLabel">MCP 专用访问令牌 (推荐与后台登录 Token 隔离)</div>
+                  <div id="mcp-token-desc" class="field-hint" data-i18n="mcp.tokenDescShared">当前复用后台会话 AUTH_TOKEN；推荐点击右侧按钮生成高强度独立 MCP Token。</div>
                 </div>
                 <div class="mcp-token-actions">
-                  <button type="button" id="btn-mcp-rotate-token" class="btn btn-primary btn-sm">生成 / 轮换独立 Token</button>
-                  <button type="button" id="btn-mcp-clear-token" class="btn btn-sm">回退默认 Token</button>
+                  <button type="button" id="btn-mcp-rotate-token" class="btn btn-primary btn-sm" data-i18n="mcp.btnRotateToken">轮换独立 Token</button>
+                  <button type="button" id="btn-mcp-clear-token" class="btn btn-sm" data-i18n="mcp.btnClearToken">回退默认 Token</button>
                 </div>
               </div>
 
               <div id="mcp-fresh-token-box" class="mcp-fresh-token" hidden>
                 <div class="mcp-fresh-token-head">
-                  <span>新生成的独立 MCP Token（仅本次明文展示，请妥善保存）</span>
-                  <button type="button" id="btn-mcp-copy-token" class="btn btn-sm">复制 Token</button>
+                  <span data-i18n="mcp.freshTokenHead">新生成的独立 MCP Token（仅本次明文展示，请妥善保存）</span>
+                  <button type="button" id="btn-mcp-copy-token" class="btn btn-sm" data-i18n="mcp.btnCopyToken">复制 Token</button>
                 </div>
                 <code id="mcp-fresh-token-val" class="mono mcp-fresh-token-code"></code>
               </div>
 
               <div class="cmd-box">
                 <div class="cmd-box-head">
-                  <span>AI 客户端直连配置（Cursor / Claude Desktop / Dify 通用）</span>
-                  <button type="button" id="btn-mcp-copy-json" class="btn btn-primary btn-sm">复制接入 JSON</button>
+                  <span data-i18n="mcp.clientJsonHead">AI 客户端直连配置（Cursor / Claude Desktop / Dify 通用）</span>
+                  <button type="button" id="btn-mcp-copy-json" class="btn btn-primary btn-sm" data-i18n="mcp.btnCopyJson">复制接入 JSON</button>
                 </div>
                 <pre id="mcp-client-json" class="cmd-pre"></pre>
               </div>
@@ -574,8 +585,8 @@
 
             <div class="section-bar">
               <div>
-                <h3 class="section-heading">内置 MCP Tools 权限矩阵</h3>
-                <p class="section-desc">所有变更工具均受 <span class="mono">nginx -t</span> 原子事务回滚保护；MCP 永不暴露管理员账号密码修改接口与 SSL 私钥文件。</p>
+                <h3 class="section-heading" data-i18n="mcp.toolsHeading">内置 MCP Tools 权限矩阵</h3>
+                <p class="section-desc"><span data-i18n="mcp.toolsDescPrefix">所有变更工具均受 </span><span class="mono">nginx -t</span><span data-i18n="mcp.toolsDescSuffix"> 原子事务回滚保护；MCP 永不暴露管理员账号密码修改接口与 SSL 私钥文件。</span></p>
               </div>
             </div>
             <div id="mcp-tools-grid" class="modules-grid"></div>
@@ -589,30 +600,30 @@
   <div id="modal-new-site" class="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="modal-new-site-title" hidden>
     <div class="modal-card">
       <div class="modal-header">
-        <h3 id="modal-new-site-title" class="modal-title">新建站点配置</h3>
-        <button type="button" class="btn btn-ghost btn-sm" data-close-modal="modal-new-site" aria-label="关闭弹窗">关闭</button>
+        <h3 id="modal-new-site-title" class="modal-title" data-i18n="modals.newSite.title">新建站点配置</h3>
+        <button type="button" class="btn btn-ghost btn-sm" data-close-modal="modal-new-site" aria-label="关闭弹窗" data-i18n="common.close" data-i18n-aria="common.closeModalAria">关闭</button>
       </div>
       <form id="new-site-form">
         <div class="modal-body">
           <div class="field">
-            <label for="new-site-domain">站点域名</label>
-            <input id="new-site-domain" type="text" class="input mono" placeholder="例如：docs.wimotek.dev" required />
+            <label for="new-site-domain" data-i18n="modals.newSite.domainLabel">站点域名</label>
+            <input id="new-site-domain" type="text" class="input mono" placeholder="例如：docs.wimotek.dev" data-i18n-placeholder="modals.newSite.domainPlaceholder" required />
             <div id="new-site-error" class="field-error" hidden></div>
           </div>
 
           <div class="field">
-            <label>选择起始配置模板</label>
-            <div id="new-site-templates" class="template-grid" role="radiogroup" aria-label="站点配置模板"></div>
+            <label data-i18n="modals.newSite.templateLabel">选择起始配置模板</label>
+            <div id="new-site-templates" class="template-grid" role="radiogroup" aria-label="站点配置模板" data-i18n-aria="modals.newSite.templateGroupAria"></div>
           </div>
 
           <div id="new-site-upstream-wrap" class="field" hidden>
-            <label for="new-site-upstream">上游反代地址 (proxy_pass)</label>
+            <label for="new-site-upstream" data-i18n="modals.newSite.upstreamLabel">上游反代地址 (proxy_pass)</label>
             <input id="new-site-upstream" type="text" class="input mono" value="http://127.0.0.1:8080" placeholder="http://127.0.0.1:8080" />
           </div>
         </div>
         <div class="modal-footer">
-          <button type="button" class="btn" data-close-modal="modal-new-site">取消</button>
-          <button type="submit" class="btn btn-primary">创建并进入编辑</button>
+          <button type="button" class="btn" data-close-modal="modal-new-site" data-i18n="common.cancel">取消</button>
+          <button type="submit" class="btn btn-primary" data-i18n="modals.newSite.submitBtn">创建并进入编辑</button>
         </div>
       </form>
     </div>
@@ -622,42 +633,42 @@
   <div id="modal-ssl" class="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="modal-ssl-title" hidden>
     <div class="modal-card">
       <div class="modal-header">
-        <h3 id="modal-ssl-title" class="modal-title">ACME 签发 SSL 证书</h3>
-        <button type="button" class="btn btn-ghost btn-sm" data-close-modal="modal-ssl" aria-label="关闭弹窗">关闭</button>
+        <h3 id="modal-ssl-title" class="modal-title" data-i18n="modals.ssl.title">ACME 签发 SSL 证书</h3>
+        <button type="button" class="btn btn-ghost btn-sm" data-close-modal="modal-ssl" aria-label="关闭弹窗" data-i18n="common.close" data-i18n-aria="common.closeModalAria">关闭</button>
       </div>
       <form id="ssl-form">
         <div class="modal-body">
           <div id="ssl-form-error" class="auth-alert" hidden></div>
 
           <div class="field">
-            <label for="ssl-domain">目标域名</label>
+            <label for="ssl-domain" data-i18n="modals.ssl.domainLabel">目标域名</label>
             <input id="ssl-domain" type="text" class="input mono" placeholder="example.com" required />
           </div>
 
           <div class="inline-row">
             <div class="field">
-              <label for="ssl-ca">CA 签发机构</label>
+              <label for="ssl-ca" data-i18n="modals.ssl.caLabel">CA 签发机构</label>
               <select id="ssl-ca" class="select">
-                <option value="letsencrypt">Let's Encrypt (推荐)</option>
-                <option value="zerossl">ZeroSSL</option>
+                <option value="letsencrypt" data-i18n="modals.ssl.caLetsEncrypt">Let's Encrypt (推荐)</option>
+                <option value="zerossl" data-i18n="modals.ssl.caZeroSsl">ZeroSSL</option>
               </select>
             </div>
             <div class="field">
-              <label for="ssl-type">验证方式</label>
+              <label for="ssl-type" data-i18n="modals.ssl.typeLabel">验证方式</label>
               <select id="ssl-type" class="select">
-                <option value="http">HTTP-01 (Webroot)</option>
-                <option value="dns">DNS-01 (支持泛域名)</option>
+                <option value="http" data-i18n="modals.ssl.typeHttp">HTTP-01 (Webroot)</option>
+                <option value="dns" data-i18n="modals.ssl.typeDns">DNS-01 (支持泛域名)</option>
               </select>
             </div>
           </div>
 
           <div id="ssl-dns-section" hidden>
             <div class="field" style="margin-bottom: 12px;">
-              <label for="ssl-provider">DNS 服务商 (白名单校验)</label>
+              <label for="ssl-provider" data-i18n="modals.ssl.providerLabel">DNS 服务商 (白名单校验)</label>
               <select id="ssl-provider" class="select">
                 <option value="dns_cf">Cloudflare (dns_cf)</option>
-                <option value="dns_ali">阿里云 DNS (dns_ali)</option>
-                <option value="dns_dp">腾讯云 DNSPod (dns_dp)</option>
+                <option value="dns_ali" data-i18n="modals.ssl.providerAli">阿里云 DNS (dns_ali)</option>
+                <option value="dns_dp" data-i18n="modals.ssl.providerDp">腾讯云 DNSPod (dns_dp)</option>
                 <option value="dns_aws">AWS Route53 (dns_aws)</option>
                 <option value="dns_gd">GoDaddy (dns_gd)</option>
                 <option value="dns_hetzner">Hetzner DNS (dns_hetzner)</option>
@@ -666,16 +677,16 @@
 
             <label class="checkbox-row" style="margin-bottom: 12px;">
               <input type="checkbox" id="ssl-wildcard" />
-              <span>同时签发泛域名证书 (<span class="mono">*.domain</span>)</span>
+              <span><span data-i18n="modals.ssl.wildcardPrefix">同时签发泛域名证书 (</span><span class="mono">*.domain</span><span data-i18n="modals.ssl.wildcardSuffix">)</span></span>
             </label>
 
             <div id="ssl-provider-fields" style="display: flex; flex-direction: column; gap: 10px;"></div>
-            <div class="field-hint" style="margin-top: 8px;">安全提示：DNS API 凭据仅通过当前请求内存传递至 acme.sh，绝不写入浏览器本地存储。</div>
+            <div class="field-hint" style="margin-top: 8px;" data-i18n="modals.ssl.dnsHint">安全提示：DNS API 凭据仅通过当前请求内存传递至 acme.sh，绝不写入浏览器本地存储。</div>
           </div>
         </div>
         <div class="modal-footer">
-          <button type="button" class="btn" data-close-modal="modal-ssl">取消</button>
-          <button type="submit" id="btn-ssl-submit" class="btn btn-primary">立即签发证书</button>
+          <button type="button" class="btn" data-close-modal="modal-ssl" data-i18n="common.cancel">取消</button>
+          <button type="submit" id="btn-ssl-submit" class="btn btn-primary" data-i18n="modals.ssl.submitBtn">立即签发证书</button>
         </div>
       </form>
     </div>
@@ -685,17 +696,17 @@
   <div id="modal-delete" class="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="modal-delete-title" hidden>
     <div class="modal-card modal-card-sm">
       <div class="modal-header">
-        <h3 id="modal-delete-title" class="modal-title">确认删除站点配置</h3>
-        <button type="button" class="btn btn-ghost btn-sm" data-close-modal="modal-delete" aria-label="关闭弹窗">关闭</button>
+        <h3 id="modal-delete-title" class="modal-title" data-i18n="modals.deleteSite.title">确认删除站点配置</h3>
+        <button type="button" class="btn btn-ghost btn-sm" data-close-modal="modal-delete" aria-label="关闭弹窗" data-i18n="common.close" data-i18n-aria="common.closeModalAria">关闭</button>
       </div>
       <div class="modal-body">
         <p style="margin: 0; color: var(--text-secondary); font-size: 13.5px;">
-          即将永久移除站点 <strong id="delete-target-domain" class="mono" style="color: var(--text-primary);"></strong> 的 Nginx 配置文件（不会删除已签发的 SSL 证书文件）。删除后建议执行一次热重载。
+          <span data-i18n="modals.deleteSite.bodyPrefix">即将永久移除站点 </span><strong id="delete-target-domain" class="mono" style="color: var(--text-primary);"></strong><span data-i18n="modals.deleteSite.bodySuffix"> 的 Nginx 配置文件（不会删除已签发的 SSL 证书文件）。删除后建议执行一次热重载。</span>
         </p>
       </div>
       <div class="modal-footer">
-        <button type="button" class="btn" data-close-modal="modal-delete">取消</button>
-        <button type="button" id="btn-confirm-delete" class="btn btn-danger-solid">确认永久删除</button>
+        <button type="button" class="btn" data-close-modal="modal-delete" data-i18n="common.cancel">取消</button>
+        <button type="button" id="btn-confirm-delete" class="btn btn-danger-solid" data-i18n="modals.deleteSite.submitBtn">确认永久删除</button>
       </div>
     </div>
   </div>
@@ -704,8 +715,8 @@
   <div id="modal-account" class="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="modal-account-title" hidden>
     <div class="modal-card">
       <div class="modal-header">
-        <h3 id="modal-account-title" class="modal-title">管理员账号与防刷安全</h3>
-        <button type="button" class="btn btn-ghost btn-sm" data-close-modal="modal-account" aria-label="关闭弹窗">关闭</button>
+        <h3 id="modal-account-title" class="modal-title" data-i18n="modals.account.title">管理员账号与防刷安全</h3>
+        <button type="button" class="btn btn-ghost btn-sm" data-close-modal="modal-account" aria-label="关闭弹窗" data-i18n="common.close" data-i18n-aria="common.closeModalAria">关闭</button>
       </div>
       <form id="account-form" novalidate>
         <div class="modal-body">
@@ -713,47 +724,47 @@
 
           <div class="account-meta-grid">
             <div class="account-meta-cell">
-              <div class="account-meta-label">当前管理员</div>
+              <div class="account-meta-label" data-i18n="modals.account.metaUser">当前管理员</div>
               <div id="acc-meta-user" class="account-meta-val mono">--</div>
             </div>
             <div class="account-meta-cell">
-              <div class="account-meta-label">凭证存储</div>
+              <div class="account-meta-label" data-i18n="modals.account.metaSource">凭证存储</div>
               <div id="acc-meta-source" class="account-meta-val mono">--</div>
             </div>
             <div class="account-meta-cell">
-              <div class="account-meta-label">防刷已拦截</div>
-              <div id="acc-meta-blocked" class="account-meta-val mono">0 次</div>
+              <div class="account-meta-label" data-i18n="modals.account.metaBlocked">防刷已拦截</div>
+              <div id="acc-meta-blocked" class="account-meta-val mono">0</div>
             </div>
             <div class="account-meta-cell">
-              <div class="account-meta-label">动态 PoW 防护</div>
+              <div class="account-meta-label" data-i18n="modals.account.metaPow">动态 PoW 防护</div>
               <div id="acc-meta-pow" class="account-meta-val mono">14~20 bit</div>
             </div>
           </div>
 
           <div class="field">
-            <label for="acc-new-user">新管理员用户名</label>
-            <input id="acc-new-user" type="text" class="input mono" autocomplete="username" placeholder="3~32 位字母、数字或 . _ -" required />
+            <label for="acc-new-user" data-i18n="modals.account.newUserLabel">新管理员用户名</label>
+            <input id="acc-new-user" type="text" class="input mono" autocomplete="username" placeholder="3~32 位字母、数字或 . _ -" data-i18n-placeholder="modals.account.newUserPlaceholder" required />
           </div>
 
           <div class="field">
-            <label for="acc-current-pass">当前密码 <span style="color: var(--danger);">*</span></label>
-            <input id="acc-current-pass" type="password" class="input" autocomplete="current-password" placeholder="验证当前管理员密码" required />
+            <label for="acc-current-pass"><span data-i18n="modals.account.currentPassLabel">当前密码</span> <span style="color: var(--danger);">*</span></label>
+            <input id="acc-current-pass" type="password" class="input" autocomplete="current-password" placeholder="验证当前管理员密码" data-i18n-placeholder="modals.account.currentPassPlaceholder" required />
           </div>
 
           <div class="inline-row">
             <div class="field">
-              <label for="acc-new-pass">新密码 (不修改可留空)</label>
-              <input id="acc-new-pass" type="password" class="input" autocomplete="new-password" placeholder="至少 8 位含大小写与数字" />
+              <label for="acc-new-pass" data-i18n="modals.account.newPassLabel">新密码</label>
+              <input id="acc-new-pass" type="password" class="input" autocomplete="new-password" placeholder="留空则不修改，至少 8 位" data-i18n-placeholder="modals.account.newPassPlaceholder" />
             </div>
             <div class="field">
-              <label for="acc-confirm-pass">确认新密码</label>
-              <input id="acc-confirm-pass" type="password" class="input" autocomplete="new-password" placeholder="再次输入新密码" />
+              <label for="acc-confirm-pass" data-i18n="modals.account.confirmPassLabel">确认新密码</label>
+              <input id="acc-confirm-pass" type="password" class="input" autocomplete="new-password" placeholder="再次输入新密码" data-i18n-placeholder="modals.account.confirmPassPlaceholder" />
             </div>
           </div>
 
           <div id="acc-strength-wrap" class="strength-wrap" hidden>
             <div class="strength-head">
-              <span>密码强度</span>
+              <span data-i18n="modals.account.strengthTitle">密码强度</span>
               <strong id="acc-strength-label">--</strong>
             </div>
             <div id="acc-strength-bar" class="strength-bar" data-score="0">
@@ -764,13 +775,13 @@
 
           <label class="checkbox-row">
             <input type="checkbox" id="acc-rotate-token" checked />
-            <span>保存后自动轮换会话 Token（强制其他旧终端重新登录）</span>
+            <span data-i18n="modals.account.rotateTokenLabel">保存后自动轮换会话 Token（强制其他旧终端重新登录）</span>
           </label>
-          <div class="field-hint">新密码使用 PBKDF2-HMAC-SHA256 (210,000 次迭代) 加密持久化至 /data/.auth.json，重启容器不丢失。</div>
+          <div class="field-hint" data-i18n="modals.account.persistHint">新密码使用 PBKDF2-HMAC-SHA256 (210,000 次迭代) 加密持久化至 /data/.auth.json，重启容器不丢失。</div>
         </div>
         <div class="modal-footer">
-          <button type="button" class="btn" data-close-modal="modal-account">取消</button>
-          <button type="submit" id="btn-account-submit" class="btn btn-primary">保存账号设置</button>
+          <button type="button" class="btn" data-close-modal="modal-account" data-i18n="common.cancel">取消</button>
+          <button type="submit" id="btn-account-submit" class="btn btn-primary" data-i18n="modals.account.submitBtn">保存账号设置</button>
         </div>
       </form>
     </div>

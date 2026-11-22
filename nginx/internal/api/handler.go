@@ -49,6 +49,14 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 	})
 }
 
+func writeErrorCode(w http.ResponseWriter, status int, errorCode string, msg string) {
+	writeJSON(w, status, map[string]interface{}{
+		"code":       status,
+		"error_code": errorCode,
+		"error":      msg,
+	})
+}
+
 func decodeJSON(w http.ResponseWriter, r *http.Request, dst interface{}) error {
 	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodyBytes)
 	dec := json.NewDecoder(r.Body)
@@ -114,7 +122,7 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 		HpField       string `json:"hp_field"`
 	}
 	if err := decodeJSON(w, r, &creds); err != nil {
-		writeError(w, http.StatusBadRequest, "请求参数格式非法")
+		writeErrorCode(w, http.StatusBadRequest, "ERR_INVALID_PARAMS", "请求参数格式非法")
 		return
 	}
 
@@ -150,6 +158,7 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 		}
 		writeJSON(w, status, map[string]interface{}{
 			"code":        status,
+			"error_code":  "ERR_TOKEN_INVALID",
 			"error":       "授权 Token 无效",
 			"retry_after": retryAfter,
 		})
@@ -168,14 +177,17 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 
 	_, retryAfter := h.guard.RecordAuthFailure(ip)
 	status := http.StatusUnauthorized
+	errorCode := "ERR_CREDENTIALS_INVALID"
 	msg := "账号或密码错误"
 	if retryAfter > 0 {
 		status = http.StatusTooManyRequests
 		w.Header().Set("Retry-After", strconv.Itoa(retryAfter))
+		errorCode = "ERR_CREDENTIALS_LOCKED"
 		msg = "账号或密码连续错误，触发防刷冷却，请 " + strconv.Itoa(retryAfter) + " 秒后再试"
 	}
 	writeJSON(w, status, map[string]interface{}{
 		"code":        status,
+		"error_code":  errorCode,
 		"error":       msg,
 		"retry_after": retryAfter,
 	})

@@ -202,7 +202,8 @@ class HubClient:
                     val = int(item.get("value", 0))
                     if val > 0:
                         parts = item.get("name", "").split(">>>")
-                        if len(parts) > 1 and parts[1]:
+                        # 仅统计用户级流量 (user>>><email>>>>traffic>>>uplink|downlink)，排除 inbound/outbound 计数器
+                        if len(parts) >= 2 and parts[0] == "user" and parts[1]:
                             agg[parts[1]] = agg.get(parts[1], 0) + val
 
                 traffic_items = [{"email": email, "bytes": total} for email, total in agg.items() if total > 0]

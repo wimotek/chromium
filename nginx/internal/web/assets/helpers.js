@@ -16,13 +16,13 @@ const WILDCARD_FQDN_REGEX = new RegExp(`^\\*\\.${DOMAIN_LABEL}(?:\\.${DOMAIN_LAB
 export function validateDomain(raw, opts = {}) {
   const normalized = String(raw ?? '').trim().toLowerCase();
   if (!normalized) {
-    return { valid: false, normalized: '', error: '请输入域名' };
+    return { valid: false, normalized: '', errorCode: 'ERR_DOMAIN_EMPTY', error: '请输入域名' };
   }
   if (normalized.length > 253) {
-    return { valid: false, normalized, error: '域名长度不能超过 253 个字符' };
+    return { valid: false, normalized, errorCode: 'ERR_DOMAIN_TOO_LONG', error: '域名长度不能超过 253 个字符' };
   }
   if (normalized.includes('..') || normalized.includes('/') || normalized.includes('\\') || /\s/.test(normalized)) {
-    return { valid: false, normalized, error: '域名包含非法路径或空白字符' };
+    return { valid: false, normalized, errorCode: 'ERR_DOMAIN_INVALID_CHARS', error: '域名包含非法路径或空白字符' };
   }
   if (opts.allowWildcard && WILDCARD_FQDN_REGEX.test(normalized)) {
     return { valid: true, normalized };
@@ -33,6 +33,7 @@ export function validateDomain(raw, opts = {}) {
   return {
     valid: false,
     normalized,
+    errorCode: opts.allowWildcard ? 'ERR_DOMAIN_INVALID_WILDCARD' : 'ERR_DOMAIN_INVALID_FORMAT',
     error: opts.allowWildcard
       ? '域名格式无效（示例：example.com 或 *.example.com）'
       : '域名格式无效（示例：app.example.com）',
@@ -55,14 +56,14 @@ export const SITE_TEMPLATES = [
 
     client_max_body_size 64m;
 
-    # ACME HTTP-01 验证通道
+    # ACME HTTP-01 challenge path
     location ^~ /.well-known/acme-challenge/ {
         root /data/www/acme;
         default_type "text/plain";
         try_files $uri =404;
     }
 
-    # WordPress 安全加固：屏蔽敏感文件与 xmlrpc 暴力攻击
+    # WordPress hardening: block xmlrpc & sensitive files
     location = /xmlrpc.php {
         deny all;
         access_log off;
@@ -73,12 +74,12 @@ export const SITE_TEMPLATES = [
         deny all;
     }
 
-    # 禁止媒体上传目录执行任意 PHP 脚本
+    # Block arbitrary PHP execution inside uploads/files
     location ~* /(?:uploads|files)/.*\\.php$ {
         deny all;
     }
 
-    # 静态资源长缓存（若自定义开启 ENABLE_GZIP_STATIC=true，可取消 gzip_static 注释）
+    # Long-term static asset cache (uncomment gzip_static if built with ENABLE_GZIP_STATIC=true)
     location ~* \\.(?:js|css|svg|woff2?|png|jpg|jpeg|gif|webp|avif|ico)$ {
         # gzip_static on;
         expires 30d;
@@ -88,7 +89,7 @@ export const SITE_TEMPLATES = [
         try_files $uri =404;
     }
 
-    # WordPress 固定链接伪静态
+    # WordPress permalinks
     location / {
         try_files $uri $uri/ /index.php?$args;
     }
@@ -121,7 +122,7 @@ export const SITE_TEMPLATES = [
 
     client_max_body_size 64m;
 
-    # ACME HTTP-01 验证通道
+    # ACME HTTP-01 challenge path
     location ^~ /.well-known/acme-challenge/ {
         root /data/www/acme;
         default_type "text/plain";
@@ -132,11 +133,11 @@ export const SITE_TEMPLATES = [
         proxy_pass ${upstream};
         proxy_http_version 1.1;
 
-        # WebSocket / SSE 支持（依赖 nginx.conf 中 map $http_upgrade $connection_upgrade）
+        # WebSocket / SSE upgrade headers (uses map $http_upgrade in nginx.conf)
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection $connection_upgrade;
 
-        # 真实客户端链路透传
+        # Forward real client metadata
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
@@ -163,17 +164,17 @@ export const SITE_TEMPLATES = [
     root /data/www/${domain}/dist;
     index index.html;
 
-    # ACME HTTP-01 验证通道
+    # ACME HTTP-01 challenge path
     location ^~ /.well-known/acme-challenge/ {
         root /data/www/acme;
         default_type "text/plain";
         try_files $uri =404;
     }
 
-    # 若构建时通过 --build-arg ENABLE_GZIP_STATIC=true 开启了预压缩模块，可取消注释：
+    # Uncomment if built with --build-arg ENABLE_GZIP_STATIC=true:
     # gzip_static on;
 
-    # 静态资源长缓存
+    # Long-term static asset cache
     location ~* \\.(?:js|css|mjs|svg|woff2?|png|jpg|jpeg|webp|avif|ico)$ {
         expires 30d;
         add_header Cache-Control "public, immutable";
@@ -181,7 +182,7 @@ export const SITE_TEMPLATES = [
         try_files $uri =404;
     }
 
-    # SPA 前端路由回退
+    # SPA history fallback
     location / {
         try_files $uri $uri/ /index.html;
     }
@@ -382,7 +383,7 @@ export function findServerBlocks(content) {
 export function injectHttpsBlock(configText, domain) {
   const safeDomain = String(domain || '').trim().toLowerCase();
   if (!safeDomain) {
-    return { updated: false, content: configText, error: '缺少有效域名' };
+    return { updated: false, content: configText, errorCode: 'ERR_DOMAIN_EMPTY', error: '缺少有效域名' };
   }
 
   const blocks = findServerBlocks(configText);
@@ -390,6 +391,7 @@ export function injectHttpsBlock(configText, domain) {
     return {
       updated: false,
       content: configText,
+      errorCode: 'ERR_NO_SERVER_BLOCK',
       error: '当前配置中未找到有效的 server { ... } 配置块',
     };
   }
@@ -417,7 +419,7 @@ export function injectHttpsBlock(configText, domain) {
 
   const snippet = [
     '',
-    '    # HTTPS / TLS 配置 (由 Wimotek Nginx Console 自动注入)',
+    '    # HTTPS / TLS config (injected by Wimotek Nginx Console)',
     '    listen 443 ssl;',
     '    listen [::]:443 ssl;',
     '    http2 on;',
@@ -682,8 +684,14 @@ export function formatBytes(bytes) {
  * Formats days remaining until TLS certificate expiry.
  * @param {number} days
  */
-export function formatCertCountdown(days) {
+export function formatCertCountdown(days, formatter) {
   const d = Number(days);
+  if (formatter && typeof formatter === 'object') {
+    if (!Number.isFinite(d)) return formatter.unknown();
+    if (d < 0) return formatter.expired(Math.abs(d));
+    if (d === 0) return formatter.today();
+    return formatter.remaining(d);
+  }
   if (!Number.isFinite(d)) return '未知';
   if (d < 0) return `已过期 ${Math.abs(d)} 天`;
   if (d === 0) return '今日到期';
@@ -852,6 +860,7 @@ export function validateUsername(username) {
     return {
       valid: false,
       normalized,
+      errorCode: 'ERR_USERNAME_INVALID',
       error: '用户名需为 3~32 位，仅支持字母、数字、点(.)、下划线(_)和连字符(-)，且需以字母或数字开头',
     };
   }
@@ -861,7 +870,7 @@ export function validateUsername(username) {
 /**
  * Evaluates password strength against the backend strong password policy.
  * @param {string} password
- * @returns {{ valid: boolean, score: number, label: string, checks: { length: boolean, upper: boolean, lower: boolean, digit: boolean, symbol: boolean }, error?: string }}
+ * @returns {{ valid: boolean, score: number, level: string, label: string, checks: { length: boolean, upper: boolean, lower: boolean, digit: boolean, symbol: boolean }, errorCode?: string, error?: string }}
  */
 export function evaluatePasswordStrength(password) {
   const p = String(password || '');
@@ -883,21 +892,27 @@ export function evaluatePasswordStrength(password) {
 
   let valid = checks.length && !hasControl && classes >= 2;
   let error = '';
+  let errorCode = '';
   if (!checks.length) {
     valid = false;
+    errorCode = 'ERR_PASSWORD_LENGTH';
     error = '新密码长度需为 8~128 位';
   } else if (hasControl) {
     valid = false;
+    errorCode = 'ERR_PASSWORD_CONTROL_CHAR';
     error = '密码不能包含控制字符';
   } else if (p.length < 12 && !(checks.upper && checks.lower && checks.digit)) {
     valid = false;
+    errorCode = 'ERR_PASSWORD_COMPLEXITY';
     error = '12 位以下需同时包含大写字母、小写字母和数字';
   } else if (classes < 2) {
     valid = false;
+    errorCode = 'ERR_PASSWORD_CLASSES';
     error = '请至少混合两类字符（字母/数字/符号）';
   }
 
+  const level = !p ? 'empty' : !valid ? 'weak' : score >= 4 ? 'very_strong' : score >= 3 ? 'strong' : 'medium';
   const label = !p ? '未填写' : !valid ? '弱' : score >= 4 ? '极强' : score >= 3 ? '强' : '中';
-  return { valid, score: valid ? Math.max(2, score) : Math.min(1, score), label, checks, error };
+  return { valid, score: valid ? Math.max(2, score) : Math.min(1, score), level, label, checks, errorCode, error };
 }
 

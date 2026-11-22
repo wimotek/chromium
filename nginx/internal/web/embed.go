@@ -6,7 +6,7 @@ import (
 	"net/http"
 )
 
-//go:embed assets/*
+//go:embed assets
 var assetsFS embed.FS
 
 func Handler() http.Handler {

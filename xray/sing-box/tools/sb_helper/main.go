@@ -42,7 +42,10 @@ func appendVarint(dst []byte, v uint64) []byte {
 func encodeQueryStatsRequest(pattern string, reset bool) []byte {
 	var payload []byte
 	if pattern != "" {
-		payload = append(payload, 0x0a) // field 1, wire type 2 (length-delimited string)
+		payload = append(payload, 0x0a) // field 1: pattern (v2ray/xray)
+		payload = appendVarint(payload, uint64(len(pattern)))
+		payload = append(payload, pattern...)
+		payload = append(payload, 0x1a) // field 3: patterns (sing-box v2ray_api)
 		payload = appendVarint(payload, uint64(len(pattern)))
 		payload = append(payload, pattern...)
 	}
