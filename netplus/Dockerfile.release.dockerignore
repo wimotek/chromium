@@ -1,0 +1,11 @@
+# Exclude everything by default so no TS source, secrets, or runtime data enter release image context
+*
+
+# Explicitly include ONLY pre-compiled artifacts & runtime manifest/entrypoint
+!dist
+!dist/**
+!dist-server
+!dist-server/**
+!package.json
+!package-lock.json
+!docker-entrypoint.sh

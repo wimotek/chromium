@@ -1,0 +1,42 @@
+services:
+  netplus:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    # Docker Hub: wimotek/netplus:latest | GHCR: ghcr.io/wimotek/netplus:latest
+    image: wimotek/netplus:latest
+    container_name: netplus
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+      # Expose HTTPS (uses Baota /certs:ro if mounted, otherwise auto-generates custom self-signed cert)
+      - "3443:3443"
+    environment:
+      NODE_ENV: production
+      PORT: "3000"
+      HTTPS_PORT: "3443"
+      DATA_DIR: /data
+      TLS_CERT_DIR: /certs
+      TLS_AUTO_SELF_SIGNED: "true"
+      TLS_SELF_SIGNED_CN: netpulse.local
+      AUDIT_MAX_SIZE_BYTES: "5242880"
+      # Optional: set fixed credentials or leave blank to use first-run web setup
+      # ADMIN_USERNAME: admin
+      # ADMIN_PASSWORD: change-me-strong-password
+      # APP_ENCRYPTION_KEY: 64-hex-char-key
+    volumes:
+      - netpulse_data:/data
+      # Optional: Mount Baota (宝塔) SSL certificate directory read-only.
+      # If not mounted, NetPulse auto-generates a persistent custom self-signed cert in /data/certs.
+      # - /www/server/panel/vhost/cert/your-domain.com:/certs:ro
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:3000/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+volumes:
+  netpulse_data:

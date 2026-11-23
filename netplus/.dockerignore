@@ -1,0 +1,12 @@
+node_modules
+dist
+dist-server
+prebuilt
+data
+.git
+.github
+.env
+.env.local
+*.log
+.DS_Store
+coverage
