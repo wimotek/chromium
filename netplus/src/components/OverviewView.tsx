@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { ArrowRight, Check, Copy, Play, RefreshCw } from 'lucide-react';
+import { ArrowRight, Play, RefreshCw } from 'lucide-react';
 import { translate, type TranslationKeys } from '../i18n/translations';
 import { apiRequest, formatBytes, formatTimeAgo } from '../lib/api';
 import type { LanguageCode, OverviewSummary } from '../types/models';
@@ -14,7 +14,6 @@ interface OverviewViewProps {
 export function OverviewView({ data, lang, onRefresh, onNavigate }: OverviewViewProps) {
   const t = (key: TranslationKeys) => translate(lang, key);
   const [syncingAll, setSyncingAll] = useState(false);
-  const [copiedCmd, setCopiedCmd] = useState(false);
 
   const handleQuickSyncAll = async () => {
     setSyncingAll(true);
@@ -24,14 +23,6 @@ export function OverviewView({ data, lang, onRefresh, onNavigate }: OverviewView
     } finally {
       setSyncingAll(false);
     }
-  };
-
-  const dockerSnippet = `docker pull wimotek/netplus:latest\ndocker compose up -d`;
-
-  const handleCopySnippet = async () => {
-    await navigator.clipboard.writeText(dockerSnippet);
-    setCopiedCmd(true);
-    setTimeout(() => setCopiedCmd(false), 1800);
   };
 
   if (!data) {
@@ -241,7 +232,7 @@ export function OverviewView({ data, lang, onRefresh, onNavigate }: OverviewView
           </div>
         </div>
 
-        {/* Container & CI/CD Runtime */}
+        {/* System Runtime & TLS */}
         <div className="lg:col-span-6 p-6 rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 flex flex-col justify-between gap-4">
           <div className="space-y-3">
             <div className="flex items-center justify-between gap-4">
@@ -266,26 +257,36 @@ export function OverviewView({ data, lang, onRefresh, onNavigate }: OverviewView
                   {data.containerInfo.dataDir}
                 </div>
               </div>
+              <div>
+                <div className="text-slate-500 dark:text-slate-400">HTTPS / TLS</div>
+                <div className="mt-0.5 font-mono text-slate-800 dark:text-slate-200 truncate">
+                  {data.tlsStatus?.httpsListening
+                    ? `:${data.tlsStatus.httpsPort} (${data.tlsStatus.source === 'mounted' ? '/certs:ro' : 'Self-Signed'})`
+                    : 'Disabled'}
+                </div>
+              </div>
+              <div>
+                <div className="text-slate-500 dark:text-slate-400">Uptime</div>
+                <div className="mt-0.5 font-mono tabular-nums text-slate-800 dark:text-slate-200">
+                  {Math.floor((data.containerInfo.uptimeSeconds || 0) / 3600)}h{' '}
+                  {Math.floor(((data.containerInfo.uptimeSeconds || 0) % 3600) / 60)}m
+                </div>
+              </div>
             </div>
           </div>
 
-          <div className="pt-3 border-t border-slate-200 dark:border-slate-800">
-            <div className="flex items-center justify-between gap-2 mb-1.5">
-              <span className="text-xs text-slate-500 dark:text-slate-400">
-                Multi-stage Docker · GHCR & Docker Hub
-              </span>
-              <button
-                type="button"
-                onClick={() => void handleCopySnippet()}
-                className="inline-flex items-center gap-1 text-xs font-medium text-blue-600 dark:text-blue-400 hover:underline whitespace-nowrap shrink-0"
-              >
-                {copiedCmd ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
-                {copiedCmd ? t('copied') : t('copy')}
-              </button>
-            </div>
-            <pre className="p-2.5 rounded-lg bg-slate-100 dark:bg-slate-950 font-mono text-[11px] text-slate-700 dark:text-slate-300 overflow-x-auto">
-              {dockerSnippet}
-            </pre>
+          <div className="pt-4 border-t border-slate-200 dark:border-slate-800 flex items-center justify-between gap-3 text-xs text-slate-500 dark:text-slate-400">
+            <span className="truncate font-mono">
+              {data.tlsStatus?.subject || 'TLS / Security Policy'}
+            </span>
+            <button
+              type="button"
+              onClick={() => onNavigate('security')}
+              className="inline-flex items-center gap-1 font-sans font-medium text-blue-600 dark:text-blue-400 hover:underline whitespace-nowrap shrink-0"
+            >
+              {t('navSecurity')}
+              <ArrowRight className="w-3.5 h-3.5" />
+            </button>
           </div>
         </div>
       </div>

@@ -10,59 +10,150 @@ function tokenCacheKey(token: string): string {
   return crypto.createHash('sha256').update(token).digest('hex');
 }
 
+function sanitizeCloudflareSecret(raw: string): string {
+  return String(raw || '')
+    .replace(/[\u200B-\u200D\uFEFF]/g, '')
+    .trim()
+    .replace(/^['"]+|['"]+$/g, '')
+    .replace(/^Bearer\s+/i, '')
+    .replace(/[\r\n\t]+/g, '')
+    .trim();
+}
+
+function buildCloudflareHeaders(
+  rawSecret: string,
+  accountEmail?: string,
+  includeContentType = true
+): { ok: true; headers: Record<string, string>; mode: 'api_token' | 'global_key'; cacheKey: string } | { ok: false; error: string } {
+  const token = sanitizeCloudflareSecret(rawSecret);
+  if (!token) {
+    return {
+      ok: false,
+      error:
+        'Cloudflare API 密钥为空或解密失败（如容器重启前未配置持久化密钥，请在「DNS 服务商」中重新编辑保存 API Token）',
+    };
+  }
+  if (!/^[\x21-\x7E]+$/.test(token)) {
+    return {
+      ok: false,
+      error: 'Cloudflare API Token 包含非法空白或非 ASCII 字符，请重新复制纯净密钥（勿含中文、空格或换行）',
+    };
+  }
+
+  const cleanEmail = (accountEmail || '').trim();
+  const base: Record<string, string> = includeContentType
+    ? { 'Content-Type': 'application/json' }
+    : {};
+
+  // Support Cloudflare Global API Key (X-Auth-Email + X-Auth-Key) when account email is configured
+  if (cleanEmail) {
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) {
+      return { ok: false, error: 'Cloudflare 账号邮箱格式无效' };
+    }
+    return {
+      ok: true,
+      mode: 'global_key',
+      cacheKey: tokenCacheKey(`global:${cleanEmail}:${token}`),
+      headers: {
+        ...base,
+        'X-Auth-Email': cleanEmail,
+        'X-Auth-Key': token,
+      },
+    };
+  }
+
+  return {
+    ok: true,
+    mode: 'api_token',
+    cacheKey: tokenCacheKey(`bearer:${token}`),
+    headers: {
+      ...base,
+      Authorization: `Bearer ${token}`,
+    },
+  };
+}
+
+function formatCloudflareApiError(
+  status: number,
+  errors?: Array<{ code?: number; message?: string }>,
+  mode?: 'api_token' | 'global_key'
+): string {
+  const first = errors?.[0];
+  const rawMsg = first?.message || `Cloudflare HTTP ${status}`;
+  const code = first?.code;
+  if (code === 6003 || /invalid request headers/i.test(rawMsg) || code === 10000) {
+    const hint =
+      mode === 'global_key'
+        ? '请核对 Cloudflare 账号邮箱与 Global API Key 是否匹配'
+        : '请确认填写的是 Cloudflare API Token（且包含 Zone:Read 与 DNS:Edit 权限）；若使用的是 Global API Key，请同时填写 Cloudflare 账号邮箱';
+    console.warn(`[NetPlus][Cloudflare] API auth failed (HTTP ${status}, code=${code ?? 'n/a'}, mode=${mode}): ${rawMsg}`);
+    return `${rawMsg}（${hint}）`;
+  }
+  console.warn(`[NetPlus][Cloudflare] API error (HTTP ${status}, code=${code ?? 'n/a'}): ${rawMsg}`);
+  return rawMsg;
+}
+
 export async function listCloudflareZones(
   token: string,
-  forceRefresh = false
+  forceRefresh = false,
+  accountEmail?: string
 ): Promise<{ ok: boolean; zones: DnsZoneSummary[]; error?: string }> {
-  const cleanToken = token.trim();
-  if (!cleanToken) {
-    return { ok: false, zones: [], error: 'Cloudflare API Token not configured' };
+  const auth = buildCloudflareHeaders(token, accountEmail);
+  if (!auth.ok) {
+    return { ok: false, zones: [], error: auth.error };
   }
-  const key = tokenCacheKey(cleanToken);
-  const cached = cfZoneCache.get(key);
+  const cached = cfZoneCache.get(auth.cacheKey);
   if (!forceRefresh && cached && cached.expiresAt > Date.now()) {
     return { ok: true, zones: cached.zones };
   }
 
   try {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 8000);
-    const res = await fetch('https://api.cloudflare.com/client/v4/zones?per_page=50&status=active', {
-      headers: {
-        Authorization: `Bearer ${cleanToken}`,
-        'Content-Type': 'application/json',
-      },
-      signal: controller.signal,
-    });
-    clearTimeout(timer);
+    const zones: DnsZoneSummary[] = [];
+    let page = 1;
+    while (page <= 5) {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 10_000);
+      const res = await fetch(
+        `https://api.cloudflare.com/client/v4/zones?per_page=50&page=${page}`,
+        {
+          headers: auth.headers,
+          signal: controller.signal,
+        }
+      );
+      clearTimeout(timer);
 
-    const data = (await res.json()) as {
-      success?: boolean;
-      result?: Array<{ id: string; name: string; status: string }>;
-      errors?: Array<{ message: string }>;
-    };
-
-    if (!res.ok || !data.success) {
-      return {
-        ok: false,
-        zones: [],
-        error: data.errors?.[0]?.message || `Cloudflare HTTP ${res.status}`,
+      const data = (await res.json()) as {
+        success?: boolean;
+        result?: Array<{ id: string; name: string; status: string }>;
+        errors?: Array<{ code?: number; message?: string }>;
+        result_info?: { total_pages?: number };
       };
+
+      if (!res.ok || !data.success) {
+        return {
+          ok: false,
+          zones: [],
+          error: formatCloudflareApiError(res.status, data.errors, auth.mode),
+        };
+      }
+
+      for (const z of data.result ?? []) {
+        zones.push({ id: z.id, name: z.name, status: z.status });
+      }
+      const totalPages = data.result_info?.total_pages ?? 1;
+      if (page >= totalPages) break;
+      page += 1;
     }
 
-    const zones: DnsZoneSummary[] = (data.result ?? []).map((z) => ({
-      id: z.id,
-      name: z.name,
-      status: z.status,
-    }));
-
-    cfZoneCache.set(key, { expiresAt: Date.now() + 5 * 60_000, zones });
+    cfZoneCache.set(auth.cacheKey, { expiresAt: Date.now() + 5 * 60_000, zones });
     return { ok: true, zones };
   } catch (err) {
+    const msg = err instanceof Error ? err.message : 'Failed to query Cloudflare zones';
+    console.warn('[NetPlus][Cloudflare] Zone list request failed:', msg);
     return {
       ok: false,
       zones: [],
-      error: err instanceof Error ? err.message : 'Failed to query Cloudflare zones',
+      error: msg,
     };
   }
 }
@@ -70,15 +161,21 @@ export async function listCloudflareZones(
 export async function resolveCloudflareZoneId(
   token: string,
   domain: string,
-  fallbackZoneId?: string
+  fallbackZoneId?: string,
+  accountEmail?: string
 ): Promise<{ zoneId?: string; matchedDomain?: string; error?: string }> {
   const cleanDomain = domain.trim().toLowerCase().replace(/\.$/, '');
   if (!cleanDomain) {
     return fallbackZoneId ? { zoneId: fallbackZoneId } : { error: 'Missing domain name' };
   }
 
+  const auth = buildCloudflareHeaders(token, accountEmail);
+  if (!auth.ok) {
+    return { error: auth.error };
+  }
+
   // 1. Check cached / full zone list first (handles subdomains matching parent root zone)
-  const listed = await listCloudflareZones(token, false);
+  const listed = await listCloudflareZones(token, false, accountEmail);
   if (listed.ok && listed.zones.length > 0) {
     const exact = listed.zones.find((z) => z.name.toLowerCase() === cleanDomain);
     if (exact) return { zoneId: exact.id, matchedDomain: exact.name };
@@ -97,17 +194,15 @@ export async function resolveCloudflareZoneId(
     candidates.push(labels.slice(i).join('.'));
   }
 
+  let lastApiError: string | undefined;
   for (const candidate of candidates) {
     try {
       const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), 6000);
+      const timer = setTimeout(() => controller.abort(), 8_000);
       const res = await fetch(
         `https://api.cloudflare.com/client/v4/zones?name=${encodeURIComponent(candidate)}`,
         {
-          headers: {
-            Authorization: `Bearer ${token.trim()}`,
-            'Content-Type': 'application/json',
-          },
+          headers: auth.headers,
           signal: controller.signal,
         }
       );
@@ -115,9 +210,13 @@ export async function resolveCloudflareZoneId(
       const data = (await res.json()) as {
         success?: boolean;
         result?: Array<{ id: string; name: string }>;
+        errors?: Array<{ code?: number; message?: string }>;
       };
       if (res.ok && data.success && data.result && data.result.length > 0) {
         return { zoneId: data.result[0].id, matchedDomain: data.result[0].name };
+      }
+      if (!res.ok || !data.success) {
+        lastApiError = formatCloudflareApiError(res.status, data.errors, auth.mode);
       }
     } catch {
       // try next candidate
@@ -128,7 +227,7 @@ export async function resolveCloudflareZoneId(
     return { zoneId: fallbackZoneId };
   }
   return {
-    error: listed.error || `Could not auto-resolve Cloudflare Zone ID for ${cleanDomain}`,
+    error: listed.error || lastApiError || `Could not auto-resolve Cloudflare Zone ID for ${cleanDomain}`,
   };
 }
 
@@ -185,6 +284,7 @@ export async function detectPublicIps(): Promise<{ ipv4: string | null; ipv6: st
 
 async function upsertCloudflareRecord(params: {
   token: string;
+  accountEmail?: string;
   zoneId: string;
   type: 'A' | 'AAAA';
   fqdn: string;
@@ -193,10 +293,11 @@ async function upsertCloudflareRecord(params: {
   proxied: boolean;
   multiSameName?: boolean;
 }): Promise<{ ok: boolean; message: string }> {
-  const headers = {
-    Authorization: `Bearer ${params.token}`,
-    'Content-Type': 'application/json',
-  };
+  const auth = buildCloudflareHeaders(params.token, params.accountEmail);
+  if (!auth.ok) {
+    return { ok: false, message: auth.error };
+  }
+  const headers = auth.headers;
   const baseUrl = `https://api.cloudflare.com/client/v4/zones/${encodeURIComponent(params.zoneId)}/dns_records`;
 
   const query = new URLSearchParams({ type: params.type, name: params.fqdn });
@@ -205,12 +306,12 @@ async function upsertCloudflareRecord(params: {
   }
 
   const listRes = await fetch(`${baseUrl}?${query.toString()}`, { headers });
-  const listData = (await listRes.json()) as { success?: boolean; result?: Array<{ id: string; content: string }>; errors?: Array<{ message: string }> };
+  const listData = (await listRes.json()) as { success?: boolean; result?: Array<{ id: string; content: string }>; errors?: Array<{ code?: number; message?: string }> };
 
   if (!listRes.ok || !listData.success) {
     return {
       ok: false,
-      message: listData.errors?.[0]?.message || `Cloudflare HTTP ${listRes.status}`,
+      message: formatCloudflareApiError(listRes.status, listData.errors, auth.mode),
     };
   }
 
@@ -232,10 +333,10 @@ async function upsertCloudflareRecord(params: {
       headers,
       body: JSON.stringify(payload),
     });
-    const putData = (await putRes.json()) as { success?: boolean; errors?: Array<{ message: string }> };
+    const putData = (await putRes.json()) as { success?: boolean; errors?: Array<{ code?: number; message?: string }> };
     return putRes.ok && putData.success
       ? { ok: true, message: 'Cloudflare record updated' }
-      : { ok: false, message: putData.errors?.[0]?.message || `Cloudflare PUT ${putRes.status}` };
+      : { ok: false, message: formatCloudflareApiError(putRes.status, putData.errors, auth.mode) };
   }
 
   const postRes = await fetch(baseUrl, {
@@ -243,10 +344,10 @@ async function upsertCloudflareRecord(params: {
     headers,
     body: JSON.stringify(payload),
   });
-  const postData = (await postRes.json()) as { success?: boolean; errors?: Array<{ message: string }> };
+  const postData = (await postRes.json()) as { success?: boolean; errors?: Array<{ code?: number; message?: string }> };
   return postRes.ok && postData.success
     ? { ok: true, message: 'Cloudflare record created' }
-    : { ok: false, message: postData.errors?.[0]?.message || `Cloudflare POST ${postRes.status}` };
+    : { ok: false, message: formatCloudflareApiError(postRes.status, postData.errors, auth.mode) };
 }
 
 async function upsertDnspodRecord(params: {
@@ -399,7 +500,12 @@ async function syncSingleRecord(
     if (provider.type === 'cloudflare') {
       let zoneId = rule.resolvedZoneId || provider.zoneId;
       if (!zoneId) {
-        const resolved = await resolveCloudflareZoneId(secrets.secret, baseDomain, provider.zoneId);
+        const resolved = await resolveCloudflareZoneId(
+          secrets.secret,
+          baseDomain,
+          provider.zoneId,
+          provider.accountEmail
+        );
         if (!resolved.zoneId) {
           return {
             recordType,
@@ -415,6 +521,7 @@ async function syncSingleRecord(
       }
       const r = await upsertCloudflareRecord({
         token: secrets.secret,
+        accountEmail: provider.accountEmail,
         zoneId,
         type: recordType,
         fqdn,
@@ -766,7 +873,7 @@ export async function listProviderDomains(
   forceRefresh = false
 ): Promise<{ ok: boolean; domains: ProviderDomainSummary[]; supported: boolean; error?: string }> {
   if (provider.type === 'cloudflare') {
-    const res = await listCloudflareZones(secrets.secret, forceRefresh);
+    const res = await listCloudflareZones(secrets.secret, forceRefresh, provider.accountEmail);
     return {
       ok: res.ok,
       domains: res.zones.map((z) => ({ id: z.id, name: z.name, status: z.status })),
@@ -878,10 +985,17 @@ export async function pullProviderDnsRecords(
   }
 
   if (provider.type === 'cloudflare') {
-    if (!secrets.secret) return { ok: false, records: [], error: 'Cloudflare API Token 未配置' };
+    const auth = buildCloudflareHeaders(secrets.secret, provider.accountEmail);
+    if (!auth.ok) return { ok: false, records: [], error: auth.error };
+
     let zoneId = explicitZoneId?.trim() || undefined;
     if (!zoneId) {
-      const resolved = await resolveCloudflareZoneId(secrets.secret, cleanDomain, provider.zoneId);
+      const resolved = await resolveCloudflareZoneId(
+        secrets.secret,
+        cleanDomain,
+        provider.zoneId,
+        provider.accountEmail
+      );
       if (!resolved.zoneId) {
         return { ok: false, records: [], error: resolved.error || `未在 Cloudflare 找到域名 ${cleanDomain} 对应的 Zone` };
       }
@@ -890,19 +1004,14 @@ export async function pullProviderDnsRecords(
     try {
       const all: PulledDnsRecord[] = [];
       let page = 1;
-      while (page <= 5) {
+      while (page <= 10) {
         const res = await fetch(
           `https://api.cloudflare.com/client/v4/zones/${encodeURIComponent(zoneId)}/dns_records?per_page=100&page=${page}`,
-          {
-            headers: {
-              Authorization: `Bearer ${secrets.secret}`,
-              'Content-Type': 'application/json',
-            },
-          }
+          { headers: auth.headers }
         );
         const data = (await res.json()) as {
           success?: boolean;
-          errors?: Array<{ message: string }>;
+          errors?: Array<{ code?: number; message?: string }>;
           result?: Array<{
             id: string;
             type: string;
@@ -918,7 +1027,7 @@ export async function pullProviderDnsRecords(
           return {
             ok: false,
             records: [],
-            error: data.errors?.[0]?.message || `Cloudflare HTTP ${res.status}`,
+            error: formatCloudflareApiError(res.status, data.errors, auth.mode),
           };
         }
         for (const r of data.result ?? []) {
@@ -1113,9 +1222,17 @@ export async function createProviderDnsRecord(
   }
 
   if (provider.type === 'cloudflare') {
+    const auth = buildCloudflareHeaders(secrets.secret, provider.accountEmail);
+    if (!auth.ok) return { ok: false, synced: false, message: auth.error };
+
     let zoneId = record.zoneId || undefined;
     if (!zoneId) {
-      const resolved = await resolveCloudflareZoneId(secrets.secret, record.domain, provider.zoneId);
+      const resolved = await resolveCloudflareZoneId(
+        secrets.secret,
+        record.domain,
+        provider.zoneId,
+        provider.accountEmail
+      );
       if (!resolved.zoneId) {
         return { ok: false, synced: false, message: resolved.error || `未找到 ${record.domain} 对应的 Cloudflare Zone` };
       }
@@ -1138,20 +1255,17 @@ export async function createProviderDnsRecord(
         `https://api.cloudflare.com/client/v4/zones/${encodeURIComponent(zoneId)}/dns_records`,
         {
           method: 'POST',
-          headers: {
-            Authorization: `Bearer ${secrets.secret}`,
-            'Content-Type': 'application/json',
-          },
+          headers: auth.headers,
           body: JSON.stringify(payload),
         }
       );
       const data = (await res.json()) as {
         success?: boolean;
         result?: { id: string };
-        errors?: Array<{ message: string }>;
+        errors?: Array<{ code?: number; message?: string }>;
       };
       if (!res.ok || !data.success) {
-        return { ok: false, synced: false, message: data.errors?.[0]?.message || `Cloudflare HTTP ${res.status}` };
+        return { ok: false, synced: false, message: formatCloudflareApiError(res.status, data.errors, auth.mode) };
       }
       return { ok: true, synced: true, remoteRecordId: data.result?.id, zoneId, message: '已同步创建 Cloudflare 记录' };
     } catch (err) {
@@ -1282,9 +1396,17 @@ export async function updateProviderDnsRecord(
   }
 
   if (provider.type === 'cloudflare') {
+    const auth = buildCloudflareHeaders(secrets.secret, provider.accountEmail);
+    if (!auth.ok) return { ok: false, synced: false, message: auth.error };
+
     let zoneId = existing.zoneId || undefined;
     if (!zoneId) {
-      const resolved = await resolveCloudflareZoneId(secrets.secret, updated.domain, provider.zoneId);
+      const resolved = await resolveCloudflareZoneId(
+        secrets.secret,
+        updated.domain,
+        provider.zoneId,
+        provider.accountEmail
+      );
       if (!resolved.zoneId) {
         return { ok: false, synced: false, message: resolved.error || `未找到 ${updated.domain} 对应的 Cloudflare Zone` };
       }
@@ -1307,16 +1429,13 @@ export async function updateProviderDnsRecord(
         `https://api.cloudflare.com/client/v4/zones/${encodeURIComponent(zoneId)}/dns_records/${encodeURIComponent(existing.remoteRecordId!)}`,
         {
           method: 'PUT',
-          headers: {
-            Authorization: `Bearer ${secrets.secret}`,
-            'Content-Type': 'application/json',
-          },
+          headers: auth.headers,
           body: JSON.stringify(payload),
         }
       );
-      const data = (await res.json()) as { success?: boolean; result?: { id: string }; errors?: Array<{ message: string }> };
+      const data = (await res.json()) as { success?: boolean; result?: { id: string }; errors?: Array<{ code?: number; message?: string }> };
       if (!res.ok || !data.success) {
-        return { ok: false, synced: false, message: data.errors?.[0]?.message || `Cloudflare HTTP ${res.status}` };
+        return { ok: false, synced: false, message: formatCloudflareApiError(res.status, data.errors, auth.mode) };
       }
       return { ok: true, synced: true, remoteRecordId: data.result?.id || existing.remoteRecordId, zoneId, message: '已同步更新 Cloudflare 记录' };
     } catch (err) {
@@ -1431,9 +1550,17 @@ export async function deleteProviderDnsRecord(
   }
 
   if (provider.type === 'cloudflare') {
+    const auth = buildCloudflareHeaders(secrets.secret, provider.accountEmail, false);
+    if (!auth.ok) return { ok: false, synced: false, message: auth.error };
+
     let zoneId = existing.zoneId || undefined;
     if (!zoneId) {
-      const resolved = await resolveCloudflareZoneId(secrets.secret, existing.domain, provider.zoneId);
+      const resolved = await resolveCloudflareZoneId(
+        secrets.secret,
+        existing.domain,
+        provider.zoneId,
+        provider.accountEmail
+      );
       zoneId = resolved.zoneId;
     }
     if (!zoneId) return { ok: false, synced: false, message: '未找到对应的 Cloudflare Zone ID' };
@@ -1442,12 +1569,12 @@ export async function deleteProviderDnsRecord(
         `https://api.cloudflare.com/client/v4/zones/${encodeURIComponent(zoneId)}/dns_records/${encodeURIComponent(existing.remoteRecordId!)}`,
         {
           method: 'DELETE',
-          headers: { Authorization: `Bearer ${secrets.secret}` },
+          headers: auth.headers,
         }
       );
-      const data = (await res.json()) as { success?: boolean; errors?: Array<{ message: string }> };
+      const data = (await res.json()) as { success?: boolean; errors?: Array<{ code?: number; message?: string }> };
       if (!res.ok || !data.success) {
-        return { ok: false, synced: false, message: data.errors?.[0]?.message || `Cloudflare HTTP ${res.status}` };
+        return { ok: false, synced: false, message: formatCloudflareApiError(res.status, data.errors, auth.mode) };
       }
       return { ok: true, synced: true, message: '已同步删除 Cloudflare 远端记录' };
     } catch (err) {

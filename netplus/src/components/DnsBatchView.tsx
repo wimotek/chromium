@@ -119,6 +119,7 @@ export function DnsBatchView({ providers, rules, records, hosts, lang, onReload 
   const [provForm, setProvForm] = useState({
     name: '',
     type: 'cloudflare' as DnsProviderType,
+    accountEmail: '',
     endpointUrl: '',
     secretId: '',
     secret: '',
@@ -274,6 +275,7 @@ export function DnsBatchView({ providers, rules, records, hosts, lang, onReload 
     setProvForm({
       name: 'Cloudflare',
       type: 'cloudflare',
+      accountEmail: '',
       endpointUrl: '',
       secretId: '',
       secret: '',
@@ -286,6 +288,7 @@ export function DnsBatchView({ providers, rules, records, hosts, lang, onReload 
     setProvForm({
       name: p.name,
       type: p.type,
+      accountEmail: p.accountEmail ?? '',
       endpointUrl: p.endpointUrl ?? '',
       secretId: '',
       secret: '',
@@ -940,6 +943,27 @@ export function DnsBatchView({ providers, rules, records, hosts, lang, onReload 
                 </div>
               )}
 
+              {provForm.type === 'cloudflare' && (
+                <div>
+                  <label className="block text-xs font-medium text-slate-700 dark:text-slate-300 mb-1">
+                    {isZh
+                      ? 'Cloudflare 账号邮箱（可选，仅使用 Global API Key 时填写）'
+                      : 'Cloudflare Account Email (Optional — Global API Key only)'}
+                  </label>
+                  <input
+                    type="email"
+                    value={provForm.accountEmail}
+                    onChange={(e) => setProvForm({ ...provForm, accountEmail: e.target.value })}
+                    className="w-full px-3 py-2 text-sm font-mono rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950"
+                    placeholder={
+                      isZh
+                        ? '使用 API Token 请留空；使用 Global API Key 则填登录邮箱'
+                        : 'Leave blank for API Token; required only for Global API Key'
+                    }
+                  />
+                </div>
+              )}
+
               <div>
                 <label className="block text-xs font-medium text-slate-700 dark:text-slate-300 mb-1">
                   {selectedProviderMeta.secretLabel}
@@ -965,8 +989,8 @@ export function DnsBatchView({ providers, rules, records, hosts, lang, onReload 
               <p className="text-[11px] leading-relaxed text-slate-500 dark:text-slate-400">
                 {provForm.type === 'cloudflare'
                   ? isZh
-                    ? '只需填一次 Cloudflare API Token，无需填域名或 Zone ID。添加域名时会自动拉取账号下域名并自动获取 Zone ID。'
-                    : 'Enter your Cloudflare API Token once. Domains & Zone IDs are fetched automatically when adding rules.'
+                    ? '推荐使用 Cloudflare API Token（权限：Zone:Read + DNS:Edit，上方邮箱留空）；若使用 Global API Key 则需同时填写 Cloudflare 登录邮箱。系统会自动拉取账号下域名列表与 Zone ID。'
+                    : 'Recommended: Cloudflare API Token (Zone:Read + DNS:Edit, leave email empty). For Global API Key, also fill in your Cloudflare account email. Domains & Zone IDs are fetched automatically.'
                   : isZh
                   ? '保存一次账号凭据即可供该服务商下所有域名复用，无需重复配置。'
                   : 'Save credentials once and reuse across all domains under this provider.'}

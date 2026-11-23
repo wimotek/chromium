@@ -33,7 +33,15 @@ class TlsCertificateManager {
   }
 
   getHttpsPort(): number {
-    return Number(process.env.HTTPS_PORT) || 3443;
+    const raw = process.env.HTTPS_PORT?.trim().toLowerCase();
+    if (raw === '0' || raw === 'false' || raw === 'off' || raw === 'disabled') {
+      return 0;
+    }
+    const parsed = Number(raw);
+    if (Number.isInteger(parsed) && parsed > 0 && parsed <= 65535) {
+      return parsed;
+    }
+    return 3443;
   }
 
   private resolveCertPair(dir: string): { certPath?: string; keyPath?: string } {
@@ -117,11 +125,11 @@ class TlsCertificateManager {
     message: string;
     status: TlsCertificateStatus;
   } {
-    const rawCn = (options?.commonName || 'netpulse.local').trim();
-    const cn = VALID_HOST_PATTERN.test(rawCn) ? rawCn : 'netpulse.local';
+    const rawCn = (options?.commonName || 'netplus.local').trim();
+    const cn = VALID_HOST_PATTERN.test(rawCn) ? rawCn : 'netplus.local';
     const days = Math.min(3650, Math.max(30, Number(options?.days) || 825));
 
-    const dnsSet = new Set<string>(['localhost', 'netpulse.local']);
+    const dnsSet = new Set<string>(['localhost', 'netplus.local']);
     if (net.isIP(cn) === 0 && VALID_HOST_PATTERN.test(cn)) {
       dnsSet.add(cn);
     }
@@ -178,7 +186,7 @@ class TlsCertificateManager {
           '-days',
           String(days),
           '-subj',
-          `/CN=${cn}/O=NetPulse Console`,
+          `/CN=${cn}/O=NetPlus Console`,
           '-addext',
           `subjectAltName=${sanEntries.join(',')}`,
           '-addext',
@@ -297,17 +305,21 @@ class TlsCertificateManager {
 
   private bindHttpsServer(certPath: string, keyPath: string, label: string) {
     if (!this.boundApp || this.httpsServer) return;
+    const port = this.getHttpsPort();
+    if (port <= 0) return;
+
     const cert = fs.readFileSync(certPath);
     const key = fs.readFileSync(keyPath);
 
     this.httpsServer = https.createServer({ cert, key }, this.boundApp);
-    const port = this.getHttpsPort();
     this.httpsServer.on('error', (err) => {
-      console.warn(`[NetPulse] HTTPS listener error on port ${port}:`, err.message);
+      console.warn(`[NetPlus][TLS] HTTPS listener error on port ${port}:`, err.message);
     });
     this.httpsServer.listen(port, '0.0.0.0', () => {
       this.lastLoadedAt = new Date().toISOString();
-      console.log(`[NetPulse] HTTPS listening on https://0.0.0.0:${port} (${label}: ${certPath})`);
+      console.log(
+        `[NetPlus][TLS] HTTPS listening on https://0.0.0.0:${port} (${label}: ${certPath}) — test with: curl -k https://127.0.0.1:${port}/api/health`
+      );
     });
 
     if (!this.reloadTimer) {
@@ -320,22 +332,33 @@ class TlsCertificateManager {
 
   startHttpsIfAvailable(app: Express): TlsCertificateStatus {
     this.boundApp = app;
+    const port = this.getHttpsPort();
+    if (port <= 0) {
+      console.log('[NetPlus][TLS] HTTPS listener disabled (HTTPS_PORT=0)');
+      return this.inspectStatus();
+    }
+
     let status = this.inspectStatus();
 
     // Auto-generate a self-signed certificate when /certs:ro is not mounted
     if (status.source === 'none' && process.env.TLS_AUTO_SELF_SIGNED !== 'false') {
+      const cn = process.env.TLS_SELF_SIGNED_CN?.trim() || 'netplus.local';
+      console.log(`[NetPlus][TLS] No mounted cert in ${status.certDir}; generating persistent self-signed ECDSA cert (CN=${cn}) in ${status.customCertDir}`);
       const gen = this.generateSelfSignedCertificate({
-        commonName: process.env.TLS_SELF_SIGNED_CN?.trim() || 'netpulse.local',
+        commonName: cn,
         days: Number(process.env.TLS_SELF_SIGNED_DAYS) || 825,
       });
       if (gen.ok) {
         status = gen.status;
       } else {
-        console.warn('[NetPulse] Auto self-signed TLS generation skipped:', gen.message);
+        console.warn('[NetPlus][TLS] Auto self-signed TLS generation failed:', gen.message);
       }
     }
 
     if (!status.enabled || !status.readable || !status.certPath || !status.keyPath) {
+      console.warn(
+        `[NetPlus][TLS] HTTPS not started on :${port} (source=${status.source}, readable=${status.readable}${status.permissionIssue ? `, issue=${status.permissionIssue}` : ''})`
+      );
       return status;
     }
 
@@ -343,10 +366,10 @@ class TlsCertificateManager {
       this.bindHttpsServer(
         status.certPath,
         status.keyPath,
-        status.source === 'mounted' ? 'mounted /certs:ro' : 'custom self-signed'
+        status.source === 'mounted' ? 'mounted /certs:ro' : 'auto self-signed'
       );
     } catch (err) {
-      console.warn('[NetPulse] Skipped HTTPS startup:', err instanceof Error ? err.message : err);
+      console.warn('[NetPlus][TLS] Failed to start HTTPS listener:', err instanceof Error ? err.message : err);
     }
 
     return this.inspectStatus();

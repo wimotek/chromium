@@ -23,7 +23,7 @@ const en = {
   navNotify: 'System Notifications',
   navCron: 'Scheduled Policies',
   navAudit: 'Audit Logs',
-  navSecurity: 'Security & Container',
+  navSecurity: 'Security',
 
   // Common actions
   save: 'Save',
@@ -91,7 +91,7 @@ const en = {
   auditStorageUsage: 'Audit Log Disk Quota',
   auditAutoPruneNote: 'Oldest lines are deleted automatically when audit.ndjson exceeds the configured byte cap.',
   recentAuditActivity: 'Recent Audit Activity',
-  containerRuntime: 'Container & CI/CD Runtime',
+  containerRuntime: 'System Runtime & TLS',
   quickSyncAll: 'Batch Sync All DNS',
   viewAllLogs: 'View Audit Logs',
 
@@ -217,8 +217,8 @@ const en = {
   filterSeverity: 'Severity',
 
   // Security & Container
-  securityTitle: 'Security Policy, Anti-Bot & Container',
-  securitySubtitle: 'Tune login rate limiting, CAPTCHA & proof-of-work strength, audit log byte caps, admin password, and Docker / GitHub Actions deployment.',
+  securityTitle: 'Security Policy & TLS',
+  securitySubtitle: 'Tune login rate limiting, CAPTCHA & proof-of-work strength, audit log byte caps, admin password, and SSL/TLS certificates.',
   antiBotSection: 'Login Protection & Anti-Bot Rules',
   auditRetentionSection: 'Audit Log Auto-Deletion Policy',
   passwordSection: 'Administrator Password',
@@ -254,7 +254,7 @@ const zhCN: Record<TranslationKeys, string> = {
   navNotify: '系统通知中心',
   navCron: '定时策略任务',
   navAudit: '审计日志与清理',
-  navSecurity: '安全防护与容器',
+  navSecurity: '安全设置',
 
   save: '保存',
   cancel: '取消',
@@ -319,7 +319,7 @@ const zhCN: Record<TranslationKeys, string> = {
   auditStorageUsage: '审计日志磁盘配额',
   auditAutoPruneNote: '当 audit.ndjson 超过设定字节上限时，系统自动删除最旧日志并记录清理事件。',
   recentAuditActivity: '近期安全与运维审计',
-  containerRuntime: '容器运行环境与 CI/CD',
+  containerRuntime: '运行环境与 TLS 状态',
   quickSyncAll: '一键批量同步 DNS',
   viewAllLogs: '查看全部审计日志',
 
@@ -439,8 +439,8 @@ const zhCN: Record<TranslationKeys, string> = {
   filterCategory: '事件分类',
   filterSeverity: '级别筛选',
 
-  securityTitle: '防刷安全策略、账号与容器部署',
-  securitySubtitle: '自定义防机器人验证码强度、限流锁定阈值、审计文件上限、修改管理员密码，并查看分阶段 Dockerfile 与 GitHub Actions 配置。',
+  securityTitle: '防刷安全策略与证书管理',
+  securitySubtitle: '自定义防机器人验证码强度、限流锁定阈值、审计文件上限、修改管理员密码与 SSL/TLS 证书。',
   antiBotSection: '登录防护与防机器人防刷参数',
   auditRetentionSection: '审计日志超限自动删除策略',
   passwordSection: '修改管理员密码',
@@ -476,7 +476,7 @@ const ja: Record<TranslationKeys, string> = {
   navNotify: 'システム通知',
   navCron: '定期同期ポリシー',
   navAudit: '監査ログ',
-  navSecurity: 'セキュリティ・コンテナ',
+  navSecurity: 'セキュリティ',
 
   save: '保存',
   cancel: 'キャンセル',
@@ -541,7 +541,7 @@ const ja: Record<TranslationKeys, string> = {
   auditStorageUsage: '監査ログ容量クォータ',
   auditAutoPruneNote: 'audit.ndjson が上限バイト数を超えると、古いログから自動的に削除されます。',
   recentAuditActivity: '最近の監査アクティビティ',
-  containerRuntime: 'コンテナ実行環境と CI/CD',
+  containerRuntime: 'ランタイム・TLS',
   quickSyncAll: 'DNS を一括同期',
   viewAllLogs: '監査ログを表示',
 
@@ -661,8 +661,8 @@ const ja: Record<TranslationKeys, string> = {
   filterCategory: 'カテゴリ',
   filterSeverity: '重要度',
 
-  securityTitle: 'セキュリティ・ボット対策・コンテナ',
-  securitySubtitle: 'レート制限、CAPTCHA・PoW 強度、監査上限、パスワード変更、Docker / GitHub Actions 設定を管理します。',
+  securityTitle: 'セキュリティ・TLS設定',
+  securitySubtitle: 'レート制限、CAPTCHA・PoW 強度、監査上限、パスワード変更、SSL/TLS 証明書を管理します。',
   antiBotSection: 'ログイン保護とボット対策',
   auditRetentionSection: '監査ログ自動削除ポリシー',
   passwordSection: '管理者パスワード変更',
@@ -698,7 +698,7 @@ const de: Record<TranslationKeys, string> = {
   navNotify: 'Systembenachrichtigungen',
   navCron: 'Zeitplan-Richtlinien',
   navAudit: 'Audit-Protokoll',
-  navSecurity: 'Sicherheit & Container',
+  navSecurity: 'Sicherheit',
 
   save: 'Speichern',
   cancel: 'Abbrechen',
@@ -763,7 +763,7 @@ const de: Record<TranslationKeys, string> = {
   auditStorageUsage: 'Audit-Speicherkontingent',
   auditAutoPruneNote: 'Älteste Zeilen werden automatisch gelöscht, sobald audit.ndjson das Größenlimit überschreitet.',
   recentAuditActivity: 'Letzte Audit-Ereignisse',
-  containerRuntime: 'Container-Laufzeit & CI/CD',
+  containerRuntime: 'System-Laufzeit & TLS',
   quickSyncAll: 'Alle DNS synchronisieren',
   viewAllLogs: 'Alle Protokolle',
 
@@ -883,8 +883,8 @@ const de: Record<TranslationKeys, string> = {
   filterCategory: 'Kategorie',
   filterSeverity: 'Schweregrad',
 
-  securityTitle: 'Sicherheit, Bot-Schutz & Container',
-  securitySubtitle: 'Konfigurieren Sie Ratenbegrenzung, CAPTCHA-Stärke, Audit-Limits, Passwortwechsel sowie Docker- & GitHub-Actions-Pipelines.',
+  securityTitle: 'Sicherheit & TLS',
+  securitySubtitle: 'Konfigurieren Sie Ratenbegrenzung, CAPTCHA-Stärke, Audit-Limits, Passwortwechsel sowie SSL/TLS-Zertifikate.',
   antiBotSection: 'Anmeldeschutz & Bot-Abwehr',
   auditRetentionSection: 'Automatische Audit-Bereinigung',
   passwordSection: 'Administratorpasswort',
@@ -920,7 +920,7 @@ const es: Record<TranslationKeys, string> = {
   navNotify: 'Notificaciones',
   navCron: 'Políticas Programadas',
   navAudit: 'Auditoría',
-  navSecurity: 'Seguridad y Contenedor',
+  navSecurity: 'Seguridad',
 
   save: 'Guardar',
   cancel: 'Cancelar',
@@ -985,7 +985,7 @@ const es: Record<TranslationKeys, string> = {
   auditStorageUsage: 'Cuota de Disco de Auditoría',
   auditAutoPruneNote: 'Las entradas más antiguas se eliminan automáticamente al superar el límite en audit.ndjson.',
   recentAuditActivity: 'Actividad Reciente de Auditoría',
-  containerRuntime: 'Contenedor y CI/CD',
+  containerRuntime: 'Entorno y TLS',
   quickSyncAll: 'Sincronizar Todo DNS',
   viewAllLogs: 'Ver Auditoría',
 
@@ -1105,8 +1105,8 @@ const es: Record<TranslationKeys, string> = {
   filterCategory: 'Categoría',
   filterSeverity: 'Nivel',
 
-  securityTitle: 'Seguridad, Anti-Bot y Contenedor',
-  securitySubtitle: 'Ajusta límites de tasa, fuerza de CAPTCHA y PoW, retención de auditoría, contraseña y pipeline Docker / GHCR.',
+  securityTitle: 'Seguridad y TLS',
+  securitySubtitle: 'Ajusta límites de tasa, fuerza de CAPTCHA y PoW, retención de auditoría, contraseña y certificados SSL/TLS.',
   antiBotSection: 'Protección de Acceso y Anti-Bot',
   auditRetentionSection: 'Política de Auto-Eliminación de Auditoría',
   passwordSection: 'Contraseña de Administrador',

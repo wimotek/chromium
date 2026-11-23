@@ -115,7 +115,6 @@ export default function App() {
       }
     } catch {
       setAuthStatus({
-        requiresBootstrap: false,
         envManagedAdmin: false,
         authenticated: false,
         security: {
@@ -201,7 +200,7 @@ export default function App() {
         onAuthenticated={(user) => {
           setCurrentUser(user);
           setAuthStatus((prev) =>
-            prev ? { ...prev, requiresBootstrap: false, authenticated: true, username: user } : prev
+            prev ? { ...prev, authenticated: true, username: user } : prev
           );
         }}
       />

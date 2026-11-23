@@ -23,16 +23,17 @@ netplus/
 └── package.json
 ```
 
-## 快速部署
+## 快速部署（零环境变量开箱即用）
 
 ### 直接拉取镜像运行
+
+无需传递任何环境变量，默认自动同时监听 HTTP (`3000`) 与 HTTPS (`3443`，未挂载外部证书时自动生成持久化自签证书)：
 
 ```bash
 docker run -d --name netplus --restart unless-stopped \
   -p 3000:3000 \
   -p 3443:3443 \
   -v netplus_data:/data \
-  -e HTTPS_PORT=3443 \
   wimotek/netplus:latest
 # 或使用 GHCR 镜像：ghcr.io/wimotek/netplus:latest
 ```
@@ -40,13 +41,33 @@ docker run -d --name netplus --restart unless-stopped \
 ### Docker Compose
 
 ```bash
-cp .env.example .env
 docker compose pull && docker compose up -d
 # 或本地编译构建启动：
 docker compose up -d --build
 ```
 
-访问 `http://<server-ip>:3000`（或 HTTPS `https://<server-ip>:3443`）完成首次管理员初始化。
+启动后直接访问 `http://<server-ip>:3000` 或 `https://<server-ip>:3443` 登录（无公开「创建管理员」页面，避免抢注风险）。全新生产实例默认零示例数据，所有凭据与配置均持久化保存在 `/data`。
+
+> **获取初始管理员密码 & 命令行健康检查**：
+> - 未设置 `ADMIN_PASSWORD` 时，首次启动会自动生成 16 位随机强密码并**一次性打印在容器日志中**，执行 `docker logs netplus` 即可查看（默认用户名 `admin`），登录后建议立即在「安全设置」修改密码。
+> - 检测 HTTP：`curl http://127.0.0.1:3000/api/health`
+> - 检测 HTTPS：`curl -k https://127.0.0.1:3443/api/health`（注意必须带 `https://` 与 `-k`；直接执行 `curl 127.0.0.1:3443` 会因明文 HTTP 请求连到 TLS 端口而返回 `Empty reply from server`）
+
+## 环境变量说明（全部可选，均带默认值）
+
+```bash
+# 以下变量均为可选（# 注释即使用内置默认值），按需取消注释或通过 -e 传入：
+# PORT=3000                             # HTTP 监听端口（默认 3000）
+# HTTPS_PORT=3443                       # HTTPS 监听端口（默认 3443；设为 0 可关闭内置 HTTPS）
+# DATA_DIR=/data                        # 数据、加密密钥(.app.key)、自签证书与审计日志持久化目录（容器默认 /data）
+# TLS_CERT_DIR=/certs                   # 外部 SSL 证书只读挂载目录（默认 /certs，支持宝塔 fullchain.pem/privkey.pem）
+# TLS_AUTO_SELF_SIGNED=true             # 未挂载外部证书时是否自动生成自签证书（默认 true）
+# TLS_SELF_SIGNED_CN=netplus.local      # 自动自签证书默认 CN（默认 netplus.local）
+# ADMIN_USERNAME=admin                  # 首次启动初始管理员用户名（默认 admin，仅首次写入生效）
+# ADMIN_PASSWORD=change-me-strong-pass  # 首次启动初始管理员密码（仅初始值，不锁定；留空则自动生成 16 位随机强密码并打印到 docker logs netplus）
+# APP_ENCRYPTION_KEY=                   # 可选 64 位十六进制 AES-256 密钥（留空自动生成并持久化在 /data/.app.key）
+# AUDIT_MAX_SIZE_BYTES=5242880          # 审计日志容量上限，单位字节（默认 5242880 即 5MB）
+```
 
 ## 先编译源码再构建 / 推送镜像
 

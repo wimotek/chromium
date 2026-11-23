@@ -25,7 +25,7 @@ import type {
 } from './src/types/models.ts';
 import { antiBotGuard } from './server/lib/captcha.ts';
 import { computeNextCronRun, isValidCronExpression } from './server/lib/cron.ts';
-import { generateToken, validateSafeExternalUrl } from './server/lib/crypto.ts';
+import { generateToken, getEncryptionKeyInfo, validateSafeExternalUrl } from './server/lib/crypto.ts';
 import {
   getHostLinkedRuleIds,
   setHostLinkedRuleIds,
@@ -230,7 +230,6 @@ export async function createServer(options: CreateServerOptions = {}) {
     const validSession = session && Date.now() <= session.expiresAt ? session : undefined;
     const sec = store.getState().security;
     res.json({
-      requiresBootstrap: store.requiresBootstrap(),
       envManagedAdmin: store.isEnvAdminConfigured(),
       authenticated: Boolean(validSession),
       username: validSession?.username,
@@ -256,78 +255,9 @@ export async function createServer(options: CreateServerOptions = {}) {
     res.json(challenge);
   });
 
-  app.post('/api/auth/bootstrap', (req, res) => {
-    const ip = getClientIp(req);
-    if (!store.requiresBootstrap()) {
-      res.status(403).json({ error: 'ADMIN_ALREADY_CONFIGURED' });
-      return;
-    }
-
-    const { username, password, challengeId, captchaAnswer, powNonce, sliderValue, honeypot } = req.body ?? {};
-    const sec = store.getState().security;
-    const rl = antiBotGuard.checkRateLimit(`auth:${ip}`, sec.rateLimitWindowSeconds, Math.max(10, sec.rateLimitMaxRequests));
-    if (!rl.allowed) {
-      res.status(429).json({ error: 'RATE_LIMITED', retryAfterSec: rl.retryAfterSec });
-      return;
-    }
-
-    const verification = antiBotGuard.verifyChallenge({
-      challengeId: String(challengeId ?? ''),
-      answer: String(captchaAnswer ?? ''),
-      powNonce: String(powNonce ?? ''),
-      sliderValue,
-      honeypot,
-      ip,
-      config: sec,
-    });
-    if (!verification.ok) {
-      const failState = antiBotGuard.recordLoginFailure(ip, sec.maxLoginAttempts, sec.lockoutMinutes);
-      store.appendAudit({
-        category: 'auth',
-        severity: 'warning',
-        action: 'BOOTSTRAP_BOT_BLOCKED',
-        actor: String(username ?? 'unknown'),
-        ip,
-        details: `Blocked first-run bootstrap attempt: ${verification.code}`,
-      });
-      res.status(400).json({
-        error: verification.code,
-        attemptsLeft: failState.attemptsLeft,
-        retryAfterSec: failState.retryAfterSec,
-      });
-      return;
-    }
-
-    const cleanUser = String(username ?? '').trim();
-    const rawPass = String(password ?? '');
-    if (cleanUser.length < 3 || cleanUser.length > 32 || !/^[a-zA-Z0-9._-]+$/.test(cleanUser)) {
-      res.status(400).json({ error: 'INVALID_USERNAME' });
-      return;
-    }
-    if (rawPass.length < 8 || rawPass.length > 128) {
-      res.status(400).json({ error: 'WEAK_PASSWORD' });
-      return;
-    }
-
-    const claimed = store.bootstrapAdmin(cleanUser, rawPass);
-    if (!claimed) {
-      res.status(409).json({ error: 'ADMIN_ALREADY_CONFIGURED' });
-      return;
-    }
-
-    antiBotGuard.clearLoginFailures(ip);
-    const sess = createSession(cleanUser, ip);
-    store.appendAudit({
-      category: 'auth',
-      severity: 'success',
-      action: 'ADMIN_BOOTSTRAPPED',
-      actor: cleanUser,
-      ip,
-      details: 'Initial administrator credentials configured and signed in',
-    });
-
-    res.status(201).json({ token: sess.token, username: cleanUser, expiresAt: sess.expiresAt });
-  });
+  // Note: Public first-run web bootstrap endpoint has been removed for security.
+  // Admin credentials are always initialized on first startup (from ADMIN_USERNAME/ADMIN_PASSWORD
+  // or auto-generated strong random password printed once to container logs).
 
   app.post('/api/auth/login', async (req, res) => {
     const ip = getClientIp(req);
@@ -1178,7 +1108,7 @@ export async function createServer(options: CreateServerOptions = {}) {
       return;
     }
     const forceRefresh = req.query.refresh === '1' || req.query.refresh === 'true';
-    const result = await listCloudflareZones(secrets.secret, forceRefresh);
+    const result = await listCloudflareZones(secrets.secret, forceRefresh, provider.accountEmail);
     res.json({ ...result, autoZoneSupported: true });
   });
 
@@ -1228,7 +1158,12 @@ export async function createServer(options: CreateServerOptions = {}) {
     if (provider.type === 'cloudflare' && !resolvedZoneId) {
       const secrets = store.getDnsProviderSecrets(provider.id);
       if (secrets.secret) {
-        const lookup = await resolveCloudflareZoneId(secrets.secret, domain, provider.zoneId);
+        const lookup = await resolveCloudflareZoneId(
+          secrets.secret,
+          domain,
+          provider.zoneId,
+          provider.accountEmail
+        );
         if (lookup.zoneId) resolvedZoneId = lookup.zoneId;
       }
     }
@@ -1461,6 +1396,7 @@ export async function createServer(options: CreateServerOptions = {}) {
     const secrets = store.getDnsProviderSecrets(provider.id);
     const pulled = await pullProviderDnsRecords(provider, secrets, domain, zoneId);
     if (!pulled.ok) {
+      console.warn(`[NetPlus][DNS] Pull records failed for provider="${provider.name}" (${provider.type}) domain="${domain}": ${pulled.error}`);
       res.status(502).json({ error: pulled.error || '从 DNS 服务商拉取记录失败' });
       return;
     }
@@ -1553,6 +1489,170 @@ export async function createServer(options: CreateServerOptions = {}) {
       updatedCount,
       removedCount,
       zoneId: pulled.zoneId,
+    });
+  });
+
+  app.post('/api/dns/records/pull-all', requireAuth, async (req: AuthedRequest, res) => {
+    const state = store.getState();
+    const b = req.body ?? {};
+    const providerId = String(b.providerId || '').trim();
+    const defaultGroupOverride = String(b.defaultGroupName || '').trim();
+    const requestedDomains = Array.isArray(b.domains)
+      ? b.domains
+          .map((d: unknown) => String(d || '').trim().toLowerCase().replace(/\.$/, ''))
+          .filter(Boolean)
+      : [];
+
+    const provider = state.dnsProviders.find((p) => p.id === providerId);
+    if (!provider) {
+      res.status(404).json({ error: '未找到选中的 DNS 服务商' });
+      return;
+    }
+    const secrets = store.getDnsProviderSecrets(provider.id);
+    const listed = await listProviderDomains(provider, secrets, true);
+    if (!listed.ok) {
+      console.warn(`[NetPlus][DNS] Pull-all domain list failed for "${provider.name}" (${provider.type}): ${listed.error}`);
+      res.status(502).json({ error: listed.error || '拉取服务商域名列表失败' });
+      return;
+    }
+
+    const targets =
+      requestedDomains.length > 0
+        ? listed.domains.filter((d) => requestedDomains.includes(d.name.toLowerCase()))
+        : listed.domains;
+
+    if (targets.length === 0) {
+      res.json({
+        ok: true,
+        domainCount: 0,
+        totalRecords: 0,
+        addedCount: 0,
+        updatedCount: 0,
+        removedCount: 0,
+        domains: [],
+        errors: [],
+      });
+      return;
+    }
+
+    const now = new Date().toISOString();
+    let totalRecords = 0;
+    let totalAdded = 0;
+    let totalUpdated = 0;
+    let totalRemoved = 0;
+    const domainSummaries: Array<{ domain: string; count: number; added: number; updated: number; removed: number }> = [];
+    const errors: Array<{ domain: string; error: string }> = [];
+
+    for (const dom of targets) {
+      const cleanDomain = dom.name.toLowerCase();
+      const pulled = await pullProviderDnsRecords(provider, secrets, cleanDomain, dom.id);
+      if (!pulled.ok) {
+        errors.push({ domain: cleanDomain, error: pulled.error || '拉取失败' });
+        continue;
+      }
+
+      const existingForDomain = state.dnsRecords.filter(
+        (r) => r.providerId === provider.id && r.domain.toLowerCase() === cleanDomain
+      );
+      const byRemoteId = new Map<string, ManagedDnsRecord>();
+      for (const ex of existingForDomain) {
+        if (ex.remoteRecordId) byRemoteId.set(ex.remoteRecordId, ex);
+      }
+
+      const seenRemoteIds = new Set<string>();
+      let added = 0;
+      let updated = 0;
+      const groupName = defaultGroupOverride || cleanDomain;
+
+      for (const item of pulled.records) {
+        seenRemoteIds.add(item.remoteRecordId);
+        const existing = byRemoteId.get(item.remoteRecordId);
+        if (existing) {
+          existing.domain = item.domain;
+          existing.zoneId = item.zoneId || pulled.zoneId || existing.zoneId;
+          existing.name = item.name;
+          existing.fqdn = item.fqdn;
+          existing.type = item.type;
+          existing.content = item.content;
+          existing.ttl = item.ttl;
+          existing.proxied = item.proxied;
+          existing.priority = item.priority;
+          existing.line = item.line;
+          existing.source = 'remote_sync';
+          existing.syncState = 'synced';
+          existing.lastSyncedAt = now;
+          existing.updatedAt = now;
+          updated += 1;
+        } else {
+          state.dnsRecords.unshift({
+            id: `rec-${crypto.randomBytes(5).toString('hex')}`,
+            providerId: provider.id,
+            domain: item.domain,
+            zoneId: item.zoneId || pulled.zoneId,
+            remoteRecordId: item.remoteRecordId,
+            name: item.name,
+            fqdn: item.fqdn,
+            type: item.type,
+            content: item.content,
+            ttl: item.ttl,
+            proxied: item.proxied,
+            priority: item.priority,
+            line: item.line,
+            groupName,
+            source: 'remote_sync',
+            syncState: 'synced',
+            lastSyncedAt: now,
+            createdAt: now,
+            updatedAt: now,
+          });
+          added += 1;
+        }
+      }
+
+      const beforeCount = state.dnsRecords.length;
+      state.dnsRecords = state.dnsRecords.filter((r) => {
+        if (r.providerId !== provider.id || r.domain.toLowerCase() !== cleanDomain) return true;
+        if (r.source === 'remote_sync' && r.remoteRecordId && !seenRemoteIds.has(r.remoteRecordId)) {
+          return false;
+        }
+        return true;
+      });
+      const removed = beforeCount - state.dnsRecords.length;
+
+      totalRecords += pulled.records.length;
+      totalAdded += added;
+      totalUpdated += updated;
+      totalRemoved += removed;
+      domainSummaries.push({
+        domain: cleanDomain,
+        count: pulled.records.length,
+        added,
+        updated,
+        removed,
+      });
+    }
+
+    store.save();
+
+    store.appendAudit({
+      category: 'dns',
+      severity: errors.length > 0 ? 'warning' : 'success',
+      action: 'DNS_ALL_DOMAINS_PULLED',
+      actor: req.sessionUser || 'admin',
+      ip: getClientIp(req),
+      target: `${provider.name} (${domainSummaries.length} domains)`,
+      details: `Pulled ${totalRecords} records across ${domainSummaries.length} domain(s) (added=${totalAdded}, updated=${totalUpdated}, removed=${totalRemoved}, errors=${errors.length})`,
+    });
+
+    res.json({
+      ok: true,
+      domainCount: domainSummaries.length,
+      totalRecords,
+      addedCount: totalAdded,
+      updatedCount: totalUpdated,
+      removedCount: totalRemoved,
+      domains: domainSummaries,
+      errors,
     });
   });
 
@@ -5390,13 +5490,36 @@ export async function createServer(options: CreateServerOptions = {}) {
   const host = cliHost || '0.0.0.0';
 
   const server = app.listen(port, host, () => {
-    console.log(`[NetPulse] HTTP listening on http://${host}:${port} (${isProd ? 'production' : 'development'})`);
-    // Automatically bind HTTPS in the background so port 3000 responds to probes immediately
+    const adminInfo = store.getAdminInitSummary();
+    const generatedInitialPass = store.consumeGeneratedInitialPassword();
+    const keyInfo = getEncryptionKeyInfo();
+    const httpsPort = tlsManager.getHttpsPort();
+    const auditCap = store.getState().security.maxAuditSizeBytes;
+    const adminDesc =
+      adminInfo.mode === 'env_seed'
+        ? `seeded-from-env (user="${adminInfo.username}", editable in Web UI)`
+        : adminInfo.mode === 'auto_generated'
+        ? `auto-generated (user="${adminInfo.username}", see initial credentials banner below)`
+        : `loaded-from-state (user="${adminInfo.username}")`;
+
+    console.log(`[NetPlus] HTTP listening on http://${host}:${port} (${isProd ? 'production' : 'development'})`);
+    console.log(
+      `[NetPlus] Runtime Config: DATA_DIR=${store.getDataDirectory()} | HTTPS_PORT=${httpsPort || 'disabled'} | TLS_CERT_DIR=${tlsManager.getConfiguredDir()} | KEY=${keyInfo.source}${keyInfo.path ? `(${keyInfo.path})` : ''} | ADMIN=${adminDesc} | AUDIT_MAX=${auditCap}B`
+    );
+    if (generatedInitialPass) {
+      console.log('========================================================================');
+      console.log('[NetPlus][Auth] First-run initial administrator credentials generated:');
+      console.log(`  Username: ${adminInfo.username}`);
+      console.log(`  Password: ${generatedInitialPass}`);
+      console.log('  (Displayed ONCE. Please sign in and change password in Security Settings.)');
+      console.log('========================================================================');
+    }
+    // Automatically bind HTTPS in the background so HTTP responds to health probes immediately
     setImmediate(() => {
       try {
         tlsManager.startHttpsIfAvailable(app);
       } catch (err) {
-        console.warn('[NetPulse] Skipped HTTPS startup:', err instanceof Error ? err.message : err);
+        console.warn('[NetPlus][TLS] Skipped HTTPS startup:', err instanceof Error ? err.message : err);
       }
     });
   });

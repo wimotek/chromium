@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { Check, Copy, Download, Lock, RefreshCw, Save, Sparkles } from 'lucide-react';
+import { Download, Lock, RefreshCw, Save, Sparkles } from 'lucide-react';
 import { translate, type TranslationKeys } from '../i18n/translations';
 import { apiRequest, getAuthToken } from '../lib/api';
 import type { LanguageCode, SecurityConfig, TlsCertificateStatus } from '../types/models';
@@ -8,34 +8,6 @@ interface SecurityContainerViewProps {
   lang: LanguageCode;
   onRefreshOverview: () => Promise<void>;
 }
-
-const GHCR_DOCKERHUB_GUIDE = `# 1. Compile source FIRST (tsc + Vite frontend dist/ + esbuild backend dist-server/server.mjs) & push
-./scripts/build-and-push.sh wimotek/netplus latest
-# Or push to GHCR:
-./scripts/build-and-push.sh ghcr.io/wimotek/netplus latest
-
-# Or step-by-step manual compile + release image push:
-npm run build:all
-docker buildx build -f Dockerfile.release \\
-  --platform linux/amd64,linux/arm64 --push \\
-  -t wimotek/netplus:latest \\
-  -t ghcr.io/wimotek/netplus:latest .
-
-# 2. Run container with persistent /data volume + Baota (宝塔) SSL mounted read-only to /certs:ro
-# Entrypoint stages root-owned 0600 Baota certs to /tmp/netpulse-certs (UID 1001) before dropping root.
-docker run -d --name netplus --restart unless-stopped \\
-  -p 3000:3000 \\
-  -p 3443:3443 \\
-  -v netpulse_data:/data \\
-  -v /www/server/panel/vhost/cert/<your-domain>:/certs:ro \\
-  -e HTTPS_PORT=3443 \\
-  -e AUDIT_MAX_SIZE_BYTES=5242880 \\
-  wimotek/netplus:latest
-
-# 3. GitHub Actions (.github/workflows/docker-publish.yml, unified WORKING_DIR: netplus)
-# - Job 1 (compile-and-verify): tsc + vite + esbuild + production /api/health smoke test
-# - Job 2 (build-and-push): packages verified dist/ & dist-server/ via Dockerfile.release
-#   -> Docker Hub: wimotek/netplus | GHCR: ghcr.io/wimotek/netplus`;
 
 export function SecurityContainerView({ lang, onRefreshOverview }: SecurityContainerViewProps) {
   const t = (key: TranslationKeys) => translate(lang, key);
@@ -48,7 +20,7 @@ export function SecurityContainerView({ lang, onRefreshOverview }: SecurityConta
   const [generatingCert, setGeneratingCert] = useState(false);
   const [showCustomCertForm, setShowCustomCertForm] = useState(false);
   const [customCertForm, setCustomCertForm] = useState({
-    commonName: 'netpulse.local',
+    commonName: 'netplus.local',
     sanDomains: '',
     sanIps: '',
     days: 825,
@@ -59,7 +31,6 @@ export function SecurityContainerView({ lang, onRefreshOverview }: SecurityConta
   const [currentPassword, setCurrentPassword] = useState('');
   const [newPassword, setNewPassword] = useState('');
   const [passMsg, setPassMsg] = useState<string | null>(null);
-  const [copiedGuide, setCopiedGuide] = useState(false);
 
   useEffect(() => {
     void apiRequest<{
@@ -128,7 +99,7 @@ export function SecurityContainerView({ lang, onRefreshOverview }: SecurityConta
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = 'netpulse-cert.pem';
+      a.download = 'netplus-cert.pem';
       a.click();
       URL.revokeObjectURL(url);
     } catch {
@@ -652,44 +623,11 @@ export function SecurityContainerView({ lang, onRefreshOverview }: SecurityConta
 
           <p className="text-xs leading-relaxed text-slate-500 dark:text-slate-400">
             {lang === 'zh-CN'
-              ? '优先使用只读挂载的宝塔证书 /certs:ro（自动将 root:root 0600 副本安全中转至 UID 1001）；未挂载外部证书时，系统自动在 /data/certs 生成持久化自定义 ECDSA 证书并启动 HTTPS，可随时自定义域名/IP 重新签发。'
-              : 'Mounted Baota /certs:ro certificates take top priority (safely staged from root:root 0600 to UID 1001). When no external cert is mounted, NetPulse automatically generates a persistent custom ECDSA certificate in /data/certs and enables HTTPS immediately.'}
+              ? '优先使用只读挂载的外部 SSL 证书 /certs:ro（自动安全中转权限）；未挂载外部证书时，系统自动在 /data/certs 生成持久化自定义 ECDSA 证书并默认监听 HTTPS 3443 端口，可随时自定义域名/IP 重新签发。'
+              : 'Mounted /certs:ro certificates take top priority. When no external cert is mounted, NetPlus automatically generates a persistent ECDSA self-signed certificate in /data/certs and enables HTTPS on port 3443.'}
           </p>
         </div>
       )}
-
-      {/* Multi-Stage Docker & GitHub Actions Container Deployment Guide */}
-      <div className="p-6 rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 space-y-4">
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <div>
-            <h2 className="font-display text-base font-semibold text-slate-900 dark:text-white">
-              {t('containerSection')}
-            </h2>
-            <p className="mt-0.5 text-xs text-slate-500 dark:text-slate-400">
-              {lang === 'zh-CN'
-                ? '先编译并校验源码（dist/ + dist-server/），再打包推送 linux/amd64 & linux/arm64 多架构镜像至 Docker Hub (wimotek/netplus) 与 GHCR (ghcr.io/wimotek/netplus)。'
-                : 'Compile and verify source first (dist/ + dist-server/), then publish multi-arch images to Docker Hub (wimotek/netplus) and GHCR (ghcr.io/wimotek/netplus).'}
-            </p>
-          </div>
-          <div className="flex items-center gap-2 shrink-0">
-            <button
-              type="button"
-              onClick={async () => {
-                await navigator.clipboard.writeText(GHCR_DOCKERHUB_GUIDE);
-                setCopiedGuide(true);
-                setTimeout(() => setCopiedGuide(false), 1800);
-              }}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 whitespace-nowrap shrink-0"
-            >
-              {copiedGuide ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
-              {copiedGuide ? t('copied') : t('copy')}
-            </button>
-          </div>
-        </div>
-        <pre className="p-4 rounded-lg bg-slate-950 text-slate-100 font-mono text-xs leading-relaxed overflow-x-auto">
-          {GHCR_DOCKERHUB_GUIDE}
-        </pre>
-      </div>
     </div>
   );
 }

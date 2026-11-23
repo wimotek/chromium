@@ -26,11 +26,8 @@ export function AuthGate({
     [lang]
   );
 
-  const isBootstrap = status.requiresBootstrap;
-
-  const [username, setUsername] = useState(isBootstrap ? 'admin' : '');
+  const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
-  const [confirmPassword, setConfirmPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [captchaAnswer, setCaptchaAnswer] = useState('');
   const [honeypot, setHoneypot] = useState('');
@@ -72,13 +69,20 @@ export function AuthGate({
         setPowReady(true);
       }
     } catch (err) {
+      console.error('[NetPlus] Failed to initialize auth challenge:', err);
       if (err instanceof ApiError && err.code === 'RATE_LIMITED') {
         const sec = Number(err.data.retryAfterSec) || 30;
         setLockoutSec(sec);
         setErrorMsg(t('errRateLimited', { sec }));
+      } else {
+        setErrorMsg(
+          lang === 'zh-CN'
+            ? `验证码初始化失败：${err instanceof Error ? err.message : '请点击刷新验证码重试'}`
+            : `Failed to initialize verification challenge: ${err instanceof Error ? err.message : 'Please refresh and retry'}`
+        );
       }
     }
-  }, [t]);
+  }, [lang, t]);
 
   useEffect(() => {
     void loadCaptcha();
@@ -135,21 +139,6 @@ export function AuthGate({
     if (submitting || lockoutSec > 0 || !challenge || !powReady) return;
     setErrorMsg(null);
 
-    if (isBootstrap) {
-      if (!/^[a-zA-Z0-9._-]{3,32}$/.test(username.trim())) {
-        setErrorMsg(t('usernameInvalid'));
-        return;
-      }
-      if (password.length < 8) {
-        setErrorMsg(t('passwordTooShort'));
-        return;
-      }
-      if (password !== confirmPassword) {
-        setErrorMsg(t('passwordMismatch'));
-        return;
-      }
-    }
-
     if (challenge.requireSlider && !sliderAligned) {
       setErrorMsg(t('errSliderMismatch'));
       return;
@@ -157,8 +146,7 @@ export function AuthGate({
 
     setSubmitting(true);
     try {
-      const endpoint = isBootstrap ? '/api/auth/bootstrap' : '/api/auth/login';
-      const resp = await apiRequest<{ token: string; username: string }>(endpoint, {
+      const resp = await apiRequest<{ token: string; username: string }>('/api/auth/login', {
         method: 'POST',
         body: JSON.stringify({
           username: username.trim(),
@@ -237,10 +225,10 @@ export function AuthGate({
                   {t('brandSubtitle')}
                 </p>
                 <h1 className="font-display text-2xl sm:text-3xl font-bold tracking-tight text-slate-900 dark:text-white [text-wrap:balance]">
-                  {isBootstrap ? t('authSetupTitle') : t('authLoginTitle')}
+                  {t('authLoginTitle')}
                 </h1>
                 <p className="mt-3 text-sm leading-relaxed text-slate-600 dark:text-slate-400">
-                  {isBootstrap ? t('authSetupDesc') : t('authLoginDesc')}
+                  {t('authLoginDesc')}
                 </p>
               </div>
 
@@ -266,7 +254,7 @@ export function AuthGate({
                     {t('navAudit')}
                   </div>
                   <p className="text-xs leading-relaxed text-slate-500 dark:text-slate-400">
-                    audit.ndjson · Size-Capped Auto-Pruning · Multi-Stage Docker · GHCR & Docker Hub
+                    audit.ndjson · Size-Capped Auto-Pruning · HTTPS / TLS Auto-Reload
                   </p>
                 </div>
               </div>
@@ -283,10 +271,10 @@ export function AuthGate({
             </div>
           </div>
 
-          {/* Right Sign-in / Bootstrap Form */}
+          {/* Right Sign-in Form */}
           <div className="lg:col-span-7 p-8 rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900">
             <form onSubmit={handleSubmit} className="space-y-5" autoComplete="on">
-              {status.envManagedAdmin && !isBootstrap && (
+              {status.envManagedAdmin && (
                 <div className="p-3 rounded-lg bg-slate-100 dark:bg-slate-800/70 text-xs text-slate-700 dark:text-slate-300">
                   {t('authEnvManaged')}
                 </div>
@@ -334,12 +322,12 @@ export function AuthGate({
                       onChange={(e) => setUsername(e.target.value)}
                       autoComplete="username"
                       className="w-full pl-9 pr-3 py-2.5 text-sm rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50/60 dark:bg-slate-950/60 text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-blue-600 focus:border-transparent"
-                      placeholder="admin"
+                      placeholder={lang === 'zh-CN' ? '输入管理员用户名' : 'Enter username'}
                     />
                   </div>
                 </div>
 
-                <div className={isBootstrap ? 'sm:col-span-1' : 'sm:col-span-2'}>
+                <div className="sm:col-span-2">
                   <label className="block text-xs font-medium text-slate-700 dark:text-slate-300 mb-1.5">
                     {t('password')}
                   </label>
@@ -350,7 +338,7 @@ export function AuthGate({
                       required
                       value={password}
                       onChange={(e) => setPassword(e.target.value)}
-                      autoComplete={isBootstrap ? 'new-password' : 'current-password'}
+                      autoComplete="current-password"
                       className="w-full pl-9 pr-10 py-2.5 text-sm rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50/60 dark:bg-slate-950/60 text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-blue-600 focus:border-transparent"
                     />
                     <button
@@ -363,22 +351,6 @@ export function AuthGate({
                     </button>
                   </div>
                 </div>
-
-                {isBootstrap && (
-                  <div>
-                    <label className="block text-xs font-medium text-slate-700 dark:text-slate-300 mb-1.5">
-                      {t('confirmPassword')}
-                    </label>
-                    <input
-                      type={showPassword ? 'text' : 'password'}
-                      required
-                      value={confirmPassword}
-                      onChange={(e) => setConfirmPassword(e.target.value)}
-                      autoComplete="new-password"
-                      className="w-full px-3 py-2.5 text-sm rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50/60 dark:bg-slate-950/60 text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-blue-600 focus:border-transparent"
-                    />
-                  </div>
-                )}
               </div>
 
               {/* Strong Distorted SVG CAPTCHA */}
@@ -495,13 +467,15 @@ export function AuthGate({
                   disabled={submitting || !powReady || lockoutSec > 0}
                   className="px-5 py-2.5 rounded-lg text-sm font-semibold text-white bg-blue-600 hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors whitespace-nowrap shrink-0"
                 >
-                  {lockoutSec > 0
-                    ? `${lockoutSec}s`
-                    : isBootstrap
-                    ? t('setupButton')
-                    : t('signInButton')}
+                  {lockoutSec > 0 ? `${lockoutSec}s` : t('signInButton')}
                 </button>
               </div>
+
+              <p className="text-[11px] leading-relaxed text-slate-400 dark:text-slate-500 pt-1">
+                {lang === 'zh-CN'
+                  ? '首次部署未指定 ADMIN_PASSWORD 时，随机初始密码已打印在容器启动日志（docker logs netplus）中，登录后可在「安全设置」修改。'
+                  : 'On first boot without ADMIN_PASSWORD, a random initial password is printed once in container startup logs (docker logs netplus). Change it anytime in Security Settings.'}
+              </p>
             </form>
           </div>
         </div>

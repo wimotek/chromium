@@ -1,17 +1,67 @@
 import crypto from 'node:crypto';
+import fs from 'node:fs';
 import net from 'node:net';
+import path from 'node:path';
 
-const EPHEMERAL_FALLBACK_KEY = crypto.randomBytes(32);
+let cachedKey: Buffer | null = null;
+let cachedKeySource: 'env' | 'file' | 'ephemeral' = 'ephemeral';
+let cachedKeyPath: string | null = null;
+
+function resolveKeyFilePath(): string {
+  const dataDir = path.resolve(process.cwd(), process.env.DATA_DIR?.trim() || './data');
+  return path.join(dataDir, '.app.key');
+}
 
 function getEncryptionKey(): Buffer {
   const envKey = process.env.APP_ENCRYPTION_KEY?.trim();
   if (envKey) {
+    cachedKeySource = 'env';
+    cachedKeyPath = null;
     if (/^[0-9a-fA-F]{64}$/.test(envKey)) {
       return Buffer.from(envKey, 'hex');
     }
     return crypto.createHash('sha256').update(envKey, 'utf8').digest();
   }
-  return EPHEMERAL_FALLBACK_KEY;
+
+  if (cachedKey) {
+    return cachedKey;
+  }
+
+  const keyFile = resolveKeyFilePath();
+  try {
+    fs.mkdirSync(path.dirname(keyFile), { recursive: true });
+    if (fs.existsSync(keyFile)) {
+      const hex = fs.readFileSync(keyFile, 'utf8').trim();
+      if (/^[0-9a-fA-F]{64}$/.test(hex)) {
+        cachedKey = Buffer.from(hex, 'hex');
+        cachedKeySource = 'file';
+        cachedKeyPath = keyFile;
+        return cachedKey;
+      }
+    }
+    const generated = crypto.randomBytes(32);
+    const tmpFile = `${keyFile}.${crypto.randomBytes(4).toString('hex')}.tmp`;
+    fs.writeFileSync(tmpFile, generated.toString('hex') + '\n', { mode: 0o600 });
+    fs.renameSync(tmpFile, keyFile);
+    cachedKey = generated;
+    cachedKeySource = 'file';
+    cachedKeyPath = keyFile;
+    return cachedKey;
+  } catch (err) {
+    console.warn(
+      `[NetPlus] Could not persist encryption key at ${keyFile}, falling back to ephemeral memory key:`,
+      err instanceof Error ? err.message : err
+    );
+    cachedKey = crypto.randomBytes(32);
+    cachedKeySource = 'ephemeral';
+    cachedKeyPath = null;
+    return cachedKey;
+  }
+}
+
+export function getEncryptionKeyInfo(): { source: 'env' | 'file' | 'ephemeral'; path: string | null } {
+  getEncryptionKey();
+  return { source: cachedKeySource, path: cachedKeyPath };
 }
 
 export function encryptSecret(plaintext: string): string {

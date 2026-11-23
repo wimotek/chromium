@@ -572,7 +572,6 @@ export interface CaptchaChallengeResponse {
 }
 
 export interface AuthStatusResponse {
-  requiresBootstrap: boolean;
   envManagedAdmin: boolean;
   authenticated: boolean;
   username?: string;

@@ -8,26 +8,26 @@ services:
     container_name: netplus
     restart: unless-stopped
     ports:
+      # HTTP 默认端口 3000（无需配置环境变量即可直接访问）
       - "3000:3000"
-      # Expose HTTPS (uses Baota /certs:ro if mounted, otherwise auto-generates custom self-signed cert)
+      # HTTPS 默认端口 3443（未挂载 /certs 时自动生成持久化自签证书；命令行测试请使用 curl -k https://127.0.0.1:3443/api/health）
       - "3443:3443"
+    # 以下所有环境变量均为可选，均有内置默认值，零配置即可直接启动；如需自定义再取消对应行前 # 注释
     environment:
       NODE_ENV: production
-      PORT: "3000"
-      HTTPS_PORT: "3443"
-      DATA_DIR: /data
-      TLS_CERT_DIR: /certs
-      TLS_AUTO_SELF_SIGNED: "true"
-      TLS_SELF_SIGNED_CN: netpulse.local
-      AUDIT_MAX_SIZE_BYTES: "5242880"
-      # Optional: set fixed credentials or leave blank to use first-run web setup
-      # ADMIN_USERNAME: admin
-      # ADMIN_PASSWORD: change-me-strong-password
-      # APP_ENCRYPTION_KEY: 64-hex-char-key
+      # PORT: "3000"                             # [可选] HTTP 监听端口，默认 3000
+      # HTTPS_PORT: "3443"                       # [可选] HTTPS 监听端口，默认 3443（设为 0 可关闭内置 HTTPS）
+      # DATA_DIR: /data                          # [可选] 数据、密钥与审计日志持久化目录，容器内默认 /data
+      # TLS_CERT_DIR: /certs                     # [可选] 外部 SSL 证书只读挂载目录（支持宝塔 fullchain.pem/privkey.pem），默认 /certs
+      # TLS_AUTO_SELF_SIGNED: "true"             # [可选] 未挂载外部证书时是否自动生成自签证书，默认 true
+      # TLS_SELF_SIGNED_CN: netplus.local        # [可选] 自动自签证书默认 CN，默认 netplus.local
+      # AUDIT_MAX_SIZE_BYTES: "5242880"          # [可选] 审计日志容量上限（字节），默认 5242880 (5MB)
+      # ADMIN_USERNAME: admin                    # [可选] 首次初始化管理员用户名，默认 admin（仅初始值，后续可在 Web 后台修改密码）
+      # ADMIN_PASSWORD: change-me-strong-password # [可选] 首次初始化管理员密码（仅初始值；留空则首次启动自动生成 16 位随机强密码并打印在 docker logs netplus 中）
+      # APP_ENCRYPTION_KEY: 64-hex-char-key      # [可选] 64 位十六进制 AES-256 加密密钥；留空时自动生成并持久化在 /data/.app.key
     volumes:
-      - netpulse_data:/data
-      # Optional: Mount Baota (宝塔) SSL certificate directory read-only.
-      # If not mounted, NetPulse auto-generates a persistent custom self-signed cert in /data/certs.
+      - netplus_data:/data
+      # [可选] 挂载宝塔面板 SSL 证书目录（只读）。未挂载时将自动生成持久化自签证书并保存在 /data/certs
       # - /www/server/panel/vhost/cert/your-domain.com:/certs:ro
     security_opt:
       - no-new-privileges:true
@@ -39,4 +39,4 @@ services:
       start_period: 15s
 
 volumes:
-  netpulse_data:
+  netplus_data:
