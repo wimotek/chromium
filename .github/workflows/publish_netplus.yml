@@ -4,17 +4,13 @@ on:
   push:
     branches:
       - main
-      - master
-    tags:
-      - "v*.*.*"
-  pull_request:
-    branches:
-      - main
-      - master
+    paths:
+      - 'Module/**'
+      - '.github/workflows/publish_netplus.yml'
   workflow_dispatch:
 
 env:
-  WORKING_DIR: .
+  WORKING_DIR: ./netplus
   GHCR_REGISTRY: ghcr.io
   DOCKERHUB_REGISTRY: docker.io
   DOCKERHUB_IMAGE: wimotek/netplus
