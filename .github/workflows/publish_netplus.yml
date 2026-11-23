@@ -13,7 +13,7 @@ env:
   WORKING_DIR: ./netplus
   GHCR_REGISTRY: ghcr.io
   DOCKERHUB_REGISTRY: docker.io
-  DOCKERHUB_IMAGE: wimotek/netplus
+  DOCKERHUB_IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/netplus
   GHCR_IMAGE: ghcr.io/wimotek/netplus
 
 jobs:
@@ -129,6 +129,26 @@ jobs:
           test -f dist/index.html
           test -f dist-server/server.mjs
 
+      # ------------------------------------------------------------------------
+      # Detect Docker Hub credentials WITHOUT referencing secrets in `if:`
+      # Pattern mirrors build_nginx.yml: shell checks secrets, emits an output.
+      # ------------------------------------------------------------------------
+      - name: Detect Docker Hub credentials
+        id: dockerhub
+        shell: bash
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -n "${DOCKERHUB_USERNAME:-}" ] && [ -n "${DOCKERHUB_TOKEN:-}" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+            echo "Docker Hub credentials detected — will push to Docker Hub."
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "Docker Hub credentials not configured — skipping Docker Hub."
+          fi
+
       - name: Set up QEMU (multi-arch emulation)
         uses: docker/setup-qemu-action@v3
 
@@ -144,7 +164,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Log in to Docker Hub
-        if: github.event_name != 'pull_request' && secrets.DOCKERHUB_USERNAME != '' && secrets.DOCKERHUB_TOKEN != ''
+        if: github.event_name != 'pull_request' && steps.dockerhub.outputs.enabled == 'true'
         uses: docker/login-action@v3
         with:
           registry: ${{ env.DOCKERHUB_REGISTRY }}
@@ -157,7 +177,7 @@ jobs:
         with:
           images: |
             ${{ env.GHCR_IMAGE }}
-            ${{ secrets.DOCKERHUB_USERNAME != '' && secrets.DOCKERHUB_TOKEN != '' && format('{0}/{1}', env.DOCKERHUB_REGISTRY, env.DOCKERHUB_IMAGE) || '' }}
+            name=${{ env.DOCKERHUB_REGISTRY }}/${{ env.DOCKERHUB_IMAGE }},enable=${{ steps.dockerhub.outputs.enabled == 'true' }}
           tags: |
             type=ref,event=branch
             type=ref,event=pr
