@@ -917,7 +917,7 @@ export function CloudHostsView({
   };
 
   // ---- Unified Oracle OCI Regional Profile CRUD ----
-  const isOciIdentityLocked = Boolean(editingOciProfile && editingOciProfile.status === 'active');
+  const isOciIdentityLocked = false;
 
   const availableOciRegionList = useMemo(() => {
     if (discoveredOci?.regions?.length) {

@@ -78,6 +78,8 @@ import {
   isValidOcid,
   listOciImages,
   listOciInstancesDetailed,
+  normalizeOciPem,
+  sanitizeOcid,
   mapOciStateToHostStatus,
   ociAddIpv6ToVnic,
   ociAllocatePublicIpv4,
@@ -371,36 +373,85 @@ export async function createServer(options: CreateServerOptions = {}) {
     res.json({ ok: true });
   });
 
-  app.post('/api/auth/change-password', requireAuth, (req: AuthedRequest, res) => {
+  const handleUpdateCredentials = (req: AuthedRequest, res: express.Response) => {
     if (store.isEnvAdminConfigured()) {
       res.status(400).json({ error: 'ENV_MANAGED_ADMIN' });
       return;
     }
-    const { currentPassword, newPassword } = req.body ?? {};
-    const check = store.verifyAdminCredentials(req.sessionUser || '', String(currentPassword ?? ''));
+    const { currentPassword, newUsername, newPassword } = req.body ?? {};
+    const currentAdminUsername = store.getAdminInitSummary().username;
+    const check = store.verifyAdminCredentials(currentAdminUsername, String(currentPassword ?? ''));
     if (!check.ok) {
       res.status(401).json({ error: 'INVALID_CURRENT_PASSWORD' });
       return;
     }
-    const nextPass = String(newPassword ?? '');
-    if (nextPass.length < 8 || nextPass.length > 128) {
-      res.status(400).json({ error: 'WEAK_PASSWORD' });
+
+    const rawUser = newUsername !== undefined ? String(newUsername).trim() : '';
+    const wantsUsernameChange = Boolean(rawUser) && rawUser !== currentAdminUsername;
+    const nextPass = newPassword !== undefined ? String(newPassword) : '';
+    const wantsPasswordChange = nextPass.length > 0;
+
+    if (!wantsUsernameChange && !wantsPasswordChange) {
+      res.status(400).json({ error: 'NO_CHANGES_REQUESTED' });
       return;
     }
-    store.updateAdminPassword(nextPass);
-    for (const [tok] of sessions.entries()) {
-      if (tok !== req.sessionToken) sessions.delete(tok);
+
+    if (wantsUsernameChange) {
+      if (rawUser.length < 3 || rawUser.length > 32 || !/^[a-zA-Z0-9._-]+$/.test(rawUser)) {
+        res.status(400).json({ error: 'INVALID_USERNAME' });
+        return;
+      }
     }
+
+    if (wantsPasswordChange) {
+      if (nextPass.length < 8 || nextPass.length > 128) {
+        res.status(400).json({ error: 'WEAK_PASSWORD' });
+        return;
+      }
+    }
+
+    const updated = store.updateAdminCredentials({
+      newUsername: wantsUsernameChange ? rawUser : undefined,
+      newPassword: wantsPasswordChange ? nextPass : undefined,
+    });
+    if (!updated.ok) {
+      res.status(500).json({ error: 'CREDENTIALS_UPDATE_FAILED' });
+      return;
+    }
+
+    // Keep current session active with updated username; revoke all other sessions
+    for (const [tok, sess] of sessions.entries()) {
+      if (tok === req.sessionToken) {
+        sess.username = updated.username;
+      } else {
+        sessions.delete(tok);
+      }
+    }
+
+    const changedParts: string[] = [];
+    if (updated.usernameChanged) changedParts.push(`username: "${currentAdminUsername}" -> "${updated.username}"`);
+    if (updated.passwordChanged) changedParts.push('password rotated');
+
     store.appendAudit({
       category: 'security',
       severity: 'warning',
-      action: 'PASSWORD_ROTATED',
-      actor: req.sessionUser || 'admin',
+      action: updated.usernameChanged && !updated.passwordChanged ? 'ADMIN_USERNAME_UPDATED' : 'PASSWORD_ROTATED',
+      actor: updated.username,
       ip: getClientIp(req),
-      details: 'Administrator password updated; other active sessions revoked',
+      details: `Administrator credentials updated (${changedParts.join(', ')}); other active sessions revoked`,
     });
-    res.json({ ok: true });
-  });
+    console.log(`[NetPlus][Auth] Administrator credentials updated (${changedParts.join(', ')}) from ${getClientIp(req)}`);
+
+    res.json({
+      ok: true,
+      username: updated.username,
+      usernameChanged: updated.usernameChanged,
+      passwordChanged: updated.passwordChanged,
+    });
+  };
+
+  app.post('/api/auth/change-password', requireAuth, handleUpdateCredentials);
+  app.post('/api/auth/credentials', requireAuth, handleUpdateCredentials);
 
   // ---- Overview ----
   app.get('/api/overview', requireAuth, (_req, res) => {
@@ -2609,38 +2660,50 @@ export async function createServer(options: CreateServerOptions = {}) {
       return;
     }
 
-    // Always derive fingerprint automatically from privateKeyPem (never trust manual fingerprint edits)
+    // Always derive fingerprint automatically from normalized privateKeyPem
     let computedFingerprint = '';
+    let normalizedPem: string | undefined;
     if (typeof b.privateKeyPem === 'string' && b.privateKeyPem.trim()) {
-      const fp = computeOciFingerprint(b.privateKeyPem);
+      const norm = normalizeOciPem(b.privateKeyPem);
+      if (!norm.ok) {
+        res.status(400).json({ error: norm.error });
+        return;
+      }
+      const fp = computeOciFingerprint(norm.pem);
       if (!fp.ok) {
         res.status(400).json({ error: fp.error });
         return;
       }
       computedFingerprint = fp.fingerprint;
+      normalizedPem = norm.pem;
     }
 
+    const cleanTenancy = sanitizeOcid(String(b.tenancyOcid));
+    const cleanUser = sanitizeOcid(String(b.userOcid));
+    const cleanComp = sanitizeOcid(String(b.compartmentOcid || '')) || cleanTenancy;
     const now = new Date().toISOString();
     const profile: StoredOciProfile = {
       id: `oci-${crypto.randomBytes(5).toString('hex')}`,
       name: String(b.name).trim(),
       region: cleanRegion,
       homeRegion: b.homeRegion ? String(b.homeRegion).trim().toLowerCase() : undefined,
-      tenancyOcid: String(b.tenancyOcid).trim(),
-      userOcid: String(b.userOcid).trim(),
-      compartmentOcid: String(b.compartmentOcid || b.tenancyOcid).trim(),
+      tenancyOcid: cleanTenancy,
+      userOcid: cleanUser,
+      compartmentOcid: cleanComp,
       fingerprint: computedFingerprint,
       subnetOcid: String(b.subnetOcid || '').trim(),
       availabilityDomains: Array.isArray(b.availabilityDomains) && b.availabilityDomains.length
         ? b.availabilityDomains.map((v: unknown) => String(v).trim()).filter(Boolean)
         : [],
       instanceCount: Number(b.instanceCount) || 0,
-      status: computedFingerprint ? 'active' : 'unverified',
+      status: 'unverified',
       notes: b.notes ? String(b.notes).trim() : undefined,
       createdAt: now,
       updatedAt: now,
     };
-    store.setOciPrivateKey(profile, b.privateKeyPem);
+    if (normalizedPem) {
+      store.setOciPrivateKey(profile, normalizedPem);
+    }
     store.getState().ociProfiles.unshift(profile);
     store.save();
 
@@ -2672,27 +2735,37 @@ export async function createServer(options: CreateServerOptions = {}) {
       profile.region = cleanRegion;
     }
     if (b.name) profile.name = String(b.name).trim();
-    // Lock Tenancy & User OCIDs once verified & active (immutable identity fields)
-    if (profile.status !== 'active') {
-      if (b.tenancyOcid) profile.tenancyOcid = String(b.tenancyOcid).trim();
-      if (b.userOcid) profile.userOcid = String(b.userOcid).trim();
+    const prevTenancy = profile.tenancyOcid;
+    if (b.tenancyOcid) {
+      const nextTenancy = sanitizeOcid(String(b.tenancyOcid));
+      profile.tenancyOcid = nextTenancy;
+      // Keep default compartment aligned with tenancy when compartment was equal to old tenancy
+      if (!b.compartmentOcid && (!profile.compartmentOcid || profile.compartmentOcid === prevTenancy)) {
+        profile.compartmentOcid = nextTenancy;
+      }
     }
+    if (b.userOcid) profile.userOcid = sanitizeOcid(String(b.userOcid));
     if (b.homeRegion) profile.homeRegion = String(b.homeRegion).trim().toLowerCase();
-    if (b.compartmentOcid) profile.compartmentOcid = String(b.compartmentOcid).trim();
+    if (b.compartmentOcid) profile.compartmentOcid = sanitizeOcid(String(b.compartmentOcid));
     if (b.subnetOcid !== undefined) profile.subnetOcid = String(b.subnetOcid).trim();
     if (Array.isArray(b.availabilityDomains) && b.availabilityDomains.length > 0) {
       profile.availabilityDomains = b.availabilityDomains.map((v: unknown) => String(v).trim()).filter(Boolean);
     }
     if (b.notes !== undefined) profile.notes = String(b.notes).trim();
     if (typeof b.privateKeyPem === 'string' && b.privateKeyPem.trim()) {
-      const fp = computeOciFingerprint(b.privateKeyPem);
+      const norm = normalizeOciPem(b.privateKeyPem);
+      if (!norm.ok) {
+        res.status(400).json({ error: norm.error });
+        return;
+      }
+      const fp = computeOciFingerprint(norm.pem);
       if (!fp.ok) {
         res.status(400).json({ error: fp.error });
         return;
       }
-      store.setOciPrivateKey(profile, b.privateKeyPem);
+      store.setOciPrivateKey(profile, norm.pem);
       profile.fingerprint = fp.fingerprint;
-      profile.status = 'active';
+      profile.status = 'unverified';
     }
     profile.updatedAt = new Date().toISOString();
     store.save();
@@ -2944,6 +3017,9 @@ export async function createServer(options: CreateServerOptions = {}) {
 
     const result = await listOciInstancesDetailed(profile, pem);
     if (!result.ok) {
+      profile.status = 'error';
+      profile.lastCheckedAt = new Date().toISOString();
+      store.save();
       res.status(502).json({ ok: false, instances: [], error: result.error || 'Failed to fetch OCI instances' });
       return;
     }
@@ -5377,6 +5453,7 @@ export async function createServer(options: CreateServerOptions = {}) {
     res.json({
       config: store.getState().security,
       envManagedAdmin: store.isEnvAdminConfigured(),
+      adminUsername: store.getAdminInitSummary().username,
       activeSessions: sessions.size,
       tlsStatus: tlsManager.inspectStatus(),
     });

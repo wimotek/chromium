@@ -141,6 +141,10 @@ export function NotificationsView({ channels, lang, onReload }: NotificationsVie
       );
       await onReload();
       showBanner(`${ch.name}: ${res.ok ? 'OK' : 'Error'} — ${res.message}`);
+    } catch (err) {
+      showBanner(
+        `${ch.name}: Error — ${err instanceof Error ? err.message : isZh ? '测试请求失败' : 'Test request failed'}`
+      );
     } finally {
       setTestingId(null);
     }
@@ -440,31 +444,58 @@ export function NotificationsView({ channels, lang, onReload }: NotificationsVie
               )}
 
               {['telegram', 'bark', 'discord', 'webhook'].includes(form.type) && (
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-2 border-t border-slate-200 dark:border-slate-800">
-                  <div>
-                    <label className="block text-xs font-medium mb-1">
-                      {form.type === 'telegram' ? 'Telegram Chat ID' : 'Webhook / Push URL'}
-                    </label>
-                    <input
-                      required
-                      value={form.target}
-                      onChange={(e) => setForm({ ...form, target: e.target.value })}
-                      placeholder={form.type === 'telegram' ? '-100123456789' : 'https://...'}
-                      className="w-full px-3 py-2 text-xs font-mono rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950"
-                    />
+                <div className="space-y-2.5 pt-2 border-t border-slate-200 dark:border-slate-800">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div>
+                      <label className="block text-xs font-medium mb-1">
+                        {form.type === 'telegram'
+                          ? isZh
+                            ? 'Telegram Chat ID（用户 / 群组 / 频道）'
+                            : 'Telegram Chat ID (User / Group / Channel)'
+                          : 'Webhook / Push URL'}
+                      </label>
+                      <input
+                        required
+                        value={form.target}
+                        onChange={(e) => setForm({ ...form, target: e.target.value })}
+                        placeholder={
+                          form.type === 'telegram'
+                            ? isZh
+                              ? '用户/群组/频道 ID，如 129xxx206、-100xxx 或 @channel'
+                              : '129xxx206, -100xxx, or @channel'
+                            : 'https://...'
+                        }
+                        className="w-full px-3 py-2 text-xs font-mono rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-medium mb-1">
+                        {form.type === 'telegram' ? 'Telegram Bot Token' : 'Auth Bearer Secret (Optional)'}
+                      </label>
+                      <input
+                        type="password"
+                        value={form.secret}
+                        onChange={(e) => setForm({ ...form, secret: e.target.value })}
+                        placeholder={
+                          editing?.hasSecret
+                            ? isZh
+                              ? '留空保留已保存密钥'
+                              : 'Leave empty to keep stored secret'
+                            : form.type === 'telegram'
+                            ? '123456789:AAHxxx...'
+                            : ''
+                        }
+                        className="w-full px-3 py-2 text-xs font-mono rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950"
+                      />
+                    </div>
                   </div>
-                  <div>
-                    <label className="block text-xs font-medium mb-1">
-                      {form.type === 'telegram' ? 'Telegram Bot Token' : 'Auth Bearer Secret (Optional)'}
-                    </label>
-                    <input
-                      type="password"
-                      value={form.secret}
-                      onChange={(e) => setForm({ ...form, secret: e.target.value })}
-                      placeholder={editing?.hasSecret ? 'Leave empty to keep stored secret' : ''}
-                      className="w-full px-3 py-2 text-xs font-mono rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950"
-                    />
-                  </div>
+                  {form.type === 'telegram' && (
+                    <p className="text-[11px] leading-relaxed text-slate-500 dark:text-slate-400">
+                      {isZh
+                        ? '支持个人用户 ID（如 5122262412）、普通群组 ID（-xxx）、超级群/频道 ID（-100xxx）或公开 @频道名，多个目标可用英文逗号分隔。使用个人 ID 前请先在 Telegram 中给该 Bot 发送一次 /start。'
+                        : 'Supports personal User ID (e.g. 5122262412), Group ID (-xxx), Supergroup/Channel ID (-100xxx), or @username (comma-separated for multiple). For personal DMs, send /start to your Bot first.'}
+                    </p>
+                  )}
                 </div>
               )}
 

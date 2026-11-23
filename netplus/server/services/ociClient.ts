@@ -15,12 +15,73 @@ import type { StoredOciProfile } from '../lib/store.ts';
 const OCI_REGION_REGEX = /^[a-z]{2}-[a-z0-9-]+-\d+$/;
 const OCI_OCID_REGEX = /^ocid1\.[a-z0-9_-]+\.[a-z0-9_-]*\.[a-z0-9_-]*\.[a-zA-Z0-9._-]+$/;
 
+// Automatically learned UTC clock-skew offset (ms) when local/container clock drifts from OCI servers (>30s)
+let ociClockSkewMs = 0;
+
 export function isValidOciRegion(region: string): boolean {
   return OCI_REGION_REGEX.test(region.trim().toLowerCase());
 }
 
+export function sanitizeOcid(raw?: string): string {
+  return String(raw || '')
+    .replace(/[\u200B-\u200D\uFEFF]/g, '')
+    .trim()
+    .replace(/^['"`]+|['"`]+$/g, '')
+    .trim()
+    .replace(/^(?:tenancy|user|compartment|subnet|ocid)\s*[:=]\s*/i, '')
+    .replace(/^['"`]+|['"`]+$/g, '')
+    .trim();
+}
+
 export function isValidOcid(ocid: string): boolean {
-  return OCI_OCID_REGEX.test(ocid.trim());
+  return OCI_OCID_REGEX.test(sanitizeOcid(ocid));
+}
+
+export function normalizeOciPem(
+  rawPem: string
+): { ok: true; pem: string } | { ok: false; error: string } {
+  let cleaned = String(rawPem || '')
+    .replace(/[\u200B-\u200D\uFEFF]/g, '')
+    .replace(/\r\n/g, '\n')
+    .replace(/\r/g, '\n')
+    .trim();
+
+  // Handle single-line escaped "\n" pasted from JSON/env snippets
+  if (cleaned.includes('\\n') && !cleaned.includes('\n')) {
+    cleaned = cleaned.replace(/\\n/g, '\n');
+  }
+
+  if (!cleaned || !cleaned.includes('BEGIN') || !cleaned.includes('PRIVATE KEY')) {
+    return {
+      ok: false,
+      error: '无效的 PEM 私钥格式（需包含 -----BEGIN RSA PRIVATE KEY----- 或 -----BEGIN PRIVATE KEY-----）',
+    };
+  }
+
+  if (
+    cleaned.includes('BEGIN ENCRYPTED PRIVATE KEY') ||
+    cleaned.includes('Proc-Type: 4,ENCRYPTED') ||
+    cleaned.includes('DEK-Info:')
+  ) {
+    return {
+      ok: false,
+      error:
+        '检测到带口令加密的 PEM 私钥，暂不支持口令解密。请先去除私钥口令（例如执行 openssl rsa -in key.pem -out key_plain.pem）后再上传',
+    };
+  }
+
+  // Extract clean PEM block (strips trailing Oracle "OCI_API_KEY" line or extraneous text)
+  const blockMatch = cleaned.match(
+    /-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]+?-----END [A-Z0-9 ]*PRIVATE KEY-----/
+  );
+  const pem = (blockMatch ? blockMatch[0] : cleaned).trim() + '\n';
+  return { ok: true, pem };
+}
+
+function maskOcid(ocid: string): string {
+  const s = sanitizeOcid(ocid);
+  if (s.length <= 24) return s;
+  return `${s.slice(0, 18)}...${s.slice(-6)}`;
 }
 
 /**
@@ -30,12 +91,10 @@ export function isValidOcid(ocid: string): boolean {
 export function computeOciFingerprint(
   privateKeyPem: string
 ): { ok: true; fingerprint: string } | { ok: false; error: string } {
-  const trimmed = String(privateKeyPem || '').trim();
-  if (!trimmed || !trimmed.includes('BEGIN') || !trimmed.includes('PRIVATE KEY')) {
-    return { ok: false, error: 'Invalid PEM private key format (expected BEGIN RSA/PRIVATE KEY)' };
-  }
+  const norm = normalizeOciPem(privateKeyPem);
+  if (!norm.ok) return norm;
   try {
-    const pubKey = crypto.createPublicKey(trimmed);
+    const pubKey = crypto.createPublicKey(norm.pem);
     const der = pubKey.export({ type: 'spki', format: 'der' });
     const md5Hex = crypto.createHash('md5').update(der).digest('hex');
     const pairs = md5Hex.match(/.{2}/g);
@@ -60,8 +119,9 @@ export function buildOciSignatureHeaders(params: {
   userOcid: string;
   fingerprint: string;
   privateKeyPem: string;
+  dateOverride?: Date;
 }): Record<string, string> {
-  const dateHeader = new Date().toUTCString();
+  const dateHeader = (params.dateOverride ?? new Date(Date.now() + ociClockSkewMs)).toUTCString();
   const methodLower = params.method.toLowerCase();
   const headersToSign = ['date', '(request-target)', 'host'];
   const signingLines = [
@@ -109,6 +169,28 @@ export interface OciAuthCredentials {
   privateKeyPem: string;
 }
 
+function formatOciAuthFailureMessage(
+  status: number,
+  rawMsg: string,
+  creds: OciAuthCredentials,
+  host: string
+): string {
+  const tenancy = sanitizeOcid(creds.tenancyOcid);
+  const user = sanitizeOcid(creds.userOcid);
+  const fp = creds.fingerprint.trim().toLowerCase();
+
+  if (status === 401) {
+    if (/aaaaaaaademo|aaaaaaaaexample/i.test(tenancy) || /aaaaaaaademo|aaaaaaaaexample/i.test(user)) {
+      return `OCI 鉴权失败（401）：当前选中的是示例占位凭据（Tenancy=${maskOcid(tenancy)}），请在下拉框切换到你真实添加的 OCI 账号，或在「云账号」中删除示例并填写实盘 Tenancy OCID、User OCID 与私钥。`;
+    }
+    return `OCI 鉴权失败（401 ${rawMsg}）。当前请求参数：Region=${creds.region}，派生指纹=${fp}，Tenancy=${maskOcid(tenancy)}，User=${maskOcid(user)}。请依次核对：① OCI 控制台「身份与安全 → 用户 → API 密钥」中是否存在该指纹对应的公钥；② Tenancy OCID 与 User OCID 未填反且与该区域归属同一账号；③ 若账号为订阅子区域，确认该区域已启用（Host: ${host}）。`;
+  }
+  if (status === 404 && /NotAuthorizedOrNotFound/i.test(rawMsg)) {
+    return `OCI 返回 404 NotAuthorizedOrNotFound（${rawMsg}）：请确认 Compartment OCID（默认填 Tenancy OCID）正确且当前用户拥有读取该区域（${creds.region}）计算资源的权限。`;
+  }
+  return rawMsg;
+}
+
 export async function ociApiRequest<T = unknown>(params: {
   creds: OciAuthCredentials;
   service: 'identity' | 'iaas';
@@ -122,83 +204,136 @@ export async function ociApiRequest<T = unknown>(params: {
     return { ok: false, status: 400, error: `Invalid OCI region: ${params.creds.region}` };
   }
 
+  const normPem = normalizeOciPem(params.creds.privateKeyPem);
+  if (!normPem.ok) {
+    return { ok: false, status: 400, error: normPem.error };
+  }
+
+  const cleanTenancy = sanitizeOcid(params.creds.tenancyOcid);
+  const cleanUser = sanitizeOcid(params.creds.userOcid);
+  const cleanFp = params.creds.fingerprint.trim().toLowerCase();
   const host = `${params.service}.${region}.oraclecloud.com`;
   const bodyStr = params.body !== undefined ? JSON.stringify(params.body) : undefined;
 
-  let headers: Record<string, string>;
-  try {
-    headers = buildOciSignatureHeaders({
-      method: params.method,
-      host,
-      path: params.apiPath,
-      body: bodyStr,
-      tenancyOcid: params.creds.tenancyOcid.trim(),
-      userOcid: params.creds.userOcid.trim(),
-      fingerprint: params.creds.fingerprint.trim(),
-      privateKeyPem: params.creds.privateKeyPem,
-    });
-  } catch (err) {
-    return {
-      ok: false,
-      status: 400,
-      error: err instanceof Error ? `OCI request signing failed: ${err.message}` : 'OCI request signing failed',
-    };
-  }
+  const executeOnce = async (dateOverride?: Date) => {
+    let headers: Record<string, string>;
+    try {
+      headers = buildOciSignatureHeaders({
+        method: params.method,
+        host,
+        path: params.apiPath,
+        body: bodyStr,
+        tenancyOcid: cleanTenancy,
+        userOcid: cleanUser,
+        fingerprint: cleanFp,
+        privateKeyPem: normPem.pem,
+        dateOverride,
+      });
+    } catch (err) {
+      return {
+        ok: false as const,
+        status: 400,
+        error: err instanceof Error ? `OCI request signing failed: ${err.message}` : 'OCI request signing failed',
+        serverDateHeader: null as string | null,
+      };
+    }
 
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), params.timeoutMs ?? 15_000);
-  try {
-    const res = await fetch(`https://${host}${params.apiPath}`, {
-      method: params.method,
-      headers,
-      body: bodyStr,
-      signal: controller.signal,
-    });
-    const text = await res.text();
-    let parsed: unknown;
-    if (text) {
-      try {
-        parsed = JSON.parse(text);
-      } catch {
-        parsed = { message: text.slice(0, 300) };
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), params.timeoutMs ?? 15_000);
+    try {
+      const res = await fetch(`https://${host}${params.apiPath}`, {
+        method: params.method,
+        headers,
+        body: bodyStr,
+        signal: controller.signal,
+      });
+      const text = await res.text();
+      let parsed: unknown;
+      if (text) {
+        try {
+          parsed = JSON.parse(text);
+        } catch {
+          parsed = { message: text.slice(0, 300) };
+        }
+      }
+      const serverDateHeader = res.headers.get('date');
+
+      if (!res.ok) {
+        const obj = (parsed ?? {}) as Record<string, unknown>;
+        const msg = String(obj.message || obj.code || `OCI HTTP ${res.status}`);
+        return { ok: false as const, status: res.status, error: msg, serverDateHeader };
+      }
+
+      return { ok: true as const, status: res.status, data: parsed as T, serverDateHeader };
+    } catch (err) {
+      return {
+        ok: false as const,
+        status: 0,
+        error: err instanceof Error ? err.message : 'OCI network request failed',
+        serverDateHeader: null as string | null,
+      };
+    } finally {
+      clearTimeout(timeout);
+    }
+  };
+
+  let attempt = await executeOnce();
+
+  // Auto-heal local/container UTC clock drift using OCI's authoritative Date response header
+  if (!attempt.ok && attempt.status === 401 && attempt.serverDateHeader) {
+    const serverTimeMs = Date.parse(attempt.serverDateHeader);
+    if (Number.isFinite(serverTimeMs)) {
+      const measuredSkewMs = serverTimeMs - Date.now();
+      if (Math.abs(measuredSkewMs - ociClockSkewMs) > 30_000) {
+        ociClockSkewMs = measuredSkewMs;
+        console.warn(
+          `[NetPlus][OCI] Detected local clock drift (${Math.round(measuredSkewMs / 1000)}s vs OCI UTC "${attempt.serverDateHeader}"); syncing offset and retrying ${params.method} ${host}${params.apiPath}`
+        );
+        attempt = await executeOnce(new Date(Date.now() + ociClockSkewMs));
       }
     }
+  }
 
-    if (!res.ok) {
-      const obj = (parsed ?? {}) as Record<string, unknown>;
-      const msg = String(obj.message || obj.code || `OCI HTTP ${res.status}`);
-      return { ok: false, status: res.status, error: msg };
+  if (!attempt.ok) {
+    if (attempt.status === 401 || attempt.status === 403 || attempt.status === 404) {
+      console.warn(
+        `[NetPlus][OCI] API error HTTP ${attempt.status} on ${host}${params.apiPath} (fp=${cleanFp}, tenancy=${maskOcid(cleanTenancy)}, user=${maskOcid(cleanUser)}): ${attempt.error}`
+      );
     }
-
-    return { ok: true, status: res.status, data: parsed as T };
-  } catch (err) {
     return {
       ok: false,
-      status: 0,
-      error: err instanceof Error ? err.message : 'OCI network request failed',
+      status: attempt.status,
+      error: formatOciAuthFailureMessage(attempt.status, attempt.error, params.creds, host),
     };
-  } finally {
-    clearTimeout(timeout);
   }
+
+  return { ok: true, status: attempt.status, data: attempt.data };
 }
 
 export function buildCredsFromProfile(
   profile: StoredOciProfile,
   privateKeyPem: string
 ): { ok: true; creds: OciAuthCredentials } | { ok: false; error: string } {
-  const fp = computeOciFingerprint(privateKeyPem);
+  const norm = normalizeOciPem(privateKeyPem);
+  if (!norm.ok) {
+    return { ok: false, error: norm.error };
+  }
+  const fp = computeOciFingerprint(norm.pem);
   if (!fp.ok) {
     return { ok: false, error: fp.error };
   }
+  const cleanTenancy = sanitizeOcid(profile.tenancyOcid);
+  const cleanUser = sanitizeOcid(profile.userOcid);
+  const cleanComp = sanitizeOcid(profile.compartmentOcid) || cleanTenancy;
   return {
     ok: true,
     creds: {
-      region: profile.region,
-      tenancyOcid: profile.tenancyOcid,
-      userOcid: profile.userOcid,
-      compartmentOcid: profile.compartmentOcid || profile.tenancyOcid,
+      region: profile.region.trim().toLowerCase(),
+      tenancyOcid: cleanTenancy,
+      userOcid: cleanUser,
+      compartmentOcid: cleanComp,
       fingerprint: fp.fingerprint,
-      privateKeyPem,
+      privateKeyPem: norm.pem,
     },
   };
 }
@@ -214,14 +349,18 @@ export async function discoverOciResources(params: {
   privateKeyPem: string;
   compartmentOcid?: string;
 }): Promise<{ ok: boolean; resources?: OciDiscoveredResources; error?: string }> {
-  const fp = computeOciFingerprint(params.privateKeyPem);
+  const normPem = normalizeOciPem(params.privateKeyPem);
+  if (!normPem.ok) {
+    return { ok: false, error: normPem.error };
+  }
+  const fp = computeOciFingerprint(normPem.pem);
   if (!fp.ok) {
     return { ok: false, error: fp.error };
   }
 
-  const tenancyOcid = params.tenancyOcid.trim();
-  const userOcid = params.userOcid.trim();
-  const compartmentOcid = (params.compartmentOcid || tenancyOcid).trim();
+  const tenancyOcid = sanitizeOcid(params.tenancyOcid);
+  const userOcid = sanitizeOcid(params.userOcid);
+  const compartmentOcid = sanitizeOcid(params.compartmentOcid) || tenancyOcid;
 
   if (!isValidOcid(tenancyOcid)) {
     return { ok: false, error: 'Invalid Tenancy OCID format (must start with ocid1.tenancy...)' };
@@ -236,7 +375,7 @@ export async function discoverOciResources(params: {
     userOcid,
     compartmentOcid,
     fingerprint: fp.fingerprint,
-    privateKeyPem: params.privateKeyPem,
+    privateKeyPem: normPem.pem,
   };
 
   // 1. Verify credentials & fetch Availability Domains (required baseline check)
@@ -350,7 +489,7 @@ export async function listOciImages(
   const built = buildCredsFromProfile(profile, privateKeyPem);
   if (!built.ok) return { ok: false, images: [], error: built.error };
 
-  const compId = profile.compartmentOcid || profile.tenancyOcid;
+  const compId = built.creds.compartmentOcid || built.creds.tenancyOcid;
   const query = new URLSearchParams({
     compartmentId: compId,
     shape,
@@ -400,7 +539,7 @@ export async function discoverOciInstanceVnics(
   const built = buildCredsFromProfile(profile, privateKeyPem);
   if (!built.ok) return { ok: false, vnics: [], error: built.error };
 
-  const compId = profile.compartmentOcid || profile.tenancyOcid;
+  const compId = built.creds.compartmentOcid || built.creds.tenancyOcid;
 
   const [instRes, attachRes] = await Promise.all([
     ociApiRequest<
@@ -582,7 +721,7 @@ export async function ociSwapPublicIpv4(
   if (!built.ok) return { ok: false, error: built.error };
   if (!isValidOcid(privateIpId)) return { ok: false, error: 'Invalid OCI Primary Private IP OCID' };
 
-  const compId = profile.compartmentOcid || profile.tenancyOcid;
+  const compId = built.creds.compartmentOcid || built.creds.tenancyOcid;
 
   // 1. Lookup current public IP on this privateIpId
   const currentRes = await ociApiRequest<{ id: string; ipAddress: string; lifetime: 'EPHEMERAL' | 'RESERVED' }>({
@@ -672,7 +811,7 @@ export async function ociAllocatePublicIpv4(
   if (!built.ok) return { ok: false, error: built.error };
   if (!isValidOcid(privateIpId)) return { ok: false, error: 'Invalid OCI Primary Private IP OCID' };
 
-  const compId = profile.compartmentOcid || profile.tenancyOcid;
+  const compId = built.creds.compartmentOcid || built.creds.tenancyOcid;
   const createRes = await ociApiRequest<{ id: string; ipAddress: string; lifetime: 'EPHEMERAL' | 'RESERVED' }>({
     creds: built.creds,
     service: 'iaas',
@@ -836,7 +975,7 @@ export async function listOciInstancesDetailed(
   const built = buildCredsFromProfile(profile, privateKeyPem);
   if (!built.ok) return { ok: false, instances: [], error: built.error };
 
-  const compId = profile.compartmentOcid || profile.tenancyOcid;
+  const compId = built.creds.compartmentOcid || built.creds.tenancyOcid;
 
   const [instRes, attachRes] = await Promise.all([
     ociApiRequest<
@@ -985,7 +1124,7 @@ export async function getOciInstanceDetail(
 
   let vnicId = knownVnicId && isValidOcid(knownVnicId) ? knownVnicId : undefined;
   if (!vnicId) {
-    const compId = profile.compartmentOcid || profile.tenancyOcid;
+    const compId = built.creds.compartmentOcid || built.creds.tenancyOcid;
     const attRes = await ociApiRequest<Array<{ vnicId: string; lifecycleState: string }>>({
       creds: built.creds,
       service: 'iaas',

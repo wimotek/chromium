@@ -6,11 +6,19 @@ import type { LanguageCode, SecurityConfig, TlsCertificateStatus } from '../type
 
 interface SecurityContainerViewProps {
   lang: LanguageCode;
+  currentUsername: string;
+  onUsernameChanged: (nextUsername: string) => void;
   onRefreshOverview: () => Promise<void>;
 }
 
-export function SecurityContainerView({ lang, onRefreshOverview }: SecurityContainerViewProps) {
+export function SecurityContainerView({
+  lang,
+  currentUsername,
+  onUsernameChanged,
+  onRefreshOverview,
+}: SecurityContainerViewProps) {
   const t = (key: TranslationKeys) => translate(lang, key);
+  const isZh = lang === 'zh-CN';
   const [config, setConfig] = useState<SecurityConfig | null>(null);
   const [tlsStatus, setTlsStatus] = useState<TlsCertificateStatus | null>(null);
   const [envManaged, setEnvManaged] = useState(false);
@@ -28,19 +36,22 @@ export function SecurityContainerView({ lang, onRefreshOverview }: SecurityConta
   const [tlsMsg, setTlsMsg] = useState<string | null>(null);
   const [toastMsg, setToastMsg] = useState<string | null>(null);
 
+  const [newUsername, setNewUsername] = useState(currentUsername);
   const [currentPassword, setCurrentPassword] = useState('');
   const [newPassword, setNewPassword] = useState('');
-  const [passMsg, setPassMsg] = useState<string | null>(null);
+  const [passMsg, setPassMsg] = useState<{ ok: boolean; text: string } | null>(null);
 
   useEffect(() => {
     void apiRequest<{
       config: SecurityConfig;
       envManagedAdmin: boolean;
+      adminUsername?: string;
       activeSessions: number;
       tlsStatus?: TlsCertificateStatus;
     }>('/api/security/config').then((res) => {
       setConfig(res.config);
       setEnvManaged(res.envManagedAdmin);
+      if (res.adminUsername) setNewUsername(res.adminUsername);
       setActiveSessions(res.activeSessions);
       if (res.tlsStatus) setTlsStatus(res.tlsStatus);
     });
@@ -125,19 +136,65 @@ export function SecurityContainerView({ lang, onRefreshOverview }: SecurityConta
     }
   };
 
-  const handleUpdatePassword = async (e: React.FormEvent) => {
+  const handleUpdateCredentials = async (e: React.FormEvent) => {
     e.preventDefault();
     setPassMsg(null);
+    const trimmedUser = newUsername.trim();
+    if (trimmedUser && !/^[a-zA-Z0-9._-]{3,32}$/.test(trimmedUser)) {
+      setPassMsg({ ok: false, text: t('usernameInvalid') });
+      return;
+    }
+    if (newPassword && newPassword.length < 8) {
+      setPassMsg({ ok: false, text: t('passwordTooShort') });
+      return;
+    }
     try {
-      await apiRequest('/api/auth/change-password', {
+      const res = await apiRequest<{
+        ok: boolean;
+        username: string;
+        usernameChanged: boolean;
+        passwordChanged: boolean;
+      }>('/api/auth/change-password', {
         method: 'POST',
-        body: JSON.stringify({ currentPassword, newPassword }),
+        body: JSON.stringify({
+          currentPassword,
+          newUsername: trimmedUser || undefined,
+          newPassword: newPassword || undefined,
+        }),
       });
       setCurrentPassword('');
       setNewPassword('');
-      setPassMsg(t('savedSuccessfully'));
+      if (res.username) {
+        setNewUsername(res.username);
+        onUsernameChanged(res.username);
+      }
+      setPassMsg({
+        ok: true,
+        text: isZh
+          ? res.usernameChanged && res.passwordChanged
+            ? `管理员用户名（${res.username}）与密码均已更新`
+            : res.usernameChanged
+            ? `管理员用户名已修改为：${res.username}`
+            : '管理员密码已更新'
+          : t('savedSuccessfully'),
+      });
     } catch (err) {
-      setPassMsg(err instanceof Error ? err.message : 'Failed');
+      const code = err instanceof Error ? err.message : 'Failed';
+      const friendly =
+        code === 'INVALID_CURRENT_PASSWORD'
+          ? isZh
+            ? '当前密码验证失败，请核对后重试'
+            : 'Current password is incorrect'
+          : code === 'NO_CHANGES_REQUESTED'
+          ? isZh
+            ? '请修改用户名或输入新密码后再保存'
+            : 'Please change the username or enter a new password'
+          : code === 'INVALID_USERNAME'
+          ? t('usernameInvalid')
+          : code === 'WEAK_PASSWORD'
+          ? t('passwordTooShort')
+          : code;
+      setPassMsg({ ok: false, text: friendly });
     }
   };
 
@@ -374,35 +431,72 @@ export function SecurityContainerView({ lang, onRefreshOverview }: SecurityConta
         </div>
       </form>
 
-      {/* Password Rotation */}
+      {/* Administrator Account & Password Rotation */}
       {!envManaged && (
         <form
-          onSubmit={handleUpdatePassword}
+          onSubmit={handleUpdateCredentials}
           className="p-6 rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 space-y-4"
         >
-          <h2 className="font-display text-base font-semibold text-slate-900 dark:text-white pb-3 border-b border-slate-200 dark:border-slate-800">
-            {t('passwordSection')}
-          </h2>
-          {passMsg && <div className="text-xs text-blue-600 dark:text-blue-400">{passMsg}</div>}
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-xs">
+          <div className="pb-3 border-b border-slate-200 dark:border-slate-800">
+            <h2 className="font-display text-base font-semibold text-slate-900 dark:text-white">
+              {isZh ? '管理员账号与密码修改' : 'Administrator Account & Password'}
+            </h2>
+            <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+              {isZh
+                ? '可单独修改管理员用户名、单独修改密码或同时修改；保存前需验证当前密码。'
+                : 'Update the administrator username, password, or both. Current password is required to authorize changes.'}
+            </p>
+          </div>
+          {passMsg && (
+            <div
+              className={`px-3 py-2 rounded-lg text-xs ${
+                passMsg.ok
+                  ? 'bg-emerald-50 dark:bg-emerald-950/30 border border-emerald-200 dark:border-emerald-900 text-emerald-700 dark:text-emerald-300'
+                  : 'bg-red-50 dark:bg-red-950/30 border border-red-200 dark:border-red-900 text-red-700 dark:text-red-300'
+              }`}
+            >
+              {passMsg.text}
+            </div>
+          )}
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 text-xs">
             <div>
-              <label className="block font-medium mb-1.5">{t('currentPassword')}</label>
+              <label className="block font-medium mb-1.5">
+                {isZh ? '管理员用户名' : 'Admin Username'}
+              </label>
+              <input
+                type="text"
+                required
+                minLength={3}
+                maxLength={32}
+                value={newUsername}
+                onChange={(e) => setNewUsername(e.target.value)}
+                placeholder={isZh ? '3-32 位字母/数字/._-' : '3-32 chars (letters, digits, ._-)'}
+                className="w-full px-3 py-2 font-mono rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950"
+              />
+            </div>
+            <div>
+              <label className="block font-medium mb-1.5">
+                {t('currentPassword')}
+              </label>
               <input
                 type="password"
                 required
                 value={currentPassword}
                 onChange={(e) => setCurrentPassword(e.target.value)}
+                placeholder={isZh ? '输入当前密码验证身份' : 'Enter current password'}
                 className="w-full px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950"
               />
             </div>
             <div>
-              <label className="block font-medium mb-1.5">{t('newPassword')}</label>
+              <label className="block font-medium mb-1.5">
+                {isZh ? '新密码（留空则仅改用户名）' : 'New Password (optional)'}
+              </label>
               <input
                 type="password"
-                required
                 minLength={8}
                 value={newPassword}
                 onChange={(e) => setNewPassword(e.target.value)}
+                placeholder={isZh ? '至少 8 位；不改密码请留空' : 'Min 8 chars; blank to keep'}
                 className="w-full px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950"
               />
             </div>
@@ -410,9 +504,9 @@ export function SecurityContainerView({ lang, onRefreshOverview }: SecurityConta
           <div className="flex justify-end">
             <button
               type="submit"
-              className="px-4 py-2 text-xs font-semibold rounded-lg border border-slate-200 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800 whitespace-nowrap"
+              className="px-4 py-2 text-xs font-semibold rounded-lg bg-blue-600 text-white hover:bg-blue-700 whitespace-nowrap"
             >
-              {t('updatePassword')}
+              {isZh ? '更新管理员凭据' : 'Update Credentials'}
             </button>
           </div>
         </form>

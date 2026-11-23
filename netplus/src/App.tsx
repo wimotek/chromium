@@ -433,7 +433,15 @@ export default function App() {
           )}
           {activeTab === 'audit' && <AuditLogsView lang={lang} />}
           {activeTab === 'security' && (
-            <SecurityContainerView lang={lang} onRefreshOverview={loadWorkspaceData} />
+            <SecurityContainerView
+              lang={lang}
+              currentUsername={currentUser}
+              onUsernameChanged={(nextUser) => {
+                setCurrentUser(nextUser);
+                setAuthStatus((prev) => (prev ? { ...prev, username: nextUser } : prev));
+              }}
+              onRefreshOverview={loadWorkspaceData}
+            />
           )}
         </main>
       </div>

@@ -361,12 +361,39 @@ class DataStore {
     return { ok: userOk && passOk, canonicalUsername: this.state.admin.username };
   }
 
+  updateAdminCredentials(params: {
+    newUsername?: string;
+    newPassword?: string;
+  }): { ok: boolean; username: string; usernameChanged: boolean; passwordChanged: boolean } {
+    if (!this.state.admin) {
+      return { ok: false, username: '', usernameChanged: false, passwordChanged: false };
+    }
+    let usernameChanged = false;
+    let passwordChanged = false;
+    const cleanUser = params.newUsername?.trim();
+    if (cleanUser && cleanUser !== this.state.admin.username) {
+      this.state.admin.username = cleanUser;
+      usernameChanged = true;
+    }
+    if (params.newPassword) {
+      this.state.admin.passwordHash = hashPassword(params.newPassword);
+      passwordChanged = true;
+    }
+    if (usernameChanged || passwordChanged) {
+      this.state.admin.updatedAt = new Date().toISOString();
+      this.adminInitMode = 'persisted';
+      this.save();
+    }
+    return {
+      ok: true,
+      username: this.state.admin.username,
+      usernameChanged,
+      passwordChanged,
+    };
+  }
+
   updateAdminPassword(newPassword: string): boolean {
-    if (!this.state.admin) return false;
-    this.state.admin.passwordHash = hashPassword(newPassword);
-    this.state.admin.updatedAt = new Date().toISOString();
-    this.save();
-    return true;
+    return this.updateAdminCredentials({ newPassword }).ok;
   }
 
   // ---- Secret sanitization helpers ----
