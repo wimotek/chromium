@@ -16,6 +16,7 @@ import type {
   IpPolicyTargetScope,
   ManagedDnsRecord,
   ManagedIpRecord,
+  MonitorCheckSample,
   MonitorTarget,
   NotificationEventType,
   OciInstanceAction,
@@ -43,6 +44,7 @@ import {
   executeDnsSyncRule,
   listCloudflareZones,
   listProviderDomains,
+  type DnsRuleSyncReport,
   pullProviderDnsRecords,
   resolveCloudflareZoneId,
   updateProviderDnsRecord,
@@ -880,7 +882,7 @@ export async function createServer(options: CreateServerOptions = {}) {
     store.save();
 
     // 4. Optional immediate batch DNS sync for affected rules
-    const syncReports = [];
+    const syncReports: DnsRuleSyncReport[] = [];
     if (req.body?.syncDnsNow !== false) {
       for (const ruleId of touchedRuleIds) {
         const rep = await executeDnsSyncRule(ruleId, req.sessionUser || 'admin', getClientIp(req));
@@ -1045,7 +1047,7 @@ export async function createServer(options: CreateServerOptions = {}) {
 
   app.post('/api/monitors/check-all', requireAuth, async (req: AuthedRequest, res) => {
     const targets = store.getState().monitors.filter((m) => m.enabled);
-    const updated = [];
+    const updated: MonitorTarget[] = [];
     for (const m of targets) {
       const result = await runMonitorCheck(m.id, req.sessionUser || 'admin', getClientIp(req));
       if (result) updated.push(result);
@@ -1394,7 +1396,7 @@ export async function createServer(options: CreateServerOptions = {}) {
         ? state.dnsRules.filter((r) => ruleIds.includes(r.id))
         : state.dnsRules.filter((r) => r.enabled);
 
-    const reports = [];
+    const reports: DnsRuleSyncReport[] = [];
     for (const rule of targets) {
       const report = await executeDnsSyncRule(rule.id, req.sessionUser || 'admin', getClientIp(req));
       if (report) reports.push(report);
@@ -2065,7 +2067,7 @@ export async function createServer(options: CreateServerOptions = {}) {
     reconcileDomainManagedIps(rule);
     store.save();
 
-    let dnsReport = null;
+    let dnsReport: DnsRuleSyncReport | null = null;
     if (syncDnsNow) {
       dnsReport = await executeDnsSyncRule(rule.id, req.sessionUser || 'admin', getClientIp(req));
     }
@@ -2129,7 +2131,7 @@ export async function createServer(options: CreateServerOptions = {}) {
     reconcileDomainManagedIps(rule);
     store.save();
 
-    let dnsReport = null;
+    let dnsReport: DnsRuleSyncReport | null = null;
     if (req.body?.syncDnsNow) {
       dnsReport = await executeDnsSyncRule(rule.id, req.sessionUser || 'admin', getClientIp(req));
     }
@@ -2204,7 +2206,7 @@ export async function createServer(options: CreateServerOptions = {}) {
     reconcileDomainManagedIps(rule);
     store.save();
 
-    let dnsReport = null;
+    let dnsReport: DnsRuleSyncReport | null = null;
     if (req.body?.syncDnsNow !== false) {
       dnsReport = await executeDnsSyncRule(rule.id, req.sessionUser || 'admin', getClientIp(req));
     }
@@ -2278,7 +2280,7 @@ export async function createServer(options: CreateServerOptions = {}) {
     reconcileDomainManagedIps(rule);
     store.save();
 
-    let dnsReport = null;
+    let dnsReport: DnsRuleSyncReport | null = null;
     if (req.body?.syncDnsNow !== false) {
       dnsReport = await executeDnsSyncRule(rule.id, req.sessionUser || 'admin', getClientIp(req));
     }
@@ -2362,7 +2364,7 @@ export async function createServer(options: CreateServerOptions = {}) {
     reconcileDomainManagedIps(rule);
     store.save();
 
-    let dnsReport = null;
+    let dnsReport: DnsRuleSyncReport | null = null;
     if (req.body?.syncDnsNow !== false) {
       dnsReport = await executeDnsSyncRule(rule.id, req.sessionUser || 'admin', getClientIp(req));
     }
@@ -2474,7 +2476,7 @@ export async function createServer(options: CreateServerOptions = {}) {
     reconcileDomainManagedIps(rule);
     store.save();
 
-    let dnsReport = null;
+    let dnsReport: DnsRuleSyncReport | null = null;
     if (req.body?.syncDnsNow) {
       dnsReport = await executeDnsSyncRule(rule.id, req.sessionUser || 'admin', getClientIp(req));
     }
@@ -3852,7 +3854,7 @@ export async function createServer(options: CreateServerOptions = {}) {
 
     // Run real TCP reachability probe on the host IP & SSH port
     const targetAddr = host.ipv4 || host.ipv6List[0];
-    let probeResult = null;
+    let probeResult: MonitorCheckSample | null = null;
     if (targetAddr) {
       probeResult = await probeTcp(targetAddr, host.sshPort || 22, 4500);
       host.lastLatencyMs = probeResult.latencyMs;
@@ -4059,7 +4061,7 @@ export async function createServer(options: CreateServerOptions = {}) {
     const state = store.getState();
     const boundIds = getHostLinkedRuleIds(host);
     const targetIds = onlyRuleId ? boundIds.filter((id) => id === onlyRuleId) : boundIds;
-    const reports = [];
+    const reports: DnsRuleSyncReport[] = [];
     const nowIso = new Date().toISOString();
 
     for (const ruleId of targetIds) {
@@ -4988,7 +4990,7 @@ export async function createServer(options: CreateServerOptions = {}) {
       }
     }
 
-    const reports = [];
+    const reports: DnsRuleSyncReport[] = [];
     for (const rule of targetRules) {
       rule.ipv4Address = host.ipv4 || '';
       rule.ipv6Targets = host.ipv6List.map((addr, idx) => {
