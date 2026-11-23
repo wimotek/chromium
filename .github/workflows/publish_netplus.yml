@@ -5,15 +5,15 @@ on:
     branches:
       - main
     paths:
-      - 'Module/**'
+      - 'netplus/**'
       - '.github/workflows/publish_netplus.yml'
   workflow_dispatch:
 
 env:
   WORKING_DIR: ./netplus
+  IMAGE_NAME: netplus
   GHCR_REGISTRY: ghcr.io
   DOCKERHUB_REGISTRY: docker.io
-  DOCKERHUB_IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/netplus
   GHCR_IMAGE: ghcr.io/wimotek/netplus
 
 jobs:
@@ -143,9 +143,11 @@ jobs:
           set -euo pipefail
           if [ -n "${DOCKERHUB_USERNAME:-}" ] && [ -n "${DOCKERHUB_TOKEN:-}" ]; then
             echo "enabled=true" >> "$GITHUB_OUTPUT"
-            echo "Docker Hub credentials detected — will push to Docker Hub."
+            echo "image=${DOCKERHUB_USERNAME}/${IMAGE_NAME}" >> "$GITHUB_OUTPUT"
+            echo "Docker Hub credentials detected — will push to ${DOCKERHUB_USERNAME}/${IMAGE_NAME}."
           else
             echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "image=wimotek/${IMAGE_NAME}" >> "$GITHUB_OUTPUT"
             echo "Docker Hub credentials not configured — skipping Docker Hub."
           fi
 
@@ -177,7 +179,7 @@ jobs:
         with:
           images: |
             ${{ env.GHCR_IMAGE }}
-            name=${{ env.DOCKERHUB_REGISTRY }}/${{ env.DOCKERHUB_IMAGE }},enable=${{ steps.dockerhub.outputs.enabled == 'true' }}
+            name=${{ env.DOCKERHUB_REGISTRY }}/${{ steps.dockerhub.outputs.image }},enable=${{ steps.dockerhub.outputs.enabled == 'true' }}
           tags: |
             type=ref,event=branch
             type=ref,event=pr
