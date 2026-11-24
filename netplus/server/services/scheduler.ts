@@ -589,19 +589,87 @@ export async function runCronJobNow(jobId: string, actor = 'scheduler', ip = '12
 class SchedulerEngine {
   private lastTickMinute = '';
   private timer: NodeJS.Timeout | null = null;
+  private sniperTimer: NodeJS.Timeout | null = null;
+  private monitorTimer: NodeJS.Timeout | null = null;
+  private runningSnipers = new Set<string>();
+  private runningMonitors = new Set<string>();
 
   start() {
-    if (this.timer) return;
-    this.timer = setInterval(() => {
-      void this.tick();
-    }, 15_000);
-    this.timer.unref();
+    if (!this.timer) {
+      this.timer = setInterval(() => {
+        void this.tick();
+      }, 15_000);
+      this.timer.unref();
+    }
+    if (!this.sniperTimer) {
+      this.sniperTimer = setInterval(() => {
+        void this.tickSnipers();
+      }, 3_000);
+      this.sniperTimer.unref();
+    }
+    if (!this.monitorTimer) {
+      this.monitorTimer = setInterval(() => {
+        void this.tickMonitors();
+      }, 5_000);
+      this.monitorTimer.unref();
+    }
   }
 
   stop() {
     if (this.timer) {
       clearInterval(this.timer);
       this.timer = null;
+    }
+    if (this.sniperTimer) {
+      clearInterval(this.sniperTimer);
+      this.sniperTimer = null;
+    }
+    if (this.monitorTimer) {
+      clearInterval(this.monitorTimer);
+      this.monitorTimer = null;
+    }
+  }
+
+  private async tickSnipers() {
+    const nowMs = Date.now();
+    const state = store.getState();
+    const dueTasks = state.ociSniperTasks.filter((t) => {
+      if (t.status !== 'running') return false;
+      if (this.runningSnipers.has(t.id)) return false;
+      if (!t.nextAttemptAt) return true;
+      const nextMs = new Date(t.nextAttemptAt).getTime();
+      return !Number.isFinite(nextMs) || nextMs <= nowMs;
+    });
+
+    for (const task of dueTasks) {
+      this.runningSnipers.add(task.id);
+      void runOciSniperAttempt(task.id, 'sniper-daemon', '127.0.0.1')
+        .catch(() => {})
+        .finally(() => {
+          this.runningSnipers.delete(task.id);
+        });
+    }
+  }
+
+  private async tickMonitors() {
+    const nowMs = Date.now();
+    const state = store.getState();
+    const dueMonitors = state.monitors.filter((m) => {
+      if (!m.enabled) return false;
+      if (this.runningMonitors.has(m.id)) return false;
+      const intervalMs = Math.max(15, Number(m.intervalSeconds) || 60) * 1000;
+      if (!m.lastCheckedAt) return true;
+      const lastMs = new Date(m.lastCheckedAt).getTime();
+      return !Number.isFinite(lastMs) || nowMs - lastMs >= intervalMs;
+    });
+
+    for (const mon of dueMonitors) {
+      this.runningMonitors.add(mon.id);
+      void runMonitorCheck(mon.id, 'monitor-daemon', '127.0.0.1')
+        .catch(() => {})
+        .finally(() => {
+          this.runningMonitors.delete(mon.id);
+        });
     }
   }
 

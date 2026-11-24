@@ -38,6 +38,7 @@ import type {
   ExternalCloudProvider,
   LanguageCode,
   ManagedCloudProvider,
+  ManagedDnsRecord,
   MonitorProbeType,
   MonitorTarget,
   OciDiscoveredInstance,
@@ -50,6 +51,7 @@ interface CloudHostsViewProps {
   hosts: CloudHost[];
   cloudAccounts: CloudAccount[];
   dnsRules: DnsSyncRule[];
+  dnsRecords: ManagedDnsRecord[];
   dnsProviders: DnsProvider[];
   ociProfiles: OciProfile[];
   monitors: MonitorTarget[];
@@ -59,6 +61,7 @@ interface CloudHostsViewProps {
   onReload: () => Promise<void>;
   onNavigateOci: () => void;
   onNavigateDns: () => void;
+  onNavigateMonitors?: () => void;
 }
 
 const MANAGED_PROVIDERS: ManagedCloudProvider[] = ['oracle', 'aws', 'aliyun', 'gcp'];
@@ -233,6 +236,7 @@ export function CloudHostsView({
   hosts,
   cloudAccounts,
   dnsRules,
+  dnsRecords,
   dnsProviders,
   ociProfiles,
   monitors,
@@ -242,6 +246,7 @@ export function CloudHostsView({
   onReload,
   onNavigateOci,
   onNavigateDns,
+  onNavigateMonitors,
 }: CloudHostsViewProps) {
   const t = (key: TranslationKeys) => translate(lang, key);
   const isZh = lang === 'zh-CN';
@@ -350,10 +355,12 @@ export function CloudHostsView({
   // Bind Domain Modal State
   const [bindModalHost, setBindModalHost] = useState<CloudHost | null>(null);
   const [bindMode, setBindMode] = useState<'create' | 'existing'>('create');
-  const [bindRuleId, setBindRuleId] = useState('');
+  const [bindExistingKey, setBindExistingKey] = useState(''); // 'rec:<id>' or 'rule:<id>'
+  const [bindExistingSearch, setBindExistingSearch] = useState('');
   const [bindSyncNow, setBindSyncNow] = useState(true);
   const [bindCfZones, setBindCfZones] = useState<DnsZoneSummary[]>([]);
   const [bindLoadingZones, setBindLoadingZones] = useState(false);
+  const [bindZonesError, setBindZonesError] = useState<string | null>(null);
   const [bindCreateForm, setBindCreateForm] = useState({
     providerId: '',
     domain: '',
@@ -1125,26 +1132,43 @@ export function CloudHostsView({
 
   // ---- Bind Domain Modal ----
   const fetchZonesForBindProvider = useCallback(
-    async (providerId: string) => {
+    async (providerId: string, forceRefresh = false) => {
       const prov = dnsProviderMap.get(providerId);
-      if (!prov || prov.type !== 'cloudflare' || !prov.hasSecret) {
+      if (
+        !prov ||
+        !prov.hasSecret ||
+        !['cloudflare', 'dnspod', 'aliyun', 'porkbun'].includes(prov.type)
+      ) {
         setBindCfZones([]);
+        setBindZonesError(null);
         return;
       }
       setBindLoadingZones(true);
+      setBindZonesError(null);
       try {
-        const res = await apiRequest<{ ok: boolean; zones: DnsZoneSummary[] }>(
-          `/api/dns/providers/${encodeURIComponent(providerId)}/zones`
-        );
-        const zones = res.ok ? res.zones : [];
+        const res = await apiRequest<{
+          ok: boolean;
+          domains?: Array<{ id: string; name: string; status?: string }>;
+          error?: string;
+        }>(`/api/dns/providers/${encodeURIComponent(providerId)}/domains${forceRefresh ? '?refresh=1' : ''}`);
+        const domains = res.ok && Array.isArray(res.domains) ? res.domains : [];
+        const zones: DnsZoneSummary[] = domains.map((d) => ({
+          id: d.id,
+          name: d.name,
+          status: d.status || 'active',
+        }));
         setBindCfZones(zones);
+        if (!res.ok && res.error) {
+          setBindZonesError(res.error);
+        }
         if (zones.length > 0) {
           setBindCreateForm((prev) =>
             prev.providerId === providerId && !prev.domain ? { ...prev, domain: zones[0].name } : prev
           );
         }
-      } catch {
+      } catch (err) {
         setBindCfZones([]);
+        setBindZonesError(err instanceof Error ? err.message : 'Failed to load domains');
       } finally {
         setBindLoadingZones(false);
       }
@@ -1162,9 +1186,9 @@ export function CloudHostsView({
     setBindModalHost(host);
     setBindError(null);
     setBindCfZones([]);
-    const boundIds = new Set(getHostBoundRuleIds(host));
-    const availableExisting = configuredDnsRules.filter((r) => !boundIds.has(r.id));
-    setBindRuleId(availableExisting[0]?.id || '');
+    setBindZonesError(null);
+    setBindExistingKey('');
+    setBindExistingSearch('');
     setBindSyncNow(true);
     setBindMode(configuredDnsProviders.length > 0 ? 'create' : 'existing');
     setBindCreateForm({
@@ -1185,17 +1209,17 @@ export function CloudHostsView({
     try {
       let updatedHost: CloudHost | undefined;
       if (bindMode === 'existing') {
-        if (!bindRuleId) {
-          setBindError(isZh ? '请选择要添加绑定的域名规则' : 'Please select a DNS rule to bind');
+        if (!bindExistingKey) {
+          setBindError(isZh ? '请在列表中选择一个未绑定的域名' : 'Please select an unbound domain');
           setBindBusy(false);
           return;
         }
+        const payload = bindExistingKey.startsWith('rec:')
+          ? { recordId: bindExistingKey.slice(4), syncNow: bindSyncNow }
+          : { ruleId: bindExistingKey.slice(5), syncNow: bindSyncNow };
         const res = await apiRequest<{ host: CloudHost }>(`/api/clouds/hosts/${bindModalHost.id}/bind-domain`, {
           method: 'POST',
-          body: JSON.stringify({
-            ruleId: bindRuleId,
-            syncNow: bindSyncNow,
-          }),
+          body: JSON.stringify(payload),
         });
         updatedHost = res.host;
       } else {
@@ -1216,10 +1240,8 @@ export function CloudHostsView({
       await onReload();
       if (updatedHost) {
         setBindModalHost(updatedHost);
-        const nextBoundSet = new Set(getHostBoundRuleIds(updatedHost));
-        const nextAvail = configuredDnsRules.filter((r) => !nextBoundSet.has(r.id));
-        setBindRuleId(nextAvail[0]?.id || '');
       }
+      setBindExistingKey('');
       setBindCreateForm((prev) => ({ ...prev, recordName: '' }));
       showNotice(
         isZh
@@ -1632,7 +1654,7 @@ export function CloudHostsView({
         {linkedMon ? (
           <button
             type="button"
-            onClick={() => setSubTab('monitors')}
+            onClick={() => (onNavigateMonitors ? onNavigateMonitors() : setSubTab('monitors'))}
             className="inline-flex items-center gap-1 text-[11px] text-blue-600 dark:text-blue-400 hover:underline font-mono tabular-nums"
           >
             <Activity className="w-3 h-3 shrink-0" />
@@ -1781,14 +1803,14 @@ export function CloudHostsView({
         </button>
         <button
           type="button"
-          onClick={() => setSubTab('monitors')}
+          onClick={() => (onNavigateMonitors ? onNavigateMonitors() : setSubTab('monitors'))}
           className={`pb-2.5 border-b-2 transition-colors whitespace-nowrap ${
-            subTab === 'monitors'
+            !onNavigateMonitors && subTab === 'monitors'
               ? 'border-blue-600 text-blue-600 dark:text-blue-400 font-semibold'
               : 'border-transparent text-slate-500 hover:text-slate-800 dark:hover:text-slate-200'
           }`}
         >
-          {isZh ? `实时监控探针 (${monitors.length})` : `Live Monitors (${monitors.length})`}
+          {isZh ? `实时监控探针 (${monitors.length}) ↗` : `Live Monitors (${monitors.length}) ↗`}
         </button>
       </div>
 
@@ -3166,8 +3188,88 @@ export function CloudHostsView({
       {bindModalHost && (() => {
         const currentModalHost = managedHosts.find((x) => x.id === bindModalHost.id) ?? bindModalHost;
         const modalBoundRules = getHostBoundRules(currentModalHost);
-        const modalBoundIdSet = new Set(modalBoundRules.map((r) => r.id));
-        const availableRulesToAttach = configuredDnsRules.filter((r) => !modalBoundIdSet.has(r.id));
+
+        // Enforce 1-to-1 domain uniqueness: map every bound FQDN across ALL hosts to its owner host
+        const boundFqdnOwnerMap = new Map<string, CloudHost>();
+        for (const h of managedHosts) {
+          for (const r of getHostBoundRules(h)) {
+            boundFqdnOwnerMap.set(formatRuleFqdn(r).toLowerCase(), h);
+          }
+        }
+
+        // Build unified "Existing Domains" list from pulled DNS Management records + configured DNS rules
+        interface ExistingBindCandidate {
+          key: string;
+          fqdn: string;
+          providerName: string;
+          providerType: string;
+          recordType?: string;
+          content?: string;
+          source: 'record' | 'rule';
+          boundHost?: CloudHost;
+        }
+        const candidateByFqdn = new Map<string, ExistingBindCandidate>();
+        // 1. Prefer pulled A / AAAA records from DNS Management (or CNAME/etc. if no A/AAAA)
+        const sortedRecs = [...dnsRecords].sort((a, b) => {
+          const rank = (t: string) => (t === 'A' ? 0 : t === 'AAAA' ? 1 : t === 'CNAME' ? 2 : 3);
+          return rank(a.type) - rank(b.type);
+        });
+        for (const rec of sortedRecs) {
+          const prov = dnsProviderMap.get(rec.providerId);
+          if (!prov || !isDnsProviderConfigured(prov)) continue;
+          const fqdn = (rec.fqdn || (rec.name === '@' ? rec.domain : `${rec.name}.${rec.domain}`)).toLowerCase();
+          if (!fqdn || candidateByFqdn.has(fqdn)) continue;
+          candidateByFqdn.set(fqdn, {
+            key: `rec:${rec.id}`,
+            fqdn,
+            providerName: prov.name,
+            providerType: prov.type,
+            recordType: rec.type,
+            content: rec.content,
+            source: 'record',
+            boundHost: boundFqdnOwnerMap.get(fqdn),
+          });
+        }
+        // 2. Also include any configured DNS rules whose FQDN isn't already represented
+        for (const rule of configuredDnsRules) {
+          const prov = dnsProviderMap.get(rule.providerId);
+          const fqdn = formatRuleFqdn(rule).toLowerCase();
+          if (!fqdn || candidateByFqdn.has(fqdn)) continue;
+          candidateByFqdn.set(fqdn, {
+            key: `rule:${rule.id}`,
+            fqdn,
+            providerName: prov?.name || rule.providerId,
+            providerType: prov?.type || 'dns',
+            source: 'rule',
+            boundHost: boundFqdnOwnerMap.get(fqdn),
+          });
+        }
+
+        const allExistingCandidates = Array.from(candidateByFqdn.values()).sort((a, b) => {
+          // Show unbound (available) domains first, then bound domains clearly separated below
+          const aBound = a.boundHost ? 1 : 0;
+          const bBound = b.boundHost ? 1 : 0;
+          if (aBound !== bBound) return aBound - bBound;
+          return a.fqdn.localeCompare(b.fqdn);
+        });
+        const availableExistingCount = allExistingCandidates.filter((c) => !c.boundHost).length;
+        const filteredExistingCandidates = allExistingCandidates.filter((c) => {
+          const q = bindExistingSearch.trim().toLowerCase();
+          if (!q) return true;
+          return `${c.fqdn} ${c.providerName} ${c.providerType} ${c.content || ''} ${c.boundHost?.name || ''}`
+            .toLowerCase()
+            .includes(q);
+        });
+
+        // Live conflict check for "Create New" tab
+        const createTargetFqdn = bindCreateForm.domain.trim()
+          ? (() => {
+              const rn = (bindCreateForm.recordName.trim() || '@').toLowerCase();
+              const dom = bindCreateForm.domain.trim().toLowerCase().replace(/\.$/, '');
+              return rn === '@' ? dom : `${rn}.${dom}`;
+            })()
+          : '';
+        const createConflictHost = createTargetFqdn ? boundFqdnOwnerMap.get(createTargetFqdn) : undefined;
 
         return (
           <div className="fixed inset-0 z-50 bg-slate-950/55 flex items-center justify-center p-4">
@@ -3181,7 +3283,7 @@ export function CloudHostsView({
                   </h3>
                   <p className="text-[11px] text-slate-500 mt-0.5 font-mono tabular-nums">
                     v4: {currentModalHost.ipv4 || '—'} · v6: {currentModalHost.ipv6List.length} ·{' '}
-                    {isZh ? `已绑定 ${modalBoundRules.length} 个域名` : `${modalBoundRules.length} bound`}
+                    {isZh ? `已绑定 ${modalBoundRules.length} 个域名（单域名仅可绑定一台实例）` : `${modalBoundRules.length} bound (1 domain = 1 host)`}
                   </p>
                 </div>
                 <button type="button" onClick={() => setBindModalHost(null)} className="p-1 text-slate-400">
@@ -3203,7 +3305,7 @@ export function CloudHostsView({
                         onClick={() => void handlePushDns(currentModalHost)}
                         className="text-blue-600 dark:text-blue-400 hover:underline font-medium"
                       >
-                        {isZh ? '一键同步全部' : 'Sync All'}
+                        {isZh ? '一键推送全部' : 'Push All'}
                       </button>
                       <button
                         type="button"
@@ -3250,7 +3352,7 @@ export function CloudHostsView({
                               className="inline-flex items-center gap-1 px-2 py-1 text-[11px] font-medium rounded border border-blue-200 dark:border-blue-800 text-blue-700 dark:text-blue-300 hover:bg-blue-50 dark:hover:bg-blue-950/40 whitespace-nowrap"
                             >
                               {singleBusy ? <Loader2 className="w-3 h-3 animate-spin" /> : <Send className="w-3 h-3" />}
-                              {isZh ? '同步' : 'Sync'}
+                              {isZh ? '推送' : 'Push'}
                             </button>
                             <button
                               type="button"
@@ -3274,7 +3376,7 @@ export function CloudHostsView({
                   {isZh ? '新增绑定域名（可多次添加，实例 IP 变动自动同步全部域名）' : 'Add Bound Domain'}
                 </h4>
 
-                {configuredDnsProviders.length === 0 && availableRulesToAttach.length === 0 ? (
+                {configuredDnsProviders.length === 0 && allExistingCandidates.length === 0 ? (
                   <div className="py-6 text-center space-y-3 text-xs">
                     <p className="text-slate-600 dark:text-slate-300">
                       {isZh
@@ -3323,8 +3425,8 @@ export function CloudHostsView({
                         }`}
                       >
                         {isZh
-                          ? `附加已有规则 (${availableRulesToAttach.length})`
-                          : `Attach Existing (${availableRulesToAttach.length})`}
+                          ? `从已拉取 DNS 选择 (${availableExistingCount} 可选)`
+                          : `Attach Pulled DNS (${availableExistingCount} avail)`}
                       </button>
                     </div>
 
@@ -3332,27 +3434,45 @@ export function CloudHostsView({
                       <div className="space-y-3.5">
                         <div>
                           <label className="block font-medium mb-1">{isZh ? 'DNS 服务商（必选）*' : 'DNS Provider *'}</label>
-                          <select
-                            required
-                            value={bindCreateForm.providerId}
-                            onChange={(e) => setBindCreateForm({ ...bindCreateForm, providerId: e.target.value, domain: '' })}
-                            className="w-full px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950"
-                          >
-                            {configuredDnsProviders.map((p) => (
-                              <option key={p.id} value={p.id}>
-                                {p.name} ({p.type})
-                              </option>
-                            ))}
-                          </select>
+                          <div className="flex gap-2">
+                            <select
+                              required
+                              value={bindCreateForm.providerId}
+                              onChange={(e) => {
+                                setBindCfZones([]);
+                                setBindZonesError(null);
+                                setBindCreateForm({ ...bindCreateForm, providerId: e.target.value, domain: '' });
+                              }}
+                              className="flex-1 px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950"
+                            >
+                              {configuredDnsProviders.map((p) => (
+                                <option key={p.id} value={p.id}>
+                                  {p.name} ({p.type})
+                                </option>
+                              ))}
+                            </select>
+                            {selectedBindProvider &&
+                              ['cloudflare', 'dnspod', 'aliyun', 'porkbun'].includes(selectedBindProvider.type) && (
+                                <button
+                                  type="button"
+                                  disabled={bindLoadingZones}
+                                  onClick={() => void fetchZonesForBindProvider(selectedBindProvider.id, true)}
+                                  title={isZh ? '刷新该服务商下的域名列表' : 'Refresh domains from provider'}
+                                  className="px-2.5 py-2 rounded-lg border border-slate-200 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800"
+                                >
+                                  <RefreshCw className={`w-3.5 h-3.5 ${bindLoadingZones ? 'animate-spin' : ''}`} />
+                                </button>
+                              )}
+                          </div>
                         </div>
 
                         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                           <div>
                             <label className="block font-medium mb-1">
                               {isZh ? '主域名 *' : 'Domain *'}
-                              {selectedBindProvider?.type === 'cloudflare' && bindLoadingZones && (
+                              {bindLoadingZones && (
                                 <span className="ml-1.5 text-[10px] text-blue-600">
-                                  {isZh ? '正在拉取 Zone...' : 'Loading zones...'}
+                                  {isZh ? '正在拉取域名列表...' : 'Loading domains...'}
                                 </span>
                               )}
                             </label>
@@ -3363,6 +3483,9 @@ export function CloudHostsView({
                                 onChange={(e) => setBindCreateForm({ ...bindCreateForm, domain: e.target.value })}
                                 className="w-full px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 font-mono"
                               >
+                                {!bindCfZones.some((z) => z.name === bindCreateForm.domain) && bindCreateForm.domain && (
+                                  <option value={bindCreateForm.domain}>{bindCreateForm.domain}</option>
+                                )}
                                 {bindCfZones.map((z) => (
                                   <option key={z.id} value={z.name}>
                                     {z.name}
@@ -3378,6 +3501,11 @@ export function CloudHostsView({
                                 className="w-full px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 font-mono"
                               />
                             )}
+                            {bindZonesError && (
+                              <div className="mt-1 text-[11px] text-amber-600 dark:text-amber-400">
+                                {bindZonesError}
+                              </div>
+                            )}
                           </div>
                           <div>
                             <label className="block font-medium mb-1">{isZh ? '主机记录 (子域名)' : 'Record Name'}</label>
@@ -3390,6 +3518,18 @@ export function CloudHostsView({
                             />
                           </div>
                         </div>
+
+                        {createConflictHost && (
+                          <div className="px-3 py-2 rounded-lg border border-amber-200 dark:border-amber-900 bg-amber-50/70 dark:bg-amber-950/30 text-amber-800 dark:text-amber-300">
+                            {createConflictHost.id === currentModalHost.id
+                              ? isZh
+                                ? `域名 ${createTargetFqdn} 已绑定在当前实例上。`
+                                : `${createTargetFqdn} is already bound to this host.`
+                              : isZh
+                              ? `域名 ${createTargetFqdn} 已被实例「${createConflictHost.name}」占用（一个域名只能绑定一台云主机）。请换用其他子域名或先解绑原实例。`
+                              : `${createTargetFqdn} is already bound to "${createConflictHost.name}" (one domain can only bind to one host).`}
+                          </div>
+                        )}
 
                         <div className="grid grid-cols-2 gap-3">
                           <div>
@@ -3433,32 +3573,110 @@ export function CloudHostsView({
                         )}
                       </div>
                     ) : (
-                      <div>
-                        <label className="block font-medium mb-1">
-                          {isZh ? '选择要附加绑定的已有域名规则' : 'Select DNS Rule to Attach'}
-                        </label>
-                        {availableRulesToAttach.length === 0 ? (
-                          <p className="text-slate-500 py-2">
+                      <div className="space-y-2.5">
+                        <div className="flex items-center justify-between gap-2">
+                          <label className="font-medium text-slate-700 dark:text-slate-300">
                             {isZh
-                              ? '所有已配置的域名规则均已绑定到该实例，请切换到「新建绑定域名」添加新域名。'
-                              : 'All configured DNS rules are already bound to this host.'}
-                          </p>
+                              ? '从「域名 DNS 管理」已拉取域名中选择（单域名仅可绑定一台主机）'
+                              : 'Select from pulled DNS Management domains (1 domain = 1 host)'}
+                          </label>
+                          <span className="text-[11px] font-mono text-slate-400">
+                            {availableExistingCount}/{allExistingCandidates.length}
+                          </span>
+                        </div>
+
+                        {allExistingCandidates.length === 0 ? (
+                          <div className="p-4 rounded-lg border border-dashed border-slate-200 dark:border-slate-800 text-center space-y-2 text-slate-500">
+                            <p>
+                              {isZh
+                                ? '尚未在「域名 DNS 管理」中拉取任何域名记录。请先前往域名 DNS 管理拉取，或切换到「新建绑定域名」。'
+                                : 'No pulled DNS records found yet. Pull domains under Domain DNS first, or create a new binding.'}
+                            </p>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setBindModalHost(null);
+                                onNavigateDns();
+                              }}
+                              className="text-blue-600 dark:text-blue-400 font-medium hover:underline"
+                            >
+                              {isZh ? '前往域名 DNS 管理拉取 →' : 'Go to Domain DNS →'}
+                            </button>
+                          </div>
                         ) : (
-                          <select
-                            required
-                            value={bindRuleId}
-                            onChange={(e) => setBindRuleId(e.target.value)}
-                            className="w-full px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 font-mono"
-                          >
-                            {availableRulesToAttach.map((r) => {
-                              const prov = dnsProviderMap.get(r.providerId);
-                              return (
-                                <option key={r.id} value={r.id}>
-                                  {formatRuleFqdn(r)} · {prov?.name || r.providerId}
-                                </option>
-                              );
-                            })}
-                          </select>
+                          <>
+                            <input
+                              type="text"
+                              value={bindExistingSearch}
+                              onChange={(e) => setBindExistingSearch(e.target.value)}
+                              placeholder={isZh ? '筛选域名、服务商、当前 IP...' : 'Filter domain, provider, IP...'}
+                              className="w-full px-3 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950"
+                            />
+                            <div className="max-h-56 overflow-y-auto divide-y divide-slate-100 dark:divide-slate-800 rounded-lg border border-slate-200 dark:border-slate-800">
+                              {filteredExistingCandidates.map((item) => {
+                                const isBound = Boolean(item.boundHost);
+                                const isSelected = bindExistingKey === item.key;
+                                return (
+                                  <button
+                                    key={item.key}
+                                    type="button"
+                                    disabled={isBound}
+                                    onClick={() => setBindExistingKey(item.key)}
+                                    className={`w-full text-left px-3 py-2.5 flex items-center justify-between gap-2 transition-colors ${
+                                      isBound
+                                        ? 'bg-slate-50/70 dark:bg-slate-950/40 opacity-55 cursor-not-allowed'
+                                        : isSelected
+                                        ? 'bg-blue-50 dark:bg-blue-950/40 ring-1 ring-inset ring-blue-500'
+                                        : 'hover:bg-slate-50 dark:hover:bg-slate-800/40'
+                                    }`}
+                                  >
+                                    <div className="min-w-0">
+                                      <div className="flex items-center gap-2">
+                                        <span className="font-mono font-semibold text-slate-900 dark:text-white truncate">
+                                          {item.fqdn}
+                                        </span>
+                                        {item.recordType && (
+                                          <span className="px-1.5 py-0.5 rounded bg-slate-100 dark:bg-slate-800 font-mono text-[10px] text-slate-600 dark:text-slate-300">
+                                            {item.recordType}
+                                          </span>
+                                        )}
+                                      </div>
+                                      <div className="mt-0.5 text-[11px] font-mono text-slate-500 dark:text-slate-400 truncate">
+                                        {item.providerName} ({item.providerType})
+                                        {item.content ? ` · ${item.content}` : ''}
+                                      </div>
+                                    </div>
+                                    <div className="shrink-0 text-[11px] font-medium">
+                                      {item.boundHost ? (
+                                        <span className="px-2 py-0.5 rounded bg-slate-200 dark:bg-slate-800 text-slate-600 dark:text-slate-400">
+                                          {item.boundHost.id === currentModalHost.id
+                                            ? isZh
+                                              ? '已绑本机'
+                                              : 'Bound here'
+                                            : isZh
+                                            ? `已绑: ${item.boundHost.name}`
+                                            : `Bound: ${item.boundHost.name}`}
+                                        </span>
+                                      ) : isSelected ? (
+                                        <span className="text-blue-600 dark:text-blue-400 font-semibold">
+                                          {isZh ? '已选中' : 'Selected'}
+                                        </span>
+                                      ) : (
+                                        <span className="text-emerald-600 dark:text-emerald-400">
+                                          {isZh ? '可绑定' : 'Available'}
+                                        </span>
+                                      )}
+                                    </div>
+                                  </button>
+                                );
+                              })}
+                              {filteredExistingCandidates.length === 0 && (
+                                <div className="p-4 text-center text-slate-400">
+                                  {isZh ? '没有匹配的域名' : 'No matching domains'}
+                                </div>
+                              )}
+                            </div>
+                          </>
                         )}
                       </div>
                     )}
@@ -3472,7 +3690,7 @@ export function CloudHostsView({
                       />
                       {isZh
                         ? '添加绑定后立即将当前 IPv4 与全部 IPv6 推送同步到该域名'
-                        : 'Immediately sync IPv4 & IPv6 to this domain after binding'}
+                        : 'Immediately push IPv4 & IPv6 to this domain after binding'}
                     </label>
 
                     <div className="flex items-center justify-end gap-2 pt-3 border-t border-slate-200 dark:border-slate-800">
@@ -3485,7 +3703,11 @@ export function CloudHostsView({
                       </button>
                       <button
                         type="submit"
-                        disabled={bindBusy || (bindMode === 'existing' && availableRulesToAttach.length === 0)}
+                        disabled={
+                          bindBusy ||
+                          (bindMode === 'existing' && !bindExistingKey) ||
+                          (bindMode === 'create' && Boolean(createConflictHost))
+                        }
                         className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-blue-600 text-white font-semibold hover:bg-blue-700 disabled:opacity-50"
                       >
                         {bindBusy && <Loader2 className="w-3.5 h-3.5 animate-spin" />}

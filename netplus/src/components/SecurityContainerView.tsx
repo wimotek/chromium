@@ -1,9 +1,62 @@
-import React, { useEffect, useState } from 'react';
-import { Download, Loader2, Lock, RefreshCw, Save, Sparkles } from 'lucide-react';
+import React, { useCallback, useEffect, useState } from 'react';
+import {
+  Check,
+  ChevronDown,
+  ChevronUp,
+  Copy,
+  Download,
+  ExternalLink,
+  KeyRound,
+  Link2,
+  Loader2,
+  Lock,
+  RefreshCw,
+  Save,
+  Sparkles,
+  Unlink,
+} from 'lucide-react';
 import { translate, type TranslationKeys } from '../i18n/translations';
-import { apiRequest, getAuthToken } from '../lib/api';
+import { apiRequest, formatTimeAgo, getAuthToken } from '../lib/api';
+import { copyText } from '../lib/clipboard';
 import { toast } from '../lib/toast';
-import type { LanguageCode, SecurityConfig, TlsCertificateStatus } from '../types/models';
+import type {
+  BoundOAuthAccount,
+  LanguageCode,
+  OAuthProviderId,
+  OAuthProviderPublicConfig,
+  SecurityConfig,
+  TlsCertificateStatus,
+} from '../types/models';
+
+const OAUTH_PROVIDER_INFO: Record<
+  OAuthProviderId,
+  { name: string; docsHintZh: string; docsHintEn: string; consoleUrl: string }
+> = {
+  microsoft: {
+    name: 'Microsoft (Entra ID / MSA)',
+    docsHintZh: 'Azure Portal → 应用注册 → 添加 Web 重定向 URI，租户填 common 支持个人微软与工作账号。',
+    docsHintEn: 'Azure Portal → App registrations → Web Redirect URI. Use tenant "common" for personal & work accounts.',
+    consoleUrl: 'https://portal.azure.com/#view/Microsoft_AAD_RegisteredApps/ApplicationsListBlade',
+  },
+  github: {
+    name: 'GitHub',
+    docsHintZh: 'GitHub Settings → Developer settings → OAuth Apps → New OAuth App。',
+    docsHintEn: 'GitHub Settings → Developer settings → OAuth Apps → New OAuth App.',
+    consoleUrl: 'https://github.com/settings/developers',
+  },
+  google: {
+    name: 'Google',
+    docsHintZh: 'Google Cloud Console → API 和服务 → 凭据 → 创建 OAuth 2.0 Web 客户端 ID。',
+    docsHintEn: 'Google Cloud Console → APIs & Services → Credentials → OAuth 2.0 Web Client ID.',
+    consoleUrl: 'https://console.cloud.google.com/apis/credentials',
+  },
+  apple: {
+    name: 'Sign in with Apple',
+    docsHintZh: 'Apple Developer → Identifiers (Services ID) + Keys (Sign in with Apple .p8 私钥)。',
+    docsHintEn: 'Apple Developer → Identifiers (Services ID) + Keys (Sign in with Apple .p8 private key).',
+    consoleUrl: 'https://developer.apple.com/account/resources/identifiers/list/serviceId',
+  },
+};
 
 interface SecurityContainerViewProps {
   lang: LanguageCode;
@@ -40,6 +93,45 @@ export function SecurityContainerView({
   const [currentPassword, setCurrentPassword] = useState('');
   const [newPassword, setNewPassword] = useState('');
 
+  // Third-party OAuth providers & bound accounts state
+  const [oauthProviders, setOauthProviders] = useState<OAuthProviderPublicConfig[]>([]);
+  const [boundAccounts, setBoundAccounts] = useState<BoundOAuthAccount[]>([]);
+  const [expandedOAuth, setExpandedOAuth] = useState<OAuthProviderId | null>(null);
+  const [oauthForm, setOauthForm] = useState<{
+    enabled: boolean;
+    clientId: string;
+    clientSecret: string;
+    tenantId: string;
+    teamId: string;
+    keyId: string;
+    privateKey: string;
+  }>({
+    enabled: true,
+    clientId: '',
+    clientSecret: '',
+    tenantId: 'common',
+    teamId: '',
+    keyId: '',
+    privateKey: '',
+  });
+  const [savingOAuth, setSavingOAuth] = useState<OAuthProviderId | null>(null);
+  const [bindingOAuth, setBindingOAuth] = useState<OAuthProviderId | null>(null);
+  const [unbindingId, setUnbindingId] = useState<string | null>(null);
+  const [copiedCallback, setCopiedCallback] = useState<string | null>(null);
+
+  const loadOAuthConfig = useCallback(async () => {
+    try {
+      const res = await apiRequest<{
+        providers: OAuthProviderPublicConfig[];
+        boundAccounts: BoundOAuthAccount[];
+      }>('/api/security/oauth');
+      setOauthProviders(res.providers || []);
+      setBoundAccounts(res.boundAccounts || []);
+    } catch {
+      // ignore if endpoint unavailable
+    }
+  }, []);
+
   useEffect(() => {
     void apiRequest<{
       config: SecurityConfig;
@@ -54,7 +146,147 @@ export function SecurityContainerView({
       setActiveSessions(res.activeSessions);
       if (res.tlsStatus) setTlsStatus(res.tlsStatus);
     });
-  }, []);
+    void loadOAuthConfig();
+  }, [loadOAuthConfig]);
+
+  // Listen for OAuth bind popup postMessage
+  useEffect(() => {
+    const onMessage = (event: MessageEvent) => {
+      const data = event.data as
+        | {
+            type?: string;
+            payload?: {
+              mode?: 'login' | 'bind';
+              provider?: OAuthProviderId;
+              account?: BoundOAuthAccount;
+              error?: string;
+            };
+          }
+        | null
+        | undefined;
+      if (!data || typeof data !== 'object') return;
+      if (data.type === 'OAUTH_AUTH_SUCCESS' && data.payload?.mode === 'bind') {
+        setBindingOAuth(null);
+        void loadOAuthConfig();
+        const acct = data.payload.account;
+        toast.success(
+          isZh
+            ? `已成功绑定 ${data.payload.provider?.toUpperCase()} 账号：${acct?.email || acct?.displayName || ''}`
+            : `Bound ${data.payload.provider?.toUpperCase()} account: ${acct?.email || acct?.displayName || ''}`
+        );
+      } else if (data.type === 'OAUTH_AUTH_ERROR' && bindingOAuth) {
+        setBindingOAuth(null);
+        toast.error(data.payload?.error || (isZh ? '第三方账号绑定失败' : 'Account binding failed'));
+      }
+    };
+    window.addEventListener('message', onMessage);
+    return () => window.removeEventListener('message', onMessage);
+  }, [bindingOAuth, isZh, loadOAuthConfig]);
+
+  const openProviderConfig = (p: OAuthProviderPublicConfig) => {
+    if (expandedOAuth === p.provider) {
+      setExpandedOAuth(null);
+      return;
+    }
+    setExpandedOAuth(p.provider);
+    setOauthForm({
+      enabled: p.enabled,
+      clientId: p.clientId || '',
+      clientSecret: '',
+      tenantId: p.tenantId || 'common',
+      teamId: p.teamId || '',
+      keyId: p.keyId || '',
+      privateKey: '',
+    });
+  };
+
+  const handleSaveOAuthProvider = async (e: React.FormEvent, provider: OAuthProviderId) => {
+    e.preventDefault();
+    setSavingOAuth(provider);
+    try {
+      await apiRequest(`/api/security/oauth/${provider}`, {
+        method: 'PUT',
+        body: JSON.stringify({
+          enabled: oauthForm.enabled,
+          clientId: oauthForm.clientId.trim(),
+          clientSecret: oauthForm.clientSecret.trim() || undefined,
+          tenantId: provider === 'microsoft' ? oauthForm.tenantId.trim() || 'common' : undefined,
+          teamId: provider === 'apple' ? oauthForm.teamId.trim() : undefined,
+          keyId: provider === 'apple' ? oauthForm.keyId.trim() : undefined,
+          privateKey: provider === 'apple' && oauthForm.privateKey.trim() ? oauthForm.privateKey.trim() : undefined,
+        }),
+      });
+      await loadOAuthConfig();
+      setOauthForm((prev) => ({ ...prev, clientSecret: '', privateKey: '' }));
+      toast.success(isZh ? `已保存 ${provider.toUpperCase()} OAuth 配置` : `Saved ${provider.toUpperCase()} OAuth config`);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Save OAuth config failed');
+    } finally {
+      setSavingOAuth(null);
+    }
+  };
+
+  const handleStartBindOAuth = async (provider: OAuthProviderId) => {
+    setBindingOAuth(provider);
+    try {
+      const res = await apiRequest<{ ok: boolean; url: string }>(
+        `/api/auth/oauth/${provider}/url?mode=bind`
+      );
+      const width = 560;
+      const height = 680;
+      const left = Math.max(0, Math.round((window.screen.width - width) / 2));
+      const top = Math.max(0, Math.round((window.screen.height - height) / 2));
+      const popup = window.open(
+        res.url,
+        'netplus_oauth_bind',
+        `width=${width},height=${height},left=${left},top=${top},resizable=yes,scrollbars=yes`
+      );
+      if (!popup) {
+        setBindingOAuth(null);
+        toast.error(
+          isZh
+            ? '浏览器拦截了授权弹窗，请允许本站点弹出窗口后重试'
+            : 'Popup blocked by browser. Please allow popups and try again.'
+        );
+        return;
+      }
+      const pollClose = window.setInterval(() => {
+        if (popup.closed) {
+          window.clearInterval(pollClose);
+          setBindingOAuth((cur) => (cur === provider ? null : cur));
+        }
+      }, 600);
+    } catch (err) {
+      setBindingOAuth(null);
+      toast.error(err instanceof Error ? err.message : 'Failed to start OAuth binding');
+    }
+  };
+
+  const handleUnbindAccount = async (acct: BoundOAuthAccount) => {
+    setUnbindingId(acct.id);
+    try {
+      await apiRequest(`/api/security/oauth/bindings/${acct.id}`, { method: 'DELETE' });
+      await loadOAuthConfig();
+      toast.success(
+        isZh
+          ? `已解绑 ${acct.provider.toUpperCase()} 账号 (${acct.email || acct.displayName})`
+          : `Unbound ${acct.provider.toUpperCase()} account`
+      );
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Unbind failed');
+    } finally {
+      setUnbindingId(null);
+    }
+  };
+
+  const handleCopyCallback = async (provider: string, uri: string) => {
+    const ok = await copyText(uri);
+    if (ok) {
+      setCopiedCallback(provider);
+      setTimeout(() => setCopiedCallback((prev) => (prev === provider ? null : prev)), 1600);
+      toast.success(isZh ? '已复制回调地址 (Redirect URI)' : 'Copied callback URI');
+    }
+  };
 
   const handleReloadTls = async () => {
     setReloadingTls(true);
@@ -500,6 +732,327 @@ export function SecurityContainerView({
           </div>
         </form>
       )}
+
+      {/* Third-Party OAuth Account Binding & SSO (Microsoft / GitHub / Google / Apple) */}
+      <div className="p-6 rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 space-y-5">
+        <div className="flex flex-wrap items-center justify-between gap-2 pb-3 border-b border-slate-200 dark:border-slate-800">
+          <div>
+            <h2 className="font-display text-base font-semibold text-slate-900 dark:text-white flex items-center gap-2">
+              <Link2 className="w-4 h-4 text-blue-600 dark:text-blue-400" />
+              {isZh
+                ? '第三方账号登录与绑定（Microsoft / GitHub / Google / Apple）'
+                : 'Third-Party SSO & Account Binding (Microsoft / GitHub / Google / Apple)'}
+            </h2>
+            <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+              {isZh
+                ? '为管理员账号绑定 Microsoft、GitHub、Google 或 Apple 账号后，可在登录页一键授权登录（仅已绑定的白名单账号允许登录，未绑定账号会被自动拒绝）。'
+                : 'Bind your administrator account to Microsoft, GitHub, Google, or Apple to allow one-click OAuth sign-in. Only explicitly bound accounts can log in.'}
+            </p>
+          </div>
+          <span className="font-mono text-xs text-slate-500 tabular-nums">
+            {isZh ? `已绑定 ${boundAccounts.length} 个账号` : `${boundAccounts.length} bound account(s)`}
+          </span>
+        </div>
+
+        {/* Bound Accounts List */}
+        {boundAccounts.length > 0 && (
+          <div className="space-y-2">
+            <div className="text-xs font-medium text-slate-700 dark:text-slate-300">
+              {isZh ? '已绑定的登录账号' : 'Bound Accounts'}
+            </div>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-2.5">
+              {boundAccounts.map((acct) => (
+                <div
+                  key={acct.id}
+                  className="p-3 rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-950/60 flex items-center justify-between gap-3 text-xs"
+                >
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-2">
+                      <span className="px-1.5 py-0.5 rounded bg-blue-100 dark:bg-blue-950/70 text-blue-700 dark:text-blue-300 font-mono text-[10px] uppercase font-semibold">
+                        {acct.provider}
+                      </span>
+                      <span className="font-semibold text-slate-900 dark:text-white truncate">
+                        {acct.displayName || acct.email || acct.subject}
+                      </span>
+                    </div>
+                    <div className="mt-1 font-mono text-[11px] text-slate-500 dark:text-slate-400 truncate">
+                      {acct.email || acct.subject}
+                      {acct.lastLoginAt
+                        ? ` · ${isZh ? '最近登录' : 'Last login'} ${formatTimeAgo(acct.lastLoginAt)}`
+                        : ` · ${isZh ? '绑定于' : 'Bound'} ${formatTimeAgo(acct.boundAt)}`}
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    disabled={unbindingId === acct.id}
+                    onClick={() => void handleUnbindAccount(acct)}
+                    className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md border border-red-200 dark:border-red-900/60 text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-950/40 disabled:opacity-50 shrink-0"
+                  >
+                    {unbindingId === acct.id ? (
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    ) : (
+                      <Unlink className="w-3.5 h-3.5" />
+                    )}
+                    {isZh ? '解绑' : 'Unbind'}
+                  </button>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* OAuth Provider Cards */}
+        <div className="space-y-2.5">
+          {oauthProviders.map((prov) => {
+            const meta = OAUTH_PROVIDER_INFO[prov.provider];
+            const isExpanded = expandedOAuth === prov.provider;
+            const boundForProv = boundAccounts.filter((b) => b.provider === prov.provider);
+            return (
+              <div
+                key={prov.provider}
+                className="rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50/40 dark:bg-slate-950/40 overflow-hidden"
+              >
+                <div className="p-3.5 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs">
+                  <div className="min-w-0 space-y-1">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="font-semibold text-slate-900 dark:text-white">{meta.name}</span>
+                      <span
+                        className={`font-mono text-[11px] font-medium ${
+                          prov.configured && prov.enabled
+                            ? 'text-emerald-600 dark:text-emerald-400'
+                            : prov.configured
+                            ? 'text-amber-600 dark:text-amber-400'
+                            : 'text-slate-400'
+                        }`}
+                      >
+                        {prov.configured && prov.enabled
+                          ? isZh
+                            ? '已启用'
+                            : 'Enabled'
+                          : prov.configured
+                          ? isZh
+                            ? '已配置（未启用）'
+                            : 'Configured (Disabled)'
+                          : isZh
+                          ? '未配置凭据'
+                          : 'Not Configured'}
+                      </span>
+                      {prov.envManaged && (
+                        <span className="text-[10px] font-mono text-slate-400">(ENV)</span>
+                      )}
+                      {boundForProv.length > 0 && (
+                        <span className="text-[11px] text-blue-600 dark:text-blue-400 font-medium">
+                          · {isZh ? `已绑 ${boundForProv.length} 个` : `${boundForProv.length} bound`}
+                        </span>
+                      )}
+                    </div>
+                    <div className="flex flex-wrap items-center gap-1.5 text-[11px] text-slate-500 dark:text-slate-400">
+                      <span>{isZh ? '回调 URI:' : 'Callback URI:'}</span>
+                      <code className="px-1.5 py-0.5 rounded bg-slate-100 dark:bg-slate-800/80 font-mono text-[11px] text-slate-700 dark:text-slate-300 break-all">
+                        {prov.callbackUri || ''}
+                      </code>
+                      <button
+                        type="button"
+                        onClick={() => void handleCopyCallback(prov.provider, prov.callbackUri || '')}
+                        className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded border border-slate-200 dark:border-slate-700 hover:bg-white dark:hover:bg-slate-800 text-slate-600 dark:text-slate-300"
+                      >
+                        {copiedCallback === prov.provider ? (
+                          <Check className="w-3 h-3 text-emerald-500" />
+                        ) : (
+                          <Copy className="w-3 h-3" />
+                        )}
+                        {isZh ? '复制' : 'Copy'}
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="flex flex-wrap items-center gap-2 shrink-0">
+                    <button
+                      type="button"
+                      disabled={!prov.configured || Boolean(bindingOAuth)}
+                      onClick={() => void handleStartBindOAuth(prov.provider)}
+                      title={
+                        !prov.configured
+                          ? isZh
+                            ? '请先点击右侧「配置」填写 Client ID / Secret'
+                            : 'Configure Client ID & Secret first'
+                          : undefined
+                      }
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-blue-600 text-white font-semibold hover:bg-blue-700 disabled:opacity-45 disabled:cursor-not-allowed whitespace-nowrap"
+                    >
+                      {bindingOAuth === prov.provider ? (
+                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      ) : (
+                        <Link2 className="w-3.5 h-3.5" />
+                      )}
+                      {isZh ? '授权绑定账号' : 'Bind Account'}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => openProviderConfig(prov)}
+                      className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 whitespace-nowrap"
+                    >
+                      <KeyRound className="w-3.5 h-3.5" />
+                      {isZh ? '配置' : 'Configure'}
+                      {isExpanded ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
+                    </button>
+                  </div>
+                </div>
+
+                {isExpanded && (
+                  <form
+                    onSubmit={(e) => void handleSaveOAuthProvider(e, prov.provider)}
+                    className="p-4 border-t border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 space-y-3.5 text-xs"
+                  >
+                    <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] text-slate-500 dark:text-slate-400">
+                      <span>{isZh ? meta.docsHintZh : meta.docsHintEn}</span>
+                      <a
+                        href={meta.consoleUrl}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="inline-flex items-center gap-1 text-blue-600 dark:text-blue-400 hover:underline shrink-0"
+                      >
+                        {isZh ? '前往开发者后台' : 'Developer Console'}
+                        <ExternalLink className="w-3 h-3" />
+                      </a>
+                    </div>
+
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                      <div>
+                        <label className="block font-medium mb-1">
+                          {prov.provider === 'apple' ? 'Services ID (Client ID) *' : 'Client ID *'}
+                        </label>
+                        <input
+                          required
+                          value={oauthForm.clientId}
+                          onChange={(e) => setOauthForm({ ...oauthForm, clientId: e.target.value })}
+                          placeholder={
+                            prov.provider === 'apple'
+                              ? 'com.example.netplus.signin'
+                              : 'OAuth Client ID'
+                          }
+                          className="w-full px-3 py-2 font-mono rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950"
+                        />
+                      </div>
+
+                      {prov.provider !== 'apple' && (
+                        <div>
+                          <label className="block font-medium mb-1">
+                            Client Secret{' '}
+                            {prov.hasClientSecret && (
+                              <span className="text-emerald-600 dark:text-emerald-400 font-normal">
+                                ({isZh ? '已加密保存，留空不改' : 'stored; blank to keep'})
+                              </span>
+                            )}
+                          </label>
+                          <input
+                            type="password"
+                            required={!prov.hasClientSecret}
+                            value={oauthForm.clientSecret}
+                            onChange={(e) => setOauthForm({ ...oauthForm, clientSecret: e.target.value })}
+                            placeholder={prov.hasClientSecret ? '••••••••' : 'OAuth Client Secret'}
+                            className="w-full px-3 py-2 font-mono rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950"
+                          />
+                        </div>
+                      )}
+
+                      {prov.provider === 'microsoft' && (
+                        <div>
+                          <label className="block font-medium mb-1">
+                            Tenant ID ({isZh ? '默认 common 支持个人微软与工作账号' : 'default: common'})
+                          </label>
+                          <input
+                            value={oauthForm.tenantId}
+                            onChange={(e) => setOauthForm({ ...oauthForm, tenantId: e.target.value })}
+                            placeholder="common / consumers / organizations / <tenant-guid>"
+                            className="w-full px-3 py-2 font-mono rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950"
+                          />
+                        </div>
+                      )}
+
+                      {prov.provider === 'apple' && (
+                        <>
+                          <div>
+                            <label className="block font-medium mb-1">Apple Team ID *</label>
+                            <input
+                              required
+                              value={oauthForm.teamId}
+                              onChange={(e) => setOauthForm({ ...oauthForm, teamId: e.target.value })}
+                              placeholder="10-char Team ID"
+                              className="w-full px-3 py-2 font-mono rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950"
+                            />
+                          </div>
+                          <div>
+                            <label className="block font-medium mb-1">Apple Key ID *</label>
+                            <input
+                              required
+                              value={oauthForm.keyId}
+                              onChange={(e) => setOauthForm({ ...oauthForm, keyId: e.target.value })}
+                              placeholder="10-char Key ID"
+                              className="w-full px-3 py-2 font-mono rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950"
+                            />
+                          </div>
+                          <div className="sm:col-span-2">
+                            <label className="block font-medium mb-1">
+                              Apple Private Key (.p8 PEM){' '}
+                              {prov.hasPrivateKey && (
+                                <span className="text-emerald-600 dark:text-emerald-400 font-normal">
+                                  ({isZh ? '已加密保存，留空不改' : 'stored; blank to keep'})
+                                </span>
+                              )}
+                            </label>
+                            <textarea
+                              rows={3}
+                              required={!prov.hasPrivateKey}
+                              value={oauthForm.privateKey}
+                              onChange={(e) => setOauthForm({ ...oauthForm, privateKey: e.target.value })}
+                              placeholder="-----BEGIN PRIVATE KEY-----&#10;...&#10;-----END PRIVATE KEY-----"
+                              className="w-full px-3 py-2 font-mono rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950"
+                            />
+                          </div>
+                        </>
+                      )}
+                    </div>
+
+                    <div className="flex flex-wrap items-center justify-between gap-3 pt-2 border-t border-slate-100 dark:border-slate-800">
+                      <label className="inline-flex items-center gap-2 font-medium text-slate-700 dark:text-slate-300">
+                        <input
+                          type="checkbox"
+                          checked={oauthForm.enabled}
+                          onChange={(e) => setOauthForm({ ...oauthForm, enabled: e.target.checked })}
+                          className="rounded accent-blue-600"
+                        />
+                        {isZh ? '在登录页显示并启用此登录方式' : 'Enable this provider on sign-in page'}
+                      </label>
+                      <div className="flex items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={() => setExpandedOAuth(null)}
+                          className="px-3 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700"
+                        >
+                          {t('cancel')}
+                        </button>
+                        <button
+                          type="submit"
+                          disabled={savingOAuth === prov.provider}
+                          className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg bg-blue-600 text-white font-semibold hover:bg-blue-700 disabled:opacity-50"
+                        >
+                          {savingOAuth === prov.provider ? (
+                            <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                          ) : (
+                            <Save className="w-3.5 h-3.5" />
+                          )}
+                          {t('save')}
+                        </button>
+                      </div>
+                    </div>
+                  </form>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      </div>
 
       {/* Baota / SSL Certificate (/certs:ro) & Auto/Custom Self-Signed TLS */}
       {tlsStatus && (

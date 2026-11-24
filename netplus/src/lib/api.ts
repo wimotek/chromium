@@ -32,12 +32,14 @@ export async function apiRequest<T>(path: string, init: RequestInit = {}): Promi
   if (!headers.has('Content-Type') && init.body) {
     headers.set('Content-Type', 'application/json');
   }
+  headers.set('X-Requested-With', 'NetPlus');
   if (memoryToken) {
     headers.set('Authorization', `Bearer ${memoryToken}`);
   }
 
   const res = await fetch(path, {
     ...init,
+    credentials: 'include',
     headers,
   });
 
@@ -52,7 +54,7 @@ export async function apiRequest<T>(path: string, init: RequestInit = {}): Promi
   }
 
   if (!res.ok) {
-    if (res.status === 401 && memoryToken && !path.startsWith('/api/auth/')) {
+    if (res.status === 401 && !path.startsWith('/api/auth/')) {
       memoryToken = null;
       unauthorizedHandler?.();
     }

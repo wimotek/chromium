@@ -17,6 +17,7 @@ const en = {
   // Navigation
   navOverview: 'Overview',
   navDns: 'Domain DNS',
+  navMonitors: 'Live Monitors',
   navOci: 'OCI ARM Sniper',
   navClouds: 'Cloud Hosts',
   navIpMonitor: 'IP Pool & Monitor',
@@ -248,6 +249,7 @@ const zhCN: Record<TranslationKeys, string> = {
 
   navOverview: '控制台总览',
   navDns: '域名 DNS 管理',
+  navMonitors: '实时监控探针',
   navOci: 'ARM 乌龟抢注',
   navClouds: '多云主机管理',
   navIpMonitor: 'IP 增换删与监控',
@@ -470,6 +472,7 @@ const ja: Record<TranslationKeys, string> = {
 
   navOverview: '概要',
   navDns: 'DNS プロバイダー',
+  navMonitors: 'ライブ監視',
   navOci: 'Oracle Cloud・ARM',
   navClouds: 'クラウドホスト',
   navIpMonitor: 'IP 管理・監視',
@@ -692,6 +695,7 @@ const de: Record<TranslationKeys, string> = {
 
   navOverview: 'Übersicht',
   navDns: 'DNS-Anbieter',
+  navMonitors: 'Live-Monitoring',
   navOci: 'Oracle Cloud & ARM',
   navClouds: 'Cloud-Hosts',
   navIpMonitor: 'IP-Bestand & Monitor',
@@ -914,6 +918,7 @@ const es: Record<TranslationKeys, string> = {
 
   navOverview: 'Resumen',
   navDns: 'Proveedores DNS',
+  navMonitors: 'Monitores en Vivo',
   navOci: 'Oracle Cloud y ARM',
   navClouds: 'Hosts Multi-Nube',
   navIpMonitor: 'IPs y Monitoreo',

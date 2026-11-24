@@ -28,6 +28,7 @@ import type {
   DnsZoneSummary,
   LanguageCode,
   ManagedDnsRecord,
+  ManagedDomain,
 } from '../types/models';
 import { DnsRecordsPanel } from './DnsRecordsPanel';
 
@@ -35,6 +36,7 @@ interface DnsBatchViewProps {
   providers: DnsProvider[];
   rules: DnsSyncRule[];
   records: ManagedDnsRecord[];
+  managedDomains: ManagedDomain[];
   hosts: CloudHost[];
   lang: LanguageCode;
   onReload: () => Promise<void>;
@@ -110,7 +112,7 @@ function isProviderConfigured(p: DnsProvider): boolean {
   return p.hasSecret;
 }
 
-export function DnsBatchView({ providers, rules, records, hosts, lang, onReload }: DnsBatchViewProps) {
+export function DnsBatchView({ providers, rules, records, managedDomains, hosts, lang, onReload }: DnsBatchViewProps) {
   const t = (key: TranslationKeys) => translate(lang, key);
   const isZh = lang === 'zh-CN';
   const [subTab, setSubTab] = useState<'records' | 'providers' | 'rules'>('records');
@@ -186,11 +188,15 @@ export function DnsBatchView({ providers, rules, records, hosts, lang, onReload 
     toast.show(msg, kind);
   };
 
-  // Auto-load Cloudflare zones whenever a configured Cloudflare provider is chosen in the rule modal
+  // Auto-load provider domains whenever a configured provider is chosen in the rule modal (Cloudflare / DNSPod / Aliyun / Porkbun)
   const fetchZonesForProvider = useCallback(
     async (providerId: string, forceRefresh = false) => {
       const prov = providerMap.get(providerId);
-      if (!prov || prov.type !== 'cloudflare' || !prov.hasSecret) {
+      if (
+        !prov ||
+        !prov.hasSecret ||
+        !['cloudflare', 'dnspod', 'aliyun', 'porkbun'].includes(prov.type)
+      ) {
         setCfZones([]);
         setZonesError(null);
         return;
@@ -200,36 +206,41 @@ export function DnsBatchView({ providers, rules, records, hosts, lang, onReload 
       try {
         const res = await apiRequest<{
           ok: boolean;
-          zones: DnsZoneSummary[];
+          domains?: Array<{ id: string; name: string; status?: string }>;
           error?: string;
-        }>(`/api/dns/providers/${providerId}/zones${forceRefresh ? '?refresh=1' : ''}`);
-        if (res.ok) {
-          setCfZones(res.zones);
+        }>(`/api/dns/providers/${encodeURIComponent(providerId)}/domains${forceRefresh ? '?refresh=1' : ''}`);
+        if (res.ok && Array.isArray(res.domains)) {
+          const zones: DnsZoneSummary[] = res.domains.map((d) => ({
+            id: d.id,
+            name: d.name,
+            status: d.status || 'active',
+          }));
+          setCfZones(zones);
           setZonesError(null);
-          // Auto-select first zone if domain is currently empty
+          // Auto-select first domain if domain is currently empty
           setRuleForm((prev) => {
             if (prev.providerId !== providerId) return prev;
-            if (!prev.domain && res.zones.length > 0) {
+            if (!prev.domain && zones.length > 0) {
               return {
                 ...prev,
-                domain: res.zones[0].name,
-                resolvedZoneId: res.zones[0].id,
+                domain: zones[0].name,
+                resolvedZoneId: prov.type === 'cloudflare' ? zones[0].id : '',
               };
             }
-            const matched = res.zones.find(
+            const matched = zones.find(
               (z) =>
                 prev.domain.toLowerCase() === z.name.toLowerCase() ||
                 prev.domain.toLowerCase().endsWith(`.${z.name.toLowerCase()}`)
             );
-            return matched ? { ...prev, resolvedZoneId: matched.id } : prev;
+            return matched && prov.type === 'cloudflare' ? { ...prev, resolvedZoneId: matched.id } : prev;
           });
         } else {
           setCfZones([]);
-          setZonesError(res.error || 'Failed to fetch Cloudflare zones');
+          setZonesError(res.error || 'Failed to fetch provider domains');
         }
       } catch (err) {
         setCfZones([]);
-        setZonesError(err instanceof Error ? err.message : 'Failed to fetch Cloudflare zones');
+        setZonesError(err instanceof Error ? err.message : 'Failed to fetch provider domains');
       } finally {
         setLoadingZones(false);
       }
@@ -843,6 +854,7 @@ export function DnsBatchView({ providers, rules, records, hosts, lang, onReload 
         <DnsRecordsPanel
           providers={providers}
           records={records}
+          managedDomains={managedDomains}
           detectedIps={detectedIps}
           lang={lang}
           onReload={onReload}
@@ -1441,20 +1453,22 @@ export function DnsBatchView({ providers, rules, records, hosts, lang, onReload 
                       <label className="block text-xs font-medium text-slate-700 dark:text-slate-300">
                         {t('domain')}
                       </label>
-                      {selectedProvider?.type === 'cloudflare' && selectedProvider.hasSecret && (
-                        <button
-                          type="button"
-                          disabled={loadingZones}
-                          onClick={() => void fetchZonesForProvider(selectedProvider.id, true)}
-                          className="inline-flex items-center gap-1 text-[11px] font-medium text-blue-600 dark:text-blue-400 hover:underline whitespace-nowrap"
-                        >
-                          <RefreshCw className={`w-3 h-3 ${loadingZones ? 'animate-spin' : ''}`} />
-                          {isZh ? '刷新域名列表' : 'Refresh Zones'}
-                        </button>
-                      )}
+                      {selectedProvider &&
+                        selectedProvider.hasSecret &&
+                        ['cloudflare', 'dnspod', 'aliyun', 'porkbun'].includes(selectedProvider.type) && (
+                          <button
+                            type="button"
+                            disabled={loadingZones}
+                            onClick={() => void fetchZonesForProvider(selectedProvider.id, true)}
+                            className="inline-flex items-center gap-1 text-[11px] font-medium text-blue-600 dark:text-blue-400 hover:underline whitespace-nowrap"
+                          >
+                            <RefreshCw className={`w-3 h-3 ${loadingZones ? 'animate-spin' : ''}`} />
+                            {isZh ? '刷新域名列表' : 'Refresh Domains'}
+                          </button>
+                        )}
                     </div>
 
-                    {selectedProvider?.type === 'cloudflare' && cfZones.length > 0 ? (
+                    {cfZones.length > 0 ? (
                       <select
                         required
                         value={ruleForm.domain}
@@ -1463,7 +1477,7 @@ export function DnsBatchView({ providers, rules, records, hosts, lang, onReload 
                           setRuleForm({
                             ...ruleForm,
                             domain: e.target.value,
-                            resolvedZoneId: z?.id ?? '',
+                            resolvedZoneId: selectedProvider?.type === 'cloudflare' ? z?.id ?? '' : '',
                           });
                         }}
                         className="w-full px-3 py-2 text-sm font-mono rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950"
@@ -1489,19 +1503,17 @@ export function DnsBatchView({ providers, rules, records, hosts, lang, onReload 
                       />
                     )}
 
-                    {selectedProvider?.type === 'cloudflare' && (
+                    {(loadingZones || zonesError || (selectedProvider?.type === 'cloudflare' && ruleForm.resolvedZoneId)) && (
                       <div className="mt-1 text-[11px] font-mono text-slate-500 dark:text-slate-400 truncate">
                         {loadingZones
                           ? isZh
-                            ? '正在自动获取 Cloudflare 域名与 Zone ID...'
-                            : 'Fetching Cloudflare zones...'
+                            ? '正在自动拉取该服务商下的域名列表...'
+                            : 'Fetching domains from provider...'
                           : ruleForm.resolvedZoneId
                           ? `Zone ID (auto): ${ruleForm.resolvedZoneId}`
                           : zonesError
-                          ? `${zonesError} (${isZh ? '仍可手动输入域名，同步时自动查询' : 'you can still type domain'})`
-                          : isZh
-                          ? '保存/同步时自动获取 Cloudflare Zone ID'
-                          : 'Cloudflare Zone ID auto-resolved on save/sync'}
+                          ? `${zonesError} (${isZh ? '仍可手动输入域名' : 'you can still type domain'})`
+                          : ''}
                       </div>
                     )}
                   </div>

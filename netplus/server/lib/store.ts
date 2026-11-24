@@ -4,15 +4,18 @@ import path from 'node:path';
 import type {
   AuditLogEntry,
   AuditStats,
+  BoundOAuthAccount,
   CloudAccount,
   CloudHost,
   CronJob,
   DnsProvider,
   DnsSyncRule,
   ManagedDnsRecord,
+  ManagedDomain,
   ManagedIpRecord,
   MonitorTarget,
   NotificationChannel,
+  OAuthProviderId,
   OciProfile,
   OciSniperTask,
   SecurityConfig,
@@ -55,12 +58,37 @@ export interface AdminRecord {
   updatedAt: string;
 }
 
+export interface StoredOAuthProviderConfig {
+  provider: OAuthProviderId;
+  enabled: boolean;
+  clientId?: string;
+  clientSecretEncrypted?: string;
+  secretPreview?: string;
+  tenantId?: string; // Microsoft Entra tenant (default 'common')
+  teamId?: string; // Apple Team ID
+  keyId?: string; // Apple Key ID
+  privateKeyEncrypted?: string; // Apple .p8 key
+  updatedAt?: string;
+}
+
+export interface PersistedSessionRecord {
+  token: string;
+  username: string;
+  ip: string;
+  createdAt: number;
+  expiresAt: number;
+  loginMethod?: string;
+}
+
 export interface PersistedState {
   admin?: AdminRecord;
   security: SecurityConfig;
+  oauthProviders: StoredOAuthProviderConfig[];
+  boundOAuthAccounts: BoundOAuthAccount[];
   dnsProviders: StoredDnsProvider[];
   dnsRules: DnsSyncRule[];
   dnsRecords: ManagedDnsRecord[];
+  managedDomains: ManagedDomain[];
   ociProfiles: StoredOciProfile[];
   ociSniperTasks: StoredOciSniperTask[];
   cloudAccounts: StoredCloudAccount[];
@@ -156,9 +184,12 @@ function createDefaultState(): PersistedState {
       maxAuditSizeBytes: DEFAULT_MAX_AUDIT_BYTES,
       auditRetentionPercent: 75,
     },
+    oauthProviders: [],
+    boundOAuthAccounts: [],
     dnsProviders: [],
     dnsRules: [],
     dnsRecords: [],
+    managedDomains: [],
     ociProfiles: [],
     ociSniperTasks: [],
     cloudAccounts: [],
@@ -202,6 +233,7 @@ class DataStore {
   private dataDir: string;
   private stateFile: string;
   private auditFile: string;
+  private sessionsFile: string;
   private state: PersistedState;
   private adminInitMode: 'persisted' | 'env_seed' | 'auto_generated' = 'persisted';
   private generatedInitialPassword: string | null = null;
@@ -211,6 +243,7 @@ class DataStore {
     fs.mkdirSync(this.dataDir, { recursive: true });
     this.stateFile = resolveConfinedPath(this.dataDir, 'state.json');
     this.auditFile = resolveConfinedPath(this.dataDir, 'audit.ndjson');
+    this.sessionsFile = resolveConfinedPath(this.dataDir, 'sessions.json');
     this.state = this.loadState();
 
     // Always ensure an admin account exists before accepting any HTTP request (no public web bootstrap page).
@@ -271,8 +304,26 @@ class DataStore {
         const defaults = createDefaultState();
         const mergedSnipers = (parsed.ociSniperTasks ?? defaults.ociSniperTasks).map((t) => ({
           ...t,
+          adaptiveInterval: t.adaptiveInterval !== false,
+          minIntervalSeconds: typeof t.minIntervalSeconds === 'number' ? t.minIntervalSeconds : 20,
+          maxIntervalSeconds: typeof t.maxIntervalSeconds === 'number' ? t.maxIntervalSeconds : 120,
+          stepUp429Seconds: typeof t.stepUp429Seconds === 'number' ? t.stepUp429Seconds : 15,
+          stepDownOkSeconds: typeof t.stepDownOkSeconds === 'number' ? t.stepDownOkSeconds : 5,
+          currentIntervalSeconds:
+            typeof t.currentIntervalSeconds === 'number'
+              ? t.currentIntervalSeconds
+              : Math.max(15, t.intervalSeconds || 30),
+          consecutive429Count: typeof t.consecutive429Count === 'number' ? t.consecutive429Count : 0,
+          consecutiveOkCount: typeof t.consecutiveOkCount === 'number' ? t.consecutiveOkCount : 0,
           useSystemNotifications: t.useSystemNotifications !== false,
           notifyChannelIds: Array.isArray(t.notifyChannelIds) ? t.notifyChannelIds : [],
+        }));
+        const mergedMonitors = (Array.isArray(parsed.monitors) ? parsed.monitors : []).map((m) => ({
+          ...m,
+          notifyOnDown: m.notifyOnDown !== undefined ? Boolean(m.notifyOnDown) : Boolean(m.notifyOnAlert),
+          notifyOnRecover: m.notifyOnRecover !== undefined ? Boolean(m.notifyOnRecover) : Boolean(m.notifyOnAlert),
+          notifyChannelIds: Array.isArray(m.notifyChannelIds) ? m.notifyChannelIds : [],
+          history: Array.isArray(m.history) ? m.history : [],
         }));
         const managedProviders = new Set(['oracle', 'aws', 'aliyun', 'gcp']);
         const cleanedHosts = (parsed.cloudHosts ?? defaults.cloudHosts)
@@ -289,15 +340,18 @@ class DataStore {
         return {
           ...defaults,
           ...parsed,
+          oauthProviders: Array.isArray(parsed.oauthProviders) ? parsed.oauthProviders : [],
+          boundOAuthAccounts: Array.isArray(parsed.boundOAuthAccounts) ? parsed.boundOAuthAccounts : [],
           dnsProviders: Array.isArray(parsed.dnsProviders) ? parsed.dnsProviders : [],
           dnsRules: Array.isArray(parsed.dnsRules) ? parsed.dnsRules : [],
           dnsRecords: Array.isArray(parsed.dnsRecords) ? parsed.dnsRecords : [],
+          managedDomains: Array.isArray(parsed.managedDomains) ? parsed.managedDomains : [],
           ociProfiles: Array.isArray(parsed.ociProfiles) ? parsed.ociProfiles : [],
           cloudAccounts: Array.isArray(parsed.cloudAccounts) ? parsed.cloudAccounts : [],
           cloudHosts: cleanedHosts,
           ociSniperTasks: mergedSnipers,
           managedIps: Array.isArray(parsed.managedIps) ? parsed.managedIps : [],
-          monitors: Array.isArray(parsed.monitors) ? parsed.monitors : [],
+          monitors: mergedMonitors,
           notificationChannels: Array.isArray(parsed.notificationChannels) ? parsed.notificationChannels : [],
           cronJobs: Array.isArray(parsed.cronJobs) ? parsed.cronJobs : defaults.cronJobs,
           security: { ...defaults.security, ...(parsed.security ?? {}) },
@@ -558,6 +612,61 @@ class DataStore {
       ch.secretEncrypted = encryptSecret(secret.trim());
       ch.secretPreview = maskSecret(secret.trim());
     }
+  }
+
+  // ---- OAuth provider encrypted secrets ----
+  setOAuthProviderSecrets(
+    cfg: StoredOAuthProviderConfig,
+    secrets: { clientSecret?: string; privateKey?: string }
+  ) {
+    if (secrets.clientSecret && secrets.clientSecret.trim()) {
+      const clean = secrets.clientSecret.trim();
+      cfg.clientSecretEncrypted = encryptSecret(clean);
+      cfg.secretPreview = maskSecret(clean);
+    }
+    if (secrets.privateKey && secrets.privateKey.trim()) {
+      cfg.privateKeyEncrypted = encryptSecret(secrets.privateKey.trim());
+    }
+  }
+
+  getOAuthProviderDecryptedSecrets(provider: OAuthProviderId): {
+    clientSecret: string;
+    privateKey: string;
+  } {
+    const cfg = this.state.oauthProviders.find((p) => p.provider === provider);
+    return {
+      clientSecret: decryptSecret(cfg?.clientSecretEncrypted),
+      privateKey: decryptSecret(cfg?.privateKeyEncrypted),
+    };
+  }
+
+  // ---- Persisted Sessions (survives page refresh & container restart) ----
+  loadSessions(): PersistedSessionRecord[] {
+    if (!fs.existsSync(this.sessionsFile)) return [];
+    try {
+      const raw = fs.readFileSync(this.sessionsFile, 'utf8');
+      const parsed = JSON.parse(raw);
+      if (!Array.isArray(parsed)) return [];
+      const now = Date.now();
+      return parsed.filter(
+        (s): s is PersistedSessionRecord =>
+          s &&
+          typeof s.token === 'string' &&
+          typeof s.username === 'string' &&
+          typeof s.expiresAt === 'number' &&
+          s.expiresAt > now
+      );
+    } catch {
+      return [];
+    }
+  }
+
+  saveSessions(records: PersistedSessionRecord[]) {
+    const now = Date.now();
+    const active = records.filter((s) => s.expiresAt > now).slice(-100);
+    const tmpFile = resolveConfinedPath(this.dataDir, `sessions.${crypto.randomBytes(4).toString('hex')}.tmp`);
+    fs.writeFileSync(tmpFile, JSON.stringify(active, null, 2), { mode: 0o600 });
+    fs.renameSync(tmpFile, this.sessionsFile);
   }
 
   // ---- Real Size-Capped Audit Logging ----

@@ -101,6 +101,23 @@ export interface ManagedDnsRecord {
   updatedAt: string;
 }
 
+export interface ManagedDomain {
+  id: string;
+  providerId: string;
+  domain: string;
+  zoneId?: string;
+  status: string;
+  nameServers: string[];
+  originalNameServers?: string[];
+  currentLiveNs?: string[];
+  nsVerified?: boolean;
+  nsCheckedAt?: string;
+  nsNote?: string;
+  notes?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface OciProfile {
   id: string;
   name: string;
@@ -195,7 +212,22 @@ export interface OciSniperTask {
   availabilityDomains: string[];
   assignPublicIp: boolean;
   assignIpv6: boolean;
+  /** Adaptive AIMD 429 avoidance + jitter (recommended default: true) */
+  adaptiveInterval?: boolean;
+  /** Minimum interval in seconds when unthrottled (default: 20s) */
+  minIntervalSeconds?: number;
+  /** Base / initial interval in seconds (default: 30s) */
   intervalSeconds: number;
+  /** Maximum adaptive ceiling on repeated 429s (default: 120s) */
+  maxIntervalSeconds?: number;
+  /** Increment added to current interval on HTTP 429 (default: +15s) */
+  stepUp429Seconds?: number;
+  /** Decrement subtracted after consecutive non-429 attempts (default: -5s) */
+  stepDownOkSeconds?: number;
+  /** Current runtime interval chosen by adaptive controller */
+  currentIntervalSeconds?: number;
+  consecutive429Count?: number;
+  consecutiveOkCount?: number;
   jitterPercent: number;
   retryOnOutOfCapacity: boolean;
   backoffOn429Seconds: number;
@@ -374,15 +406,21 @@ export interface MonitorCheckSample {
 export interface MonitorTarget {
   id: string;
   name: string;
+  groupName?: string;
   type: MonitorProbeType;
   target: string; // IP, host:port, URL, or FQDN
   port?: number; // used for TCP probes
   expectedIp?: string; // used for DNS drift probes
+  httpKeyword?: string; // optional body keyword assertion for HTTP(S) probes
+  expectedStatusCodes?: string; // e.g. "200-399" or "200,204"
   intervalSeconds: number;
   timeoutMs: number;
   failureThreshold: number;
   enabled: boolean;
   notifyOnAlert: boolean;
+  notifyOnDown?: boolean;
+  notifyOnRecover?: boolean;
+  notifyChannelIds?: string[];
   linkedHostId?: string;
   linkedIpId?: string;
   status: 'up' | 'degraded' | 'down' | 'pending';
@@ -571,10 +609,45 @@ export interface CaptchaChallengeResponse {
   expiresAt: number;
 }
 
+export type OAuthProviderId = 'microsoft' | 'github' | 'google' | 'apple';
+
+export interface OAuthProviderPublicConfig {
+  provider: OAuthProviderId;
+  enabled: boolean;
+  configured: boolean;
+  envManaged: boolean;
+  clientId?: string;
+  tenantId?: string; // Microsoft Entra tenant (default 'common')
+  teamId?: string; // Apple Team ID
+  keyId?: string; // Apple Key ID
+  hasClientSecret: boolean;
+  secretPreview?: string;
+  hasPrivateKey?: boolean; // Apple .p8 private key
+  boundCount: number;
+  callbackUri?: string;
+}
+
+export interface BoundOAuthAccount {
+  id: string;
+  provider: OAuthProviderId;
+  subject: string;
+  email?: string;
+  displayName?: string;
+  avatarUrl?: string;
+  boundAt: string;
+  lastLoginAt?: string;
+}
+
 export interface AuthStatusResponse {
   envManagedAdmin: boolean;
   authenticated: boolean;
   username?: string;
+  oauthProviders?: Array<{
+    provider: OAuthProviderId;
+    configured: boolean;
+    enabled: boolean;
+    boundCount: number;
+  }>;
   security: {
     captchaDifficulty: 'standard' | 'high';
     powDifficulty: number;

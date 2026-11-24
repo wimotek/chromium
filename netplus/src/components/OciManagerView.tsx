@@ -110,6 +110,37 @@ export function OciManagerView({
   const [generatingSshKey, setGeneratingSshKey] = useState(false);
   const [generatedSshKey, setGeneratedSshKey] = useState<GeneratedSshKeyInfo | null>(null);
 
+  // Local live-polled copy of sniper tasks so running tasks auto-update Last OCI Response every 4s
+  const [liveTasks, setLiveTasks] = useState<OciSniperTask[]>(tasks);
+  useEffect(() => {
+    setLiveTasks(tasks);
+  }, [tasks]);
+
+  const hasRunningSniper = useMemo(
+    () => liveTasks.some((t) => t.status === 'running'),
+    [liveTasks]
+  );
+
+  useEffect(() => {
+    if (!hasRunningSniper) return;
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const fresh = await apiRequest<OciSniperTask[]>('/api/oci/sniper');
+        if (!cancelled && Array.isArray(fresh)) {
+          setLiveTasks(fresh);
+        }
+      } catch {
+        // silent background poll
+      }
+    };
+    const timer = window.setInterval(() => void poll(), 4000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [hasRunningSniper]);
+
   const [taskForm, setTaskForm] = useState({
     name: '',
     profileId: '',
@@ -124,10 +155,15 @@ export function OciManagerView({
     availabilityDomains: [] as string[],
     assignPublicIp: true,
     assignIpv6: true,
-    intervalSeconds: '45',
-    jitterPercent: '20',
+    adaptiveInterval: true,
+    intervalSeconds: '30',
+    minIntervalSeconds: '20',
+    maxIntervalSeconds: '120',
+    stepUp429Seconds: '15',
+    stepDownOkSeconds: '5',
+    jitterPercent: '15',
     retryOnOutOfCapacity: true,
-    backoffOn429Seconds: '180',
+    backoffOn429Seconds: '60',
     maxAttempts: '0',
     autoStopOnSuccess: true,
     autoBindDnsRuleId: '',
@@ -303,10 +339,15 @@ export function OciManagerView({
       availabilityDomains: firstProf?.availabilityDomains ?? [],
       assignPublicIp: true,
       assignIpv6: true,
-      intervalSeconds: '45',
-      jitterPercent: '20',
+      adaptiveInterval: true,
+      intervalSeconds: '30',
+      minIntervalSeconds: '20',
+      maxIntervalSeconds: '120',
+      stepUp429Seconds: '15',
+      stepDownOkSeconds: '5',
+      jitterPercent: '15',
       retryOnOutOfCapacity: true,
-      backoffOn429Seconds: '180',
+      backoffOn429Seconds: '60',
       maxAttempts: '0',
       autoStopOnSuccess: true,
       autoBindDnsRuleId: '',
@@ -340,10 +381,15 @@ export function OciManagerView({
           : fallbackProf?.availabilityDomains ?? task.availabilityDomains ?? [],
       assignPublicIp: task.assignPublicIp,
       assignIpv6: task.assignIpv6,
-      intervalSeconds: String(task.intervalSeconds),
-      jitterPercent: String(task.jitterPercent),
+      adaptiveInterval: task.adaptiveInterval !== false,
+      intervalSeconds: String(task.intervalSeconds ?? 30),
+      minIntervalSeconds: String(task.minIntervalSeconds ?? 20),
+      maxIntervalSeconds: String(task.maxIntervalSeconds ?? 120),
+      stepUp429Seconds: String(task.stepUp429Seconds ?? 15),
+      stepDownOkSeconds: String(task.stepDownOkSeconds ?? 5),
+      jitterPercent: String(task.jitterPercent ?? 15),
       retryOnOutOfCapacity: task.retryOnOutOfCapacity,
-      backoffOn429Seconds: String(task.backoffOn429Seconds),
+      backoffOn429Seconds: String(task.backoffOn429Seconds ?? 60),
       maxAttempts: String(task.maxAttempts),
       autoStopOnSuccess: task.autoStopOnSuccess,
       autoBindDnsRuleId: task.autoBindDnsRuleId ?? '',
@@ -366,15 +412,23 @@ export function OciManagerView({
       );
       return;
     }
+    const minSec = clampNumericField(taskForm.minIntervalSeconds, 10, 300, 20);
+    const maxSec = clampNumericField(taskForm.maxIntervalSeconds, Math.max(30, minSec), 600, 120);
+    const initSec = clampNumericField(taskForm.intervalSeconds, minSec, maxSec, 30);
     const payload = {
       ...taskForm,
       profileId: effectiveProfile.id,
       ocpus: clampNumericField(taskForm.ocpus, 1, 4, 4),
       memoryInGBs: clampNumericField(taskForm.memoryInGBs, 1, 24, 24),
       bootVolumeSizeInGBs: clampNumericField(taskForm.bootVolumeSizeInGBs, 50, 200, 100),
-      intervalSeconds: clampNumericField(taskForm.intervalSeconds, 15, undefined, 45),
-      jitterPercent: clampNumericField(taskForm.jitterPercent, 0, 50, 20),
-      backoffOn429Seconds: clampNumericField(taskForm.backoffOn429Seconds, 30, undefined, 180),
+      adaptiveInterval: taskForm.adaptiveInterval,
+      intervalSeconds: initSec,
+      minIntervalSeconds: minSec,
+      maxIntervalSeconds: maxSec,
+      stepUp429Seconds: clampNumericField(taskForm.stepUp429Seconds, 5, 120, 15),
+      stepDownOkSeconds: clampNumericField(taskForm.stepDownOkSeconds, 1, 60, 5),
+      jitterPercent: clampNumericField(taskForm.jitterPercent, 0, 50, 15),
+      backoffOn429Seconds: clampNumericField(taskForm.backoffOn429Seconds, 15, 600, 60),
       maxAttempts: clampNumericField(taskForm.maxAttempts, 0, undefined, 0),
       availabilityDomains:
         taskForm.availabilityDomains.length > 0
@@ -563,10 +617,33 @@ export function OciManagerView({
 
       {/* ARM Sniper Tasks List */}
       <div className="space-y-4">
-        {tasks.map((task) => {
+        {hasRunningSniper && (
+          <div className="flex items-center justify-between gap-2 px-3.5 py-2 rounded-lg border border-emerald-200 dark:border-emerald-900/60 bg-emerald-50/60 dark:bg-emerald-950/25 text-xs text-emerald-700 dark:text-emerald-300">
+            <span className="inline-flex items-center gap-2 font-medium">
+              <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
+              {isZh
+                ? '后台抢注引擎运行中 · 页面每 4 秒自动刷新最新 OCI 响应与动态间隔'
+                : 'Sniper engine running · Auto-refreshing live OCI responses & adaptive interval every 4s'}
+            </span>
+            <button
+              type="button"
+              onClick={() => void onReload()}
+              className="inline-flex items-center gap-1 text-[11px] font-medium hover:underline"
+            >
+              <RefreshCw className="w-3 h-3" />
+              {t('refresh')}
+            </button>
+          </div>
+        )}
+        {liveTasks.map((task) => {
           const prof = profileMap.get(task.profileId);
           const isRunning = task.status === 'running';
           const autoDiscoverPending = !task.imageOcid || !prof?.subnetOcid;
+          const isAdaptive = task.adaptiveInterval !== false;
+          const curInterval = task.currentIntervalSeconds ?? task.intervalSeconds;
+          const nextInSec = task.nextAttemptAt
+            ? Math.max(0, Math.round((new Date(task.nextAttemptAt).getTime() - Date.now()) / 1000))
+            : null;
           return (
             <div
               key={task.id}
@@ -700,9 +777,17 @@ export function OciManagerView({
                   </div>
                 </div>
                 <div>
-                  <div className="text-slate-500 dark:text-slate-400">{t('pollingIntervalSec')}</div>
+                  <div className="text-slate-500 dark:text-slate-400">
+                    {isAdaptive
+                      ? isZh
+                        ? '动态回避 429 策略'
+                        : 'Adaptive 429 Timing'
+                      : t('pollingIntervalSec')}
+                  </div>
                   <div className="mt-0.5 font-mono tabular-nums text-slate-800 dark:text-slate-200">
-                    {task.intervalSeconds}s ±{task.jitterPercent}% · 429:{task.backoffOn429Seconds}s
+                    {isAdaptive
+                      ? `${isZh ? '当前' : 'Now'} ${curInterval}s (${task.minIntervalSeconds ?? 20}–${task.maxIntervalSeconds ?? 120}s · ±${task.jitterPercent}%)`
+                      : `${task.intervalSeconds}s ±${task.jitterPercent}% · 429:${task.backoffOn429Seconds}s`}
                   </div>
                 </div>
                 <div>
@@ -715,23 +800,37 @@ export function OciManagerView({
                   <div className="text-slate-500 dark:text-slate-400">{t('lastRun')}</div>
                   <div className="mt-0.5 font-mono tabular-nums text-slate-800 dark:text-slate-200">
                     {formatTimeAgo(task.lastAttemptAt)}
+                    {isRunning && nextInSec !== null && (
+                      <span className="ml-1.5 text-[11px] text-emerald-600 dark:text-emerald-400">
+                        · {isZh ? `下次 ${nextInSec}s` : `next ${nextInSec}s`}
+                      </span>
+                    )}
                   </div>
                 </div>
               </div>
 
-              <div
-                className="pt-3 border-t border-slate-200/70 dark:border-slate-800/70 text-xs font-mono text-slate-600 dark:text-slate-400 truncate min-h-[29px]"
-                title={task.lastMessage || undefined}
-              >
+              <div className="pt-3 border-t border-slate-200/70 dark:border-slate-800/70 text-xs font-mono text-slate-600 dark:text-slate-400 leading-relaxed break-words">
                 <span className="font-sans font-medium text-slate-500 mr-2">{t('lastResponse')}:</span>
-                <span className={task.lastMessage ? '' : 'font-sans text-slate-400 dark:text-slate-500'}>
+                <span
+                  className={
+                    !task.lastMessage
+                      ? 'font-sans text-slate-400 dark:text-slate-500'
+                      : /429|TooManyRequests/i.test(task.lastMessage)
+                      ? 'text-amber-600 dark:text-amber-400'
+                      : /Service limit|失败|Error/i.test(task.lastMessage)
+                      ? 'text-red-600 dark:text-red-400'
+                      : /已创建|Allocated|succeeded/i.test(task.lastMessage)
+                      ? 'text-emerald-600 dark:text-emerald-400 font-semibold'
+                      : ''
+                  }
+                >
                   {task.lastMessage || (isZh ? '尚无执行记录' : 'No attempts yet')}
                 </span>
               </div>
             </div>
           );
         })}
-        {tasks.length === 0 && (
+        {liveTasks.length === 0 && (
           <div className="p-10 text-center rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 text-sm text-slate-400">
             {t('noData')}
           </div>
@@ -1137,78 +1236,236 @@ export function OciManagerView({
                 )}
               </div>
 
-              {/* Rate-limit, Jitter & Backoff Controls */}
-              <div className="pt-3 border-t border-slate-200 dark:border-slate-800 grid grid-cols-2 sm:grid-cols-4 gap-3">
-                <div>
-                  <label className="block text-xs font-medium mb-1">{t('pollingIntervalSec')}</label>
-                  <input
-                    type="text"
-                    inputMode="numeric"
-                    value={taskForm.intervalSeconds}
-                    onChange={(e) => setTaskForm({ ...taskForm, intervalSeconds: cleanDigitsInput(e.target.value) })}
-                    onBlur={() =>
-                      setTaskForm((prev) => ({
-                        ...prev,
-                        intervalSeconds: String(clampNumericField(prev.intervalSeconds, 15, undefined, 45)),
-                      }))
-                    }
-                    placeholder="≥ 15"
-                    className="w-full px-3 py-2 text-xs font-mono rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950"
-                  />
+              {/* Hybrid Adaptive 429 Avoidance + Jitter Timing Controls */}
+              <div className="pt-3 border-t border-slate-200 dark:border-slate-800 space-y-3">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <label className="inline-flex items-center gap-2 text-xs font-semibold text-slate-800 dark:text-slate-200">
+                    <input
+                      type="checkbox"
+                      checked={taskForm.adaptiveInterval}
+                      onChange={(e) => setTaskForm({ ...taskForm, adaptiveInterval: e.target.checked })}
+                      className="rounded accent-blue-600"
+                    />
+                    {isZh
+                      ? '启用智能动态回避 429（AIMD 混合抖动，默认推荐）'
+                      : 'Adaptive 429 Avoidance (Hybrid AIMD + Jitter · Recommended)'}
+                  </label>
+                  <span className="text-[11px] text-slate-500 dark:text-slate-400">
+                    {isZh
+                      ? '默认最佳：20–120s · 初始 30s · 429 +15s · 连续2次正常 -5s · ±15%抖动'
+                      : 'Optimal: 20–120s · Init 30s · 429 +15s · 2× OK -5s · ±15% jitter'}
+                  </span>
                 </div>
-                <div>
-                  <label className="block text-xs font-medium mb-1">{t('jitterPercent')}</label>
-                  <input
-                    type="text"
-                    inputMode="numeric"
-                    value={taskForm.jitterPercent}
-                    onChange={(e) => setTaskForm({ ...taskForm, jitterPercent: cleanDigitsInput(e.target.value) })}
-                    onBlur={() =>
-                      setTaskForm((prev) => ({
-                        ...prev,
-                        jitterPercent: String(clampNumericField(prev.jitterPercent, 0, 50, 20)),
-                      }))
-                    }
-                    placeholder="0-50"
-                    className="w-full px-3 py-2 text-xs font-mono rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950"
-                  />
-                </div>
-                <div>
-                  <label className="block text-xs font-medium mb-1">{t('backoff429Sec')}</label>
-                  <input
-                    type="text"
-                    inputMode="numeric"
-                    value={taskForm.backoffOn429Seconds}
-                    onChange={(e) =>
-                      setTaskForm({ ...taskForm, backoffOn429Seconds: cleanDigitsInput(e.target.value) })
-                    }
-                    onBlur={() =>
-                      setTaskForm((prev) => ({
-                        ...prev,
-                        backoffOn429Seconds: String(clampNumericField(prev.backoffOn429Seconds, 30, undefined, 180)),
-                      }))
-                    }
-                    placeholder="≥ 30"
-                    className="w-full px-3 py-2 text-xs font-mono rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950"
-                  />
-                </div>
-                <div>
-                  <label className="block text-xs font-medium mb-1">{t('maxAttempts')}</label>
-                  <input
-                    type="text"
-                    inputMode="numeric"
-                    value={taskForm.maxAttempts}
-                    onChange={(e) => setTaskForm({ ...taskForm, maxAttempts: cleanDigitsInput(e.target.value) })}
-                    onBlur={() =>
-                      setTaskForm((prev) => ({
-                        ...prev,
-                        maxAttempts: String(clampNumericField(prev.maxAttempts, 0, undefined, 0)),
-                      }))
-                    }
-                    placeholder="0 = ∞"
-                    className="w-full px-3 py-2 text-xs font-mono rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950"
-                  />
-                </div>
+
+                {taskForm.adaptiveInterval ? (
+                  <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+                    <div>
+                      <label className="block text-xs font-medium mb-1">
+                        {isZh ? '最小间隔 (秒)' : 'Min Interval (s)'}
+                      </label>
+                      <input
+                        type="text"
+                        inputMode="numeric"
+                        value={taskForm.minIntervalSeconds}
+                        onChange={(e) => setTaskForm({ ...taskForm, minIntervalSeconds: cleanDigitsInput(e.target.value) })}
+                        onBlur={() =>
+                          setTaskForm((prev) => ({
+                            ...prev,
+                            minIntervalSeconds: String(clampNumericField(prev.minIntervalSeconds, 10, 300, 20)),
+                          }))
+                        }
+                        placeholder="20"
+                        className="w-full px-3 py-2 text-xs font-mono rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-medium mb-1">
+                        {isZh ? '初始间隔 (秒)' : 'Initial Interval (s)'}
+                      </label>
+                      <input
+                        type="text"
+                        inputMode="numeric"
+                        value={taskForm.intervalSeconds}
+                        onChange={(e) => setTaskForm({ ...taskForm, intervalSeconds: cleanDigitsInput(e.target.value) })}
+                        onBlur={() =>
+                          setTaskForm((prev) => ({
+                            ...prev,
+                            intervalSeconds: String(clampNumericField(prev.intervalSeconds, 10, 600, 30)),
+                          }))
+                        }
+                        placeholder="30"
+                        className="w-full px-3 py-2 text-xs font-mono rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-medium mb-1">
+                        {isZh ? '最大上限 (秒)' : 'Max Interval (s)'}
+                      </label>
+                      <input
+                        type="text"
+                        inputMode="numeric"
+                        value={taskForm.maxIntervalSeconds}
+                        onChange={(e) => setTaskForm({ ...taskForm, maxIntervalSeconds: cleanDigitsInput(e.target.value) })}
+                        onBlur={() =>
+                          setTaskForm((prev) => ({
+                            ...prev,
+                            maxIntervalSeconds: String(clampNumericField(prev.maxIntervalSeconds, 30, 600, 120)),
+                          }))
+                        }
+                        placeholder="120"
+                        className="w-full px-3 py-2 text-xs font-mono rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-medium mb-1">
+                        {isZh ? '遇到 429 递增 (+秒)' : 'Step Up on 429 (+s)'}
+                      </label>
+                      <input
+                        type="text"
+                        inputMode="numeric"
+                        value={taskForm.stepUp429Seconds}
+                        onChange={(e) => setTaskForm({ ...taskForm, stepUp429Seconds: cleanDigitsInput(e.target.value) })}
+                        onBlur={() =>
+                          setTaskForm((prev) => ({
+                            ...prev,
+                            stepUp429Seconds: String(clampNumericField(prev.stepUp429Seconds, 5, 120, 15)),
+                          }))
+                        }
+                        placeholder="15"
+                        className="w-full px-3 py-2 text-xs font-mono rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-medium mb-1">
+                        {isZh ? '连续正常回落 (-秒)' : 'Step Down on OK (-s)'}
+                      </label>
+                      <input
+                        type="text"
+                        inputMode="numeric"
+                        value={taskForm.stepDownOkSeconds}
+                        onChange={(e) => setTaskForm({ ...taskForm, stepDownOkSeconds: cleanDigitsInput(e.target.value) })}
+                        onBlur={() =>
+                          setTaskForm((prev) => ({
+                            ...prev,
+                            stepDownOkSeconds: String(clampNumericField(prev.stepDownOkSeconds, 1, 60, 5)),
+                          }))
+                        }
+                        placeholder="5"
+                        className="w-full px-3 py-2 text-xs font-mono rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-medium mb-1">{t('jitterPercent')}</label>
+                      <input
+                        type="text"
+                        inputMode="numeric"
+                        value={taskForm.jitterPercent}
+                        onChange={(e) => setTaskForm({ ...taskForm, jitterPercent: cleanDigitsInput(e.target.value) })}
+                        onBlur={() =>
+                          setTaskForm((prev) => ({
+                            ...prev,
+                            jitterPercent: String(clampNumericField(prev.jitterPercent, 0, 50, 15)),
+                          }))
+                        }
+                        placeholder="15"
+                        className="w-full px-3 py-2 text-xs font-mono rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950"
+                      />
+                    </div>
+                  </div>
+                ) : (
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                    <div>
+                      <label className="block text-xs font-medium mb-1">{t('pollingIntervalSec')}</label>
+                      <input
+                        type="text"
+                        inputMode="numeric"
+                        value={taskForm.intervalSeconds}
+                        onChange={(e) => setTaskForm({ ...taskForm, intervalSeconds: cleanDigitsInput(e.target.value) })}
+                        onBlur={() =>
+                          setTaskForm((prev) => ({
+                            ...prev,
+                            intervalSeconds: String(clampNumericField(prev.intervalSeconds, 15, undefined, 30)),
+                          }))
+                        }
+                        placeholder="≥ 15"
+                        className="w-full px-3 py-2 text-xs font-mono rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-medium mb-1">{t('jitterPercent')}</label>
+                      <input
+                        type="text"
+                        inputMode="numeric"
+                        value={taskForm.jitterPercent}
+                        onChange={(e) => setTaskForm({ ...taskForm, jitterPercent: cleanDigitsInput(e.target.value) })}
+                        onBlur={() =>
+                          setTaskForm((prev) => ({
+                            ...prev,
+                            jitterPercent: String(clampNumericField(prev.jitterPercent, 0, 50, 15)),
+                          }))
+                        }
+                        placeholder="0-50"
+                        className="w-full px-3 py-2 text-xs font-mono rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-medium mb-1">{t('backoff429Sec')}</label>
+                      <input
+                        type="text"
+                        inputMode="numeric"
+                        value={taskForm.backoffOn429Seconds}
+                        onChange={(e) =>
+                          setTaskForm({ ...taskForm, backoffOn429Seconds: cleanDigitsInput(e.target.value) })
+                        }
+                        onBlur={() =>
+                          setTaskForm((prev) => ({
+                            ...prev,
+                            backoffOn429Seconds: String(clampNumericField(prev.backoffOn429Seconds, 30, undefined, 60)),
+                          }))
+                        }
+                        placeholder="≥ 30"
+                        className="w-full px-3 py-2 text-xs font-mono rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-medium mb-1">{t('maxAttempts')}</label>
+                      <input
+                        type="text"
+                        inputMode="numeric"
+                        value={taskForm.maxAttempts}
+                        onChange={(e) => setTaskForm({ ...taskForm, maxAttempts: cleanDigitsInput(e.target.value) })}
+                        onBlur={() =>
+                          setTaskForm((prev) => ({
+                            ...prev,
+                            maxAttempts: String(clampNumericField(prev.maxAttempts, 0, undefined, 0)),
+                          }))
+                        }
+                        placeholder="0 = ∞"
+                        className="w-full px-3 py-2 text-xs font-mono rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950"
+                      />
+                    </div>
+                  </div>
+                )}
+
+                {taskForm.adaptiveInterval && (
+                  <div className="max-w-[200px]">
+                    <label className="block text-xs font-medium mb-1">{t('maxAttempts')}</label>
+                    <input
+                      type="text"
+                      inputMode="numeric"
+                      value={taskForm.maxAttempts}
+                      onChange={(e) => setTaskForm({ ...taskForm, maxAttempts: cleanDigitsInput(e.target.value) })}
+                      onBlur={() =>
+                        setTaskForm((prev) => ({
+                          ...prev,
+                          maxAttempts: String(clampNumericField(prev.maxAttempts, 0, undefined, 0)),
+                        }))
+                      }
+                      placeholder="0 = ∞"
+                      className="w-full px-3 py-2 text-xs font-mono rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950"
+                    />
+                  </div>
+                )}
               </div>
 
               {/* DNS Binding & Unified System Notifications */}

@@ -9,6 +9,52 @@ import {
   ociApiRequest,
 } from './ociClient.ts';
 
+function computeAdaptiveDelay(task: StoredOciSniperTask, outcome: 'ok_ooc' | '429' | 'other', retryAfterSec?: number): {
+  nextIso: string;
+  appliedIntervalSec: number;
+  actualWaitSec: number;
+} {
+  const adaptive = task.adaptiveInterval !== false;
+  const minSec = Math.max(10, Math.min(300, Number(task.minIntervalSeconds ?? 20)));
+  const maxSec = Math.max(minSec, Math.min(600, Number(task.maxIntervalSeconds ?? 120)));
+  const stepUp = Math.max(5, Math.min(120, Number(task.stepUp429Seconds ?? 15)));
+  const stepDown = Math.max(1, Math.min(60, Number(task.stepDownOkSeconds ?? 5)));
+  const baseSec = Math.max(minSec, Math.min(maxSec, Number(task.intervalSeconds || 30)));
+  let currentSec = Number(task.currentIntervalSeconds ?? baseSec);
+  if (!Number.isFinite(currentSec) || currentSec < minSec) currentSec = baseSec;
+
+  if (adaptive) {
+    if (outcome === '429') {
+      task.consecutive429Count = (task.consecutive429Count ?? 0) + 1;
+      task.consecutiveOkCount = 0;
+      const stepped = Math.min(maxSec, currentSec + stepUp);
+      const min429Floor = Math.min(maxSec, Math.max(stepped, retryAfterSec ?? 0));
+      currentSec = min429Floor;
+    } else if (outcome === 'ok_ooc') {
+      task.consecutive429Count = 0;
+      task.consecutiveOkCount = (task.consecutiveOkCount ?? 0) + 1;
+      // Gentle AIMD recovery: step down after 2 consecutive unthrottled OOC responses
+      if (task.consecutiveOkCount >= 2 && currentSec > minSec) {
+        currentSec = Math.max(minSec, currentSec - stepDown);
+        task.consecutiveOkCount = 0;
+      }
+    }
+    task.currentIntervalSeconds = currentSec;
+  } else {
+    currentSec = outcome === '429' ? Math.max(baseSec, task.backoffOn429Seconds || 60, retryAfterSec ?? 0) : baseSec;
+    task.currentIntervalSeconds = currentSec;
+  }
+
+  const jitterPct = Math.min(50, Math.max(0, Number(task.jitterPercent ?? 15)));
+  const jitterFactor = 1 + ((Math.random() * 2 - 1) * jitterPct) / 100;
+  const actualWaitSec = Math.max(10, Math.round(currentSec * jitterFactor));
+  return {
+    nextIso: new Date(Date.now() + actualWaitSec * 1000).toISOString(),
+    appliedIntervalSec: currentSec,
+    actualWaitSec,
+  };
+}
+
 function computeNextAttemptIso(intervalSeconds: number, jitterPercent: number, overrideSeconds?: number): string {
   const baseSec = overrideSeconds ?? Math.max(15, intervalSeconds);
   const jitterFactor = 1 + ((Math.random() * 2 - 1) * Math.min(50, Math.max(0, jitterPercent))) / 100;
@@ -356,16 +402,41 @@ export async function runOciSniperAttempt(
     }
 
     const ociErrMsg = String(res.error || `HTTP ${res.status}`);
-    task.lastMessage = `[${adTarget}] HTTP ${res.status}: ${ociErrMsg}`;
+    const lowerErr = ociErrMsg.toLowerCase();
+    const isServiceLimit =
+      res.status === 400 &&
+      (lowerErr.includes('service limit') || lowerErr.includes('limitexceeded') || lowerErr.includes('limit exceeded'));
+    const isOutOfCapacity =
+      (res.status === 500 || res.status === 502 || res.status === 503) &&
+      (lowerErr.includes('out of host capacity') || lowerErr.includes('capacity'));
 
-    if (res.status === 429) {
-      task.nextAttemptAt = computeNextAttemptIso(task.intervalSeconds, task.jitterPercent, task.backoffOn429Seconds);
-    } else if (res.status === 500 && ociErrMsg.toLowerCase().includes('capacity') && task.retryOnOutOfCapacity) {
-      task.nextAttemptAt = computeNextAttemptIso(task.intervalSeconds, task.jitterPercent);
+    if (res.status === 429 || lowerErr.includes('toomanyrequests')) {
+      const delay = computeAdaptiveDelay(task, '429');
+      task.lastMessage = `[${adTarget}] HTTP 429 触发限流，已动态升频至 ${delay.appliedIntervalSec}s（本次等待 ${delay.actualWaitSec}s）· ${ociErrMsg}`;
+      task.nextAttemptAt = task.status === 'running' ? delay.nextIso : undefined;
+    } else if (isOutOfCapacity && task.retryOnOutOfCapacity) {
+      const delay = computeAdaptiveDelay(task, 'ok_ooc');
+      task.lastMessage = `[${adTarget}] HTTP ${res.status}: ${ociErrMsg}（无 429 限流，当前间隔 ${delay.appliedIntervalSec}s，下次等待 ${delay.actualWaitSec}s）`;
+      task.nextAttemptAt = task.status === 'running' ? delay.nextIso : undefined;
+    } else if (isServiceLimit) {
+      task.status = 'paused';
+      task.nextAttemptAt = undefined;
+      task.lastMessage = `[${adTarget}] HTTP 400 配额已达上限 (${ociErrMsg}) — 可能已成功刷出机器或免费额度已满，任务已自动停止，请登录 OCI 后台检查 CPU / 内存 / 硬盘占用！`;
+      if (task.useSystemNotifications) {
+        await dispatchSystemNotification({
+          event: 'oci_sniper_error',
+          title: `OCI ARM 达到配额上限已自动停止: ${task.name}`,
+          message: `区域: ${profile.region}/${adTarget}\n已尝试次数: ${task.attempts}\n返回信息: HTTP 400 ${ociErrMsg}\n提示: 说明可能已刷到机器但达到免费额度上限，请立即检查 OCI 后台 CPU/内存/引导卷占用情况。`,
+          channelIds: task.notifyChannelIds.length > 0 ? task.notifyChannelIds : undefined,
+          actor,
+          ip,
+        });
+      }
     } else if (res.status === 401 || res.status === 404) {
       task.status = 'failed';
       task.nextAttemptAt = undefined;
       profile.status = 'error';
+      task.lastMessage = `[${adTarget}] HTTP ${res.status}: ${ociErrMsg}`;
       if (task.useSystemNotifications) {
         await dispatchSystemNotification({
           event: 'oci_sniper_error',
@@ -377,7 +448,9 @@ export async function runOciSniperAttempt(
         });
       }
     } else {
-      task.nextAttemptAt = computeNextAttemptIso(task.intervalSeconds, task.jitterPercent);
+      const delay = computeAdaptiveDelay(task, 'other');
+      task.lastMessage = `[${adTarget}] HTTP ${res.status}: ${ociErrMsg}（下次等待 ${delay.actualWaitSec}s）`;
+      task.nextAttemptAt = task.status === 'running' ? delay.nextIso : undefined;
     }
 
     if (task.maxAttempts > 0 && task.attempts >= task.maxAttempts && task.status === 'running') {
@@ -458,9 +531,12 @@ MEMORY_GB = ${task.memoryInGBs}
 BOOT_GB = ${task.bootVolumeSizeInGBs}
 SSH_PUBLIC_KEY = ${JSON.stringify(task.sshPublicKey || '')}
 AVAILABILITY_DOMAINS = ${JSON.stringify(realAds)}
-INTERVAL_SEC = ${task.intervalSeconds}
-JITTER_PCT = ${task.jitterPercent}
-BACKOFF_429 = ${task.backoffOn429Seconds}
+MIN_INTERVAL_SEC = ${task.minIntervalSeconds ?? 20}
+INITIAL_INTERVAL_SEC = ${task.intervalSeconds || 30}
+MAX_INTERVAL_SEC = ${task.maxIntervalSeconds ?? 120}
+STEP_UP_429_SEC = ${task.stepUp429Seconds ?? 15}
+STEP_DOWN_OK_SEC = ${task.stepDownOkSeconds ?? 5}
+JITTER_PCT = ${task.jitterPercent ?? 15}
 MAX_ATTEMPTS = ${task.maxAttempts}
 
 SERVERCHAN_KEY = os.getenv("SERVERCHAN_SENDKEY", "")
@@ -514,11 +590,13 @@ def main() -> None:
     comp_id, ads, subnet_id, image_id = auto_discover_without_maintf(config)
     compute = oci.core.ComputeClient(config)
     attempt = 0
+    sleep_time = INITIAL_INTERVAL_SEC
+    ok_streak = 0
 
     while True:
         attempt += 1
         ad = ads[(attempt - 1) % len(ads)]
-        print(f"[Attempt #{attempt}] Launching {SHAPE} ({OCPUS}C/{MEMORY_GB}G) in {REGION}/{ad} ...")
+        print(f"[Attempt #{attempt}] Launching {SHAPE} ({OCPUS}C/{MEMORY_GB}G) in {REGION}/{ad} (interval={sleep_time}s) ...")
         try:
             details = oci.core.models.LaunchInstanceDetails(
                 compartment_id=comp_id,
@@ -546,12 +624,30 @@ def main() -> None:
             notify("OCI ARM Allocated", f"Instance {DISPLAY_NAME} ({inst_id}) created in {REGION}/{ad}")
             break
         except oci.exceptions.ServiceError as err:
-            print(f"[RETRY] HTTP {err.status}: {err.message}")
-            if err.status == 429:
-                time.sleep(BACKOFF_429)
+            msg = str(err.message or "")
+            if err.status == 429 or err.code == "TooManyRequests":
+                ok_streak = 0
+                sleep_time = min(MAX_INTERVAL_SEC, sleep_time + STEP_UP_429_SEC)
+                print(f"[429 限流] 动态升高间隔至 {sleep_time}s: {msg}")
+            elif err.status == 400 and ("Service limit" in msg or "LimitExceeded" in str(err.code)):
+                print(f"[STOP] 达到配额上限，请检查 OCI 后台是否已开通成功: {err}")
+                notify("OCI ARM 达到配额上限", f"区域 {REGION}/{ad} 返回 HTTP 400: {msg}")
+                break
+            elif err.status == 500 and "Out of host capacity" in msg:
+                ok_streak += 1
+                if ok_streak >= 2 and sleep_time > MIN_INTERVAL_SEC:
+                    sleep_time = max(MIN_INTERVAL_SEC, sleep_time - STEP_DOWN_OK_SEC)
+                    ok_streak = 0
+                print(f"[无库存] 当前动态间隔 {sleep_time}s: {msg}")
             else:
-                jitter = INTERVAL_SEC * (JITTER_PCT / 100.0)
-                time.sleep(max(15, INTERVAL_SEC + random.uniform(-jitter, jitter)))
+                print(f"[ERROR] HTTP {err.status}: {msg}")
+                if err.status in (401, 404):
+                    notify("OCI ARM 错误停止", f"HTTP {err.status}: {msg}")
+                    break
+
+            jitter = sleep_time * (JITTER_PCT / 100.0)
+            wait_sec = max(10, round(sleep_time + random.uniform(-jitter, jitter)))
+            time.sleep(wait_sec)
 
         if MAX_ATTEMPTS > 0 and attempt >= MAX_ATTEMPTS:
             print(f"[STOP] Reached MAX_ATTEMPTS ({MAX_ATTEMPTS})")

@@ -1,9 +1,15 @@
 import crypto from 'node:crypto';
+import dnsPromises from 'node:dns/promises';
 import net from 'node:net';
 import os from 'node:os';
 import type { DnsRecordType, DnsSyncRule, DnsZoneSummary, ManagedDnsRecord } from '../../src/types/models.ts';
 import { validateSafeExternalUrl } from '../lib/crypto.ts';
 import { store, type StoredDnsProvider } from '../lib/store.ts';
+
+const DNSPOD_HEADERS = {
+  'Content-Type': 'application/x-www-form-urlencoded',
+  'User-Agent': 'NetPlus/1.0 (admin@netplus.local)',
+};
 
 const cfZoneCache = new Map<string, { expiresAt: number; zones: DnsZoneSummary[] }>();
 
@@ -1021,7 +1027,11 @@ export async function listProviderDomains(
     }
     try {
       const form = new URLSearchParams({ login_token: loginToken, format: 'json', length: '100' });
-      const res = await fetch('https://dnsapi.cn/Domain.List', { method: 'POST', body: form });
+      const res = await fetch('https://dnsapi.cn/Domain.List', {
+        method: 'POST',
+        headers: DNSPOD_HEADERS,
+        body: form,
+      });
       const data = (await res.json()) as {
         status?: { code?: string; message?: string };
         domains?: Array<{ id: number | string; name: string; status?: string }>;
@@ -1201,7 +1211,11 @@ export async function pullProviderDnsRecords(
         domain: cleanDomain,
         length: '3000',
       });
-      const res = await fetch('https://dnsapi.cn/Record.List', { method: 'POST', body: form });
+      const res = await fetch('https://dnsapi.cn/Record.List', {
+        method: 'POST',
+        headers: DNSPOD_HEADERS,
+        body: form,
+      });
       const data = (await res.json()) as {
         status?: { code?: string; message?: string };
         records?: Array<{
@@ -1779,4 +1793,367 @@ export async function deleteProviderDnsRecord(
   }
 
   return { ok: true, synced: false, message: '已删除本地记录' };
+}
+
+// ============================================================================
+// Domain Creation & Authoritative Nameserver (NS) Retrieval + Live Verification
+// ============================================================================
+
+export interface CreatedProviderDomainResult {
+  ok: boolean;
+  domain: string;
+  zoneId?: string;
+  status: string;
+  nameServers: string[];
+  originalNameServers?: string[];
+  nsNote: string;
+  message: string;
+  error?: string;
+}
+
+export async function createProviderDomain(
+  provider: StoredDnsProvider,
+  secrets: { secret: string; secretId: string },
+  domainInput: string
+): Promise<CreatedProviderDomainResult> {
+  const cleanDomain = String(domainInput || '').trim().toLowerCase().replace(/\.$/, '');
+  if (!cleanDomain || !DOMAIN_REGEX.test(cleanDomain)) {
+    return {
+      ok: false,
+      domain: cleanDomain,
+      status: 'error',
+      nameServers: [],
+      nsNote: '',
+      message: '主域名格式无效（例如 example.com）',
+      error: '主域名格式无效（例如 example.com）',
+    };
+  }
+
+  if (provider.type === 'cloudflare') {
+    const auth = buildCloudflareHeaders(secrets.secret, provider.accountEmail);
+    if (!auth.ok) {
+      return {
+        ok: false,
+        domain: cleanDomain,
+        status: 'error',
+        nameServers: [],
+        nsNote: '',
+        message: auth.error,
+        error: auth.error,
+      };
+    }
+
+    try {
+      // First check if zone already exists so we can return its exact assigned NS cleanly
+      const lookupRes = await fetch(
+        `https://api.cloudflare.com/client/v4/zones?name=${encodeURIComponent(cleanDomain)}`,
+        { headers: auth.headers }
+      );
+      const lookupData = (await lookupRes.json()) as {
+        success?: boolean;
+        result?: Array<{
+          id: string;
+          name: string;
+          status: string;
+          name_servers?: string[];
+          original_name_servers?: string[];
+        }>;
+      };
+      const existing = lookupData.result?.[0];
+      if (lookupRes.ok && lookupData.success && existing) {
+        return {
+          ok: true,
+          domain: existing.name,
+          zoneId: existing.id,
+          status: existing.status || 'pending',
+          nameServers: existing.name_servers ?? [],
+          originalNameServers: existing.original_name_servers ?? [],
+          nsNote:
+            '请前往您的域名注册商（如阿里云/腾讯云/Namecheap/GoDaddy/Porkbun 等），将域名的 DNS 服务器 (Nameservers) 修改为上方 Cloudflare 分配的两条 NS 地址，修改后通常 5 分钟至 24 小时全球生效。',
+          message: `域名 ${existing.name} 已存在于 Cloudflare（状态: ${existing.status}），已获取分配的 NS 服务器`,
+        };
+      }
+
+      // Fetch Cloudflare account id (required by POST /zones in multi-account API tokens)
+      let accountId: string | undefined;
+      try {
+        const accRes = await fetch('https://api.cloudflare.com/client/v4/accounts?per_page=5', {
+          headers: auth.headers,
+        });
+        const accData = (await accRes.json()) as {
+          success?: boolean;
+          result?: Array<{ id: string }>;
+        };
+        if (accRes.ok && accData.success && accData.result?.[0]?.id) {
+          accountId = accData.result[0].id;
+        }
+      } catch {
+        // Proceed without explicit account field
+      }
+
+      const createPayload: Record<string, unknown> = {
+        name: cleanDomain,
+        type: 'full',
+        jump_start: true,
+      };
+      if (accountId) {
+        createPayload.account = { id: accountId };
+      }
+
+      const res = await fetch('https://api.cloudflare.com/client/v4/zones', {
+        method: 'POST',
+        headers: auth.headers,
+        body: JSON.stringify(createPayload),
+      });
+      const data = (await res.json()) as {
+        success?: boolean;
+        errors?: Array<{ code?: number; message?: string }>;
+        result?: {
+          id: string;
+          name: string;
+          status: string;
+          name_servers?: string[];
+          original_name_servers?: string[];
+        };
+      };
+      if (!res.ok || !data.success || !data.result) {
+        const errMsg = formatCloudflareApiError(res.status, data.errors, auth.mode);
+        return {
+          ok: false,
+          domain: cleanDomain,
+          status: 'error',
+          nameServers: [],
+          nsNote: '',
+          message: errMsg,
+          error: errMsg,
+        };
+      }
+
+      // Invalidate Cloudflare zone cache so newly added zone shows up immediately
+      cfZoneCache.delete(auth.cacheKey);
+
+      return {
+        ok: true,
+        domain: data.result.name,
+        zoneId: data.result.id,
+        status: data.result.status || 'pending',
+        nameServers: data.result.name_servers ?? [],
+        originalNameServers: data.result.original_name_servers ?? [],
+        nsNote:
+          '请登录您的域名注册商控制台，将域名的 DNS 服务器 (NS) 修改为上方 Cloudflare 专属分配的 NS 地址，并移除旧的 NS 记录。生效后点击「验证 NS 生效状态」确认。',
+        message: `已在 Cloudflare 成功添加域名 ${data.result.name}，请按提示修改注册商 NS 服务器`,
+      };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Cloudflare 添加域名失败';
+      return { ok: false, domain: cleanDomain, status: 'error', nameServers: [], nsNote: '', message: msg, error: msg };
+    }
+  }
+
+  if (provider.type === 'dnspod') {
+    const loginToken = secrets.secretId ? `${secrets.secretId},${secrets.secret}` : secrets.secret;
+    if (!loginToken.includes(',')) {
+      const errMsg = 'DNSPod 凭据格式应为 ID,Token';
+      return { ok: false, domain: cleanDomain, status: 'error', nameServers: [], nsNote: '', message: errMsg, error: errMsg };
+    }
+    try {
+      const createForm = new URLSearchParams({
+        login_token: loginToken,
+        format: 'json',
+        domain: cleanDomain,
+      });
+      const createRes = await fetch('https://dnsapi.cn/Domain.Create', {
+        method: 'POST',
+        headers: DNSPOD_HEADERS,
+        body: createForm,
+      });
+      const createData = (await createRes.json()) as {
+        status?: { code?: string; message?: string };
+        domain?: { id?: number | string; domain?: string; grade_ns?: string[] };
+      };
+      // Code '1' = created, '7' = already exists in account
+      if (createData.status?.code !== '1' && createData.status?.code !== '7') {
+        const errMsg = createData.status?.message || `DNSPod 添加域名失败 (${createData.status?.code})`;
+        return { ok: false, domain: cleanDomain, status: 'error', nameServers: [], nsNote: '', message: errMsg, error: errMsg };
+      }
+
+      // Query Domain.Info to get exact grade_ns assigned to this domain
+      let gradeNs: string[] = Array.isArray(createData.domain?.grade_ns) ? createData.domain!.grade_ns! : [];
+      let zoneId = createData.domain?.id ? String(createData.domain.id) : undefined;
+      let status = 'pending';
+      try {
+        const infoForm = new URLSearchParams({
+          login_token: loginToken,
+          format: 'json',
+          domain: cleanDomain,
+        });
+        const infoRes = await fetch('https://dnsapi.cn/Domain.Info', {
+          method: 'POST',
+          headers: DNSPOD_HEADERS,
+          body: infoForm,
+        });
+        const infoData = (await infoRes.json()) as {
+          status?: { code?: string };
+          domain?: { id?: number | string; status?: string; grade_ns?: string[] };
+        };
+        if (infoData.status?.code === '1' && infoData.domain) {
+          zoneId = infoData.domain.id ? String(infoData.domain.id) : zoneId;
+          status = infoData.domain.status || 'enable';
+          if (Array.isArray(infoData.domain.grade_ns) && infoData.domain.grade_ns.length > 0) {
+            gradeNs = infoData.domain.grade_ns;
+          }
+        }
+      } catch {
+        // Fallback to standard DNSPod NS
+      }
+
+      if (gradeNs.length === 0) {
+        gradeNs = ['f1g1ns1.dnspod.net', 'f1g1ns2.dnspod.net'];
+      }
+
+      return {
+        ok: true,
+        domain: cleanDomain,
+        zoneId,
+        status,
+        nameServers: gradeNs,
+        nsNote:
+          '请前往您的域名注册商控制台，将该域名的 DNS 服务器修改为上方 DNSPod 分配的 NS 服务器地址（免费版通常为 f1g1ns1.dnspod.net / f1g1ns2.dnspod.net 或系统分配地址）。',
+        message: `已在 DNSPod 添加域名 ${cleanDomain}，请按提示更新注册商 NS 服务器`,
+      };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'DNSPod 添加域名失败';
+      return { ok: false, domain: cleanDomain, status: 'error', nameServers: [], nsNote: '', message: msg, error: msg };
+    }
+  }
+
+  if (provider.type === 'aliyun') {
+    const addRes = await aliyunDnsRpcCall<{
+      DomainId?: string;
+      DomainName?: string;
+      DnsServers?: { DnsServer?: string[] };
+    }>(secrets.secretId, secrets.secret, 'AddDomain', { DomainName: cleanDomain });
+
+    let zoneId = addRes.data?.DomainId;
+    let nsList = addRes.data?.DnsServers?.DnsServer ?? [];
+
+    if (!addRes.ok) {
+      // If domain already exists in Aliyun account, fetch its info & assigned DnsServers
+      if (/already exists|DomainAlreadyExist/i.test(addRes.error || '')) {
+        const infoRes = await aliyunDnsRpcCall<{
+          DomainId?: string;
+          DnsServers?: { DnsServer?: string[] };
+        }>(secrets.secretId, secrets.secret, 'DescribeDomainInfo', { DomainName: cleanDomain });
+        if (infoRes.ok && infoRes.data) {
+          zoneId = infoRes.data.DomainId;
+          nsList = infoRes.data.DnsServers?.DnsServer ?? [];
+        } else {
+          return {
+            ok: false,
+            domain: cleanDomain,
+            status: 'error',
+            nameServers: [],
+            nsNote: '',
+            message: addRes.error || 'Aliyun 添加域名失败',
+            error: addRes.error,
+          };
+        }
+      } else {
+        return {
+          ok: false,
+          domain: cleanDomain,
+          status: 'error',
+          nameServers: [],
+          nsNote: '',
+          message: addRes.error || 'Aliyun 添加域名失败',
+          error: addRes.error,
+        };
+      }
+    }
+
+    return {
+      ok: true,
+      domain: cleanDomain,
+      zoneId,
+      status: 'pending',
+      nameServers: nsList,
+      nsNote:
+        '请前往您的域名注册商控制台，将域名的 DNS 服务器修改为上方阿里云解析分配的专属 NS 地址，修改后点击「验证 NS 生效状态」检查生效进度。',
+      message: `已在阿里云 DNS 添加域名 ${cleanDomain}，已获取分配的 NS 服务器`,
+    };
+  }
+
+  if (provider.type === 'porkbun') {
+    const defaultNs = [
+      'curitiba.ns.porkbun.com',
+      'fortaleza.ns.porkbun.com',
+      'maceio.ns.porkbun.com',
+      'salvador.ns.porkbun.com',
+    ];
+    return {
+      ok: true,
+      domain: cleanDomain,
+      zoneId: cleanDomain,
+      status: 'active',
+      nameServers: defaultNs,
+      nsNote:
+        'Porkbun 域名需在 Porkbun 注册商后台管理，请确认域名的 Authoritative Nameservers 已指向上述 Porkbun 官方 NS 地址。',
+      message: `已登记 Porkbun 域名 ${cleanDomain}`,
+    };
+  }
+
+  return {
+    ok: true,
+    domain: cleanDomain,
+    zoneId: cleanDomain,
+    status: 'pending',
+    nameServers: [],
+    nsNote: `当前服务商类型 (${provider.type}) 需先在服务商控制台添加该域名，并将域名的注册商 NS 服务器修改为服务商提供的权威 NS 地址。`,
+    message: `已登记域名 ${cleanDomain} 到本地域名列表`,
+  };
+}
+
+export async function checkDomainNsDelegation(
+  domain: string,
+  expectedNameServers: string[]
+): Promise<{
+  ok: boolean;
+  liveNs: string[];
+  verified: boolean;
+  message: string;
+}> {
+  const cleanDomain = domain.trim().toLowerCase().replace(/\.$/, '');
+  try {
+    const rawNs = await dnsPromises.resolveNs(cleanDomain);
+    const liveNs = rawNs.map((n) => n.trim().toLowerCase().replace(/\.$/, '')).sort();
+    const expectedClean = expectedNameServers
+      .map((n) => n.trim().toLowerCase().replace(/\.$/, ''))
+      .filter(Boolean);
+
+    if (expectedClean.length === 0) {
+      return {
+        ok: true,
+        liveNs,
+        verified: liveNs.length > 0,
+        message: liveNs.length > 0 ? `当前全网 NS: ${liveNs.join(', ')}` : '暂未查询到该域名的公开 NS 记录',
+      };
+    }
+
+    const matchedCount = expectedClean.filter((ns) => liveNs.includes(ns)).length;
+    const verified = matchedCount >= Math.min(2, expectedClean.length);
+    return {
+      ok: true,
+      liveNs,
+      verified,
+      message: verified
+        ? `NS 已生效（已匹配 ${matchedCount}/${expectedClean.length} 条权威 NS）`
+        : `NS 尚未生效：当前全网解析为 [${liveNs.join(', ') || '无'}]，请修改为 [${expectedClean.join(', ')}]`,
+    };
+  } catch (err) {
+    return {
+      ok: false,
+      liveNs: [],
+      verified: false,
+      message: `NS 查询失败: ${err instanceof Error ? err.message : 'DNS lookup error'}`,
+    };
+  }
 }

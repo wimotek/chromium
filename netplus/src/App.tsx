@@ -5,6 +5,7 @@
 
 import React, { useCallback, useEffect, useState } from 'react';
 import {
+  Activity,
   Bell,
   Clock,
   Cpu,
@@ -24,6 +25,7 @@ import { AuthGate } from './components/AuthGate';
 import { CloudHostsView } from './components/CloudHostsView';
 import { AuditLogsView, CronJobsView } from './components/CronAndAuditViews';
 import { DnsBatchView } from './components/DnsBatchView';
+import { MonitorsView } from './components/MonitorsView';
 import { NotificationsView } from './components/NotificationsView';
 import { OciManagerView } from './components/OciManagerView';
 import { OverviewView } from './components/OverviewView';
@@ -40,6 +42,7 @@ import type {
   DnsSyncRule,
   LanguageCode,
   ManagedDnsRecord,
+  ManagedDomain,
   MonitorTarget,
   NotificationChannel,
   OciProfile,
@@ -50,6 +53,7 @@ import type {
 type NavTab =
   | 'overview'
   | 'dns'
+  | 'monitors'
   | 'oci'
   | 'clouds'
   | 'notifications'
@@ -87,6 +91,7 @@ export default function App() {
   const [dnsProviders, setDnsProviders] = useState<DnsProvider[]>([]);
   const [dnsRules, setDnsRules] = useState<DnsSyncRule[]>([]);
   const [dnsRecords, setDnsRecords] = useState<ManagedDnsRecord[]>([]);
+  const [managedDomains, setManagedDomains] = useState<ManagedDomain[]>([]);
   const [ociProfiles, setOciProfiles] = useState<OciProfile[]>([]);
   const [ociSnipers, setOciSnipers] = useState<OciSniperTask[]>([]);
   const [cloudAccounts, setCloudAccounts] = useState<CloudAccount[]>([]);
@@ -138,11 +143,12 @@ export default function App() {
 
   const loadWorkspaceData = useCallback(async () => {
     if (!currentUser) return;
-    const [ov, provs, rules, recs, profs, snipers, accounts, hosts, mons, chans, jobs] = await Promise.all([
+    const [ov, provs, rules, recs, doms, profs, snipers, accounts, hosts, mons, chans, jobs] = await Promise.all([
       apiRequest<OverviewSummary>('/api/overview'),
       apiRequest<DnsProvider[]>('/api/dns/providers'),
       apiRequest<DnsSyncRule[]>('/api/dns/rules'),
       apiRequest<ManagedDnsRecord[]>('/api/dns/records'),
+      apiRequest<ManagedDomain[]>('/api/dns/domains').catch(() => [] as ManagedDomain[]),
       apiRequest<OciProfile[]>('/api/oci/profiles'),
       apiRequest<OciSniperTask[]>('/api/oci/sniper'),
       apiRequest<CloudAccount[]>('/api/clouds/accounts'),
@@ -155,6 +161,7 @@ export default function App() {
     setDnsProviders(provs);
     setDnsRules(rules);
     setDnsRecords(recs);
+    setManagedDomains(doms);
     setOciProfiles(profs);
     setOciSnipers(snipers);
     setCloudAccounts(accounts);
@@ -215,6 +222,7 @@ export default function App() {
     { id: 'overview', label: t('navOverview'), icon: LayoutDashboard },
     { id: 'clouds', label: t('navClouds'), icon: Server },
     { id: 'dns', label: t('navDns'), icon: Network },
+    { id: 'monitors', label: t('navMonitors'), icon: Activity },
     { id: 'oci', label: t('navOci'), icon: Cpu },
     { id: 'notifications', label: t('navNotify'), icon: Bell },
     { id: 'cron', label: t('navCron'), icon: Clock },
@@ -387,9 +395,19 @@ export default function App() {
               providers={dnsProviders}
               rules={dnsRules}
               records={dnsRecords}
+              managedDomains={managedDomains}
               hosts={cloudHosts}
               lang={lang}
               onReload={loadWorkspaceData}
+            />
+          )}
+          {activeTab === 'monitors' && (
+            <MonitorsView
+              monitors={monitors}
+              notificationChannels={notificationChannels}
+              lang={lang}
+              onReload={loadWorkspaceData}
+              onNavigateNotifications={() => setActiveTab('notifications')}
             />
           )}
           {activeTab === 'oci' && (
@@ -409,6 +427,7 @@ export default function App() {
               hosts={cloudHosts}
               cloudAccounts={cloudAccounts}
               dnsRules={dnsRules}
+              dnsRecords={dnsRecords}
               dnsProviders={dnsProviders}
               ociProfiles={ociProfiles}
               monitors={monitors}
@@ -418,6 +437,7 @@ export default function App() {
               onReload={loadWorkspaceData}
               onNavigateOci={() => setActiveTab('oci')}
               onNavigateDns={() => setActiveTab('dns')}
+              onNavigateMonitors={() => setActiveTab('monitors')}
             />
           )}
           {activeTab === 'notifications' && (

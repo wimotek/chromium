@@ -1,10 +1,13 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
+  AlertCircle,
   ArrowLeft,
   ArrowRight,
   Check,
+  CheckCircle2,
   ChevronRight,
   CloudDownload,
+  CloudUpload,
   Copy,
   Folder,
   Globe,
@@ -13,7 +16,9 @@ import {
   Pencil,
   Plus,
   RefreshCw,
+  Save,
   Search,
+  ShieldCheck,
   Trash2,
   X,
 } from 'lucide-react';
@@ -25,11 +30,13 @@ import type {
   DnsRecordType,
   LanguageCode,
   ManagedDnsRecord,
+  ManagedDomain,
 } from '../types/models';
 
 interface DnsRecordsPanelProps {
   providers: DnsProvider[];
   records: ManagedDnsRecord[];
+  managedDomains?: ManagedDomain[];
   detectedIps?: {
     ipv4: string | null;
     ipv6: string | null;
@@ -103,6 +110,7 @@ interface DomainOverviewRow {
   providerId: string;
   domain: string;
   zoneId?: string;
+  managedDomain?: ManagedDomain;
   recordCount: number;
   typeCounts: Array<{ type: DnsRecordType; count: number }>;
   groups: string[];
@@ -110,9 +118,23 @@ interface DomainOverviewRow {
   remoteSyncedCount: number;
 }
 
+interface InlineRecordDraft {
+  name: string;
+  type: DnsRecordType;
+  content: string;
+  ttl: number;
+  proxied: boolean;
+  priority: number;
+  line: string;
+  groupName: string;
+  notes: string;
+  syncRemote: boolean;
+}
+
 export function DnsRecordsPanel({
   providers,
   records,
+  managedDomains = [],
   detectedIps,
   lang,
   onReload,
@@ -154,18 +176,26 @@ export function DnsRecordsPanel({
   const [pullBusy, setPullBusy] = useState(false);
   const [pullError, setPullError] = useState<string | null>(null);
 
-  // Add / Edit Record Modal
-  const [showRecordModal, setShowRecordModal] = useState(false);
-  const [editingRecord, setEditingRecord] = useState<ManagedDnsRecord | null>(null);
-  const [formDomains, setFormDomains] = useState<ProviderDomainItem[]>([]);
-  const [formLoadingDomains, setFormLoadingDomains] = useState(false);
-  const [recordSaving, setRecordSaving] = useState(false);
-  const [recordError, setRecordError] = useState<string | null>(null);
-  const [recordForm, setRecordForm] = useState({
-    providerId: '',
-    domain: '',
+  // Level 1: Add Domain Modal
+  const [showAddDomainModal, setShowAddDomainModal] = useState(false);
+  const [addDomainProviderId, setAddDomainProviderId] = useState('');
+  const [addDomainInput, setAddDomainInput] = useState('');
+  const [addDomainBusy, setAddDomainBusy] = useState(false);
+  const [addDomainError, setAddDomainError] = useState<string | null>(null);
+
+  // NS Delegation Guide & Verification Modal
+  const [nsGuideDomain, setNsGuideDomain] = useState<ManagedDomain | null>(null);
+  const [nsCheckBusyId, setNsCheckBusyId] = useState<string | null>(null);
+
+  // Level 2: Inline Row Editing + Inline Quick-Add + Single-Record Push
+  const [editingRowId, setEditingRowId] = useState<string | null>(null);
+  const [inlineEditDraft, setInlineEditDraft] = useState<InlineRecordDraft | null>(null);
+  const [inlineEditBusy, setInlineEditBusy] = useState(false);
+
+  const [showInlineAdd, setShowInlineAdd] = useState(false);
+  const [inlineAddDraft, setInlineAddDraft] = useState<InlineRecordDraft>({
     name: '@',
-    type: 'A' as DnsRecordType,
+    type: 'A',
     content: '',
     ttl: 300,
     proxied: false,
@@ -175,6 +205,9 @@ export function DnsRecordsPanel({
     notes: '',
     syncRemote: true,
   });
+  const [inlineAddBusy, setInlineAddBusy] = useState(false);
+  const [inlineError, setInlineError] = useState<string | null>(null);
+  const [pushingRecordId, setPushingRecordId] = useState<string | null>(null);
 
   // Delete confirm modal
   const [deleteTarget, setDeleteTarget] = useState<ManagedDnsRecord | null>(null);
@@ -189,7 +222,7 @@ export function DnsRecordsPanel({
     [configuredProviders]
   );
 
-  // Aggregate records into Level 1 Domain List rows
+  // Aggregate managedDomains + records into Level 1 Domain List rows
   const domainRows = useMemo<DomainOverviewRow[]>(() => {
     const map = new Map<
       string,
@@ -197,9 +230,24 @@ export function DnsRecordsPanel({
         providerId: string;
         domain: string;
         zoneId?: string;
+        managedDomain?: ManagedDomain;
         records: ManagedDnsRecord[];
       }
     >();
+
+    for (const md of managedDomains) {
+      const domain = (md.domain || '').toLowerCase();
+      if (!domain) continue;
+      const key = `${md.providerId}::${domain}`;
+      map.set(key, {
+        providerId: md.providerId,
+        domain,
+        zoneId: md.zoneId,
+        managedDomain: md,
+        records: [],
+      });
+    }
+
     for (const r of records) {
       const domain = (r.domain || '').toLowerCase();
       if (!domain) continue;
@@ -239,6 +287,7 @@ export function DnsRecordsPanel({
         providerId: bucket.providerId,
         domain: bucket.domain,
         zoneId: bucket.zoneId,
+        managedDomain: bucket.managedDomain,
         recordCount: bucket.records.length,
         typeCounts,
         groups: Array.from(groupSet),
@@ -248,7 +297,7 @@ export function DnsRecordsPanel({
     }
 
     return out.sort((a, b) => a.domain.localeCompare(b.domain));
-  }, [records, isZh]);
+  }, [managedDomains, records, isZh]);
 
   const filteredDomainRows = useMemo(() => {
     const q = domainSearch.trim().toLowerCase();
@@ -267,20 +316,33 @@ export function DnsRecordsPanel({
     [domainRows, selectedDomainKey]
   );
 
-  // If all records of currently open domain are deleted, return to domain list cleanly
+  // Keep nsGuideDomain in sync with latest reloaded managedDomains
+  useEffect(() => {
+    if (!nsGuideDomain) return;
+    const latest = managedDomains.find((d) => d.id === nsGuideDomain.id);
+    if (latest) {
+      setNsGuideDomain(latest);
+    }
+  }, [managedDomains, nsGuideDomain?.id]);
+
+  // If the currently open domain disappears completely, return to domain list cleanly
   useEffect(() => {
     if (selectedDomainKey && !activeDomainRow) {
       setSelectedDomainKey(null);
     }
   }, [selectedDomainKey, activeDomainRow]);
 
-  // Reset Level 2 filters & selection whenever entering a different domain
+  // Reset Level 2 filters & inline editors whenever entering a different domain
   const enterDomain = (key: string) => {
     setSelectedDomainKey(key);
     setGroupFilter('all');
     setTypeFilter('ALL');
     setSearchQuery('');
     setSelectedIds(new Set());
+    setEditingRowId(null);
+    setInlineEditDraft(null);
+    setShowInlineAdd(false);
+    setInlineError(null);
   };
 
   // Records inside currently selected domain (Level 2)
@@ -310,11 +372,6 @@ export function DnsRecordsPanel({
     }
     return Array.from(set);
   }, [records]);
-
-  const allDomains = useMemo(
-    () => Array.from(new Set(records.map((r) => r.domain).filter(Boolean))).sort(),
-    [records]
-  );
 
   const filteredRecords = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
@@ -350,15 +407,13 @@ export function DnsRecordsPanel({
   };
 
   const fetchDomainsForProvider = useCallback(
-    async (providerId: string, target: 'pull' | 'form', forceRefresh = false) => {
+    async (providerId: string, forceRefresh = false) => {
       const prov = providerMap.get(providerId);
       if (!prov || !isProviderConfigured(prov)) {
-        if (target === 'pull') setPullDomains([]);
-        else setFormDomains([]);
+        setPullDomains([]);
         return;
       }
-      if (target === 'pull') setPullLoadingDomains(true);
-      else setFormLoadingDomains(true);
+      setPullLoadingDomains(true);
       try {
         const res = await apiRequest<{
           ok: boolean;
@@ -366,37 +421,25 @@ export function DnsRecordsPanel({
           error?: string;
         }>(`/api/dns/providers/${encodeURIComponent(providerId)}/domains${forceRefresh ? '?refresh=1' : ''}`);
         const list = res.ok ? res.domains : [];
-        if (target === 'pull') {
-          setPullDomains(list);
-          if (list.length > 0) {
-            setPullDomain((prev) => prev || list[0].name);
-            setPullZoneId((prev) => prev || list[0].id);
-            setPullError(null);
-          }
-          if (!res.ok && res.error) setPullError(res.error);
-        } else {
-          setFormDomains(list);
-          if (list.length > 0) {
-            setRecordForm((prev) => (prev.domain ? prev : { ...prev, domain: list[0].name }));
-          }
+        setPullDomains(list);
+        if (list.length > 0) {
+          setPullDomain((prev) => prev || list[0].name);
+          setPullZoneId((prev) => prev || list[0].id);
+          setPullError(null);
         }
+        if (!res.ok && res.error) setPullError(res.error);
       } catch (err) {
-        if (target === 'pull') {
-          setPullDomains([]);
-          setPullError(err instanceof Error ? err.message : 'Failed to load domains');
-        } else {
-          setFormDomains([]);
-        }
+        setPullDomains([]);
+        setPullError(err instanceof Error ? err.message : 'Failed to load domains');
       } finally {
-        if (target === 'pull') setPullLoadingDomains(false);
-        else setFormLoadingDomains(false);
+        setPullLoadingDomains(false);
       }
     },
     [providerMap]
   );
 
-  // Quick one-click re-sync for a specific domain row or currently open domain
-  const handleQuickSyncDomain = async (row: DomainOverviewRow) => {
+  // Quick one-click Pull for a specific domain row or currently open domain
+  const handleQuickPullDomain = async (row: DomainOverviewRow) => {
     const prov = providerMap.get(row.providerId);
     if (!prov || !isProviderConfigured(prov)) {
       onNotify(
@@ -424,12 +467,12 @@ export function DnsRecordsPanel({
       await onReload();
       onNotify(
         isZh
-          ? `已刷新 ${row.domain}：共 ${res.total} 条解析（新增 ${res.addedCount}，更新 ${res.updatedCount}，清理 ${res.removedCount}）`
-          : `Synced ${res.total} records for ${row.domain} (+${res.addedCount}, ~${res.updatedCount}, -${res.removedCount})`,
+          ? `已从远端拉取 ${row.domain}：共 ${res.total} 条解析（新增 ${res.addedCount}，更新 ${res.updatedCount}，清理 ${res.removedCount}）`
+          : `Pulled ${res.total} records for ${row.domain} (+${res.addedCount}, ~${res.updatedCount}, -${res.removedCount})`,
         'success'
       );
     } catch (err) {
-      onNotify(err instanceof Error ? err.message : 'Sync domain failed', 'error');
+      onNotify(err instanceof Error ? err.message : 'Pull domain failed', 'error');
     } finally {
       setSyncingDomainKey(null);
     }
@@ -451,7 +494,7 @@ export function DnsRecordsPanel({
     setPullProviderId(pid);
     setShowPullModal(true);
     if (pid) {
-      void fetchDomainsForProvider(pid, 'pull');
+      void fetchDomainsForProvider(pid);
     }
   };
 
@@ -482,7 +525,7 @@ export function DnsRecordsPanel({
           }),
         });
         setShowPullModal(false);
-        setSelectedDomainKey(null); // Land cleanly on Level 1 Domain List so multi-domain view stays organized
+        setSelectedDomainKey(null);
         await onReload();
         const errSuffix =
           res.errors.length > 0
@@ -492,7 +535,7 @@ export function DnsRecordsPanel({
             : '';
         onNotify(
           isZh
-            ? `已拉取 ${res.domainCount} 个域名，共 ${res.totalRecords} 条记录（新增 ${res.addedCount}，更新 ${res.updatedCount}，清理 ${res.removedCount}）${errSuffix}`
+            ? `已从远端拉取 ${res.domainCount} 个域名，共 ${res.totalRecords} 条记录（新增 ${res.addedCount}，更新 ${res.updatedCount}，清理 ${res.removedCount}）${errSuffix}`
             : `Pulled ${res.totalRecords} records across ${res.domainCount} domain(s)${errSuffix}`
         );
       } catch (err) {
@@ -531,8 +574,8 @@ export function DnsRecordsPanel({
       await onReload();
       onNotify(
         isZh
-          ? `已同步 ${cleanDom}：共 ${res.total} 条记录（新增 ${res.addedCount}，更新 ${res.updatedCount}，清理 ${res.removedCount}）`
-          : `Synced ${res.total} DNS records for ${cleanDom} (+${res.addedCount}, ~${res.updatedCount}, -${res.removedCount})`
+          ? `已拉取 ${cleanDom}：共 ${res.total} 条记录（新增 ${res.addedCount}，更新 ${res.updatedCount}，清理 ${res.removedCount}）`
+          : `Pulled ${res.total} DNS records for ${cleanDom} (+${res.addedCount}, ~${res.updatedCount}, -${res.removedCount})`
       );
     } catch (err) {
       setPullError(err instanceof Error ? err.message : 'Pull DNS records failed');
@@ -541,47 +584,162 @@ export function DnsRecordsPanel({
     }
   };
 
-  // Open Create / Edit Record Modal
-  const openCreateRecordModal = () => {
-    setEditingRecord(null);
-    setRecordError(null);
-    setFormDomains([]);
-    const defaultProv =
-      (activeDomainRow ? providerMap.get(activeDomainRow.providerId) : undefined) ??
-      configuredProviders[0] ??
-      providers[0];
-    const pid = defaultProv?.id || '';
-    setRecordForm({
-      providerId: pid,
-      domain: activeDomainRow?.domain || '',
+  // ==================== LEVEL 1: ADD DOMAIN + NS DELEGATION ====================
+  const openAddDomainModal = () => {
+    setAddDomainError(null);
+    setAddDomainInput('');
+    const first = pullSupportedProviders[0] ?? configuredProviders[0] ?? providers[0];
+    setAddDomainProviderId(first?.id || '');
+    setShowAddDomainModal(true);
+  };
+
+  const handleAddDomainSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!addDomainProviderId) {
+      setAddDomainError(isZh ? '请先选择 DNS 服务商' : 'Select a DNS provider');
+      return;
+    }
+    const clean = addDomainInput.trim().toLowerCase().replace(/^https?:\/\//, '').replace(/\/.*$/, '').replace(/\.$/, '');
+    if (!clean || !clean.includes('.')) {
+      setAddDomainError(isZh ? '请输入有效的主域名，例如 example.com' : 'Enter a valid root domain like example.com');
+      return;
+    }
+    setAddDomainBusy(true);
+    setAddDomainError(null);
+    try {
+      const res = await apiRequest<{
+        domain: ManagedDomain;
+        nameServers?: string[];
+        nsNote?: string;
+        message?: string;
+      }>('/api/dns/domains', {
+        method: 'POST',
+        body: JSON.stringify({
+          providerId: addDomainProviderId,
+          domain: clean,
+        }),
+      });
+      setShowAddDomainModal(false);
+      await onReload();
+      onNotify(
+        res.message ||
+          (isZh ? `已添加域名 ${res.domain.domain}` : `Added domain ${res.domain.domain}`),
+        'success'
+      );
+      // Immediately show NS setup guide modal so user knows the exact NS servers to configure at their registrar
+      setNsGuideDomain(res.domain);
+    } catch (err) {
+      setAddDomainError(err instanceof Error ? err.message : 'Failed to add domain');
+    } finally {
+      setAddDomainBusy(false);
+    }
+  };
+
+  const handleCheckDomainNs = async (domainObj: ManagedDomain) => {
+    setNsCheckBusyId(domainObj.id);
+    try {
+      const res = await apiRequest<{
+        domain: ManagedDomain;
+        check?: {
+          verified: boolean;
+          liveNs: string[];
+          message?: string;
+        };
+      }>(`/api/dns/domains/${encodeURIComponent(domainObj.id)}/check-ns`, {
+        method: 'POST',
+      });
+      setNsGuideDomain(res.domain);
+      await onReload();
+      const verified = Boolean(res.check?.verified ?? res.domain.nsVerified);
+      const msg =
+        res.check?.message ||
+        (verified
+          ? isZh
+            ? `${res.domain.domain} NS 已生效`
+            : `NS verified for ${res.domain.domain}`
+          : isZh
+            ? `${res.domain.domain} 尚未检测到预期 NS，请确认已在注册商处修改并等待生效`
+            : `NS not yet matching for ${res.domain.domain}`);
+      onNotify(msg, verified ? 'success' : 'warning');
+    } catch (err) {
+      onNotify(err instanceof Error ? err.message : 'NS check failed', 'error');
+    } finally {
+      setNsCheckBusyId(null);
+    }
+  };
+
+  // ==================== LEVEL 2: INLINE ADD & INLINE EDIT & SINGLE PUSH ====================
+  const activeProvider = activeDomainRow ? providerMap.get(activeDomainRow.providerId) : undefined;
+  const activeProviderConfigured = isProviderConfigured(activeProvider);
+
+  const openInlineAddRow = () => {
+    if (!activeDomainRow) return;
+    setEditingRowId(null);
+    setInlineEditDraft(null);
+    setInlineError(null);
+    setInlineAddDraft({
       name: '@',
       type: 'A',
       content: '',
       ttl: 300,
       proxied: false,
       priority: 10,
-      line: defaultProv?.type === 'dnspod' ? '默认' : '',
+      line: activeProvider?.type === 'dnspod' ? '默认' : '',
       groupName:
         groupFilter !== 'all'
           ? groupFilter
-          : activeDomainRow?.domain || (isZh ? '默认分组' : 'Default'),
+          : activeDomainRow.domain || (isZh ? '默认分组' : 'Default'),
       notes: '',
-      syncRemote: isProviderConfigured(defaultProv),
+      syncRemote: activeProviderConfigured,
     });
-    setShowRecordModal(true);
-    if (pid && !activeDomainRow) {
-      void fetchDomainsForProvider(pid, 'form');
+    setShowInlineAdd(true);
+  };
+
+  const handleSaveInlineAdd = async () => {
+    if (!activeDomainRow) return;
+    if (!inlineAddDraft.content.trim()) {
+      setInlineError(isZh ? '请填写记录值 (Value)' : 'Please enter a record value');
+      return;
+    }
+    setInlineAddBusy(true);
+    setInlineError(null);
+    try {
+      const res = await apiRequest<{ record: ManagedDnsRecord; message: string }>('/api/dns/records', {
+        method: 'POST',
+        body: JSON.stringify({
+          providerId: activeDomainRow.providerId,
+          domain: activeDomainRow.domain,
+          name: inlineAddDraft.name.trim() || '@',
+          type: inlineAddDraft.type,
+          content: inlineAddDraft.content.trim(),
+          ttl: Number(inlineAddDraft.ttl) || 300,
+          proxied: inlineAddDraft.proxied,
+          priority:
+            inlineAddDraft.type === 'MX' || inlineAddDraft.type === 'SRV'
+              ? Number(inlineAddDraft.priority) || 10
+              : undefined,
+          line: inlineAddDraft.line.trim() || undefined,
+          groupName: inlineAddDraft.groupName.trim() || (isZh ? '默认分组' : 'Default'),
+          notes: inlineAddDraft.notes.trim() || undefined,
+          syncRemote: inlineAddDraft.syncRemote,
+        }),
+      });
+      setShowInlineAdd(false);
+      await onReload();
+      onNotify(`${res.record.fqdn} (${res.record.type})：${res.message}`, 'success');
+    } catch (err) {
+      setInlineError(err instanceof Error ? err.message : 'Create record failed');
+    } finally {
+      setInlineAddBusy(false);
     }
   };
 
-  const openEditRecordModal = (rec: ManagedDnsRecord) => {
-    setEditingRecord(rec);
-    setRecordError(null);
-    setFormDomains([]);
+  const startInlineEdit = (rec: ManagedDnsRecord) => {
     const prov = providerMap.get(rec.providerId);
-    setRecordForm({
-      providerId: rec.providerId,
-      domain: rec.domain,
+    setShowInlineAdd(false);
+    setInlineError(null);
+    setEditingRowId(rec.id);
+    setInlineEditDraft({
       name: rec.name,
       type: rec.type,
       content: rec.content,
@@ -593,57 +751,73 @@ export function DnsRecordsPanel({
       notes: rec.notes || '',
       syncRemote: isProviderConfigured(prov),
     });
-    setShowRecordModal(true);
   };
 
-  useEffect(() => {
-    if (showRecordModal && !editingRecord && recordForm.providerId && !activeDomainRow) {
-      void fetchDomainsForProvider(recordForm.providerId, 'form');
+  const cancelInlineEdit = () => {
+    setEditingRowId(null);
+    setInlineEditDraft(null);
+    setInlineError(null);
+  };
+
+  const handleSaveInlineEdit = async (rec: ManagedDnsRecord) => {
+    if (!inlineEditDraft) return;
+    if (!inlineEditDraft.content.trim()) {
+      setInlineError(isZh ? '记录值不能为空' : 'Record value cannot be empty');
+      return;
     }
-  }, [showRecordModal, editingRecord, recordForm.providerId, activeDomainRow, fetchDomainsForProvider]);
-
-  const handleSaveRecord = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setRecordSaving(true);
-    setRecordError(null);
+    setInlineEditBusy(true);
+    setInlineError(null);
     try {
-      const payload = {
-        providerId: recordForm.providerId,
-        domain: recordForm.domain.trim(),
-        name: recordForm.name.trim() || '@',
-        type: recordForm.type,
-        content: recordForm.content.trim(),
-        ttl: Number(recordForm.ttl) || 300,
-        proxied: recordForm.proxied,
-        priority:
-          recordForm.type === 'MX' || recordForm.type === 'SRV'
-            ? Number(recordForm.priority) || 10
-            : undefined,
-        line: recordForm.line.trim() || undefined,
-        groupName: recordForm.groupName.trim() || (isZh ? '默认分组' : 'Default'),
-        notes: recordForm.notes.trim() || undefined,
-        syncRemote: recordForm.syncRemote,
-      };
-
-      if (editingRecord) {
-        const res = await apiRequest<{ record: ManagedDnsRecord; message: string }>(
-          `/api/dns/records/${editingRecord.id}`,
-          { method: 'PUT', body: JSON.stringify(payload) }
-        );
-        onNotify(`${res.record.fqdn} (${res.record.type})：${res.message}`);
-      } else {
-        const res = await apiRequest<{ record: ManagedDnsRecord; message: string }>(
-          '/api/dns/records',
-          { method: 'POST', body: JSON.stringify(payload) }
-        );
-        onNotify(`${res.record.fqdn} (${res.record.type})：${res.message}`);
-      }
-      setShowRecordModal(false);
+      const res = await apiRequest<{ record: ManagedDnsRecord; message: string }>(
+        `/api/dns/records/${encodeURIComponent(rec.id)}`,
+        {
+          method: 'PUT',
+          body: JSON.stringify({
+            providerId: rec.providerId,
+            domain: rec.domain,
+            name: inlineEditDraft.name.trim() || '@',
+            type: inlineEditDraft.type,
+            content: inlineEditDraft.content.trim(),
+            ttl: Number(inlineEditDraft.ttl) || 300,
+            proxied: inlineEditDraft.proxied,
+            priority:
+              inlineEditDraft.type === 'MX' || inlineEditDraft.type === 'SRV'
+                ? Number(inlineEditDraft.priority) || 10
+                : undefined,
+            line: inlineEditDraft.line.trim() || undefined,
+            groupName: inlineEditDraft.groupName.trim() || (isZh ? '默认分组' : 'Default'),
+            notes: inlineEditDraft.notes.trim() || undefined,
+            syncRemote: inlineEditDraft.syncRemote,
+          }),
+        }
+      );
+      setEditingRowId(null);
+      setInlineEditDraft(null);
       await onReload();
+      onNotify(`${res.record.fqdn} (${res.record.type})：${res.message}`, 'success');
     } catch (err) {
-      setRecordError(err instanceof Error ? err.message : 'Save record failed');
+      setInlineError(err instanceof Error ? err.message : 'Save & push failed');
     } finally {
-      setRecordSaving(false);
+      setInlineEditBusy(false);
+    }
+  };
+
+  const handlePushSingleRecord = async (rec: ManagedDnsRecord) => {
+    setPushingRecordId(rec.id);
+    setInlineError(null);
+    try {
+      const res = await apiRequest<{ ok: boolean; record: ManagedDnsRecord; message: string }>(
+        `/api/dns/records/${encodeURIComponent(rec.id)}/push`,
+        { method: 'POST' }
+      );
+      await onReload();
+      onNotify(`${res.record.fqdn} (${res.record.type})：${res.message}`, 'success');
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Push record failed';
+      setInlineError(msg);
+      onNotify(msg, 'error');
+    } finally {
+      setPushingRecordId(null);
     }
   };
 
@@ -702,18 +876,16 @@ export function DnsRecordsPanel({
     }
   };
 
-  const handleCopyContent = async (rec: ManagedDnsRecord) => {
-    const ok = await copyText(rec.content);
+  const handleCopyValue = async (id: string, value: string, label?: string) => {
+    const ok = await copyText(value);
     if (ok) {
-      setCopiedId(rec.id);
-      setTimeout(() => setCopiedId((prev) => (prev === rec.id ? null : prev)), 1500);
-      toast.success(isZh ? `已复制记录值：${rec.content}` : `Copied: ${rec.content}`);
+      setCopiedId(id);
+      setTimeout(() => setCopiedId((prev) => (prev === id ? null : prev)), 1500);
+      toast.success(isZh ? `已复制${label ? ` ${label}` : ''}：${value}` : `Copied: ${value}`);
     } else {
       toast.error(isZh ? '复制失败，请手动选中复制' : 'Clipboard copy failed');
     }
   };
-
-  const selectedFormProvider = providerMap.get(recordForm.providerId);
 
   return (
     <div className="space-y-4">
@@ -724,7 +896,7 @@ export function DnsRecordsPanel({
       </datalist>
 
       {/* ===================================================================== */}
-      {/* LEVEL 1: DOMAIN LIST VIEW (Clean overview when managing many domains) */}
+      {/* LEVEL 1: DOMAIN LIST VIEW                                             */}
       {/* ===================================================================== */}
       {!activeDomainRow ? (
         <>
@@ -780,15 +952,15 @@ export function DnsRecordsPanel({
                   className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 whitespace-nowrap shrink-0"
                 >
                   <CloudDownload className="w-3.5 h-3.5" />
-                  {isZh ? '从服务商同步拉取' : 'Pull from Provider'}
+                  {isZh ? '从远端拉取 (Pull)' : 'Pull from Provider'}
                 </button>
                 <button
                   type="button"
-                  onClick={openCreateRecordModal}
+                  onClick={openAddDomainModal}
                   className="inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-semibold rounded-lg bg-blue-600 text-white hover:bg-blue-700 whitespace-nowrap shrink-0"
                 >
                   <Plus className="w-3.5 h-3.5" />
-                  {isZh ? '添加解析记录' : 'Add Record'}
+                  {isZh ? '添加域名' : 'Add Domain'}
                 </button>
               </div>
             </div>
@@ -809,10 +981,10 @@ export function DnsRecordsPanel({
                       {isZh ? '解析记录分布' : 'Record Breakdown'}
                     </th>
                     <th className="py-3 px-4 font-medium whitespace-nowrap">
-                      {isZh ? '分组' : 'Groups'}
+                      {isZh ? 'NS 托管状态' : 'NS Delegation'}
                     </th>
                     <th className="py-3 px-4 font-medium whitespace-nowrap">
-                      {isZh ? '最近同步' : 'Last Synced'}
+                      {isZh ? '最近拉取 (Pull)' : 'Last Pulled'}
                     </th>
                     <th className="py-3 px-5 font-medium text-right whitespace-nowrap">
                       {isZh ? '操作' : 'Actions'}
@@ -828,7 +1000,7 @@ export function DnsRecordsPanel({
                           <p className="text-sm font-medium text-slate-700 dark:text-slate-300">
                             {domainRows.length === 0
                               ? isZh
-                                ? '尚未同步或添加任何域名'
+                                ? '尚未拉取或添加任何域名'
                                 : 'No domains yet'
                               : isZh
                                 ? '没有匹配的域名'
@@ -837,11 +1009,11 @@ export function DnsRecordsPanel({
                           <p className="text-xs text-slate-500 dark:text-slate-400 leading-relaxed">
                             {providers.length === 0
                               ? isZh
-                                ? '请先在「DNS 服务商」中添加 Cloudflare、DNSPod、阿里云或 Porkbun 账号凭据，即可一键拉取全部域名并分级管理。'
-                                : 'Add your Cloudflare, DNSPod, Aliyun, or Porkbun credentials under DNS Providers first, then pull all domains in one click.'
+                                ? '请先在「DNS 服务商」中添加 Cloudflare、DNSPod、阿里云或 Porkbun 账号凭据，即可一键拉取全部域名或添加新域名。'
+                                : 'Add your Cloudflare, DNSPod, Aliyun, or Porkbun credentials under DNS Providers first.'
                               : isZh
-                                ? '点击「从服务商同步拉取」即可拉取账号下全部域名；拉取后在此按域名列表展示，点击任意域名即可进入管理其全部解析记录。'
-                                : 'Click "Pull from Provider" to import your domains. Click any domain row to inspect and manage its DNS records.'}
+                                ? '点击「从远端拉取 (Pull)」导入服务商下已有域名，或点击「添加域名」向服务商创建新域名并获取指定 NS 服务器指引。'
+                                : 'Click "Pull from Provider" to import existing domains, or click "Add Domain" to onboard a new domain with NS instructions.'}
                           </p>
                           <div className="flex flex-wrap items-center justify-center gap-2 pt-1">
                             {providers.length === 0 ? (
@@ -862,15 +1034,15 @@ export function DnsRecordsPanel({
                                   className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-blue-600 text-white text-xs font-semibold hover:bg-blue-700"
                                 >
                                   <CloudDownload className="w-3.5 h-3.5" />
-                                  {isZh ? '从服务商同步拉取' : 'Pull from Provider'}
+                                  {isZh ? '从远端拉取 (Pull)' : 'Pull from Provider'}
                                 </button>
                                 <button
                                   type="button"
-                                  onClick={openCreateRecordModal}
+                                  onClick={openAddDomainModal}
                                   className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg border border-slate-200 dark:border-slate-700 text-xs font-medium hover:bg-slate-50 dark:hover:bg-slate-800"
                                 >
                                   <Plus className="w-3.5 h-3.5" />
-                                  {isZh ? '手动添加记录' : 'Add Record'}
+                                  {isZh ? '添加域名' : 'Add Domain'}
                                 </button>
                               </>
                             )}
@@ -882,6 +1054,8 @@ export function DnsRecordsPanel({
                     filteredDomainRows.map((row) => {
                       const prov = providerMap.get(row.providerId);
                       const isSyncing = syncingDomainKey === row.key;
+                      const md = row.managedDomain;
+                      const hasNsGuide = Boolean(md && md.nameServers && md.nameServers.length > 0);
                       return (
                         <tr
                           key={row.key}
@@ -916,34 +1090,60 @@ export function DnsRecordsPanel({
                               <span className="font-semibold text-slate-900 dark:text-white">
                                 {row.recordCount} {isZh ? '条' : 'rec'}
                               </span>
-                              <span className="text-slate-300 dark:text-slate-700">|</span>
-                              {row.typeCounts.slice(0, 5).map((tc) => (
-                                <span key={tc.type} className={`text-[11px] font-semibold ${recordTypeTextColor(tc.type)}`}>
-                                  {tc.type}: {tc.count}
-                                </span>
-                              ))}
-                              {row.typeCounts.length > 5 && (
-                                <span className="text-[11px] text-slate-400">
-                                  +{row.typeCounts.length - 5}
-                                </span>
+                              {row.typeCounts.length > 0 && (
+                                <>
+                                  <span className="text-slate-300 dark:text-slate-700">|</span>
+                                  {row.typeCounts.slice(0, 5).map((tc) => (
+                                    <span key={tc.type} className={`text-[11px] font-semibold ${recordTypeTextColor(tc.type)}`}>
+                                      {tc.type}: {tc.count}
+                                    </span>
+                                  ))}
+                                  {row.typeCounts.length > 5 && (
+                                    <span className="text-[11px] text-slate-400">
+                                      +{row.typeCounts.length - 5}
+                                    </span>
+                                  )}
+                                </>
                               )}
                             </div>
                           </td>
-                          <td className="py-3.5 px-4 align-middle">
-                            <div className="flex flex-wrap items-center gap-1.5 text-[11px] text-slate-600 dark:text-slate-300">
-                              {row.groups.slice(0, 3).map((g) => (
-                                <span key={g} className="inline-flex items-center gap-1">
-                                  <Folder className="w-3 h-3 text-slate-400" />
-                                  {g}
-                                </span>
-                              ))}
-                              {row.groups.length > 3 && (
-                                <span className="text-slate-400">+{row.groups.length - 3}</span>
-                              )}
-                            </div>
+                          <td
+                            className="py-3.5 px-4 align-middle whitespace-nowrap"
+                            onClick={(e) => {
+                              if (hasNsGuide && md) {
+                                e.stopPropagation();
+                                setNsGuideDomain(md);
+                              }
+                            }}
+                          >
+                            {hasNsGuide && md ? (
+                              md.nsVerified ? (
+                                <button
+                                  type="button"
+                                  onClick={() => setNsGuideDomain(md)}
+                                  className="inline-flex items-center gap-1 text-[11px] font-medium text-emerald-700 dark:text-emerald-400 hover:underline"
+                                >
+                                  <CheckCircle2 className="w-3.5 h-3.5" />
+                                  {isZh ? 'NS 已生效' : 'NS Verified'}
+                                </button>
+                              ) : (
+                                <button
+                                  type="button"
+                                  onClick={() => setNsGuideDomain(md)}
+                                  className="inline-flex items-center gap-1 px-2 py-1 rounded-md border border-amber-300 dark:border-amber-800 bg-amber-50 dark:bg-amber-950/30 text-[11px] font-medium text-amber-700 dark:text-amber-300 hover:bg-amber-100 dark:hover:bg-amber-950/60"
+                                >
+                                  <AlertCircle className="w-3.5 h-3.5" />
+                                  {isZh ? '待修改 NS · 查看指引' : 'Set NS · Guide'}
+                                </button>
+                              )
+                            ) : (
+                              <span className="text-[11px] text-slate-400">
+                                {isZh ? '已托管' : 'Active'}
+                              </span>
+                            )}
                           </td>
                           <td className="py-3.5 px-4 align-middle whitespace-nowrap font-mono text-[11px] text-slate-500 dark:text-slate-400 tabular-nums">
-                            {row.lastSyncedAt ? formatTimeAgo(row.lastSyncedAt) : isZh ? '仅本地' : 'Local'}
+                            {row.lastSyncedAt ? formatTimeAgo(row.lastSyncedAt) : isZh ? '未拉取' : 'Not pulled'}
                           </td>
                           <td
                             className="py-3.5 px-5 align-middle text-right whitespace-nowrap"
@@ -954,12 +1154,16 @@ export function DnsRecordsPanel({
                                 <button
                                   type="button"
                                   disabled={isSyncing}
-                                  onClick={() => void handleQuickSyncDomain(row)}
-                                  title={isZh ? '重新拉取此域名解析记录' : 'Re-sync live records'}
+                                  onClick={() => void handleQuickPullDomain(row)}
+                                  title={
+                                    isZh
+                                      ? 'Pull：从远端 DNS 服务商拉取最新解析记录到本地视图'
+                                      : 'Pull latest records from remote DNS provider'
+                                  }
                                   className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md border border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 disabled:opacity-50"
                                 >
-                                  <RefreshCw className={`w-3.5 h-3.5 ${isSyncing ? 'animate-spin' : ''}`} />
-                                  <span className="hidden sm:inline">{isZh ? '同步' : 'Sync'}</span>
+                                  <CloudDownload className={`w-3.5 h-3.5 ${isSyncing ? 'animate-pulse' : ''}`} />
+                                  <span className="hidden sm:inline">{isZh ? '拉取 (Pull)' : 'Pull'}</span>
                                 </button>
                               )}
                               <button
@@ -967,7 +1171,7 @@ export function DnsRecordsPanel({
                                 onClick={() => enterDomain(row.key)}
                                 className="inline-flex items-center gap-1 px-3 py-1.5 rounded-md bg-blue-600 text-white font-medium hover:bg-blue-700"
                               >
-                                {isZh ? '管理解析' : 'Manage'}
+                                {isZh ? '管理解析' : 'Records'}
                                 <ChevronRight className="w-3.5 h-3.5" />
                               </button>
                             </div>
@@ -983,7 +1187,7 @@ export function DnsRecordsPanel({
         </>
       ) : (
         /* ===================================================================== */
-        /* LEVEL 2: SELECTED DOMAIN RECORDS VIEW                                 */
+        /* LEVEL 2: SELECTED DOMAIN RECORDS VIEW (INLINE EDIT + IMMEDIATE PUSH)  */
         /* ===================================================================== */
         <>
           {/* Domain Breadcrumb & Quick Actions */}
@@ -995,6 +1199,8 @@ export function DnsRecordsPanel({
                   onClick={() => {
                     setSelectedDomainKey(null);
                     setSelectedIds(new Set());
+                    setEditingRowId(null);
+                    setShowInlineAdd(false);
                   }}
                   className="inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium rounded-lg border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 whitespace-nowrap shrink-0"
                 >
@@ -1007,35 +1213,64 @@ export function DnsRecordsPanel({
                       {activeDomainRow.domain}
                     </h2>
                     <span className="text-xs text-slate-500 dark:text-slate-400">
-                      · {providerMap.get(activeDomainRow.providerId)?.name || activeDomainRow.providerId}
+                      · {activeProvider?.name || activeDomainRow.providerId}
                     </span>
                     <span className="font-mono text-xs text-slate-500 dark:text-slate-400 tabular-nums">
                       · {domainScopedRecords.length} {isZh ? '条记录' : 'records'}
                     </span>
+                    {activeDomainRow.managedDomain &&
+                      activeDomainRow.managedDomain.nameServers.length > 0 && (
+                        <button
+                          type="button"
+                          onClick={() => setNsGuideDomain(activeDomainRow.managedDomain!)}
+                          className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-medium border ${
+                            activeDomainRow.managedDomain.nsVerified
+                              ? 'border-emerald-200 dark:border-emerald-800 bg-emerald-50 dark:bg-emerald-950/30 text-emerald-700 dark:text-emerald-300'
+                              : 'border-amber-300 dark:border-amber-800 bg-amber-50 dark:bg-amber-950/30 text-amber-700 dark:text-amber-300'
+                          }`}
+                        >
+                          {activeDomainRow.managedDomain.nsVerified ? (
+                            <CheckCircle2 className="w-3 h-3" />
+                          ) : (
+                            <AlertCircle className="w-3 h-3" />
+                          )}
+                          {activeDomainRow.managedDomain.nsVerified
+                            ? isZh
+                              ? 'NS 已生效'
+                              : 'NS Verified'
+                            : isZh
+                              ? '查看 NS 修改指引'
+                              : 'NS Setup Guide'}
+                        </button>
+                      )}
                   </div>
+                  <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5">
+                    {isZh
+                      ? '拉取 (Pull) = 从 DNS 服务商读取最新解析到本地 · 行内编辑保存 / 推送 (Push) = 立即单条推送修改到 DNS 服务器生效。'
+                      : 'Pull = read latest records from remote DNS · Inline Save / Push = immediately push single-record updates to remote DNS.'}
+                  </p>
                 </div>
               </div>
 
               <div className="flex items-center gap-2 shrink-0">
-                {providerMap.get(activeDomainRow.providerId) &&
-                  isProviderConfigured(providerMap.get(activeDomainRow.providerId)) && (
-                    <button
-                      type="button"
-                      disabled={syncingDomainKey === activeDomainRow.key}
-                      onClick={() => void handleQuickSyncDomain(activeDomainRow)}
-                      className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 disabled:opacity-50 whitespace-nowrap shrink-0"
-                    >
-                      <RefreshCw
-                        className={`w-3.5 h-3.5 ${
-                          syncingDomainKey === activeDomainRow.key ? 'animate-spin' : ''
-                        }`}
-                      />
-                      {isZh ? '同步最新解析' : 'Sync Live Records'}
-                    </button>
-                  )}
+                {activeProvider && activeProviderConfigured && (
+                  <button
+                    type="button"
+                    disabled={syncingDomainKey === activeDomainRow.key}
+                    onClick={() => void handleQuickPullDomain(activeDomainRow)}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 disabled:opacity-50 whitespace-nowrap shrink-0"
+                  >
+                    <CloudDownload
+                      className={`w-3.5 h-3.5 ${
+                        syncingDomainKey === activeDomainRow.key ? 'animate-pulse' : ''
+                      }`}
+                    />
+                    {isZh ? '拉取远端 (Pull)' : 'Pull Remote'}
+                  </button>
+                )}
                 <button
                   type="button"
-                  onClick={openCreateRecordModal}
+                  onClick={openInlineAddRow}
                   className="inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-semibold rounded-lg bg-blue-600 text-white hover:bg-blue-700 whitespace-nowrap shrink-0"
                 >
                   <Plus className="w-3.5 h-3.5" />
@@ -1043,6 +1278,61 @@ export function DnsRecordsPanel({
                 </button>
               </div>
             </div>
+
+            {/* Inline NS Banner when domain has pending NS delegation */}
+            {activeDomainRow.managedDomain &&
+              !activeDomainRow.managedDomain.nsVerified &&
+              activeDomainRow.managedDomain.nameServers.length > 0 && (
+                <div className="rounded-lg border border-amber-200 dark:border-amber-900/70 bg-amber-50/70 dark:bg-amber-950/20 px-3.5 py-2.5 flex flex-col md:flex-row md:items-center justify-between gap-2 text-xs">
+                  <div className="space-y-1">
+                    <div className="font-semibold text-amber-800 dark:text-amber-300 flex items-center gap-1.5">
+                      <AlertCircle className="w-3.5 h-3.5 shrink-0" />
+                      {isZh
+                        ? '请先在域名注册商处将 NS 服务器修改为以下地址，解析才会全球生效：'
+                        : 'Update your domain registrar Nameservers (NS) to activate live DNS:'}
+                    </div>
+                    <div className="flex flex-wrap items-center gap-2 font-mono text-[11px] text-amber-900 dark:text-amber-200">
+                      {activeDomainRow.managedDomain.nameServers.map((ns) => (
+                        <button
+                          key={ns}
+                          type="button"
+                          onClick={() => void handleCopyValue(`banner-${ns}`, ns, 'NS')}
+                          className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-white/80 dark:bg-slate-900/80 border border-amber-300/70 dark:border-amber-800 hover:border-blue-500"
+                        >
+                          {ns}
+                          {copiedId === `banner-${ns}` ? (
+                            <Check className="w-3 h-3 text-emerald-600" />
+                          ) : (
+                            <Copy className="w-3 h-3 text-slate-400" />
+                          )}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2 shrink-0">
+                    <button
+                      type="button"
+                      disabled={nsCheckBusyId === activeDomainRow.managedDomain.id}
+                      onClick={() => void handleCheckDomainNs(activeDomainRow.managedDomain!)}
+                      className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md bg-amber-600 text-white font-medium hover:bg-amber-700 disabled:opacity-50 whitespace-nowrap"
+                    >
+                      {nsCheckBusyId === activeDomainRow.managedDomain.id ? (
+                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      ) : (
+                        <ShieldCheck className="w-3.5 h-3.5" />
+                      )}
+                      {isZh ? '验证 NS 生效' : 'Verify NS'}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setNsGuideDomain(activeDomainRow.managedDomain!)}
+                      className="px-2.5 py-1.5 rounded-md border border-amber-300 dark:border-amber-800 text-amber-800 dark:text-amber-200 hover:bg-amber-100/60 dark:hover:bg-amber-950/40 whitespace-nowrap"
+                    >
+                      {isZh ? '详细指引' : 'Guide'}
+                    </button>
+                  </div>
+                </div>
+              )}
 
             {/* Scoped Group Filter + Search + Record Type Filter */}
             <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3 pt-3 border-t border-slate-100 dark:border-slate-800/80 text-xs">
@@ -1115,10 +1405,18 @@ export function DnsRecordsPanel({
                 </select>
               </div>
             </div>
-
           </div>
 
-          {/* Floating Batch Group Move Dock (never shifts the records table vertically) */}
+          {inlineError && (
+            <div className="px-4 py-2.5 rounded-xl border border-red-200 dark:border-red-900 bg-red-50/80 dark:bg-red-950/30 text-xs text-red-700 dark:text-red-300 flex items-center justify-between gap-2">
+              <span>{inlineError}</span>
+              <button type="button" onClick={() => setInlineError(null)} className="p-0.5 hover:opacity-70">
+                <X className="w-3.5 h-3.5" />
+              </button>
+            </div>
+          )}
+
+          {/* Floating Batch Group Move Dock */}
           {selectedIds.size > 0 && (
             <div className="fixed bottom-5 left-1/2 -translate-x-1/2 z-40 max-w-[94vw] flex flex-wrap items-center gap-3 px-4 py-2.5 rounded-xl border border-blue-200 dark:border-blue-800 bg-white/95 dark:bg-slate-900/95 backdrop-blur shadow-xl text-xs">
               <span className="font-semibold text-blue-700 dark:text-blue-300 tabular-nums whitespace-nowrap">
@@ -1152,7 +1450,7 @@ export function DnsRecordsPanel({
             </div>
           )}
 
-          {/* Records Table for Selected Domain */}
+          {/* Records Table for Selected Domain (Inline Add + Inline Row Edit) */}
           <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 overflow-hidden">
             <div className="overflow-x-auto">
               <table className="w-full text-left border-collapse">
@@ -1168,7 +1466,7 @@ export function DnsRecordsPanel({
                       />
                     </th>
                     <th className="py-3 px-4 font-medium whitespace-nowrap">
-                      {isZh ? '主机记录' : 'Host / FQDN'}
+                      {isZh ? '主机记录 / 备注' : 'Host / Notes'}
                     </th>
                     <th className="py-3 px-3 font-medium whitespace-nowrap">
                       {isZh ? '类型' : 'Type'}
@@ -1183,7 +1481,7 @@ export function DnsRecordsPanel({
                       {isZh ? '分组' : 'Group'}
                     </th>
                     <th className="py-3 px-3 font-medium whitespace-nowrap">
-                      {isZh ? '状态' : 'Sync'}
+                      {isZh ? '远端状态' : 'Remote'}
                     </th>
                     <th className="py-3 px-4 font-medium text-right whitespace-nowrap">
                       {isZh ? '操作' : 'Actions'}
@@ -1191,18 +1489,427 @@ export function DnsRecordsPanel({
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-200/70 dark:divide-slate-800/70 text-xs">
-                  {filteredRecords.length === 0 ? (
+                  {/* INLINE QUICK-ADD ROW */}
+                  {showInlineAdd && (
+                    <tr className="bg-blue-50/55 dark:bg-blue-950/25">
+                      <td className="py-3 px-4 align-top">
+                        <Plus className="w-4 h-4 text-blue-600 dark:text-blue-400 mt-1.5" />
+                      </td>
+                      <td className="py-2.5 px-3 align-top min-w-[165px]">
+                        <div className="space-y-1.5">
+                          <input
+                            autoFocus
+                            value={inlineAddDraft.name}
+                            onChange={(e) => setInlineAddDraft({ ...inlineAddDraft, name: e.target.value })}
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter') void handleSaveInlineAdd();
+                              if (e.key === 'Escape') setShowInlineAdd(false);
+                            }}
+                            placeholder="@ / www / api"
+                            className="w-full px-2.5 py-1.5 rounded-md border border-blue-300 dark:border-blue-700 bg-white dark:bg-slate-950 font-mono text-xs"
+                          />
+                          <input
+                            value={inlineAddDraft.notes}
+                            onChange={(e) => setInlineAddDraft({ ...inlineAddDraft, notes: e.target.value })}
+                            placeholder={isZh ? '备注（可选）' : 'Notes (optional)'}
+                            className="w-full px-2.5 py-1 rounded-md border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-950 text-[11px]"
+                          />
+                        </div>
+                      </td>
+                      <td className="py-2.5 px-2 align-top">
+                        <select
+                          value={inlineAddDraft.type}
+                          onChange={(e) =>
+                            setInlineAddDraft({ ...inlineAddDraft, type: e.target.value as DnsRecordType })
+                          }
+                          className="px-2 py-1.5 rounded-md border border-blue-300 dark:border-blue-700 bg-white dark:bg-slate-950 font-mono font-semibold text-xs"
+                        >
+                          {RECORD_TYPES.map((rt) => (
+                            <option key={rt} value={rt}>
+                              {rt}
+                            </option>
+                          ))}
+                        </select>
+                      </td>
+                      <td className="py-2.5 px-3 align-top min-w-[230px]">
+                        <div className="space-y-1.5">
+                          <div className="flex items-center gap-1.5">
+                            {(inlineAddDraft.type === 'MX' || inlineAddDraft.type === 'SRV') && (
+                              <input
+                                type="number"
+                                min={0}
+                                max={65535}
+                                value={inlineAddDraft.priority}
+                                onChange={(e) =>
+                                  setInlineAddDraft({
+                                    ...inlineAddDraft,
+                                    priority: Number(e.target.value) || 10,
+                                  })
+                                }
+                                title={isZh ? '优先级' : 'Priority'}
+                                className="w-16 px-2 py-1.5 rounded-md border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-950 font-mono text-xs"
+                              />
+                            )}
+                            <input
+                              value={inlineAddDraft.content}
+                              onChange={(e) => setInlineAddDraft({ ...inlineAddDraft, content: e.target.value })}
+                              onKeyDown={(e) => {
+                                if (e.key === 'Enter') void handleSaveInlineAdd();
+                                if (e.key === 'Escape') setShowInlineAdd(false);
+                              }}
+                              placeholder={contentPlaceholder(inlineAddDraft.type, isZh)}
+                              className="flex-1 min-w-0 px-2.5 py-1.5 rounded-md border border-blue-300 dark:border-blue-700 bg-white dark:bg-slate-950 font-mono text-xs"
+                            />
+                          </div>
+                          {inlineAddDraft.type === 'A' && detectedIps?.ipv4 && (
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setInlineAddDraft((prev) => ({ ...prev, content: detectedIps.ipv4! }))
+                              }
+                              className="text-[10px] font-mono text-blue-600 dark:text-blue-400 hover:underline"
+                            >
+                              {isZh ? `填入本机 IPv4: ${detectedIps.ipv4}` : `Use IPv4: ${detectedIps.ipv4}`}
+                            </button>
+                          )}
+                          {inlineAddDraft.type === 'AAAA' && detectedIps?.ipv6 && (
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setInlineAddDraft((prev) => ({ ...prev, content: detectedIps.ipv6! }))
+                              }
+                              className="text-[10px] font-mono text-blue-600 dark:text-blue-400 hover:underline"
+                            >
+                              {isZh ? `填入本机 IPv6: ${detectedIps.ipv6}` : `Use IPv6: ${detectedIps.ipv6}`}
+                            </button>
+                          )}
+                        </div>
+                      </td>
+                      <td className="py-2.5 px-2 align-top min-w-[145px]">
+                        <div className="space-y-1.5">
+                          <input
+                            type="number"
+                            min={1}
+                            max={86400}
+                            value={inlineAddDraft.ttl}
+                            onChange={(e) =>
+                              setInlineAddDraft({ ...inlineAddDraft, ttl: Number(e.target.value) || 300 })
+                            }
+                            className="w-24 px-2 py-1.5 rounded-md border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-950 font-mono text-xs"
+                          />
+                          {activeProvider?.type === 'cloudflare' &&
+                            ['A', 'AAAA', 'CNAME'].includes(inlineAddDraft.type) && (
+                              <label className="flex items-center gap-1.5 text-[11px] text-amber-700 dark:text-amber-300">
+                                <input
+                                  type="checkbox"
+                                  checked={inlineAddDraft.proxied}
+                                  onChange={(e) =>
+                                    setInlineAddDraft({ ...inlineAddDraft, proxied: e.target.checked })
+                                  }
+                                  className="rounded accent-amber-500"
+                                />
+                                Proxied
+                              </label>
+                            )}
+                          {(activeProvider?.type === 'dnspod' || activeProvider?.type === 'aliyun') && (
+                            <input
+                              value={inlineAddDraft.line}
+                              onChange={(e) => setInlineAddDraft({ ...inlineAddDraft, line: e.target.value })}
+                              placeholder={activeProvider.type === 'dnspod' ? '线路: 默认' : '线路: default'}
+                              className="w-28 px-2 py-1 rounded-md border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-950 text-[11px]"
+                            />
+                          )}
+                        </div>
+                      </td>
+                      <td className="py-2.5 px-2 align-top min-w-[110px]">
+                        <input
+                          list="dns-record-group-options"
+                          value={inlineAddDraft.groupName}
+                          onChange={(e) => setInlineAddDraft({ ...inlineAddDraft, groupName: e.target.value })}
+                          className="w-28 px-2 py-1.5 rounded-md border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-950 text-xs"
+                        />
+                      </td>
+                      <td className="py-2.5 px-2 align-top whitespace-nowrap">
+                        <label className="inline-flex items-center gap-1.5 text-[11px] font-medium text-blue-700 dark:text-blue-300 mt-1.5">
+                          <input
+                            type="checkbox"
+                            disabled={!activeProviderConfigured}
+                            checked={activeProviderConfigured && inlineAddDraft.syncRemote}
+                            onChange={(e) =>
+                              setInlineAddDraft({ ...inlineAddDraft, syncRemote: e.target.checked })
+                            }
+                            className="rounded accent-blue-600"
+                          />
+                          {activeProviderConfigured
+                            ? isZh
+                              ? '立即推送'
+                              : 'Push Live'
+                            : isZh
+                              ? '仅本地'
+                              : 'Local'}
+                        </label>
+                      </td>
+                      <td className="py-2.5 px-4 align-top text-right whitespace-nowrap">
+                        <div className="inline-flex items-center gap-1">
+                          <button
+                            type="button"
+                            disabled={inlineAddBusy}
+                            onClick={() => void handleSaveInlineAdd()}
+                            className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md bg-blue-600 text-white font-semibold hover:bg-blue-700 disabled:opacity-50"
+                          >
+                            {inlineAddBusy ? (
+                              <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                            ) : (
+                              <Save className="w-3.5 h-3.5" />
+                            )}
+                            {isZh ? '保存并推送' : 'Save'}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setShowInlineAdd(false)}
+                            className="p-1.5 rounded-md border border-slate-200 dark:border-slate-700 text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800"
+                            title={isZh ? '取消' : 'Cancel'}
+                          >
+                            <X className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  )}
+
+                  {filteredRecords.length === 0 && !showInlineAdd ? (
                     <tr>
-                      <td colSpan={8} className="py-10 px-4 text-center text-slate-500 dark:text-slate-400">
-                        {isZh ? '当前筛选条件下暂无解析记录' : 'No records match your current filters'}
+                      <td colSpan={8} className="py-12 px-4 text-center text-slate-500 dark:text-slate-400">
+                        <div className="space-y-2.5">
+                          <p>
+                            {domainScopedRecords.length === 0
+                              ? isZh
+                                ? '该域名下暂无解析记录，可直接点击「添加解析记录」行内新增并立即推送到远端。'
+                                : 'No records yet for this domain. Click "Add Record" to add one inline.'
+                              : isZh
+                                ? '当前筛选条件下暂无解析记录'
+                                : 'No records match your current filters'}
+                          </p>
+                          {domainScopedRecords.length === 0 && (
+                            <button
+                              type="button"
+                              onClick={openInlineAddRow}
+                              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-blue-600 text-white text-xs font-semibold hover:bg-blue-700"
+                            >
+                              <Plus className="w-3.5 h-3.5" />
+                              {isZh ? '立即添加第一条解析' : 'Add First Record'}
+                            </button>
+                          )}
+                        </div>
                       </td>
                     </tr>
                   ) : (
                     filteredRecords.map((rec) => {
                       const prov = providerMap.get(rec.providerId);
+                      const provConfigured = isProviderConfigured(prov);
+                      const isEditing = editingRowId === rec.id && inlineEditDraft !== null;
+                      const isPushing = pushingRecordId === rec.id;
+
+                      if (isEditing && inlineEditDraft) {
+                        return (
+                          <tr key={rec.id} className="bg-amber-50/45 dark:bg-amber-950/20">
+                            <td className="py-3 px-4 align-top">
+                              <Pencil className="w-3.5 h-3.5 text-amber-600 dark:text-amber-400 mt-1.5" />
+                            </td>
+                            <td className="py-2.5 px-3 align-top min-w-[165px]">
+                              <div className="space-y-1.5">
+                                <input
+                                  autoFocus
+                                  value={inlineEditDraft.name}
+                                  onChange={(e) =>
+                                    setInlineEditDraft({ ...inlineEditDraft, name: e.target.value })
+                                  }
+                                  onKeyDown={(e) => {
+                                    if (e.key === 'Enter') void handleSaveInlineEdit(rec);
+                                    if (e.key === 'Escape') cancelInlineEdit();
+                                  }}
+                                  className="w-full px-2.5 py-1.5 rounded-md border border-amber-400 dark:border-amber-700 bg-white dark:bg-slate-950 font-mono text-xs"
+                                />
+                                <input
+                                  value={inlineEditDraft.notes}
+                                  onChange={(e) =>
+                                    setInlineEditDraft({ ...inlineEditDraft, notes: e.target.value })
+                                  }
+                                  placeholder={isZh ? '备注（可选）' : 'Notes'}
+                                  className="w-full px-2.5 py-1 rounded-md border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-950 text-[11px]"
+                                />
+                              </div>
+                            </td>
+                            <td className="py-2.5 px-2 align-top">
+                              <select
+                                value={inlineEditDraft.type}
+                                onChange={(e) =>
+                                  setInlineEditDraft({
+                                    ...inlineEditDraft,
+                                    type: e.target.value as DnsRecordType,
+                                  })
+                                }
+                                className="px-2 py-1.5 rounded-md border border-amber-400 dark:border-amber-700 bg-white dark:bg-slate-950 font-mono font-semibold text-xs"
+                              >
+                                {RECORD_TYPES.map((rt) => (
+                                  <option key={rt} value={rt}>
+                                    {rt}
+                                  </option>
+                                ))}
+                              </select>
+                            </td>
+                            <td className="py-2.5 px-3 align-top min-w-[230px]">
+                              <div className="space-y-1.5">
+                                <div className="flex items-center gap-1.5">
+                                  {(inlineEditDraft.type === 'MX' || inlineEditDraft.type === 'SRV') && (
+                                    <input
+                                      type="number"
+                                      min={0}
+                                      max={65535}
+                                      value={inlineEditDraft.priority}
+                                      onChange={(e) =>
+                                        setInlineEditDraft({
+                                          ...inlineEditDraft,
+                                          priority: Number(e.target.value) || 10,
+                                        })
+                                      }
+                                      className="w-16 px-2 py-1.5 rounded-md border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-950 font-mono text-xs"
+                                    />
+                                  )}
+                                  <input
+                                    value={inlineEditDraft.content}
+                                    onChange={(e) =>
+                                      setInlineEditDraft({ ...inlineEditDraft, content: e.target.value })
+                                    }
+                                    onKeyDown={(e) => {
+                                      if (e.key === 'Enter') void handleSaveInlineEdit(rec);
+                                      if (e.key === 'Escape') cancelInlineEdit();
+                                    }}
+                                    className="flex-1 min-w-0 px-2.5 py-1.5 rounded-md border border-amber-400 dark:border-amber-700 bg-white dark:bg-slate-950 font-mono text-xs"
+                                  />
+                                </div>
+                                {inlineEditDraft.type === 'A' && detectedIps?.ipv4 && (
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      setInlineEditDraft((prev) =>
+                                        prev ? { ...prev, content: detectedIps.ipv4! } : prev
+                                      )
+                                    }
+                                    className="text-[10px] font-mono text-blue-600 dark:text-blue-400 hover:underline"
+                                  >
+                                    {isZh ? `填入本机 IPv4: ${detectedIps.ipv4}` : `Use IPv4: ${detectedIps.ipv4}`}
+                                  </button>
+                                )}
+                              </div>
+                            </td>
+                            <td className="py-2.5 px-2 align-top min-w-[145px]">
+                              <div className="space-y-1.5">
+                                <input
+                                  type="number"
+                                  min={1}
+                                  max={86400}
+                                  value={inlineEditDraft.ttl}
+                                  onChange={(e) =>
+                                    setInlineEditDraft({
+                                      ...inlineEditDraft,
+                                      ttl: Number(e.target.value) || 300,
+                                    })
+                                  }
+                                  className="w-24 px-2 py-1.5 rounded-md border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-950 font-mono text-xs"
+                                />
+                                {prov?.type === 'cloudflare' &&
+                                  ['A', 'AAAA', 'CNAME'].includes(inlineEditDraft.type) && (
+                                    <label className="flex items-center gap-1.5 text-[11px] text-amber-700 dark:text-amber-300">
+                                      <input
+                                        type="checkbox"
+                                        checked={inlineEditDraft.proxied}
+                                        onChange={(e) =>
+                                          setInlineEditDraft({
+                                            ...inlineEditDraft,
+                                            proxied: e.target.checked,
+                                          })
+                                        }
+                                        className="rounded accent-amber-500"
+                                      />
+                                      Proxied
+                                    </label>
+                                  )}
+                                {(prov?.type === 'dnspod' || prov?.type === 'aliyun') && (
+                                  <input
+                                    value={inlineEditDraft.line}
+                                    onChange={(e) =>
+                                      setInlineEditDraft({ ...inlineEditDraft, line: e.target.value })
+                                    }
+                                    placeholder={prov.type === 'dnspod' ? '默认' : 'default'}
+                                    className="w-28 px-2 py-1 rounded-md border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-950 text-[11px]"
+                                  />
+                                )}
+                              </div>
+                            </td>
+                            <td className="py-2.5 px-2 align-top min-w-[110px]">
+                              <input
+                                list="dns-record-group-options"
+                                value={inlineEditDraft.groupName}
+                                onChange={(e) =>
+                                  setInlineEditDraft({ ...inlineEditDraft, groupName: e.target.value })
+                                }
+                                className="w-28 px-2 py-1.5 rounded-md border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-950 text-xs"
+                              />
+                            </td>
+                            <td className="py-2.5 px-2 align-top whitespace-nowrap">
+                              <label className="inline-flex items-center gap-1.5 text-[11px] font-medium text-emerald-700 dark:text-emerald-300 mt-1.5">
+                                <input
+                                  type="checkbox"
+                                  disabled={!provConfigured}
+                                  checked={provConfigured && inlineEditDraft.syncRemote}
+                                  onChange={(e) =>
+                                    setInlineEditDraft({ ...inlineEditDraft, syncRemote: e.target.checked })
+                                  }
+                                  className="rounded accent-emerald-600"
+                                />
+                                {provConfigured
+                                  ? isZh
+                                    ? '保存即推送'
+                                    : 'Push Live'
+                                  : isZh
+                                    ? '仅本地'
+                                    : 'Local'}
+                              </label>
+                            </td>
+                            <td className="py-2.5 px-4 align-top text-right whitespace-nowrap">
+                              <div className="inline-flex items-center gap-1">
+                                <button
+                                  type="button"
+                                  disabled={inlineEditBusy}
+                                  onClick={() => void handleSaveInlineEdit(rec)}
+                                  className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md bg-emerald-600 text-white font-semibold hover:bg-emerald-700 disabled:opacity-50"
+                                >
+                                  {inlineEditBusy ? (
+                                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                                  ) : (
+                                    <Save className="w-3.5 h-3.5" />
+                                  )}
+                                  {isZh ? '保存并推送' : 'Save & Push'}
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={cancelInlineEdit}
+                                  className="p-1.5 rounded-md border border-slate-200 dark:border-slate-700 text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800"
+                                  title={isZh ? '取消编辑' : 'Cancel'}
+                                >
+                                  <X className="w-3.5 h-3.5" />
+                                </button>
+                              </div>
+                            </td>
+                          </tr>
+                        );
+                      }
+
                       return (
                         <tr
                           key={rec.id}
+                          onDoubleClick={() => startInlineEdit(rec)}
                           className="hover:bg-slate-50/70 dark:hover:bg-slate-800/30 transition-colors"
                         >
                           <td className="py-3 px-4 align-middle">
@@ -1240,7 +1947,7 @@ export function DnsRecordsPanel({
                               </span>
                               <button
                                 type="button"
-                                onClick={() => handleCopyContent(rec)}
+                                onClick={() => void handleCopyValue(rec.id, rec.content)}
                                 title={isZh ? '复制记录值' : 'Copy value'}
                                 className="p-1 rounded text-slate-400 hover:text-blue-600 dark:hover:text-blue-400 shrink-0"
                               >
@@ -1279,20 +1986,20 @@ export function DnsRecordsPanel({
                                   ? 'text-emerald-600 dark:text-emerald-400'
                                   : rec.syncState === 'error'
                                     ? 'text-red-600 dark:text-red-400'
-                                    : 'text-slate-500 dark:text-slate-400'
+                                    : 'text-amber-600 dark:text-amber-400'
                               }`}
                             >
                               {rec.syncState === 'synced'
                                 ? isZh
-                                  ? '已同步'
+                                  ? '远端一致'
                                   : 'Synced'
                                 : rec.syncState === 'error'
                                   ? isZh
-                                    ? '同步异常'
-                                    : 'Error'
+                                    ? '推送失败'
+                                    : 'Push Error'
                                   : isZh
-                                    ? '本地'
-                                    : 'Local'}
+                                    ? '待推送'
+                                    : 'Local Only'}
                             </div>
                             <div className="text-[10px] font-mono text-slate-400 tabular-nums min-h-[14px]">
                               {rec.lastSyncedAt ? formatTimeAgo(rec.lastSyncedAt) : '—'}
@@ -1300,10 +2007,33 @@ export function DnsRecordsPanel({
                           </td>
                           <td className="py-3 px-4 align-middle text-right whitespace-nowrap">
                             <div className="inline-flex items-center gap-1">
+                              {provConfigured && (
+                                <button
+                                  type="button"
+                                  disabled={isPushing}
+                                  onClick={() => void handlePushSingleRecord(rec)}
+                                  title={
+                                    isZh
+                                      ? 'Push：立即将此单条记录推送到远端 DNS 服务器'
+                                      : 'Push this record immediately to remote DNS server'
+                                  }
+                                  className={`p-1.5 rounded-md border transition-colors disabled:opacity-50 ${
+                                    rec.syncState !== 'synced'
+                                      ? 'border-amber-300 dark:border-amber-800 bg-amber-50 dark:bg-amber-950/30 text-amber-700 dark:text-amber-300 hover:bg-amber-100'
+                                      : 'border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800 hover:text-emerald-600'
+                                  }`}
+                                >
+                                  {isPushing ? (
+                                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                                  ) : (
+                                    <CloudUpload className="w-3.5 h-3.5" />
+                                  )}
+                                </button>
+                              )}
                               <button
                                 type="button"
-                                onClick={() => openEditRecordModal(rec)}
-                                title={isZh ? '修改记录' : 'Edit record'}
+                                onClick={() => startInlineEdit(rec)}
+                                title={isZh ? '行内直接编辑（保存后立即推送）' : 'Edit inline (pushes on save)'}
                                 className="p-1.5 rounded-md border border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800 hover:text-blue-600 dark:hover:text-blue-400"
                               >
                                 <Pencil className="w-3.5 h-3.5" />
@@ -1340,12 +2070,12 @@ export function DnsRecordsPanel({
             <div className="flex items-center justify-between pb-4 border-b border-slate-200 dark:border-slate-800">
               <div>
                 <h3 className="font-display text-lg font-semibold">
-                  {isZh ? '从 DNS 服务商同步拉取域名与解析' : 'Pull Live DNS Domains & Records'}
+                  {isZh ? '从 DNS 服务商拉取域名与解析 (Pull)' : 'Pull Live DNS Domains & Records'}
                 </h3>
                 <p className="text-[11px] text-slate-500 mt-0.5">
                   {isZh
-                    ? '支持 Cloudflare、DNSPod、阿里云 DNS、Porkbun。拉取后按域名列表分组展示，点进域名再管理解析记录。'
-                    : 'Pull live zones and records from Cloudflare, DNSPod, Aliyun DNS, or Porkbun.'}
+                    ? 'Pull 仅读取远端 DNS 服务商的最新配置并同步到本地视图，不会覆盖远端服务器。修改推送请使用行内「保存并推送」或单条 Push。'
+                    : 'Pull reads live zones/records from your DNS provider into NetPlus without overwriting remote records.'}
                 </p>
               </div>
               <button type="button" onClick={() => setShowPullModal(false)} className="p-1 text-slate-400">
@@ -1393,7 +2123,7 @@ export function DnsRecordsPanel({
                         setPullDomain('');
                         setPullZoneId('');
                         setPullError(null);
-                        void fetchDomainsForProvider(pid, 'pull');
+                        void fetchDomainsForProvider(pid);
                       }}
                       className="flex-1 px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950"
                     >
@@ -1406,7 +2136,7 @@ export function DnsRecordsPanel({
                     <button
                       type="button"
                       disabled={pullLoadingDomains}
-                      onClick={() => void fetchDomainsForProvider(pullProviderId, 'pull', true)}
+                      onClick={() => void fetchDomainsForProvider(pullProviderId, true)}
                       title={isZh ? '刷新域名列表' : 'Refresh domains'}
                       className="px-2.5 py-2 rounded-lg border border-slate-200 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800"
                     >
@@ -1415,7 +2145,6 @@ export function DnsRecordsPanel({
                   </div>
                 </div>
 
-                {/* Sync scope: All domains under account vs Single domain */}
                 <div className="grid grid-cols-2 gap-2">
                   <button
                     type="button"
@@ -1452,7 +2181,7 @@ export function DnsRecordsPanel({
                   >
                     <div>{isZh ? '仅拉取单个域名' : 'Single Domain'}</div>
                     <div className="text-[10px] opacity-80 mt-0.5">
-                      {isZh ? '指定一个主域名同步' : 'Sync one specific zone'}
+                      {isZh ? '指定一个主域名拉取' : 'Pull one specific zone'}
                     </div>
                   </button>
                 </div>
@@ -1529,7 +2258,7 @@ export function DnsRecordsPanel({
                         ? '拉取全部域名'
                         : 'Pull All Domains'
                       : isZh
-                      ? '立即同步读取'
+                      ? '立即拉取 (Pull)'
                       : 'Pull Records'}
                   </button>
                 </div>
@@ -1539,48 +2268,61 @@ export function DnsRecordsPanel({
         </div>
       )}
 
-      {/* ==================== MODAL 2: ADD / EDIT DNS RECORD ==================== */}
-      {showRecordModal && (
+      {/* ==================== MODAL 2: ADD DOMAIN TO DNS PROVIDER ==================== */}
+      {showAddDomainModal && (
         <div className="fixed inset-0 z-50 bg-slate-950/55 flex items-center justify-center p-4">
-          <div className="w-full max-w-xl rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-6 max-h-[90vh] overflow-y-auto">
+          <div className="w-full max-w-lg rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-6">
             <div className="flex items-center justify-between pb-4 border-b border-slate-200 dark:border-slate-800">
-              <h3 className="font-display text-lg font-semibold">
-                {editingRecord
-                  ? isZh
-                    ? `修改 DNS 记录 — ${editingRecord.fqdn}`
-                    : `Edit DNS Record — ${editingRecord.fqdn}`
-                  : isZh
-                    ? '手动添加域名 DNS 记录'
-                    : 'Add DNS Record'}
-              </h3>
-              <button type="button" onClick={() => setShowRecordModal(false)} className="p-1 text-slate-400">
+              <div>
+                <h3 className="font-display text-lg font-semibold">
+                  {isZh ? '添加域名到 DNS 服务商' : 'Add Domain to DNS Provider'}
+                </h3>
+                <p className="text-[11px] text-slate-500 mt-0.5">
+                  {isZh
+                    ? '系统将调用服务商 API 创建域名托管区，并自动获取该服务商分配的专属 NS 服务器地址通知您修改。'
+                    : 'Creates the zone on your DNS provider via API and returns the assigned Nameservers (NS) to set at your registrar.'}
+                </p>
+              </div>
+              <button type="button" onClick={() => setShowAddDomainModal(false)} className="p-1 text-slate-400">
                 <X className="w-5 h-5" />
               </button>
             </div>
 
-            <form onSubmit={handleSaveRecord} className="mt-4 space-y-4 text-xs">
-              {recordError && (
-                <div className="px-3 py-2 rounded-lg border border-red-200 dark:border-red-900 bg-red-50/70 dark:bg-red-950/30 text-red-700 dark:text-red-300">
-                  {recordError}
-                </div>
-              )}
+            {providers.length === 0 ? (
+              <div className="py-8 text-center space-y-3 text-xs">
+                <p className="text-slate-600 dark:text-slate-300">
+                  {isZh
+                    ? '请先配置至少一个 DNS 服务商账号凭据。'
+                    : 'Please configure at least one DNS provider first.'}
+                </p>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowAddDomainModal(false);
+                    onJumpToProviders();
+                  }}
+                  className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-blue-600 text-white font-semibold hover:bg-blue-700"
+                >
+                  <KeyRound className="w-3.5 h-3.5" />
+                  {isZh ? '去配置 DNS 服务商' : 'Configure DNS Providers'}
+                </button>
+              </div>
+            ) : (
+              <form onSubmit={handleAddDomainSubmit} className="mt-4 space-y-4 text-xs">
+                {addDomainError && (
+                  <div className="px-3 py-2.5 rounded-lg border border-red-200 dark:border-red-900 bg-red-50/70 dark:bg-red-950/30 text-red-700 dark:text-red-300">
+                    {addDomainError}
+                  </div>
+                )}
 
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
                 <div>
-                  <label className="block font-medium mb-1">{isZh ? 'DNS 服务商 *' : 'DNS Provider *'}</label>
+                  <label className="block font-medium mb-1">
+                    {isZh ? '目标 DNS 服务商 *' : 'Target DNS Provider *'}
+                  </label>
                   <select
                     required
-                    value={recordForm.providerId}
-                    onChange={(e) => {
-                      const nextPid = e.target.value;
-                      const nextProv = providerMap.get(nextPid);
-                      setRecordForm((prev) => ({
-                        ...prev,
-                        providerId: nextPid,
-                        line: nextProv?.type === 'dnspod' ? prev.line || '默认' : prev.line,
-                        syncRemote: isProviderConfigured(nextProv),
-                      }));
-                    }}
+                    value={addDomainProviderId}
+                    onChange={(e) => setAddDomainProviderId(e.target.value)}
                     className="w-full px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950"
                   >
                     {providers.map((p) => (
@@ -1593,217 +2335,208 @@ export function DnsRecordsPanel({
 
                 <div>
                   <label className="block font-medium mb-1">
-                    {isZh ? '主域名 *' : 'Root Domain *'}
-                    {formLoadingDomains && (
-                      <span className="ml-1.5 text-[10px] text-blue-600">
-                        {isZh ? '加载中...' : 'Loading...'}
-                      </span>
-                    )}
+                    {isZh ? '主域名（根域名）*' : 'Root Domain *'}
                   </label>
                   <input
                     required
-                    list="dns-form-domain-suggestions"
-                    value={recordForm.domain}
-                    onChange={(e) => setRecordForm({ ...recordForm, domain: e.target.value })}
+                    autoFocus
+                    value={addDomainInput}
+                    onChange={(e) => setAddDomainInput(e.target.value)}
                     placeholder="example.com"
                     className="w-full px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 font-mono"
                   />
-                  <datalist id="dns-form-domain-suggestions">
-                    {Array.from(new Set([...formDomains.map((d) => d.name), ...allDomains])).map((d) => (
-                      <option key={d} value={d} />
-                    ))}
-                  </datalist>
+                  <p className="mt-1.5 text-[11px] text-slate-500 dark:text-slate-400 leading-relaxed">
+                    {isZh
+                      ? '支持自动获取：Cloudflare（API 返回该 Zone 专属双 NS）、DNSPod（套餐对应 NS）、阿里云 DNS（DnsServers）、Porkbun（默认 NS）。创建完成后将立即弹出 NS 修改指引并支持一键验证生效。'
+                      : 'Automatically fetches provider NS servers for Cloudflare, DNSPod, Aliyun DNS, and Porkbun, with one-click live NS verification.'}
+                  </p>
                 </div>
-              </div>
 
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3.5">
-                <div>
-                  <label className="block font-medium mb-1">{isZh ? '记录类型 *' : 'Record Type *'}</label>
-                  <select
-                    value={recordForm.type}
-                    onChange={(e) => setRecordForm({ ...recordForm, type: e.target.value as DnsRecordType })}
-                    className="w-full px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 font-mono font-semibold"
+                <div className="flex justify-end gap-2 pt-3 border-t border-slate-200 dark:border-slate-800">
+                  <button
+                    type="button"
+                    onClick={() => setShowAddDomainModal(false)}
+                    className="px-4 py-2 rounded-lg border border-slate-200 dark:border-slate-700"
                   >
-                    {RECORD_TYPES.map((rt) => (
-                      <option key={rt} value={rt}>
-                        {rt}
-                      </option>
-                    ))}
-                  </select>
+                    {isZh ? '取消' : 'Cancel'}
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={addDomainBusy}
+                    className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-blue-600 text-white font-semibold hover:bg-blue-700 disabled:opacity-50"
+                  >
+                    {addDomainBusy ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Plus className="w-3.5 h-3.5" />}
+                    {isZh ? '创建域名并获取 NS' : 'Add Domain & Fetch NS'}
+                  </button>
                 </div>
-                <div className="sm:col-span-2">
-                  <label className="block font-medium mb-1">{isZh ? '主机记录（@ 为根域名）*' : 'Host Name *'}</label>
-                  <input
-                    required
-                    value={recordForm.name}
-                    onChange={(e) => setRecordForm({ ...recordForm, name: e.target.value })}
-                    placeholder="@ / www / api / _acme-challenge"
-                    className="w-full px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 font-mono"
-                  />
-                </div>
-              </div>
-
-              <div>
-                <label className="block font-medium mb-1">{isZh ? '记录值 *' : 'Value / Content *'}</label>
-                <input
-                  required
-                  value={recordForm.content}
-                  onChange={(e) => setRecordForm({ ...recordForm, content: e.target.value })}
-                  placeholder={contentPlaceholder(recordForm.type, isZh)}
-                  className="w-full px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 font-mono"
-                />
-                {recordForm.type === 'A' && detectedIps?.ipv4 && (
-                  <div className="mt-1.5 flex items-center gap-2 text-[11px]">
-                    <span className="text-slate-400">{isZh ? '快速填入探测 IPv4：' : 'Detected IPv4:'}</span>
-                    <button
-                      type="button"
-                      onClick={() => setRecordForm((prev) => ({ ...prev, content: detectedIps.ipv4! }))}
-                      className="font-mono text-blue-600 dark:text-blue-400 hover:underline"
-                    >
-                      {detectedIps.ipv4}
-                    </button>
-                  </div>
-                )}
-                {recordForm.type === 'AAAA' && detectedIps && detectedIps.ipv6List.length > 0 && (
-                  <div className="mt-1.5 space-y-1 text-[11px]">
-                    <div className="text-slate-400">
-                      {isZh
-                        ? `快速填入探测到的 IPv6（共 ${detectedIps.ipv6List.length} 个）：`
-                        : `Quick-fill detected IPv6 (${detectedIps.ipv6List.length}):`}
-                    </div>
-                    <div className="max-h-24 overflow-y-auto space-y-1">
-                      {detectedIps.ipv6List.map((addr, idx) => (
-                        <button
-                          key={addr}
-                          type="button"
-                          onClick={() => setRecordForm((prev) => ({ ...prev, content: addr }))}
-                          className="w-full flex items-center gap-2 px-2 py-1 rounded border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-950/60 hover:border-blue-400 text-left font-mono text-[11px] text-slate-700 dark:text-slate-300"
-                        >
-                          <span className="text-slate-400 shrink-0">#{idx + 1}</span>
-                          <span className="truncate">{addr}</span>
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                )}
-              </div>
-
-              <div className="grid grid-cols-2 sm:grid-cols-3 gap-3.5">
-                <div>
-                  <label className="block font-medium mb-1">TTL (s)</label>
-                  <input
-                    type="number"
-                    min={1}
-                    max={86400}
-                    value={recordForm.ttl}
-                    onChange={(e) => setRecordForm({ ...recordForm, ttl: Number(e.target.value) || 300 })}
-                    className="w-full px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 font-mono"
-                  />
-                </div>
-
-                {(recordForm.type === 'MX' || recordForm.type === 'SRV') && (
-                  <div>
-                    <label className="block font-medium mb-1">{isZh ? '优先级 (MX/SRV)' : 'Priority'}</label>
-                    <input
-                      type="number"
-                      min={0}
-                      max={65535}
-                      value={recordForm.priority}
-                      onChange={(e) => setRecordForm({ ...recordForm, priority: Number(e.target.value) || 10 })}
-                      className="w-full px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 font-mono"
-                    />
-                  </div>
-                )}
-
-                {(selectedFormProvider?.type === 'dnspod' || selectedFormProvider?.type === 'aliyun') && (
-                  <div>
-                    <label className="block font-medium mb-1">{isZh ? '解析线路' : 'Route / Line'}</label>
-                    <input
-                      value={recordForm.line}
-                      onChange={(e) => setRecordForm({ ...recordForm, line: e.target.value })}
-                      placeholder={selectedFormProvider.type === 'dnspod' ? '默认' : 'default'}
-                      className="w-full px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950"
-                    />
-                  </div>
-                )}
-
-                <div>
-                  <label className="block font-medium mb-1">{isZh ? '自定义分组 *' : 'Group *'}</label>
-                  <input
-                    required
-                    list="dns-record-group-options"
-                    value={recordForm.groupName}
-                    onChange={(e) => setRecordForm({ ...recordForm, groupName: e.target.value })}
-                    placeholder={isZh ? '如：边缘节点 / 业务入口' : 'e.g. Edge Nodes'}
-                    className="w-full px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950"
-                  />
-                </div>
-              </div>
-
-              <div>
-                <label className="block font-medium mb-1">{isZh ? '备注（可选）' : 'Notes (Optional)'}</label>
-                <input
-                  value={recordForm.notes}
-                  onChange={(e) => setRecordForm({ ...recordForm, notes: e.target.value })}
-                  placeholder={isZh ? '用途说明或关联业务' : 'Purpose or environment note'}
-                  className="w-full px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950"
-                />
-              </div>
-
-              <div className="space-y-2 pt-1">
-                {selectedFormProvider?.type === 'cloudflare' &&
-                  (recordForm.type === 'A' || recordForm.type === 'AAAA' || recordForm.type === 'CNAME') && (
-                    <label className="flex items-center gap-2">
-                      <input
-                        type="checkbox"
-                        checked={recordForm.proxied}
-                        onChange={(e) => setRecordForm({ ...recordForm, proxied: e.target.checked })}
-                        className="rounded accent-blue-600"
-                      />
-                      {isZh ? '开启 Cloudflare CDN 代理 (Proxied)' : 'Enable Cloudflare Proxy'}
-                    </label>
-                  )}
-
-                <label className="flex items-center gap-2">
-                  <input
-                    type="checkbox"
-                    checked={recordForm.syncRemote}
-                    onChange={(e) => setRecordForm({ ...recordForm, syncRemote: e.target.checked })}
-                    className="rounded accent-blue-600"
-                  />
-                  {isProviderConfigured(selectedFormProvider)
-                    ? isZh
-                      ? '同时推送同步到 DNS 服务商远端（实时生效）'
-                      : 'Push changes live to DNS provider'
-                    : isZh
-                      ? '服务商未配置 API 密钥，将仅保存至本地记录库'
-                      : 'Provider has no API secret; will save locally'}
-                </label>
-              </div>
-
-              <div className="flex justify-end gap-2 pt-3 border-t border-slate-200 dark:border-slate-800">
-                <button
-                  type="button"
-                  onClick={() => setShowRecordModal(false)}
-                  className="px-4 py-2 rounded-lg border border-slate-200 dark:border-slate-700"
-                >
-                  {isZh ? '取消' : 'Cancel'}
-                </button>
-                <button
-                  type="submit"
-                  disabled={recordSaving}
-                  className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-blue-600 text-white font-semibold hover:bg-blue-700 disabled:opacity-50"
-                >
-                  {recordSaving && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
-                  {isZh ? '保存记录' : 'Save Record'}
-                </button>
-              </div>
-            </form>
+              </form>
+            )}
           </div>
         </div>
       )}
 
-      {/* ==================== MODAL 3: DELETE RECORD CONFIRM ==================== */}
+      {/* ==================== MODAL 3: NS DELEGATION GUIDE & VERIFICATION ==================== */}
+      {nsGuideDomain && (
+        <div className="fixed inset-0 z-50 bg-slate-950/55 flex items-center justify-center p-4">
+          <div className="w-full max-w-lg rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-6 space-y-4 text-xs">
+            <div className="flex items-start justify-between gap-3 pb-3 border-b border-slate-200 dark:border-slate-800">
+              <div>
+                <div className="flex items-center gap-2">
+                  <h3 className="font-display text-base font-semibold text-slate-900 dark:text-white">
+                    {isZh ? '域名 NS 服务器配置指引' : 'Nameserver (NS) Delegation Guide'}
+                  </h3>
+                  <span
+                    className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-medium ${
+                      nsGuideDomain.nsVerified
+                        ? 'bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300'
+                        : 'bg-amber-50 dark:bg-amber-950/40 text-amber-700 dark:text-amber-300'
+                    }`}
+                  >
+                    {nsGuideDomain.nsVerified ? (
+                      <CheckCircle2 className="w-3 h-3" />
+                    ) : (
+                      <AlertCircle className="w-3 h-3" />
+                    )}
+                    {nsGuideDomain.nsVerified
+                      ? isZh
+                        ? 'NS 已生效'
+                        : 'Verified'
+                      : isZh
+                        ? '待修改 / 等待生效'
+                        : 'Pending NS Update'}
+                  </span>
+                </div>
+                <p className="font-mono text-sm font-bold text-blue-600 dark:text-blue-400 mt-1">
+                  {nsGuideDomain.domain}
+                </p>
+              </div>
+              <button type="button" onClick={() => setNsGuideDomain(null)} className="p-1 text-slate-400">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="space-y-3">
+              <div className="flex items-center justify-between">
+                <span className="font-semibold text-slate-800 dark:text-slate-200">
+                  {isZh
+                    ? '请前往域名注册商（如阿里云/腾讯云/GoDaddy/Namecheap/Porkbun）将 DNS 服务器修改为：'
+                    : 'Set the following Nameservers at your domain registrar:'}
+                </span>
+                {nsGuideDomain.nameServers.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={() =>
+                      void handleCopyValue(
+                        'copy-all-ns',
+                        nsGuideDomain.nameServers.join('\n'),
+                        isZh ? '全部 NS' : 'All NS'
+                      )
+                    }
+                    className="inline-flex items-center gap-1 text-[11px] font-medium text-blue-600 dark:text-blue-400 hover:underline shrink-0"
+                  >
+                    <Copy className="w-3 h-3" />
+                    {isZh ? '复制全部' : 'Copy All'}
+                  </button>
+                )}
+              </div>
+
+              {nsGuideDomain.nameServers.length > 0 ? (
+                <div className="space-y-1.5">
+                  {nsGuideDomain.nameServers.map((ns, idx) => (
+                    <div
+                      key={ns}
+                      className="flex items-center justify-between px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-950 font-mono"
+                    >
+                      <div className="flex items-center gap-2">
+                        <span className="text-[10px] text-slate-400">NS #{idx + 1}</span>
+                        <span className="font-semibold text-slate-900 dark:text-white">{ns}</span>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => void handleCopyValue(`ns-modal-${ns}`, ns, 'NS')}
+                        className="inline-flex items-center gap-1 px-2 py-1 rounded border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-[11px] text-slate-600 dark:text-slate-300 hover:border-blue-500"
+                      >
+                        {copiedId === `ns-modal-${ns}` ? (
+                          <>
+                            <Check className="w-3 h-3 text-emerald-600" />
+                            {isZh ? '已复制' : 'Copied'}
+                          </>
+                        ) : (
+                          <>
+                            <Copy className="w-3 h-3" />
+                            {isZh ? '复制' : 'Copy'}
+                          </>
+                        )}
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div className="px-3 py-2.5 rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-950 text-slate-500">
+                  {isZh
+                    ? '该服务商未返回明确 NS 列表，请在服务商控制台查看域名指定 NS。'
+                    : 'No nameservers returned by this provider. Check your provider console.'}
+                </div>
+              )}
+
+              {nsGuideDomain.nsNote && (
+                <p className="text-[11px] text-slate-500 dark:text-slate-400 leading-relaxed bg-slate-50 dark:bg-slate-950/60 p-3 rounded-lg border border-slate-200/70 dark:border-slate-800">
+                  {nsGuideDomain.nsNote}
+                </p>
+              )}
+
+              {nsGuideDomain.currentLiveNs && nsGuideDomain.currentLiveNs.length > 0 && (
+                <div className="p-3 rounded-lg border border-slate-200 dark:border-slate-800 space-y-1">
+                  <div className="text-[11px] font-medium text-slate-500 dark:text-slate-400">
+                    {isZh ? '当前公网实际解析到的 NS 服务器：' : 'Currently live resolved NS:'}
+                  </div>
+                  <div className="font-mono text-[11px] text-slate-800 dark:text-slate-200">
+                    {nsGuideDomain.currentLiveNs.join(' · ')}
+                  </div>
+                </div>
+              )}
+            </div>
+
+            <div className="flex flex-wrap items-center justify-between gap-2 pt-3 border-t border-slate-200 dark:border-slate-800">
+              <button
+                type="button"
+                disabled={nsCheckBusyId === nsGuideDomain.id}
+                onClick={() => void handleCheckDomainNs(nsGuideDomain)}
+                className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-blue-600 text-white font-semibold hover:bg-blue-700 disabled:opacity-50"
+              >
+                {nsCheckBusyId === nsGuideDomain.id ? (
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                ) : (
+                  <ShieldCheck className="w-3.5 h-3.5" />
+                )}
+                {isZh ? '立即验证 NS 是否生效' : 'Verify Live NS Now'}
+              </button>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    const key = `${nsGuideDomain.providerId}::${nsGuideDomain.domain.toLowerCase()}`;
+                    setNsGuideDomain(null);
+                    enterDomain(key);
+                  }}
+                  className="px-3.5 py-2 rounded-lg border border-slate-200 dark:border-slate-700 font-medium hover:bg-slate-50 dark:hover:bg-slate-800"
+                >
+                  {isZh ? '进入解析管理' : 'Manage Records'}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setNsGuideDomain(null)}
+                  className="px-3.5 py-2 rounded-lg border border-slate-200 dark:border-slate-700 text-slate-500"
+                >
+                  {isZh ? '关闭' : 'Close'}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ==================== MODAL 4: DELETE RECORD CONFIRM ==================== */}
       {deleteTarget && (
         <div className="fixed inset-0 z-50 bg-slate-950/55 flex items-center justify-center p-4">
           <div className="w-full max-w-md rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-6 space-y-4 text-xs">

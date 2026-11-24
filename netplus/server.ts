@@ -15,10 +15,12 @@ import type {
   IpPolicyAction,
   IpPolicyTargetScope,
   ManagedDnsRecord,
+  ManagedDomain,
   ManagedIpRecord,
   MonitorCheckSample,
   MonitorTarget,
   NotificationEventType,
+  OAuthProviderId,
   OciInstanceAction,
   OverviewSummary,
   SecurityConfig,
@@ -30,15 +32,19 @@ import {
   getHostLinkedRuleIds,
   setHostLinkedRuleIds,
   store,
+  type PersistedSessionRecord,
   type StoredCloudAccount,
   type StoredCloudHost,
   type StoredDnsProvider,
   type StoredNotificationChannel,
+  type StoredOAuthProviderConfig,
   type StoredOciProfile,
   type StoredOciSniperTask,
 } from './server/lib/store.ts';
 import {
+  checkDomainNsDelegation,
   createProviderDnsRecord,
+  createProviderDomain,
   deleteProviderDnsRecord,
   detectPublicIps,
   executeDnsSyncRule,
@@ -51,6 +57,15 @@ import {
   validateDnsRecordInput,
 } from './server/services/dnsSync.ts';
 import { probeTcp, runMonitorCheck } from './server/services/monitor.ts';
+import {
+  buildOAuthCallbackUri,
+  completeOAuthCallback,
+  createOAuthAuthorizationUrl,
+  getPublicOAuthStatus,
+  isOAuthProviderId,
+  listOAuthProviderConfigs,
+  renderOAuthPopupResultHtml,
+} from './server/services/oauth.ts';
 import {
   CLOUD_INSTANCE_ID_REGEX,
   cloudHostAddIpv4,
@@ -100,7 +115,8 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 dotenv.config();
 
 export interface ServerHookContext {
-  createSession: (username: string, ip: string) => { token: string; expiresAt: string };
+  createSession: (username: string, ip: string) => { token: string; expiresAt: string; expiresAtMs: number };
+  setSessionCookie: (req: Request, res: Response, token: string, expiresAtMs: number) => void;
   getClientIp: (req: Request) => string;
 }
 
@@ -108,15 +124,24 @@ export interface CreateServerOptions {
   configureApp?: (app: express.Express, ctx: ServerHookContext) => void;
 }
 
-interface ActiveSession {
-  token: string;
-  username: string;
-  ip: string;
-  createdAt: number;
-  expiresAt: number;
+type ActiveSession = PersistedSessionRecord;
+
+const SESSION_COOKIE_NAME = 'netplus_sid';
+const sessions = new Map<string, ActiveSession>();
+
+// Hydrate persisted sessions so logins survive page refresh and server/container restart
+for (const saved of store.loadSessions()) {
+  sessions.set(saved.token, saved);
 }
 
-const sessions = new Map<string, ActiveSession>();
+function persistSessionsToDisk() {
+  try {
+    store.saveSessions(Array.from(sessions.values()));
+  } catch {
+    // Non-fatal persistence warning
+  }
+}
+
 const OCI_REGION_REGEX = /^[a-z]{2}-[a-z0-9-]+-\d+$/;
 const VALID_NOTIFY_EVENTS: NotificationEventType[] = [
   'oci_sniper_success',
@@ -131,9 +156,14 @@ const VALID_NOTIFY_EVENTS: NotificationEventType[] = [
 
 setInterval(() => {
   const now = Date.now();
+  let removed = false;
   for (const [token, s] of sessions.entries()) {
-    if (now > s.expiresAt) sessions.delete(token);
+    if (now > s.expiresAt) {
+      sessions.delete(token);
+      removed = true;
+    }
   }
+  if (removed) persistSessionsToDisk();
 }, 60_000).unref();
 
 interface AuthedRequest extends Request {
@@ -149,44 +179,147 @@ function getClientIp(req: Request): string {
   return req.socket.remoteAddress || '127.0.0.1';
 }
 
-function extractBearerToken(req: Request): string | null {
+function parseCookies(req: Request): Record<string, string> {
+  const header = req.headers.cookie;
+  if (!header) return {};
+  const out: Record<string, string> = {};
+  for (const part of header.split(';')) {
+    const idx = part.indexOf('=');
+    if (idx <= 0) continue;
+    const key = part.slice(0, idx).trim();
+    const val = part.slice(idx + 1).trim();
+    if (!key) continue;
+    try {
+      out[key] = decodeURIComponent(val);
+    } catch {
+      out[key] = val;
+    }
+  }
+  return out;
+}
+
+function isHttpsRequest(req: Request): boolean {
+  if (req.secure) return true;
+  const proto = String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim().toLowerCase();
+  return proto === 'https';
+}
+
+function setSessionCookie(req: Request, res: Response, token: string, expiresAtMs: number) {
+  const maxAgeSec = Math.max(60, Math.floor((expiresAtMs - Date.now()) / 1000));
+  const secure = isHttpsRequest(req);
+  const parts = [
+    `${SESSION_COOKIE_NAME}=${encodeURIComponent(token)}`,
+    'Path=/',
+    'HttpOnly',
+    `Max-Age=${maxAgeSec}`,
+  ];
+  if (secure) {
+    // Required for HTTPS iframe contexts (e.g. AI Studio preview) as well as standard HTTPS
+    parts.push('Secure', 'SameSite=None', 'Partitioned');
+  } else {
+    parts.push('SameSite=Lax');
+  }
+  res.append('Set-Cookie', parts.join('; '));
+}
+
+function clearSessionCookie(req: Request, res: Response) {
+  const secure = isHttpsRequest(req);
+  const parts = [
+    `${SESSION_COOKIE_NAME}=`,
+    'Path=/',
+    'HttpOnly',
+    'Max-Age=0',
+  ];
+  if (secure) {
+    parts.push('Secure', 'SameSite=None', 'Partitioned');
+  } else {
+    parts.push('SameSite=Lax');
+  }
+  res.append('Set-Cookie', parts.join('; '));
+}
+
+function extractAuthToken(req: Request): { token: string | null; source: 'bearer' | 'cookie' | 'none' } {
   const header = req.headers.authorization;
-  if (!header || !header.startsWith('Bearer ')) return null;
-  const token = header.slice(7).trim();
-  return token || null;
+  if (header && header.startsWith('Bearer ')) {
+    const token = header.slice(7).trim();
+    if (token) return { token, source: 'bearer' };
+  }
+  const cookies = parseCookies(req);
+  const cookieToken = cookies[SESSION_COOKIE_NAME]?.trim();
+  if (cookieToken) {
+    return { token: cookieToken, source: 'cookie' };
+  }
+  return { token: null, source: 'none' };
+}
+
+function passesCookieCsrfCheck(req: Request): boolean {
+  const method = req.method.toUpperCase();
+  if (method === 'GET' || method === 'HEAD' || method === 'OPTIONS') return true;
+  if (String(req.headers['x-requested-with'] || '') === 'NetPlus') return true;
+  const origin = String(req.headers.origin || '').trim();
+  const host = String(req.headers['x-forwarded-host'] || req.headers.host || '').split(',')[0].trim();
+  if (origin && host) {
+    try {
+      const parsed = new URL(origin);
+      if (parsed.host === host) return true;
+    } catch {
+      return false;
+    }
+  }
+  return false;
 }
 
 function requireAuth(req: AuthedRequest, res: Response, next: NextFunction) {
-  const token = extractBearerToken(req);
-  if (!token) {
+  const extracted = extractAuthToken(req);
+  if (!extracted.token) {
     res.status(401).json({ error: 'Authentication required' });
     return;
   }
-  const session = sessions.get(token);
+  if (extracted.source === 'cookie' && !passesCookieCsrfCheck(req)) {
+    res.status(403).json({ error: 'CSRF validation failed' });
+    return;
+  }
+  const session = sessions.get(extracted.token);
   if (!session || Date.now() > session.expiresAt) {
-    if (session) sessions.delete(token);
+    if (session) {
+      sessions.delete(extracted.token);
+      persistSessionsToDisk();
+    }
     res.status(401).json({ error: 'Session expired or invalid' });
     return;
   }
   const timeoutMs = Math.max(10, store.getState().security.sessionTimeoutMinutes) * 60_000;
-  session.expiresAt = Date.now() + timeoutMs;
+  const now = Date.now();
+  // Throttle disk writes when sliding expiration
+  if (session.expiresAt - now < timeoutMs * 0.85) {
+    session.expiresAt = now + timeoutMs;
+    persistSessionsToDisk();
+  } else {
+    session.expiresAt = now + timeoutMs;
+  }
   req.sessionUser = session.username;
-  req.sessionToken = token;
+  req.sessionToken = extracted.token;
   next();
 }
 
-function createSession(username: string, ip: string): { token: string; expiresAt: string } {
+function createSession(
+  username: string,
+  ip: string,
+  loginMethod = 'password'
+): { token: string; expiresAt: string; expiresAtMs: number } {
   const token = generateToken(36);
   const timeoutMs = Math.max(10, store.getState().security.sessionTimeoutMinutes) * 60_000;
-  const expiresAt = Date.now() + timeoutMs;
+  const expiresAtMs = Date.now() + timeoutMs;
   sessions.set(token, {
     token,
     username,
     ip,
     createdAt: Date.now(),
-    expiresAt,
+    expiresAt: expiresAtMs,
+    loginMethod,
   });
-  return { token, expiresAt: new Date(expiresAt).toISOString() };
+  persistSessionsToDisk();
+  return { token, expiresAt: new Date(expiresAtMs).toISOString(), expiresAtMs };
 }
 
 function sanitizeIpv6List(raw: unknown): string[] {
@@ -216,6 +349,7 @@ export async function createServer(options: CreateServerOptions = {}) {
   app.set('trust proxy', 1);
   app.disable('x-powered-by');
   app.use(express.json({ limit: '1mb' }));
+  app.use(express.urlencoded({ extended: false, limit: '256kb' }));
 
   app.use((_req, res, next) => {
     res.setHeader('X-Content-Type-Options', 'nosniff');
@@ -235,7 +369,7 @@ export async function createServer(options: CreateServerOptions = {}) {
 
   // ---- Auth & Anti-Bot Endpoints ----
   app.get('/api/auth/status', (req, res) => {
-    const token = extractBearerToken(req);
+    const { token } = extractAuthToken(req);
     const session = token ? sessions.get(token) : undefined;
     const validSession = session && Date.now() <= session.expiresAt ? session : undefined;
     const sec = store.getState().security;
@@ -243,6 +377,7 @@ export async function createServer(options: CreateServerOptions = {}) {
       envManagedAdmin: store.isEnvAdminConfigured(),
       authenticated: Boolean(validSession),
       username: validSession?.username,
+      oauthProviders: getPublicOAuthStatus(),
       security: {
         captchaDifficulty: sec.captchaDifficulty,
         powDifficulty: sec.powDifficulty,
@@ -355,7 +490,8 @@ export async function createServer(options: CreateServerOptions = {}) {
     }
 
     antiBotGuard.clearLoginFailures(ip);
-    const sess = createSession(credCheck.canonicalUsername, ip);
+    const sess = createSession(credCheck.canonicalUsername, ip, 'password');
+    setSessionCookie(req, res, sess.token, sess.expiresAtMs);
     store.appendAudit({
       category: 'auth',
       severity: 'success',
@@ -369,16 +505,301 @@ export async function createServer(options: CreateServerOptions = {}) {
   });
 
   app.post('/api/auth/logout', requireAuth, (req: AuthedRequest, res) => {
-    if (req.sessionToken) sessions.delete(req.sessionToken);
+    if (req.sessionToken) {
+      sessions.delete(req.sessionToken);
+      persistSessionsToDisk();
+    }
+    clearSessionCookie(req, res);
     store.appendAudit({
       category: 'auth',
       severity: 'info',
       action: 'LOGOUT',
       actor: req.sessionUser || 'admin',
       ip: getClientIp(req),
-      details: 'Administrator signed out and invalidated bearer session',
+      details: 'Administrator signed out and invalidated session cookie/token',
     });
     res.json({ ok: true });
+  });
+
+  // ---- Third-Party OAuth Login & Admin Account Binding (Microsoft / GitHub / Google / Apple) ----
+  app.get('/api/auth/oauth/providers', (_req, res) => {
+    res.json({ providers: getPublicOAuthStatus() });
+  });
+
+  app.get('/api/security/oauth', requireAuth, (req, res) => {
+    const providers = listOAuthProviderConfigs().map((p) => ({
+      ...p,
+      callbackUri: buildOAuthCallbackUri(req, p.provider),
+    }));
+    res.json({
+      providers,
+      bindings: store.getState().boundOAuthAccounts,
+    });
+  });
+
+  app.put('/api/security/oauth/:provider', requireAuth, (req: AuthedRequest, res) => {
+    const providerParam = String(req.params.provider || '').toLowerCase();
+    if (!isOAuthProviderId(providerParam)) {
+      res.status(400).json({ error: 'Unsupported OAuth provider' });
+      return;
+    }
+    const b = req.body ?? {};
+    const state = store.getState();
+    let cfg = state.oauthProviders.find((p) => p.provider === providerParam);
+    if (!cfg) {
+      cfg = { provider: providerParam, enabled: false };
+      state.oauthProviders.push(cfg);
+    }
+    if (b.enabled !== undefined) cfg.enabled = Boolean(b.enabled);
+    if (b.clientId !== undefined) cfg.clientId = String(b.clientId).trim() || undefined;
+    if (b.tenantId !== undefined) cfg.tenantId = String(b.tenantId).trim() || 'common';
+    if (b.teamId !== undefined) cfg.teamId = String(b.teamId).trim() || undefined;
+    if (b.keyId !== undefined) cfg.keyId = String(b.keyId).trim() || undefined;
+    store.setOAuthProviderSecrets(cfg, {
+      clientSecret: typeof b.clientSecret === 'string' ? b.clientSecret : undefined,
+      privateKey: typeof b.privateKey === 'string' ? b.privateKey : undefined,
+    });
+    cfg.updatedAt = new Date().toISOString();
+    store.save();
+
+    store.appendAudit({
+      category: 'security',
+      severity: 'warning',
+      action: 'OAUTH_PROVIDER_UPDATED',
+      actor: req.sessionUser || 'admin',
+      ip: getClientIp(req),
+      target: providerParam.toUpperCase(),
+      details: `Updated OAuth provider config (enabled=${cfg.enabled})`,
+    });
+
+    const updated = listOAuthProviderConfigs().find((p) => p.provider === providerParam);
+    res.json({
+      provider: updated ? { ...updated, callbackUri: buildOAuthCallbackUri(req, providerParam) } : null,
+    });
+  });
+
+  app.delete('/api/security/oauth/bindings/:id', requireAuth, (req: AuthedRequest, res) => {
+    const list = store.getState().boundOAuthAccounts;
+    const idx = list.findIndex((b) => b.id === req.params.id);
+    if (idx === -1) {
+      res.status(404).json({ error: 'Bound OAuth account not found' });
+      return;
+    }
+    const [removed] = list.splice(idx, 1);
+    store.save();
+    store.appendAudit({
+      category: 'security',
+      severity: 'warning',
+      action: 'OAUTH_ACCOUNT_UNBOUND',
+      actor: req.sessionUser || 'admin',
+      ip: getClientIp(req),
+      target: `${removed.provider}:${removed.email || removed.displayName || removed.subject}`,
+      details: 'Administrator unbound external OAuth identity',
+    });
+    res.json({ ok: true });
+  });
+
+  app.get('/api/auth/oauth/:provider/url', (req, res) => {
+    const providerParam = String(req.params.provider || '').toLowerCase();
+    if (!isOAuthProviderId(providerParam)) {
+      res.status(400).json({ error: 'Unsupported OAuth provider' });
+      return;
+    }
+    const mode = req.query.mode === 'bind' ? 'bind' : 'login';
+    let actor: string | undefined;
+
+    if (mode === 'bind') {
+      const { token } = extractAuthToken(req);
+      const sess = token ? sessions.get(token) : undefined;
+      if (!sess || Date.now() > sess.expiresAt) {
+        res.status(401).json({ error: '请先登录后再绑定第三方账号' });
+        return;
+      }
+      actor = sess.username;
+    }
+
+    const built = createOAuthAuthorizationUrl({
+      req,
+      provider: providerParam,
+      mode,
+      actor,
+    });
+    if (!built.ok) {
+      res.status(400).json({ error: built.error });
+      return;
+    }
+    res.json({ url: built.url, callbackUri: built.callbackUri });
+  });
+
+  const handleOAuthCallback = async (req: Request, res: Response) => {
+    const providerParam = String(req.params.provider || '').toLowerCase();
+    if (!isOAuthProviderId(providerParam)) {
+      res.status(400).send('Unsupported OAuth provider');
+      return;
+    }
+
+    const queryOrBody = req.method === 'POST' ? (req.body ?? {}) : (req.query ?? {});
+    const errCode = String(queryOrBody.error_description || queryOrBody.error || '').trim();
+    const code = String(queryOrBody.code || '').trim();
+    const state = String(queryOrBody.state || '').trim();
+    const appleUserJson = typeof queryOrBody.user === 'string' ? queryOrBody.user : undefined;
+
+    if (errCode) {
+      res.setHeader('Content-Type', 'text/html; charset=utf-8');
+      res.send(
+        renderOAuthPopupResultHtml({
+          ok: false,
+          mode: 'login',
+          provider: providerParam,
+          error: `授权被取消或拒绝：${errCode}`,
+        })
+      );
+      return;
+    }
+
+    if (!code || !state) {
+      res.setHeader('Content-Type', 'text/html; charset=utf-8');
+      res.send(
+        renderOAuthPopupResultHtml({
+          ok: false,
+          mode: 'login',
+          provider: providerParam,
+          error: '缺少授权码 (code) 或状态参数 (state)',
+        })
+      );
+      return;
+    }
+
+    const result = await completeOAuthCallback({
+      provider: providerParam,
+      code,
+      state,
+      appleUserJson,
+    });
+
+    if (!result.ok) {
+      res.setHeader('Content-Type', 'text/html; charset=utf-8');
+      res.send(
+        renderOAuthPopupResultHtml({
+          ok: false,
+          mode: 'login',
+          provider: providerParam,
+          error: result.error,
+        })
+      );
+      return;
+    }
+
+    const ip = getClientIp(req);
+    const appState = store.getState();
+    const now = new Date().toISOString();
+
+    if (result.mode === 'bind') {
+      const existing = appState.boundOAuthAccounts.find(
+        (b) => b.provider === providerParam && b.subject === result.identity.subject
+      );
+      if (existing) {
+        existing.email = result.identity.email || existing.email;
+        existing.displayName = result.identity.displayName || existing.displayName;
+        existing.avatarUrl = result.identity.avatarUrl || existing.avatarUrl;
+      } else {
+        appState.boundOAuthAccounts.unshift({
+          id: `oauth-${crypto.randomBytes(5).toString('hex')}`,
+          provider: providerParam,
+          subject: result.identity.subject,
+          email: result.identity.email,
+          displayName: result.identity.displayName,
+          avatarUrl: result.identity.avatarUrl,
+          boundAt: now,
+        });
+      }
+      store.save();
+
+      store.appendAudit({
+        category: 'security',
+        severity: 'success',
+        action: 'OAUTH_ACCOUNT_BOUND',
+        actor: result.actor || store.getAdminInitSummary().username,
+        ip,
+        target: `${providerParam}:${result.identity.email || result.identity.displayName || result.identity.subject}`,
+        details: 'Bound external OAuth account to administrator console',
+      });
+
+      res.setHeader('Content-Type', 'text/html; charset=utf-8');
+      res.send(
+        renderOAuthPopupResultHtml({
+          ok: true,
+          mode: 'bind',
+          provider: providerParam,
+          boundAccount: {
+            email: result.identity.email,
+            displayName: result.identity.displayName,
+          },
+        })
+      );
+      return;
+    }
+
+    // Login mode: ONLY allow accounts explicitly bound by the administrator
+    const matched = appState.boundOAuthAccounts.find(
+      (b) => b.provider === providerParam && b.subject === result.identity.subject
+    );
+    if (!matched) {
+      store.appendAudit({
+        category: 'auth',
+        severity: 'warning',
+        action: 'OAUTH_LOGIN_UNBOUND_REJECTED',
+        actor: result.identity.email || result.identity.displayName || result.identity.subject,
+        ip,
+        target: providerParam.toUpperCase(),
+        details: 'Rejected OAuth sign-in because external identity is not bound to admin',
+      });
+      res.setHeader('Content-Type', 'text/html; charset=utf-8');
+      res.send(
+        renderOAuthPopupResultHtml({
+          ok: false,
+          mode: 'login',
+          provider: providerParam,
+          error: `该 ${providerParam.toUpperCase()} 账号 (${result.identity.email || result.identity.displayName || result.identity.subject}) 尚未绑定到管理员账户。请先使用管理员密码登录后，在「安全与容器设置」中绑定此账号。`,
+        })
+      );
+      return;
+    }
+
+    matched.lastLoginAt = now;
+    if (result.identity.email) matched.email = result.identity.email;
+    if (result.identity.displayName) matched.displayName = result.identity.displayName;
+    store.save();
+
+    const adminUser = store.getAdminInitSummary().username;
+    const sess = createSession(adminUser, ip, `oauth:${providerParam}`);
+    setSessionCookie(req, res, sess.token, sess.expiresAtMs);
+
+    store.appendAudit({
+      category: 'auth',
+      severity: 'success',
+      action: 'OAUTH_LOGIN_SUCCESS',
+      actor: adminUser,
+      ip,
+      target: `${providerParam}:${matched.email || matched.displayName || matched.subject}`,
+      details: `Signed in via bound ${providerParam.toUpperCase()} account`,
+    });
+
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    res.send(
+      renderOAuthPopupResultHtml({
+        ok: true,
+        mode: 'login',
+        provider: providerParam,
+        token: sess.token,
+        username: adminUser,
+        expiresAt: sess.expiresAtMs,
+      })
+    );
+  };
+
+  app.all(['/api/auth/oauth/:provider/callback', '/api/auth/oauth/:provider/callback/'], (req, res) => {
+    void handleOAuthCallback(req, res);
   });
 
   const handleUpdateCredentials = (req: AuthedRequest, res: express.Response) => {
@@ -435,6 +856,7 @@ export async function createServer(options: CreateServerOptions = {}) {
         sessions.delete(tok);
       }
     }
+    persistSessionsToDisk();
 
     const changedParts: string[] = [];
     if (updated.usernameChanged) changedParts.push(`username: "${currentAdminUsername}" -> "${updated.username}"`);
@@ -960,18 +1382,26 @@ export async function createServer(options: CreateServerOptions = {}) {
       }
     }
     const now = new Date().toISOString();
+    const notifyOnDown = b.notifyOnDown !== undefined ? Boolean(b.notifyOnDown) : b.notifyOnAlert !== false;
+    const notifyOnRecover = b.notifyOnRecover !== undefined ? Boolean(b.notifyOnRecover) : b.notifyOnAlert !== false;
     const mon: MonitorTarget = {
       id: `mon-${crypto.randomBytes(5).toString('hex')}`,
       name: String(b.name).trim(),
+      groupName: b.groupName ? String(b.groupName).trim() : undefined,
       type: b.type === 'http' || b.type === 'dns' ? b.type : 'tcp',
       target: String(b.target).trim(),
       port: b.type === 'tcp' ? Math.min(65535, Math.max(1, Number(b.port) || 443)) : undefined,
       expectedIp: b.expectedIp ? String(b.expectedIp).trim() : undefined,
-      intervalSeconds: Math.max(30, Number(b.intervalSeconds) || 60),
+      httpKeyword: b.httpKeyword ? String(b.httpKeyword).trim() : undefined,
+      expectedStatusCodes: b.expectedStatusCodes ? String(b.expectedStatusCodes).trim() : undefined,
+      intervalSeconds: Math.max(15, Number(b.intervalSeconds) || 60),
       timeoutMs: Math.min(12_000, Math.max(1000, Number(b.timeoutMs) || 5000)),
       failureThreshold: Math.min(10, Math.max(1, Number(b.failureThreshold) || 2)),
       enabled: b.enabled !== false,
-      notifyOnAlert: b.notifyOnAlert !== false,
+      notifyOnAlert: notifyOnDown || notifyOnRecover,
+      notifyOnDown,
+      notifyOnRecover,
+      notifyChannelIds: Array.isArray(b.notifyChannelIds) ? b.notifyChannelIds.map(String) : [],
       linkedHostId: b.linkedHostId || undefined,
       linkedIpId: b.linkedIpId || undefined,
       status: 'pending',
@@ -1011,15 +1441,27 @@ export async function createServer(options: CreateServerOptions = {}) {
       }
     }
     if (b.name !== undefined) mon.name = String(b.name).trim();
+    if (b.groupName !== undefined) mon.groupName = String(b.groupName).trim() || undefined;
     if (b.type !== undefined) mon.type = b.type;
     if (b.target !== undefined) mon.target = String(b.target).trim();
     if (b.port !== undefined) mon.port = Math.min(65535, Math.max(1, Number(b.port) || 443));
     if (b.expectedIp !== undefined) mon.expectedIp = String(b.expectedIp).trim() || undefined;
-    if (b.intervalSeconds !== undefined) mon.intervalSeconds = Math.max(30, Number(b.intervalSeconds) || 60);
+    if (b.httpKeyword !== undefined) mon.httpKeyword = String(b.httpKeyword).trim() || undefined;
+    if (b.expectedStatusCodes !== undefined) mon.expectedStatusCodes = String(b.expectedStatusCodes).trim() || undefined;
+    if (b.intervalSeconds !== undefined) mon.intervalSeconds = Math.max(15, Number(b.intervalSeconds) || 60);
     if (b.timeoutMs !== undefined) mon.timeoutMs = Math.min(12_000, Math.max(1000, Number(b.timeoutMs) || 5000));
     if (b.failureThreshold !== undefined) mon.failureThreshold = Math.min(10, Math.max(1, Number(b.failureThreshold) || 2));
     if (b.enabled !== undefined) mon.enabled = Boolean(b.enabled);
-    if (b.notifyOnAlert !== undefined) mon.notifyOnAlert = Boolean(b.notifyOnAlert);
+    if (b.notifyOnDown !== undefined) mon.notifyOnDown = Boolean(b.notifyOnDown);
+    if (b.notifyOnRecover !== undefined) mon.notifyOnRecover = Boolean(b.notifyOnRecover);
+    if (b.notifyOnAlert !== undefined) {
+      mon.notifyOnAlert = Boolean(b.notifyOnAlert);
+      if (b.notifyOnDown === undefined) mon.notifyOnDown = Boolean(b.notifyOnAlert);
+      if (b.notifyOnRecover === undefined) mon.notifyOnRecover = Boolean(b.notifyOnAlert);
+    } else if (b.notifyOnDown !== undefined || b.notifyOnRecover !== undefined) {
+      mon.notifyOnAlert = Boolean(mon.notifyOnDown || mon.notifyOnRecover);
+    }
+    if (Array.isArray(b.notifyChannelIds)) mon.notifyChannelIds = b.notifyChannelIds.map(String);
     mon.updatedAt = new Date().toISOString();
     store.save();
     res.json(mon);
@@ -1437,6 +1879,130 @@ export async function createServer(options: CreateServerOptions = {}) {
       );
     }
     res.json(list);
+  });
+
+  // ---- Managed Domains (Add Domain to DNS Provider + NS Delegation Guide & Verification) ----
+  app.get('/api/dns/domains', requireAuth, (_req, res) => {
+    res.json(store.getState().managedDomains);
+  });
+
+  app.post('/api/dns/domains', requireAuth, async (req: AuthedRequest, res) => {
+    const state = store.getState();
+    const b = req.body ?? {};
+    const providerId = String(b.providerId || '').trim();
+    const rawDomain = String(b.domain || '').trim().toLowerCase().replace(/\.$/, '');
+    const notes = b.notes ? String(b.notes).trim().slice(0, 500) : undefined;
+
+    const provider = state.dnsProviders.find((p) => p.id === providerId);
+    if (!provider) {
+      res.status(400).json({ error: '请选择有效的 DNS 服务商' });
+      return;
+    }
+
+    const secrets = store.getDnsProviderSecrets(provider.id);
+    const created = await createProviderDomain(provider, secrets, rawDomain);
+    if (!created.ok) {
+      res.status(502).json({ error: created.error || created.message || '添加域名失败' });
+      return;
+    }
+
+    const now = new Date().toISOString();
+    let entry = state.managedDomains.find(
+      (d) => d.providerId === provider.id && d.domain.toLowerCase() === created.domain.toLowerCase()
+    );
+    if (entry) {
+      entry.zoneId = created.zoneId || entry.zoneId;
+      entry.status = created.status || entry.status;
+      if (created.nameServers.length > 0) entry.nameServers = created.nameServers;
+      if (created.originalNameServers?.length) entry.originalNameServers = created.originalNameServers;
+      entry.nsNote = created.nsNote;
+      if (notes !== undefined) entry.notes = notes;
+      entry.updatedAt = now;
+    } else {
+      entry = {
+        id: `dom-${crypto.randomBytes(5).toString('hex')}`,
+        providerId: provider.id,
+        domain: created.domain,
+        zoneId: created.zoneId,
+        status: created.status,
+        nameServers: created.nameServers,
+        originalNameServers: created.originalNameServers,
+        nsNote: created.nsNote,
+        notes,
+        createdAt: now,
+        updatedAt: now,
+      };
+      state.managedDomains.unshift(entry);
+    }
+
+    // Run a quick non-blocking live NS lookup so we immediately know if NS already matches
+    const nsCheck = await checkDomainNsDelegation(entry.domain, entry.nameServers);
+    entry.currentLiveNs = nsCheck.liveNs;
+    entry.nsVerified = nsCheck.verified;
+    entry.nsCheckedAt = now;
+    if (nsCheck.verified) {
+      entry.status = 'active';
+    }
+    store.save();
+
+    store.appendAudit({
+      category: 'dns',
+      severity: 'success',
+      action: 'DNS_DOMAIN_ADDED',
+      actor: req.sessionUser || 'admin',
+      ip: getClientIp(req),
+      target: `${entry.domain} (${provider.name})`,
+      details: `Added domain with NS=[${entry.nameServers.join(', ')}] (verified=${entry.nsVerified})`,
+    });
+
+    res.status(201).json({
+      domain: entry,
+      nameServers: entry.nameServers,
+      originalNameServers: entry.originalNameServers,
+      currentLiveNs: entry.currentLiveNs,
+      nsVerified: entry.nsVerified,
+      nsNote: entry.nsNote,
+      message: created.message,
+    });
+  });
+
+  app.post('/api/dns/domains/:id/check-ns', requireAuth, async (req: AuthedRequest, res) => {
+    const state = store.getState();
+    const entry = state.managedDomains.find((d) => d.id === req.params.id);
+    if (!entry) {
+      res.status(404).json({ error: '域名记录不存在' });
+      return;
+    }
+    const check = await checkDomainNsDelegation(entry.domain, entry.nameServers);
+    const now = new Date().toISOString();
+    entry.currentLiveNs = check.liveNs;
+    entry.nsVerified = check.verified;
+    entry.nsCheckedAt = now;
+    if (check.verified) entry.status = 'active';
+    entry.updatedAt = now;
+    store.save();
+    res.json({ domain: entry, check });
+  });
+
+  app.delete('/api/dns/domains/:id', requireAuth, (req: AuthedRequest, res) => {
+    const state = store.getState();
+    const idx = state.managedDomains.findIndex((d) => d.id === req.params.id);
+    if (idx === -1) {
+      res.status(404).json({ error: '域名记录不存在' });
+      return;
+    }
+    const [removed] = state.managedDomains.splice(idx, 1);
+    store.save();
+    store.appendAudit({
+      category: 'dns',
+      severity: 'info',
+      action: 'DNS_DOMAIN_REMOVED',
+      actor: req.sessionUser || 'admin',
+      ip: getClientIp(req),
+      target: removed.domain,
+      details: 'Removed domain from local managed domain list',
+    });
+    res.json({ ok: true });
   });
 
   app.post('/api/dns/records/pull', requireAuth, async (req: AuthedRequest, res) => {
@@ -1916,6 +2482,58 @@ export async function createServer(options: CreateServerOptions = {}) {
     });
 
     res.json({ record, message: remoteMessage });
+  });
+
+  // Explicit single-record push to remote DNS server
+  app.post('/api/dns/records/:id/push', requireAuth, async (req: AuthedRequest, res) => {
+    const state = store.getState();
+    const record = state.dnsRecords.find((r) => r.id === req.params.id);
+    if (!record) {
+      res.status(404).json({ error: 'DNS 记录不存在' });
+      return;
+    }
+    const provider = state.dnsProviders.find((p) => p.id === record.providerId);
+    if (!provider) {
+      res.status(400).json({ error: '关联的 DNS 服务商不存在' });
+      return;
+    }
+    const secrets = store.getDnsProviderSecrets(provider.id);
+    const remoteRes = await updateProviderDnsRecord(provider, secrets, record, {
+      domain: record.domain,
+      name: record.name,
+      fqdn: record.fqdn,
+      type: record.type,
+      content: record.content,
+      ttl: record.ttl,
+      proxied: record.proxied,
+      priority: record.priority,
+      line: record.line,
+    });
+    const now = new Date().toISOString();
+    if (!remoteRes.ok) {
+      record.syncState = 'error';
+      record.updatedAt = now;
+      store.save();
+      res.status(502).json({ error: remoteRes.message, record });
+      return;
+    }
+    if (remoteRes.remoteRecordId) record.remoteRecordId = remoteRes.remoteRecordId;
+    if (remoteRes.zoneId) record.zoneId = remoteRes.zoneId;
+    record.syncState = remoteRes.synced ? 'synced' : 'local_only';
+    if (remoteRes.synced) record.lastSyncedAt = now;
+    record.updatedAt = now;
+    store.save();
+
+    store.appendAudit({
+      category: 'dns',
+      severity: 'success',
+      action: 'DNS_RECORD_PUSHED',
+      actor: req.sessionUser || 'admin',
+      ip: getClientIp(req),
+      target: `${record.fqdn} (${record.type})`,
+      details: `Pushed single record to ${provider.name}: ${remoteRes.message}`,
+    });
+    res.json({ ok: true, record, message: remoteRes.message });
   });
 
   app.post('/api/dns/records/batch-group', requireAuth, (req: AuthedRequest, res) => {
@@ -2875,6 +3493,9 @@ export async function createServer(options: CreateServerOptions = {}) {
       return;
     }
     const now = new Date().toISOString();
+    const minInterval = Math.max(10, Math.min(300, Number(b.minIntervalSeconds ?? 20)));
+    const initInterval = Math.max(minInterval, Math.min(600, Number(b.intervalSeconds ?? 30)));
+    const maxInterval = Math.max(initInterval, Math.min(600, Number(b.maxIntervalSeconds ?? 120)));
     const task: StoredOciSniperTask = {
       id: `sniper-${crypto.randomBytes(5).toString('hex')}`,
       name: String(b.name).trim(),
@@ -2892,10 +3513,18 @@ export async function createServer(options: CreateServerOptions = {}) {
         : ['AD-1'],
       assignPublicIp: b.assignPublicIp !== false,
       assignIpv6: b.assignIpv6 !== false,
-      intervalSeconds: Math.max(15, Number(b.intervalSeconds) || 45),
-      jitterPercent: Math.min(50, Math.max(0, Number(b.jitterPercent) || 20)),
+      adaptiveInterval: b.adaptiveInterval !== false,
+      minIntervalSeconds: minInterval,
+      intervalSeconds: initInterval,
+      maxIntervalSeconds: maxInterval,
+      stepUp429Seconds: Math.max(5, Math.min(120, Number(b.stepUp429Seconds ?? 15))),
+      stepDownOkSeconds: Math.max(1, Math.min(60, Number(b.stepDownOkSeconds ?? 5))),
+      currentIntervalSeconds: initInterval,
+      consecutive429Count: 0,
+      consecutiveOkCount: 0,
+      jitterPercent: Math.min(50, Math.max(0, Number(b.jitterPercent ?? 15))),
       retryOnOutOfCapacity: b.retryOnOutOfCapacity !== false,
-      backoffOn429Seconds: Math.max(30, Number(b.backoffOn429Seconds) || 180),
+      backoffOn429Seconds: Math.max(30, Number(b.backoffOn429Seconds ?? 60)),
       maxAttempts: Math.max(0, Number(b.maxAttempts) || 0),
       autoStopOnSuccess: b.autoStopOnSuccess !== false,
       autoBindDnsRuleId: b.autoBindDnsRuleId || undefined,
@@ -2916,7 +3545,7 @@ export async function createServer(options: CreateServerOptions = {}) {
       actor: req.sessionUser || 'admin',
       ip: getClientIp(req),
       target: task.name,
-      details: `${task.shape} ${task.ocpus}C/${task.memoryInGBs}G · interval=${task.intervalSeconds}s · systemNotify=${task.useSystemNotifications}`,
+      details: `${task.shape} ${task.ocpus}C/${task.memoryInGBs}G · adaptive=${task.adaptiveInterval} (${task.minIntervalSeconds}-${task.maxIntervalSeconds}s, init=${task.intervalSeconds}s)`,
     });
     res.status(201).json(store.toPublicSniperTask(task));
   });
@@ -2955,10 +3584,20 @@ export async function createServer(options: CreateServerOptions = {}) {
     }
     if (b.assignPublicIp !== undefined) task.assignPublicIp = Boolean(b.assignPublicIp);
     if (b.assignIpv6 !== undefined) task.assignIpv6 = Boolean(b.assignIpv6);
-    if (b.intervalSeconds !== undefined) task.intervalSeconds = Math.max(15, Number(b.intervalSeconds) || 45);
+    if (b.adaptiveInterval !== undefined) task.adaptiveInterval = Boolean(b.adaptiveInterval);
+    if (b.minIntervalSeconds !== undefined) task.minIntervalSeconds = Math.max(10, Math.min(300, Number(b.minIntervalSeconds) || 20));
+    if (b.intervalSeconds !== undefined) {
+      task.intervalSeconds = Math.max(10, Math.min(600, Number(b.intervalSeconds) || 30));
+      task.currentIntervalSeconds = task.intervalSeconds;
+    }
+    if (b.maxIntervalSeconds !== undefined) {
+      task.maxIntervalSeconds = Math.max(task.minIntervalSeconds ?? 20, Math.min(600, Number(b.maxIntervalSeconds) || 120));
+    }
+    if (b.stepUp429Seconds !== undefined) task.stepUp429Seconds = Math.max(5, Math.min(120, Number(b.stepUp429Seconds) || 15));
+    if (b.stepDownOkSeconds !== undefined) task.stepDownOkSeconds = Math.max(1, Math.min(60, Number(b.stepDownOkSeconds) || 5));
     if (b.jitterPercent !== undefined) task.jitterPercent = Math.min(50, Math.max(0, Number(b.jitterPercent) || 0));
     if (b.retryOnOutOfCapacity !== undefined) task.retryOnOutOfCapacity = Boolean(b.retryOnOutOfCapacity);
-    if (b.backoffOn429Seconds !== undefined) task.backoffOn429Seconds = Math.max(30, Number(b.backoffOn429Seconds) || 120);
+    if (b.backoffOn429Seconds !== undefined) task.backoffOn429Seconds = Math.max(30, Number(b.backoffOn429Seconds) || 60);
     if (b.maxAttempts !== undefined) task.maxAttempts = Math.max(0, Number(b.maxAttempts) || 0);
     if (b.autoStopOnSuccess !== undefined) task.autoStopOnSuccess = Boolean(b.autoStopOnSuccess);
     if (b.autoBindDnsRuleId !== undefined) task.autoBindDnsRuleId = b.autoBindDnsRuleId || undefined;
@@ -2966,7 +3605,14 @@ export async function createServer(options: CreateServerOptions = {}) {
     if (Array.isArray(b.notifyChannelIds)) task.notifyChannelIds = b.notifyChannelIds.map(String);
     if (b.status && ['running', 'paused', 'succeeded', 'failed'].includes(b.status)) {
       task.status = b.status;
-      task.nextAttemptAt = b.status === 'running' ? new Date().toISOString() : undefined;
+      if (b.status === 'running') {
+        task.nextAttemptAt = new Date().toISOString();
+        task.consecutive429Count = 0;
+        task.consecutiveOkCount = 0;
+        if (!task.currentIntervalSeconds) task.currentIntervalSeconds = task.intervalSeconds || 30;
+      } else {
+        task.nextAttemptAt = undefined;
+      }
     }
     task.updatedAt = new Date().toISOString();
     store.save();
@@ -2978,7 +3624,7 @@ export async function createServer(options: CreateServerOptions = {}) {
       actor: req.sessionUser || 'admin',
       ip: getClientIp(req),
       target: task.name,
-      details: `Status=${task.status}, ${task.ocpus}C/${task.memoryInGBs}G, interval=${task.intervalSeconds}s, systemNotify=${task.useSystemNotifications}`,
+      details: `Status=${task.status}, ${task.ocpus}C/${task.memoryInGBs}G, adaptive=${task.adaptiveInterval !== false}, interval=${task.intervalSeconds}s`,
     });
     res.json(store.toPublicSniperTask(task));
   });
@@ -4370,9 +5016,113 @@ export async function createServer(options: CreateServerOptions = {}) {
       return;
     }
 
+    // Enforce 1-to-1 binding: a single FQDN can only be bound to ONE cloud host instance
+    const buildRuleFqdn = (recName: string, dom: string) => {
+      const cleanDom = String(dom || '').trim().toLowerCase().replace(/\.$/, '');
+      const cleanRec = String(recName || '@').trim().toLowerCase().replace(/\.$/, '');
+      if (!cleanRec || cleanRec === '@' || cleanRec === cleanDom) return cleanDom;
+      return cleanRec.endsWith(`.${cleanDom}`) ? cleanRec : `${cleanRec}.${cleanDom}`;
+    };
+
+    const findHostOwningFqdn = (targetFqdn: string): StoredCloudHost | undefined => {
+      const normalized = targetFqdn.trim().toLowerCase().replace(/\.$/, '');
+      for (const other of state.cloudHosts) {
+        if (other.id === host.id) continue;
+        for (const rId of getHostLinkedRuleIds(other)) {
+          const r = state.dnsRules.find((x) => x.id === rId);
+          if (r && buildRuleFqdn(r.recordName, r.domain) === normalized) {
+            return other;
+          }
+        }
+      }
+      return undefined;
+    };
+
     let rule: DnsSyncRule | undefined;
 
-    if (b.createRule && typeof b.createRule === 'object') {
+    if (b.recordId && typeof b.recordId === 'string') {
+      // Attach an existing pulled DNS record from DNS Management (auto-creating/reusing its DnsSyncRule)
+      const rec = state.dnsRecords.find((r) => r.id === b.recordId.trim());
+      if (!rec) {
+        res.status(404).json({ error: '未找到所选的 DNS 域名记录，请先在 DNS 管理中拉取记录' });
+        return;
+      }
+      const targetFqdn = buildRuleFqdn(rec.name, rec.domain);
+      const conflictHost = findHostOwningFqdn(targetFqdn);
+      if (conflictHost) {
+        res.status(409).json({
+          error: `域名 ${targetFqdn} 已绑定到云主机「${conflictHost.name}」，一个域名只能绑定一个云主机实例`,
+        });
+        return;
+      }
+      const provider = state.dnsProviders.find((p) => p.id === rec.providerId);
+      if (!provider) {
+        res.status(400).json({ error: '该域名记录关联的 DNS 服务商不存在' });
+        return;
+      }
+      const secrets = store.getDnsProviderSecrets(provider.id);
+      const isConfigured = provider.type === 'webhook' ? Boolean(provider.endpointUrl) : Boolean(secrets.secret);
+      if (!isConfigured) {
+        res.status(400).json({ error: `DNS 服务商「${provider.name}」尚未配置 API 凭据` });
+        return;
+      }
+
+      // Reuse an existing unbound rule matching the same provider + FQDN if present
+      const existingRule = state.dnsRules.find(
+        (r) => r.providerId === provider.id && buildRuleFqdn(r.recordName, r.domain) === targetFqdn
+      );
+      if (existingRule) {
+        rule = existingRule;
+        rule.linkedHostId = host.id;
+        rule.ipv4Source = 'cloud_host';
+        rule.ipv4Address = host.ipv4 || '';
+        rule.updatedAt = now;
+      } else {
+        const ipv6Mode: 'round_robin' | 'per_host' = 'round_robin';
+        rule = {
+          id: `rule-${crypto.randomBytes(5).toString('hex')}`,
+          name: `${host.name} -> ${targetFqdn}`,
+          providerId: provider.id,
+          domain: rec.domain,
+          resolvedZoneId: rec.zoneId || provider.zoneId,
+          recordName: rec.name || '@',
+          ttl: Math.max(60, rec.ttl || 120),
+          proxied: Boolean(rec.proxied),
+          line: rec.line || (provider.type === 'dnspod' ? '默认' : 'default'),
+          syncIpv4: Boolean(host.ipv4) || true,
+          ipv4Address: host.ipv4 || '',
+          ipv4Source: 'cloud_host',
+          syncIpv6: host.ipv6List.length > 0,
+          ipv6Mode,
+          ipv6Targets: host.ipv6List.map((addr, idx) => {
+            const ociEntry = host.ociIpv6Entries?.find((e) => e.ipAddress.toLowerCase() === addr.toLowerCase());
+            return {
+              id: `v6-${host.id}-${idx + 1}`,
+              recordName: rec.name || '@',
+              address: addr,
+              proxied: Boolean(rec.proxied),
+              enabled: true,
+              ociIpv6Id: ociEntry?.id,
+              lastStatus: 'pending',
+            };
+          }),
+          linkedHostId: host.id,
+          ociProfileId: host.ociProfileId,
+          ociInstanceId: host.provider === 'oracle' ? host.instanceId : undefined,
+          ociInstanceName: host.provider === 'oracle' ? host.name : undefined,
+          ociVnicId: host.ociVnicId,
+          ociPrimaryPrivateIpId: host.ociPrimaryPrivateIpId,
+          ociPublicIpId: host.ociPublicIpId,
+          ociPublicIpLifetime: host.ociPublicIpLifetime,
+          dryRun: false,
+          enabled: true,
+          lastStatus: 'pending',
+          createdAt: now,
+          updatedAt: now,
+        };
+        state.dnsRules.unshift(rule);
+      }
+    } else if (b.createRule && typeof b.createRule === 'object') {
       const cr = b.createRule;
       const providerId = String(cr.providerId || '').trim();
       const domain = String(cr.domain || '').trim().toLowerCase();
@@ -4386,6 +5136,14 @@ export async function createServer(options: CreateServerOptions = {}) {
         res.status(400).json({ error: '请填写主域名（例如 example.com）' });
         return;
       }
+      const fqdn = buildRuleFqdn(recordName, domain);
+      const conflictHost = findHostOwningFqdn(fqdn);
+      if (conflictHost) {
+        res.status(409).json({
+          error: `域名 ${fqdn} 已绑定到云主机「${conflictHost.name}」，一个域名只能绑定一个云主机实例`,
+        });
+        return;
+      }
       const secrets = store.getDnsProviderSecrets(provider.id);
       const isConfigured = provider.type === 'webhook' ? Boolean(provider.endpointUrl) : Boolean(secrets.secret);
       if (!isConfigured) {
@@ -4395,13 +5153,12 @@ export async function createServer(options: CreateServerOptions = {}) {
 
       let resolvedZoneId: string | undefined = provider.zoneId;
       if (provider.type === 'cloudflare' && secrets.secret) {
-        const z = await resolveCloudflareZoneId(secrets.secret, domain);
+        const z = await resolveCloudflareZoneId(secrets.secret, domain, provider.zoneId, provider.accountEmail);
         if (z.zoneId) {
           resolvedZoneId = z.zoneId;
         }
       }
 
-      const fqdn = recordName === '@' ? domain : `${recordName}.${domain}`;
       const ipv6Mode: 'round_robin' | 'per_host' = cr.ipv6Mode === 'per_host' ? 'per_host' : 'round_robin';
       rule = {
         id: `rule-${crypto.randomBytes(5).toString('hex')}`,
@@ -4450,6 +5207,14 @@ export async function createServer(options: CreateServerOptions = {}) {
       rule = state.dnsRules.find((r) => r.id === ruleId);
       if (!rule) {
         res.status(404).json({ error: 'Selected DNS rule not found' });
+        return;
+      }
+      const targetFqdn = buildRuleFqdn(rule.recordName, rule.domain);
+      const conflictHost = findHostOwningFqdn(targetFqdn);
+      if (conflictHost) {
+        res.status(409).json({
+          error: `域名 ${targetFqdn} 已绑定到云主机「${conflictHost.name}」，一个域名只能绑定一个云主机实例`,
+        });
         return;
       }
       const existingProvider = state.dnsProviders.find((p) => p.id === rule!.providerId);
@@ -5520,7 +6285,7 @@ export async function createServer(options: CreateServerOptions = {}) {
   });
 
   // Optional extension hook (not used in standalone production runs)
-  options.configureApp?.(app, { createSession, getClientIp });
+  options.configureApp?.(app, { createSession, setSessionCookie, getClientIp });
 
   // Start background scheduler
   schedulerEngine.start();

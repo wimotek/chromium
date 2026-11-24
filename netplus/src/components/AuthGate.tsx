@@ -1,8 +1,50 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { Eye, EyeOff, Globe, Lock, Moon, RefreshCw, ShieldCheck, Sun, User } from 'lucide-react';
+import { Eye, EyeOff, Globe, Loader2, Lock, Moon, RefreshCw, ShieldCheck, Sun, User } from 'lucide-react';
 import { LANGUAGE_OPTIONS, translate, type TranslationKeys } from '../i18n/translations';
 import { ApiError, apiRequest, setAuthToken, solvePowChallenge } from '../lib/api';
-import type { AuthStatusResponse, CaptchaChallengeResponse, LanguageCode } from '../types/models';
+import type { AuthStatusResponse, CaptchaChallengeResponse, LanguageCode, OAuthProviderId } from '../types/models';
+
+const OAUTH_META: Record<OAuthProviderId, { label: string; shortLabel: string; accent: string }> = {
+  microsoft: { label: 'Microsoft', shortLabel: 'Microsoft', accent: 'border-sky-200 dark:border-sky-800/70 hover:bg-sky-50 dark:hover:bg-sky-950/30' },
+  github: { label: 'GitHub', shortLabel: 'GitHub', accent: 'border-slate-300 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800' },
+  google: { label: 'Google', shortLabel: 'Google', accent: 'border-blue-200 dark:border-blue-800/70 hover:bg-blue-50 dark:hover:bg-blue-950/30' },
+  apple: { label: 'Apple', shortLabel: 'Apple', accent: 'border-slate-300 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800' },
+};
+
+function ProviderBrandIcon({ provider }: { provider: OAuthProviderId }) {
+  if (provider === 'microsoft') {
+    return (
+      <svg className="w-4 h-4 shrink-0" viewBox="0 0 21 21" aria-hidden="true">
+        <rect x="1" y="1" width="9" height="9" fill="#f25022" />
+        <rect x="11" y="1" width="9" height="9" fill="#7fba00" />
+        <rect x="1" y="11" width="9" height="9" fill="#00a4ef" />
+        <rect x="11" y="11" width="9" height="9" fill="#ffb900" />
+      </svg>
+    );
+  }
+  if (provider === 'github') {
+    return (
+      <svg className="w-4 h-4 shrink-0 fill-current" viewBox="0 0 24 24" aria-hidden="true">
+        <path d="M12 0.5C5.65 0.5 0.5 5.65 0.5 12c0 5.08 3.29 9.39 7.86 10.91.58.11.79-.25.79-.56 0-.28-.01-1.02-.02-2-3.2.7-3.87-1.54-3.87-1.54-.52-1.33-1.28-1.69-1.28-1.69-1.05-.72.08-.71.08-.71 1.16.08 1.77 1.19 1.77 1.19 1.03 1.77 2.71 1.26 3.37.96.1-.75.4-1.26.73-1.55-2.55-.29-5.23-1.28-5.23-5.69 0-1.26.45-2.29 1.19-3.1-.12-.29-.52-1.46.11-3.05 0 0 .97-.31 3.18 1.18a11.06 11.06 0 0 1 5.78 0c2.2-1.49 3.17-1.18 3.17-1.18.63 1.59.23 2.76.11 3.05.74.81 1.19 1.84 1.19 3.1 0 4.42-2.69 5.39-5.25 5.68.41.36.78 1.06.78 2.14 0 1.54-.01 2.79-.01 3.17 0 .31.21.68.8.56A11.51 11.51 0 0 0 23.5 12C23.5 5.65 18.35 0.5 12 0.5z" />
+      </svg>
+    );
+  }
+  if (provider === 'google') {
+    return (
+      <svg className="w-4 h-4 shrink-0" viewBox="0 0 24 24" aria-hidden="true">
+        <path fill="#4285F4" d="M23.49 12.27c0-.79-.07-1.54-.19-2.27H12v4.51h6.47a5.53 5.53 0 0 1-2.4 3.63v3h3.88c2.27-2.09 3.54-5.17 3.54-8.87z" />
+        <path fill="#34A853" d="M12 24c3.24 0 5.95-1.07 7.94-2.91l-3.88-3c-1.08.72-2.45 1.15-4.06 1.15-3.12 0-5.77-2.11-6.72-4.96H1.29v3.09A12 12 0 0 0 12 24z" />
+        <path fill="#FBBC05" d="M5.28 14.28A7.2 7.2 0 0 1 4.9 12c0-.79.14-1.56.38-2.28V6.63H1.29a12 12 0 0 0 0 10.74l3.99-3.09z" />
+        <path fill="#EA4335" d="M12 4.76c1.76 0 3.34.61 4.58 1.8l3.43-3.43C17.95 1.19 15.24 0 12 0A12 12 0 0 0 1.29 6.63l3.99 3.09c.95-2.85 3.6-4.96 6.72-4.96z" />
+      </svg>
+    );
+  }
+  return (
+    <svg className="w-4 h-4 shrink-0 fill-current" viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M17.05 20.28c-.98.95-2.05.8-3.08.35-1.09-.46-2.09-.48-3.24 0-1.44.62-2.2.44-3.06-.35C2.79 15.25 3.51 7.59 9.05 7.31c1.35.07 2.29.74 3.08.8 1.18-.24 2.31-.93 3.57-.84 1.51.12 2.65.72 3.4 1.8-3.12 1.87-2.38 5.98.48 7.13-.57 1.5-1.31 2.99-2.53 4.08zM12.03 7.25c-.15-2.23 1.66-4.07 3.74-4.25.29 2.58-2.34 4.5-3.74 4.25z" />
+    </svg>
+  );
+}
 
 interface AuthGateProps {
   status: AuthStatusResponse;
@@ -39,11 +81,89 @@ export function AuthGate({
   const [powReady, setPowReady] = useState(false);
 
   const [submitting, setSubmitting] = useState(false);
+  const [oauthBusy, setOauthBusy] = useState<OAuthProviderId | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [attemptsLeft, setAttemptsLeft] = useState<number | null>(null);
   const [lockoutSec, setLockoutSec] = useState<number>(0);
 
   const activeChallengeIdRef = useRef<string>('');
+
+  const enabledOAuthProviders = (status.oauthProviders ?? []).filter(
+    (p) => p.enabled && p.configured
+  );
+
+  // Listen for OAuth popup completion via postMessage
+  useEffect(() => {
+    const onMessage = (event: MessageEvent) => {
+      const data = event.data as
+        | {
+            type?: string;
+            payload?: {
+              mode?: 'login' | 'bind';
+              token?: string;
+              username?: string;
+              error?: string;
+            };
+          }
+        | null
+        | undefined;
+      if (!data || typeof data !== 'object') return;
+      if (data.type === 'OAUTH_AUTH_SUCCESS' && data.payload?.mode === 'login') {
+        setOauthBusy(null);
+        if (data.payload.token) {
+          setAuthToken(data.payload.token);
+        }
+        onAuthenticated(data.payload.username || 'admin');
+      } else if (data.type === 'OAUTH_AUTH_ERROR') {
+        setOauthBusy(null);
+        setErrorMsg(
+          data.payload?.error ||
+            (lang === 'zh-CN' ? '第三方账号登录失败，请确认已在安全设置中绑定该账号。' : 'OAuth login failed.')
+        );
+      }
+    };
+    window.addEventListener('message', onMessage);
+    return () => window.removeEventListener('message', onMessage);
+  }, [lang, onAuthenticated]);
+
+  const handleOAuthLogin = async (provider: OAuthProviderId) => {
+    if (oauthBusy) return;
+    setErrorMsg(null);
+    setOauthBusy(provider);
+    try {
+      const res = await apiRequest<{ ok: boolean; url: string }>(
+        `/api/auth/oauth/${provider}/url?mode=login`
+      );
+      const width = 560;
+      const height = 680;
+      const left = Math.max(0, Math.round((window.screen.width - width) / 2));
+      const top = Math.max(0, Math.round((window.screen.height - height) / 2));
+      const popup = window.open(
+        res.url,
+        'netplus_oauth_login',
+        `width=${width},height=${height},left=${left},top=${top},resizable=yes,scrollbars=yes`
+      );
+      if (!popup) {
+        setOauthBusy(null);
+        setErrorMsg(
+          lang === 'zh-CN'
+            ? '浏览器拦截了授权弹窗，请允许本站点弹出窗口后重试。'
+            : 'Popup blocked by browser. Please allow popups and try again.'
+        );
+        return;
+      }
+      // Reset busy state if user closes popup manually
+      const pollClose = window.setInterval(() => {
+        if (popup.closed) {
+          window.clearInterval(pollClose);
+          setOauthBusy((cur) => (cur === provider ? null : cur));
+        }
+      }, 600);
+    } catch (err) {
+      setOauthBusy(null);
+      setErrorMsg(err instanceof Error ? err.message : 'Failed to initiate OAuth login');
+    }
+  };
 
   const loadCaptcha = useCallback(async () => {
     setPowReady(false);
@@ -478,6 +598,55 @@ export function AuthGate({
                   : 'On first boot without ADMIN_PASSWORD, a random initial password is printed once in container startup logs (docker logs netplus). Change it anytime in Security Settings.'}
               </p>
             </form>
+
+            {/* Third-Party OAuth / SSO Sign-In (Microsoft, GitHub, Google, Apple) */}
+            <div className="mt-6 pt-5 border-t border-slate-200 dark:border-slate-800 space-y-3">
+              <div className="flex items-center justify-between gap-2 text-xs">
+                <span className="font-medium text-slate-600 dark:text-slate-300">
+                  {lang === 'zh-CN'
+                    ? '第三方已绑定账号快捷登录'
+                    : 'Sign in with a bound third-party account'}
+                </span>
+                <span className="text-[11px] text-slate-400 dark:text-slate-500 font-mono">
+                  OAuth 2.0 / OIDC
+                </span>
+              </div>
+
+              {enabledOAuthProviders.length > 0 ? (
+                <div className="grid grid-cols-2 gap-2.5">
+                  {enabledOAuthProviders.map((prov) => {
+                    const meta = OAUTH_META[prov.provider];
+                    const isBusy = oauthBusy === prov.provider;
+                    return (
+                      <button
+                        key={prov.provider}
+                        type="button"
+                        disabled={Boolean(oauthBusy)}
+                        onClick={() => void handleOAuthLogin(prov.provider)}
+                        className={`inline-flex items-center justify-center gap-2 px-3.5 py-2.5 rounded-lg border text-xs font-medium text-slate-800 dark:text-slate-100 bg-white dark:bg-slate-950/60 transition-colors disabled:opacity-50 ${meta.accent}`}
+                      >
+                        {isBusy ? (
+                          <Loader2 className="w-4 h-4 animate-spin shrink-0" />
+                        ) : (
+                          <ProviderBrandIcon provider={prov.provider} />
+                        )}
+                        <span className="truncate">
+                          {lang === 'zh-CN' ? `使用 ${meta.shortLabel} 登录` : `Continue with ${meta.label}`}
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+              ) : (
+                <div className="p-3 rounded-lg bg-slate-50 dark:bg-slate-950/60 border border-slate-200/80 dark:border-slate-800 text-[11px] leading-relaxed text-slate-500 dark:text-slate-400 flex flex-wrap items-center justify-between gap-2">
+                  <span>
+                    {lang === 'zh-CN'
+                      ? '支持绑定 Microsoft、GitHub、Google、Apple 账号免密登录。登录后前往「安全设置 → 第三方账号登录与绑定」配置并绑定即可启用。'
+                      : 'Supports Microsoft, GitHub, Google, and Apple sign-in. Sign in once and configure & bind your account under Security Settings.'}
+                  </span>
+                </div>
+              )}
+            </div>
           </div>
         </div>
       </main>

@@ -62,7 +62,29 @@ export function probeTcp(host: string, port: number, timeoutMs: number): Promise
   });
 }
 
-async function probeHttp(url: string, timeoutMs: number): Promise<MonitorCheckSample> {
+function matchesExpectedHttpStatus(status: number, expectedSpec?: string): boolean {
+  const spec = (expectedSpec || '').trim();
+  if (!spec) return status >= 200 && status < 400;
+  for (const rawPart of spec.split(',')) {
+    const part = rawPart.trim();
+    if (!part) continue;
+    const rangeMatch = part.match(/^(\d{3})\s*-\s*(\d{3})$/);
+    if (rangeMatch) {
+      const lo = Number(rangeMatch[1]);
+      const hi = Number(rangeMatch[2]);
+      if (status >= lo && status <= hi) return true;
+    } else if (/^\d{3}$/.test(part) && status === Number(part)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+async function probeHttp(
+  url: string,
+  timeoutMs: number,
+  options?: { httpKeyword?: string; expectedStatusCodes?: string }
+): Promise<MonitorCheckSample> {
   const check = validateSafeExternalUrl(url);
   if (!check.valid) {
     return {
@@ -82,22 +104,38 @@ async function probeHttp(url: string, timeoutMs: number): Promise<MonitorCheckSa
       redirect: 'follow',
       signal: controller.signal,
     });
+    const keyword = (options?.httpKeyword || '').trim();
+    let bodyText = '';
+    if (keyword) {
+      bodyText = (await res.text()).slice(0, 65536);
+    }
     clearTimeout(timer);
     const rtt = Date.now() - started;
 
-    if (res.status >= 200 && res.status < 400) {
+    const statusOk = matchesExpectedHttpStatus(res.status, options?.expectedStatusCodes);
+    if (!statusOk) {
       return {
         timestamp: new Date().toISOString(),
-        status: rtt > 1500 ? 'degraded' : 'up',
+        status: 'down',
         latencyMs: rtt,
-        message: `HTTP ${res.status} (${rtt}ms)`,
+        message: `HTTP ${res.status} unexpected status`,
       };
     }
+
+    if (keyword && !bodyText.includes(keyword)) {
+      return {
+        timestamp: new Date().toISOString(),
+        status: 'down',
+        latencyMs: rtt,
+        message: `HTTP ${res.status} missing keyword "${keyword}"`,
+      };
+    }
+
     return {
       timestamp: new Date().toISOString(),
-      status: 'down',
+      status: rtt > 1500 ? 'degraded' : 'up',
       latencyMs: rtt,
-      message: `HTTP ${res.status} unexpected status`,
+      message: keyword ? `HTTP ${res.status} · keyword matched (${rtt}ms)` : `HTTP ${res.status} (${rtt}ms)`,
     };
   } catch (err) {
     return {
@@ -158,14 +196,17 @@ export async function runMonitorCheck(
   if (monitor.type === 'tcp') {
     sample = await probeTcp(monitor.target, monitor.port || 22, monitor.timeoutMs || 5000);
   } else if (monitor.type === 'http') {
-    sample = await probeHttp(monitor.target, monitor.timeoutMs || 6000);
+    sample = await probeHttp(monitor.target, monitor.timeoutMs || 6000, {
+      httpKeyword: monitor.httpKeyword,
+      expectedStatusCodes: monitor.expectedStatusCodes,
+    });
   } else {
     sample = await probeDns(monitor.target, monitor.expectedIp);
   }
 
   monitor.history.push(sample);
-  if (monitor.history.length > 30) {
-    monitor.history = monitor.history.slice(-30);
+  if (monitor.history.length > 40) {
+    monitor.history = monitor.history.slice(-40);
   }
 
   monitor.lastCheckedAt = sample.timestamp;
@@ -185,39 +226,51 @@ export async function runMonitorCheck(
   monitor.updatedAt = sample.timestamp;
   store.save();
 
-  // Trigger unified System Notifications on state transition
-  if (monitor.notifyOnAlert) {
-    if (previousStatus !== 'down' && monitor.status === 'down') {
-      store.appendAudit({
-        category: 'monitor',
-        severity: 'error',
-        action: 'MONITOR_TARGET_DOWN',
-        actor,
-        ip,
-        target: monitor.name,
-        details: `${monitor.type.toUpperCase()} ${monitor.target} -> ${sample.message}`,
-      });
+  // Trigger unified System Notifications on state transition (supports independent down/recover toggles & channel routing)
+  const shouldNotifyDown = monitor.notifyOnDown !== undefined ? Boolean(monitor.notifyOnDown) : Boolean(monitor.notifyOnAlert);
+  const shouldNotifyRecover =
+    monitor.notifyOnRecover !== undefined ? Boolean(monitor.notifyOnRecover) : Boolean(monitor.notifyOnAlert);
+  const channelIds =
+    Array.isArray(monitor.notifyChannelIds) && monitor.notifyChannelIds.length > 0
+      ? monitor.notifyChannelIds
+      : undefined;
+
+  if (previousStatus !== 'down' && monitor.status === 'down') {
+    store.appendAudit({
+      category: 'monitor',
+      severity: 'error',
+      action: 'MONITOR_TARGET_DOWN',
+      actor,
+      ip,
+      target: monitor.name,
+      details: `${monitor.type.toUpperCase()} ${monitor.target} -> ${sample.message}`,
+    });
+    if (shouldNotifyDown) {
       await dispatchSystemNotification({
         event: 'monitor_down',
-        title: `Monitor Down: ${monitor.name}`,
-        message: `Target: ${monitor.target}\nProbe: ${monitor.type.toUpperCase()}\nReason: ${sample.message}\nUptime: ${monitor.uptimePercent}%`,
+        title: `🔴 服务下线告警: ${monitor.name}`,
+        message: `监控名称: ${monitor.name}\n目标地址: ${monitor.target}\n探测类型: ${monitor.type.toUpperCase()}\n异常原因: ${sample.message}\n可用率: ${monitor.uptimePercent}%`,
+        channelIds,
         actor,
         ip,
       });
-    } else if (previousStatus === 'down' && monitor.status === 'up') {
-      store.appendAudit({
-        category: 'monitor',
-        severity: 'success',
-        action: 'MONITOR_TARGET_RECOVERED',
-        actor,
-        ip,
-        target: monitor.name,
-        details: `${monitor.type.toUpperCase()} ${monitor.target} recovered (${sample.latencyMs}ms)`,
-      });
+    }
+  } else if (previousStatus === 'down' && (monitor.status === 'up' || monitor.status === 'degraded')) {
+    store.appendAudit({
+      category: 'monitor',
+      severity: 'success',
+      action: 'MONITOR_TARGET_RECOVERED',
+      actor,
+      ip,
+      target: monitor.name,
+      details: `${monitor.type.toUpperCase()} ${monitor.target} recovered (${sample.latencyMs}ms)`,
+    });
+    if (shouldNotifyRecover) {
       await dispatchSystemNotification({
         event: 'monitor_recover',
-        title: `Monitor Recovered: ${monitor.name}`,
-        message: `Target: ${monitor.target}\nProbe: ${monitor.type.toUpperCase()}\nLatency: ${sample.latencyMs}ms\nUptime: ${monitor.uptimePercent}%`,
+        title: `🟢 服务上线恢复: ${monitor.name}`,
+        message: `监控名称: ${monitor.name}\n目标地址: ${monitor.target}\n探测类型: ${monitor.type.toUpperCase()}\n当前延迟: ${sample.latencyMs}ms\n可用率: ${monitor.uptimePercent}%`,
+        channelIds,
         actor,
         ip,
       });
