@@ -1,5 +1,6 @@
 import crypto from 'node:crypto';
 import net from 'node:net';
+import os from 'node:os';
 import type { DnsRecordType, DnsSyncRule, DnsZoneSummary, ManagedDnsRecord } from '../../src/types/models.ts';
 import { validateSafeExternalUrl } from '../lib/crypto.ts';
 import { store, type StoredDnsProvider } from '../lib/store.ts';
@@ -257,12 +258,61 @@ function buildFqdn(recordName: string, domain: string): string {
   return `${cleanRecord}.${cleanDomain}`;
 }
 
-export async function detectPublicIps(): Promise<{ ipv4: string | null; ipv6: string | null }> {
+export interface DetectedPublicIps {
+  ipv4: string | null;
+  ipv6: string | null;
+  ipv6List: string[];
+  ipv6Source: 'interface_and_egress' | 'egress' | 'interface' | 'cloud_host' | 'none';
+  ipv6SourceLabel?: string;
+  ipv6Hint?: string;
+}
+
+function isGlobalUnicastIpv6(raw: string): boolean {
+  const clean = String(raw || '').trim().split('%')[0];
+  if (!clean || !net.isIPv6(clean)) return false;
+  const lower = clean.toLowerCase();
+  if (lower === '::' || lower === '::1') return false;
+  if (lower.startsWith('::ffff:')) return false;
+  if (/^fe[89ab][0-9a-f]:/.test(lower)) return false; // Link-local fe80::/10
+  if (/^f[cd][0-9a-f]{2}:/.test(lower)) return false; // ULA fc00::/7
+  if (lower.startsWith('ff')) return false; // Multicast ff00::/8
+  if (/^2001:0?db8:/.test(lower)) return false; // Documentation 2001:db8::/32
+  return /^[23][0-9a-f]{0,3}:/.test(lower); // Global unicast 2000::/3
+}
+
+function getLocalGlobalIpv6s(): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  try {
+    const ifaces = os.networkInterfaces();
+    for (const entries of Object.values(ifaces)) {
+      for (const entry of entries ?? []) {
+        if (!entry || entry.internal) continue;
+        const family = String(entry.family);
+        if (family !== 'IPv6' && family !== '6') continue;
+        const addr = String(entry.address || '').split('%')[0].trim();
+        if (!isGlobalUnicastIpv6(addr)) continue;
+        const key = addr.toLowerCase();
+        if (seen.has(key)) continue;
+        seen.add(key);
+        out.push(addr);
+      }
+    }
+  } catch {
+    // Ignore interface enumeration errors in restricted sandboxes
+  }
+  return out;
+}
+
+export async function detectPublicIps(): Promise<DetectedPublicIps> {
   const fetchText = async (url: string): Promise<string | null> => {
     try {
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), 4500);
-      const res = await fetch(url, { signal: controller.signal });
+      const res = await fetch(url, {
+        signal: controller.signal,
+        headers: { accept: 'text/plain' },
+      });
       clearTimeout(timeout);
       if (!res.ok) return null;
       return (await res.text()).trim();
@@ -271,14 +321,96 @@ export async function detectPublicIps(): Promise<{ ipv4: string | null; ipv6: st
     }
   };
 
-  const [v4Raw, v6Raw] = await Promise.all([
-    fetchText('https://api4.ipify.org'),
-    fetchText('https://api6.ipify.org'),
+  const probeFirstValid = async (
+    urls: string[],
+    validator: (ip: string) => boolean
+  ): Promise<string | null> => {
+    try {
+      return await Promise.any(
+        urls.map(async (url) => {
+          const text = await fetchText(url);
+          if (text && validator(text)) return text;
+          throw new Error('invalid');
+        })
+      );
+    } catch {
+      return null;
+    }
+  };
+
+  const localV6s = getLocalGlobalIpv6s();
+  const [ipv4, egressV6] = await Promise.all([
+    probeFirstValid(
+      [
+        'https://api4.ipify.org',
+        'https://ipv4.icanhazip.com',
+        'https://v4.ident.me',
+        'https://4.ipw.cn',
+      ],
+      (ip) => net.isIPv4(ip)
+    ),
+    probeFirstValid(
+      [
+        'https://api6.ipify.org',
+        'https://ipv6.icanhazip.com',
+        'https://v6.ident.me',
+        'https://6.ipw.cn',
+      ],
+      (ip) => isGlobalUnicastIpv6(ip)
+    ),
   ]);
 
+  const mergedSeen = new Set<string>();
+  const ipv6List: string[] = [];
+  const pushV6 = (addr?: string | null) => {
+    const clean = String(addr || '').trim().split('%')[0];
+    if (!isGlobalUnicastIpv6(clean)) return;
+    const key = clean.toLowerCase();
+    if (mergedSeen.has(key)) return;
+    mergedSeen.add(key);
+    ipv6List.push(clean);
+  };
+
+  // Put active external egress IPv6 first, followed by all local interface global IPv6 addresses
+  pushV6(egressV6);
+  for (const addr of localV6s) pushV6(addr);
+
+  let ipv6Source: DetectedPublicIps['ipv6Source'] = 'none';
+  let ipv6SourceLabel: string | undefined;
+  let ipv6Hint: string | undefined;
+
+  if (egressV6 && localV6s.length > 0) {
+    ipv6Source = 'interface_and_egress';
+  } else if (egressV6) {
+    ipv6Source = 'egress';
+  } else if (localV6s.length > 0) {
+    ipv6Source = 'interface';
+  } else if (ipv4) {
+    // Fallback for Docker default bridge (IPv4-only container): match same-IPv4 managed cloud host
+    const matchedHost = store
+      .getState()
+      .cloudHosts.find((h) => h.ipv4?.trim() === ipv4 && Array.isArray(h.ipv6List) && h.ipv6List.length > 0);
+    if (matchedHost) {
+      for (const addr of matchedHost.ipv6List) pushV6(addr);
+      if (ipv6List.length > 0) {
+        ipv6Source = 'cloud_host';
+        ipv6SourceLabel = matchedHost.name;
+      }
+    }
+  }
+
+  if (ipv6List.length === 0) {
+    ipv6Hint =
+      '未在当前运行环境探测到公网 IPv6（若运行在 Docker 默认 bridge 网络下，容器仅分配了 IPv4；如需直接探测宿主机全部 IPv6，可为容器启用 IPv6 / host 网络，或在「多云主机管理」同步本机云实例 IPv6 后自动关联）。';
+  }
+
   return {
-    ipv4: v4Raw && net.isIPv4(v4Raw) ? v4Raw : null,
-    ipv6: v6Raw && net.isIPv6(v6Raw) ? v6Raw : null,
+    ipv4,
+    ipv6: ipv6List[0] ?? null,
+    ipv6List,
+    ipv6Source,
+    ipv6SourceLabel,
+    ipv6Hint,
   };
 }
 

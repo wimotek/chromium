@@ -2,11 +2,11 @@ import { store, type StoredOciProfile, type StoredOciSniperTask } from '../lib/s
 import { executeDnsSyncRule } from './dnsSync.ts';
 import { dispatchSystemNotification } from './notifier.ts';
 import {
-  buildOciSignatureHeaders,
-  computeOciFingerprint,
+  buildCredsFromProfile,
   discoverOciResources,
   isValidOcid,
   listOciImages,
+  ociApiRequest,
 } from './ociClient.ts';
 
 function computeNextAttemptIso(intervalSeconds: number, jitterPercent: number, overrideSeconds?: number): string {
@@ -160,12 +160,26 @@ export async function runOciSniperAttempt(
   const task = state.ociSniperTasks.find((t) => t.id === taskId);
   if (!task) return { ok: false, code: 404, message: 'Sniper task not found' };
 
-  const profile = state.ociProfiles.find((p) => p.id === task.profileId);
+  let profile = state.ociProfiles.find((p) => p.id === task.profileId);
   if (!profile) {
-    task.status = 'failed';
-    task.lastMessage = 'Linked OCI regional profile not found';
-    store.save();
-    return { ok: false, code: 404, message: task.lastMessage };
+    const readyProfiles = state.ociProfiles.filter((p) => Boolean(store.getOciPrivateKey(p.id)));
+    const soleCandidate =
+      readyProfiles.length === 1
+        ? readyProfiles[0]
+        : state.ociProfiles.length === 1
+        ? state.ociProfiles[0]
+        : undefined;
+    if (soleCandidate) {
+      profile = soleCandidate;
+      task.profileId = soleCandidate.id;
+      task.updatedAt = new Date().toISOString();
+      store.save();
+    } else {
+      task.status = 'failed';
+      task.lastMessage = `关联的 OCI 区域凭据不存在（ID: ${task.profileId || '未绑定'}），请点击该任务的「编辑」重新选择有效的 OCI 账号并保存。`;
+      store.save();
+      return { ok: false, code: 404, message: task.lastMessage };
+    }
   }
 
   const now = new Date().toISOString();
@@ -248,13 +262,18 @@ export async function runOciSniperAttempt(
     return { ok: false, code: 400, message: 'Invalid OCI region identifier' };
   }
 
-  const derivedFp = computeOciFingerprint(privateKeyPem);
-  const activeFingerprint = derivedFp.ok ? derivedFp.fingerprint : profile.fingerprint;
+  const builtCreds = buildCredsFromProfile(profile, privateKeyPem);
+  if (!builtCreds.ok) {
+    task.lastResponseCode = 400;
+    task.lastMessage = `OCI 私钥或凭据无效：${builtCreds.error}`;
+    task.updatedAt = now;
+    store.save();
+    return { ok: false, code: 400, message: task.lastMessage };
+  }
 
-  const host = `iaas.${profile.region}.oraclecloud.com`;
   const apiPath = '/20160918/instances/';
   const launchPayload = {
-    compartmentId: profile.compartmentOcid || profile.tenancyOcid,
+    compartmentId: builtCreds.creds.compartmentOcid || builtCreds.creds.tenancyOcid,
     availabilityDomain: adTarget,
     displayName: task.displayName,
     shape: task.shape,
@@ -281,42 +300,21 @@ export async function runOciSniperAttempt(
       : {},
   };
 
-  const bodyStr = JSON.stringify(launchPayload);
-
   try {
-    const signedHeaders = buildOciSignatureHeaders({
+    const res = await ociApiRequest<{ id?: string }>({
+      creds: builtCreds.creds,
+      service: 'iaas',
       method: 'POST',
-      host,
-      path: apiPath,
-      body: bodyStr,
-      tenancyOcid: profile.tenancyOcid,
-      userOcid: profile.userOcid,
-      fingerprint: activeFingerprint,
-      privateKeyPem,
+      apiPath,
+      body: launchPayload,
+      timeoutMs: 15_000,
+      noRetryOn429: true,
     });
-
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 15_000);
-    const res = await fetch(`https://${host}${apiPath}`, {
-      method: 'POST',
-      headers: signedHeaders,
-      body: bodyStr,
-      signal: controller.signal,
-    });
-    clearTimeout(timeout);
-
-    const text = await res.text();
-    let parsed: Record<string, unknown> = {};
-    try {
-      parsed = JSON.parse(text) as Record<string, unknown>;
-    } catch {
-      parsed = { message: text.slice(0, 220) };
-    }
 
     task.lastResponseCode = res.status;
 
     if (res.ok) {
-      const instanceId = String(parsed.id ?? '');
+      const instanceId = String(res.data?.id ?? '');
       task.createdInstanceId = instanceId;
       task.lastMessage = `Allocated ${task.shape} in ${profile.region}/${adTarget} (${instanceId})`;
       if (task.autoStopOnSuccess) {
@@ -357,7 +355,7 @@ export async function runOciSniperAttempt(
       return { ok: true, code: res.status, message: task.lastMessage };
     }
 
-    const ociErrMsg = String(parsed.message || parsed.code || `HTTP ${res.status}`);
+    const ociErrMsg = String(res.error || `HTTP ${res.status}`);
     task.lastMessage = `[${adTarget}] HTTP ${res.status}: ${ociErrMsg}`;
 
     if (res.status === 429) {

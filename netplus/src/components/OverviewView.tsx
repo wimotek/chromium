@@ -1,7 +1,8 @@
 import React, { useState } from 'react';
-import { ArrowRight, Play, RefreshCw } from 'lucide-react';
+import { ArrowRight, Loader2, Play, RefreshCw } from 'lucide-react';
 import { translate, type TranslationKeys } from '../i18n/translations';
 import { apiRequest, formatBytes, formatTimeAgo } from '../lib/api';
+import { toast } from '../lib/toast';
 import type { LanguageCode, OverviewSummary } from '../types/models';
 
 interface OverviewViewProps {
@@ -13,13 +14,49 @@ interface OverviewViewProps {
 
 export function OverviewView({ data, lang, onRefresh, onNavigate }: OverviewViewProps) {
   const t = (key: TranslationKeys) => translate(lang, key);
+  const isZh = lang === 'zh-CN';
+  const [refreshing, setRefreshing] = useState(false);
   const [syncingAll, setSyncingAll] = useState(false);
+
+  const handleRefresh = async () => {
+    setRefreshing(true);
+    try {
+      await onRefresh();
+      toast.success(isZh ? '控制台数据已刷新' : 'Dashboard data refreshed');
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : isZh ? '刷新失败' : 'Refresh failed');
+    } finally {
+      setRefreshing(false);
+    }
+  };
 
   const handleQuickSyncAll = async () => {
     setSyncingAll(true);
     try {
-      await apiRequest('/api/dns/sync', { method: 'POST', body: JSON.stringify({}) });
+      const res = await apiRequest<{ reports?: Array<{ status: string }> }>('/api/dns/sync', {
+        method: 'POST',
+        body: JSON.stringify({}),
+      });
       await onRefresh();
+      const total = res.reports?.length ?? 0;
+      if (total === 0) {
+        toast.info(isZh ? '当前暂无已启用的 DNS 同步规则' : 'No enabled DNS sync rules to run');
+      } else {
+        const failed = res.reports?.filter((r) => r.status === 'failed').length ?? 0;
+        if (failed > 0) {
+          toast.warning(
+            isZh
+              ? `已完成 ${total} 条 DNS 规则同步（其中 ${failed} 条失败）`
+              : `Synced ${total} DNS rule(s) (${failed} failed)`
+          );
+        } else {
+          toast.success(
+            isZh ? `已完成 ${total} 条 DNS 规则同步` : `Synced ${total} DNS rule(s) successfully`
+          );
+        }
+      }
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : isZh ? '一键同步失败' : 'Quick sync failed');
     } finally {
       setSyncingAll(false);
     }
@@ -58,10 +95,11 @@ export function OverviewView({ data, lang, onRefresh, onNavigate }: OverviewView
         <div className="flex flex-wrap items-center gap-2 shrink-0">
           <button
             type="button"
-            onClick={() => void onRefresh()}
-            className="inline-flex items-center gap-2 px-3.5 py-2 text-xs font-medium rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 transition-colors whitespace-nowrap shrink-0"
+            disabled={refreshing}
+            onClick={() => void handleRefresh()}
+            className="inline-flex items-center gap-2 px-3.5 py-2 text-xs font-medium rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 disabled:opacity-50 transition-colors whitespace-nowrap shrink-0"
           >
-            <RefreshCw className="w-3.5 h-3.5" />
+            <RefreshCw className={`w-3.5 h-3.5 ${refreshing ? 'animate-spin' : ''}`} />
             {t('refresh')}
           </button>
           <button
@@ -70,7 +108,7 @@ export function OverviewView({ data, lang, onRefresh, onNavigate }: OverviewView
             onClick={() => void handleQuickSyncAll()}
             className="inline-flex items-center gap-2 px-4 py-2 text-xs font-semibold rounded-lg bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50 transition-colors whitespace-nowrap shrink-0"
           >
-            <Play className="w-3.5 h-3.5" />
+            {syncingAll ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Play className="w-3.5 h-3.5" />}
             {t('quickSyncAll')}
           </button>
         </div>

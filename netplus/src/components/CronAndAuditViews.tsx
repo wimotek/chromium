@@ -13,6 +13,7 @@ import {
 } from 'lucide-react';
 import { translate, type TranslationKeys } from '../i18n/translations';
 import { apiRequest, formatBytes, formatTimeAgo } from '../lib/api';
+import { toast } from '../lib/toast';
 import type {
   AuditLogEntry,
   AuditStats,
@@ -58,6 +59,7 @@ export function CronJobsView({ jobs, hosts, dnsRules, lang, onReload }: CronJobs
   const isZh = lang === 'zh-CN';
 
   const [runningId, setRunningId] = useState<string | null>(null);
+  const [busyJobId, setBusyJobId] = useState<string | null>(null);
   const [showModal, setShowModal] = useState(false);
   const [editingJob, setEditingJob] = useState<CronJob | null>(null);
   const [saving, setSaving] = useState(false);
@@ -223,18 +225,43 @@ export function CronJobsView({ jobs, hosts, dnsRules, lang, onReload }: CronJobs
   };
 
   const handleToggle = async (job: CronJob) => {
-    await apiRequest(`/api/cron/jobs/${job.id}`, {
-      method: 'PUT',
-      body: JSON.stringify({ enabled: !job.enabled }),
-    });
-    await onReload();
+    setBusyJobId(job.id);
+    try {
+      const next = !job.enabled;
+      await apiRequest(`/api/cron/jobs/${job.id}`, {
+        method: 'PUT',
+        body: JSON.stringify({ enabled: next }),
+      });
+      await onReload();
+      toast.success(
+        isZh
+          ? `定时任务「${job.name}」已${next ? '启用' : '停用'}`
+          : `Cron job "${job.name}" ${next ? 'enabled' : 'disabled'}`
+      );
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : isZh ? '状态切换失败' : 'Toggle failed');
+    } finally {
+      setBusyJobId(null);
+    }
   };
 
   const handleRunNow = async (job: CronJob) => {
     setRunningId(job.id);
     try {
-      await apiRequest(`/api/cron/jobs/${job.id}/run`, { method: 'POST' });
+      const res = await apiRequest<{ job?: CronJob }>(`/api/cron/jobs/${job.id}/run`, { method: 'POST' });
       await onReload();
+      const status = res.job?.lastStatus;
+      const summary = res.job?.lastSummary;
+      const msg = summary ? `${job.name}：${summary}` : isZh ? `已执行定时任务「${job.name}」` : `Executed "${job.name}"`;
+      if (status === 'failed') {
+        toast.error(msg);
+      } else if (status === 'partial') {
+        toast.warning(msg);
+      } else {
+        toast.success(msg);
+      }
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : isZh ? '执行失败' : 'Execution failed');
     } finally {
       setRunningId(null);
     }
@@ -265,16 +292,27 @@ export function CronJobsView({ jobs, hosts, dnsRules, lang, onReload }: CronJobs
       }
       setShowModal(false);
       await onReload();
+      toast.success(t('savedSuccessfully'));
     } catch (err) {
-      setFormError(err instanceof Error ? err.message : 'Failed to save scheduled job');
+      const msg = err instanceof Error ? err.message : 'Failed to save scheduled job';
+      setFormError(msg);
+      toast.error(msg);
     } finally {
       setSaving(false);
     }
   };
 
-  const handleDelete = async (id: string) => {
-    await apiRequest(`/api/cron/jobs/${id}`, { method: 'DELETE' });
-    await onReload();
+  const handleDelete = async (job: CronJob) => {
+    setBusyJobId(job.id);
+    try {
+      await apiRequest(`/api/cron/jobs/${job.id}`, { method: 'DELETE' });
+      await onReload();
+      toast.success(isZh ? `已删除定时任务「${job.name}」` : `Deleted cron job "${job.name}"`);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : isZh ? '删除失败' : 'Delete failed');
+    } finally {
+      setBusyJobId(null);
+    }
   };
 
   return (
@@ -329,19 +367,21 @@ export function CronJobsView({ jobs, hosts, dnsRules, lang, onReload }: CronJobs
                           {policySummary}
                         </div>
                       )}
-                      {job.lastSummary && (
-                        <div className="mt-1 text-[11px] text-slate-500 dark:text-slate-400 max-w-lg truncate" title={job.lastSummary}>
-                          {job.lastSummary}
-                        </div>
-                      )}
+                      <div
+                        className="mt-1 text-[11px] text-slate-500 dark:text-slate-400 max-w-lg truncate min-h-[16px]"
+                        title={job.lastSummary || undefined}
+                      >
+                        {job.lastSummary || '—'}
+                      </div>
                     </td>
                     <td className="py-3.5 px-4 font-mono tabular-nums text-slate-800 dark:text-slate-200 whitespace-nowrap">
                       {job.expression}
                       <div className="mt-1">
                         <button
                           type="button"
+                          disabled={busyJobId === job.id}
                           onClick={() => void handleToggle(job)}
-                          className={`text-[11px] font-sans font-medium ${
+                          className={`text-[11px] font-sans font-medium disabled:opacity-50 ${
                             job.enabled
                               ? 'text-emerald-600 dark:text-emerald-400'
                               : 'text-slate-400'
@@ -383,9 +423,10 @@ export function CronJobsView({ jobs, hosts, dnsRules, lang, onReload }: CronJobs
                         </button>
                         <button
                           type="button"
-                          onClick={() => void handleDelete(job.id)}
+                          disabled={busyJobId === job.id}
+                          onClick={() => void handleDelete(job)}
                           aria-label={t('delete')}
-                          className="p-1.5 rounded-md text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-950/40"
+                          className="p-1.5 rounded-md text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-950/40 disabled:opacity-50"
                         >
                           <Trash2 className="w-4 h-4" />
                         </button>
@@ -722,14 +763,17 @@ interface AuditLogsViewProps {
 
 export function AuditLogsView({ lang }: AuditLogsViewProps) {
   const t = (key: TranslationKeys) => translate(lang, key);
+  const isZh = lang === 'zh-CN';
   const [stats, setStats] = useState<AuditStats | null>(null);
   const [entries, setEntries] = useState<AuditLogEntry[]>([]);
   const [category, setCategory] = useState('all');
   const [severity, setSeverity] = useState('all');
   const [search, setSearch] = useState('');
   const [loading, setLoading] = useState(false);
+  const [enforcing, setEnforcing] = useState(false);
+  const [purging, setPurging] = useState(false);
 
-  const loadLogs = useCallback(async () => {
+  const loadLogs = useCallback(async (manual = false) => {
     setLoading(true);
     try {
       const qs = new URLSearchParams({ category, severity, search, limit: '250' });
@@ -738,23 +782,57 @@ export function AuditLogsView({ lang }: AuditLogsViewProps) {
       );
       setStats(res.stats);
       setEntries(res.entries);
+      if (manual) {
+        toast.success(
+          isZh ? `已刷新审计日志（当前显示 ${res.entries.length} 条）` : `Refreshed ${res.entries.length} audit log(s)`
+        );
+      }
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : isZh ? '加载审计日志失败' : 'Failed to load audit logs');
     } finally {
       setLoading(false);
     }
-  }, [category, severity, search]);
+  }, [category, severity, search, isZh]);
 
   useEffect(() => {
-    void loadLogs();
+    void loadLogs(false);
   }, [loadLogs]);
 
   const handleEnforceQuota = async () => {
-    await apiRequest('/api/audit/enforce', { method: 'POST' });
-    await loadLogs();
+    setEnforcing(true);
+    try {
+      const res = await apiRequest<{ pruned?: boolean; removedBytes?: number; currentBytes?: number }>(
+        '/api/audit/enforce',
+        { method: 'POST' }
+      );
+      await loadLogs(false);
+      toast.success(
+        res.pruned
+          ? isZh
+            ? `已自动清理 ${formatBytes(res.removedBytes ?? 0)}，当前大小 ${formatBytes(res.currentBytes ?? 0)}`
+            : `Pruned ${formatBytes(res.removedBytes ?? 0)}; current size ${formatBytes(res.currentBytes ?? 0)}`
+          : isZh
+          ? `审计日志容量正常，无需清理（当前 ${formatBytes(res.currentBytes ?? stats?.fileSizeBytes ?? 0)}）`
+          : 'Audit log is within configured size quota'
+      );
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : isZh ? '执行容量检查失败' : 'Quota enforcement failed');
+    } finally {
+      setEnforcing(false);
+    }
   };
 
   const handlePurge = async () => {
-    await apiRequest('/api/audit/purge', { method: 'POST' });
-    await loadLogs();
+    setPurging(true);
+    try {
+      await apiRequest('/api/audit/purge', { method: 'POST' });
+      await loadLogs(false);
+      toast.success(isZh ? '已清空全部审计日志' : 'Purged all audit logs');
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : isZh ? '清空日志失败' : 'Purge failed');
+    } finally {
+      setPurging(false);
+    }
   };
 
   const exportFile = (format: 'json' | 'csv') => {
@@ -779,6 +857,11 @@ export function AuditLogsView({ lang }: AuditLogsViewProps) {
     a.download = `netpulse-audit.${format}`;
     a.click();
     URL.revokeObjectURL(url);
+    toast.success(
+      isZh
+        ? `已导出 ${entries.length} 条审计日志（${format.toUpperCase()}）`
+        : `Exported ${entries.length} audit log(s) as ${format.toUpperCase()}`
+    );
   };
 
   const usagePct = stats
@@ -798,10 +881,11 @@ export function AuditLogsView({ lang }: AuditLogsViewProps) {
         <div className="flex flex-wrap items-center gap-2 shrink-0">
           <button
             type="button"
+            disabled={enforcing}
             onClick={() => void handleEnforceQuota()}
-            className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-medium rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 hover:bg-slate-50 dark:hover:bg-slate-800 whitespace-nowrap"
+            className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-medium rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 hover:bg-slate-50 dark:hover:bg-slate-800 disabled:opacity-50 whitespace-nowrap"
           >
-            <ShieldAlert className="w-3.5 h-3.5" />
+            {enforcing ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <ShieldAlert className="w-3.5 h-3.5" />}
             {t('enforceQuotaNow')}
           </button>
           <button
@@ -822,54 +906,53 @@ export function AuditLogsView({ lang }: AuditLogsViewProps) {
           </button>
           <button
             type="button"
+            disabled={purging}
             onClick={() => void handlePurge()}
-            className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-medium rounded-lg border border-red-200 dark:border-red-900 text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-950/40 whitespace-nowrap"
+            className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-medium rounded-lg border border-red-200 dark:border-red-900 text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-950/40 disabled:opacity-50 whitespace-nowrap"
           >
-            <Trash2 className="w-3.5 h-3.5" />
+            {purging ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Trash2 className="w-3.5 h-3.5" />}
             {t('purgeAllLogs')}
           </button>
         </div>
       </div>
 
-      {/* Size Quota Bar */}
-      {stats && (
-        <div className="p-5 rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 space-y-3">
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 text-xs">
-            <div>
-              <div className="text-slate-500 dark:text-slate-400">{t('auditCurrentSize')}</div>
-              <div className="mt-1 font-mono text-base font-semibold tabular-nums">
-                {formatBytes(stats.fileSizeBytes)}
-              </div>
-            </div>
-            <div>
-              <div className="text-slate-500 dark:text-slate-400">{t('auditMaxCap')}</div>
-              <div className="mt-1 font-mono text-base font-semibold tabular-nums">
-                {formatBytes(stats.maxSizeBytes)}
-              </div>
-            </div>
-            <div>
-              <div className="text-slate-500 dark:text-slate-400">{t('auditTotalEntries')}</div>
-              <div className="mt-1 font-mono text-base font-semibold tabular-nums">
-                {stats.totalEntries}
-              </div>
-            </div>
-            <div>
-              <div className="text-slate-500 dark:text-slate-400">{t('auditPruneHistory')}</div>
-              <div className="mt-1 font-mono text-base font-semibold tabular-nums">
-                {stats.pruneCount}
-              </div>
+      {/* Size Quota Bar (always mounted to prevent filter/table jump on initial load) */}
+      <div className="p-5 rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 space-y-3">
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 text-xs">
+          <div>
+            <div className="text-slate-500 dark:text-slate-400">{t('auditCurrentSize')}</div>
+            <div className="mt-1 font-mono text-base font-semibold tabular-nums">
+              {stats ? formatBytes(stats.fileSizeBytes) : '—'}
             </div>
           </div>
-          <div className="w-full h-2 rounded-full bg-slate-100 dark:bg-slate-800 overflow-hidden">
-            <div
-              className={`h-full rounded-full ${
-                usagePct > 85 ? 'bg-red-600' : usagePct > 65 ? 'bg-amber-500' : 'bg-blue-600'
-              }`}
-              style={{ width: `${Math.max(2, usagePct)}%` }}
-            />
+          <div>
+            <div className="text-slate-500 dark:text-slate-400">{t('auditMaxCap')}</div>
+            <div className="mt-1 font-mono text-base font-semibold tabular-nums">
+              {stats ? formatBytes(stats.maxSizeBytes) : '—'}
+            </div>
+          </div>
+          <div>
+            <div className="text-slate-500 dark:text-slate-400">{t('auditTotalEntries')}</div>
+            <div className="mt-1 font-mono text-base font-semibold tabular-nums">
+              {stats ? stats.totalEntries : '—'}
+            </div>
+          </div>
+          <div>
+            <div className="text-slate-500 dark:text-slate-400">{t('auditPruneHistory')}</div>
+            <div className="mt-1 font-mono text-base font-semibold tabular-nums">
+              {stats ? stats.pruneCount : '—'}
+            </div>
           </div>
         </div>
-      )}
+        <div className="w-full h-2 rounded-full bg-slate-100 dark:bg-slate-800 overflow-hidden">
+          <div
+            className={`h-full rounded-full transition-all ${
+              usagePct > 85 ? 'bg-red-600' : usagePct > 65 ? 'bg-amber-500' : 'bg-blue-600'
+            }`}
+            style={{ width: `${stats ? Math.max(2, usagePct) : 2}%` }}
+          />
+        </div>
+      </div>
 
       {/* Filter Bar */}
       <div className="flex flex-col sm:flex-row gap-3">
@@ -911,8 +994,9 @@ export function AuditLogsView({ lang }: AuditLogsViewProps) {
         </select>
         <button
           type="button"
-          onClick={() => void loadLogs()}
-          className="inline-flex items-center justify-center gap-1.5 px-3.5 py-2 text-xs font-medium rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900"
+          disabled={loading}
+          onClick={() => void loadLogs(true)}
+          className="inline-flex items-center justify-center gap-1.5 px-3.5 py-2 text-xs font-medium rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 hover:bg-slate-50 dark:hover:bg-slate-800 disabled:opacity-50"
         >
           <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />
           {t('refresh')}

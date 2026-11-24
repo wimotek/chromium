@@ -1,7 +1,12 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   ArrowRight,
+  Check,
+  ChevronDown,
+  ChevronUp,
+  Copy,
   KeyRound,
+  Loader2,
   Pencil,
   Play,
   Plus,
@@ -12,6 +17,8 @@ import {
 } from 'lucide-react';
 import { translate, type TranslationKeys } from '../i18n/translations';
 import { apiRequest, formatTimeAgo } from '../lib/api';
+import { copyText } from '../lib/clipboard';
+import { toast } from '../lib/toast';
 import type {
   CloudHost,
   DnsIpv6Target,
@@ -109,9 +116,22 @@ export function DnsBatchView({ providers, rules, records, hosts, lang, onReload 
   const [subTab, setSubTab] = useState<'records' | 'providers' | 'rules'>('records');
   const [selectedRuleIds, setSelectedRuleIds] = useState<string[]>([]);
   const [syncing, setSyncing] = useState(false);
+  const [syncingRuleId, setSyncingRuleId] = useState<string | null>(null);
+  const [savingProvider, setSavingProvider] = useState(false);
+  const [savingRule, setSavingRule] = useState(false);
   const [detectingIp, setDetectingIp] = useState(false);
-  const [detectedIps, setDetectedIps] = useState<{ ipv4: string | null; ipv6: string | null } | null>(null);
-  const [toastMsg, setToastMsg] = useState<string | null>(null);
+  const [detectedIps, setDetectedIps] = useState<{
+    ipv4: string | null;
+    ipv6: string | null;
+    ipv6List: string[];
+    ipv6Source?: 'interface_and_egress' | 'egress' | 'interface' | 'cloud_host' | 'none';
+    ipv6SourceLabel?: string;
+    ipv6Hint?: string;
+  } | null>(null);
+  const [expandDetectedV6, setExpandDetectedV6] = useState(false);
+  const [showDetectedPopover, setShowDetectedPopover] = useState(false);
+  const [copiedIpKey, setCopiedIpKey] = useState<string | null>(null);
+  const [expandedRuleV6Ids, setExpandedRuleV6Ids] = useState<Set<string>>(new Set());
 
   // Provider Modal State (simplified: reusable account credentials, no per-domain/ZoneID clutter)
   const [editingProvider, setEditingProvider] = useState<DnsProvider | null>(null);
@@ -162,9 +182,8 @@ export function DnsBatchView({ providers, rules, records, hosts, lang, onReload 
   const selectedProviderMeta =
     PROVIDER_TYPES.find((pt) => pt.value === provForm.type) ?? PROVIDER_TYPES[0];
 
-  const showNotice = (msg: string) => {
-    setToastMsg(msg);
-    setTimeout(() => setToastMsg(null), 4000);
+  const showNotice = (msg: string, kind: 'success' | 'error' | 'info' | 'warning' = 'success') => {
+    toast.show(msg, kind);
   };
 
   // Auto-load Cloudflare zones whenever a configured Cloudflare provider is chosen in the rule modal
@@ -232,31 +251,83 @@ export function DnsBatchView({ providers, rules, records, hosts, lang, onReload 
 
   const handleBatchSync = async (ids?: string[]) => {
     setSyncing(true);
+    setSyncingRuleId(ids && ids.length === 1 ? ids[0] : null);
     try {
       const res = await apiRequest<{ reports: Array<{ ruleName: string; status: string }> }>('/api/dns/sync', {
         method: 'POST',
         body: JSON.stringify(ids && ids.length > 0 ? { ruleIds: ids } : {}),
       });
       await onReload();
-      showNotice(
-        isZh
-          ? `已完成 ${res.reports.length} 条 DNS 规则批量同步`
-          : `Processed ${res.reports.length} DNS rule(s)`
-      );
+      if (res.reports.length === 0) {
+        showNotice(isZh ? '暂无可执行的启用 DNS 规则' : 'No enabled DNS rules to sync', 'info');
+      } else {
+        const failed = res.reports.filter((r) => r.status === 'failed').length;
+        showNotice(
+          isZh
+            ? failed > 0
+              ? `已完成 ${res.reports.length} 条 DNS 规则同步（其中 ${failed} 条失败）`
+              : `已完成 ${res.reports.length} 条 DNS 规则批量同步`
+            : failed > 0
+              ? `Processed ${res.reports.length} DNS rule(s) (${failed} failed)`
+              : `Processed ${res.reports.length} DNS rule(s)`,
+          failed > 0 ? 'warning' : 'success'
+        );
+      }
     } catch (err) {
-      showNotice(err instanceof Error ? err.message : 'Sync failed');
+      showNotice(err instanceof Error ? err.message : isZh ? 'DNS 同步失败' : 'Sync failed', 'error');
     } finally {
       setSyncing(false);
+      setSyncingRuleId(null);
     }
   };
 
   const handleDetectIp = async () => {
     setDetectingIp(true);
+    setExpandDetectedV6(false);
     try {
-      const res = await apiRequest<{ ipv4: string | null; ipv6: string | null }>('/api/dns/detect-ip');
-      setDetectedIps(res);
+      const res = await apiRequest<{
+        ipv4: string | null;
+        ipv6: string | null;
+        ipv6List?: string[];
+        ipv6Source?: 'interface_and_egress' | 'egress' | 'interface' | 'cloud_host' | 'none';
+        ipv6SourceLabel?: string;
+        ipv6Hint?: string;
+      }>('/api/dns/detect-ip');
+      const v6List = Array.isArray(res.ipv6List)
+        ? res.ipv6List
+        : res.ipv6
+        ? [res.ipv6]
+        : [];
+      setDetectedIps({
+        ipv4: res.ipv4 ?? null,
+        ipv6: res.ipv6 ?? v6List[0] ?? null,
+        ipv6List: v6List,
+        ipv6Source: res.ipv6Source,
+        ipv6SourceLabel: res.ipv6SourceLabel,
+        ipv6Hint: res.ipv6Hint,
+      });
+      setShowDetectedPopover(true);
+      showNotice(
+        isZh
+          ? `探测完成：IPv4 ${res.ipv4 ?? '未探测到'} · IPv6 ${v6List.length > 0 ? `共 ${v6List.length} 个` : '未探测到'}`
+          : `Detected IPv4: ${res.ipv4 ?? 'n/a'} · IPv6: ${v6List.length} address(es)`,
+        res.ipv4 || v6List.length > 0 ? 'success' : 'warning'
+      );
+    } catch (err) {
+      showNotice(err instanceof Error ? err.message : isZh ? '探测公网 IP 失败' : 'Public IP detection failed', 'error');
     } finally {
       setDetectingIp(false);
+    }
+  };
+
+  const handleCopyDetected = async (key: string, value: string) => {
+    const ok = await copyText(value);
+    if (ok) {
+      setCopiedIpKey(key);
+      setTimeout(() => setCopiedIpKey((prev) => (prev === key ? null : prev)), 1800);
+      showNotice(isZh ? '已复制到剪贴板' : 'Copied to clipboard', 'success');
+    } else {
+      showNotice(isZh ? '复制失败，请手动选中复制' : 'Clipboard copy failed', 'error');
     }
   };
 
@@ -298,6 +369,7 @@ export function DnsBatchView({ providers, rules, records, hosts, lang, onReload 
 
   const handleSaveProvider = async (e: React.FormEvent) => {
     e.preventDefault();
+    setSavingProvider(true);
     try {
       if (editingProvider) {
         await apiRequest(`/api/dns/providers/${editingProvider.id}`, {
@@ -312,15 +384,22 @@ export function DnsBatchView({ providers, rules, records, hosts, lang, onReload 
       }
       setShowProviderModal(false);
       await onReload();
-      showNotice(t('savedSuccessfully'));
+      showNotice(t('savedSuccessfully'), 'success');
     } catch (err) {
-      showNotice(err instanceof Error ? err.message : 'Failed to save provider');
+      showNotice(err instanceof Error ? err.message : 'Failed to save provider', 'error');
+    } finally {
+      setSavingProvider(false);
     }
   };
 
   const handleDeleteProvider = async (id: string) => {
-    await apiRequest(`/api/dns/providers/${id}`, { method: 'DELETE' });
-    await onReload();
+    try {
+      await apiRequest(`/api/dns/providers/${id}`, { method: 'DELETE' });
+      await onReload();
+      showNotice(isZh ? '已删除 DNS 服务商' : 'Deleted DNS provider', 'success');
+    } catch (err) {
+      showNotice(err instanceof Error ? err.message : isZh ? '删除失败' : 'Delete failed', 'error');
+    }
   };
 
   const openNewRule = () => {
@@ -343,9 +422,15 @@ export function DnsBatchView({ providers, rules, records, hosts, lang, onReload 
       ipv4Source: 'manual',
       syncIpv6: true,
       ipv6Mode: 'round_robin',
-      ipv6Targets: detectedIps?.ipv6
-        ? [{ id: 'tmp-1', recordName: 'edge', address: detectedIps.ipv6, enabled: true }]
-        : [],
+      ipv6Targets:
+        detectedIps && detectedIps.ipv6List.length > 0
+          ? detectedIps.ipv6List.map((addr, idx) => ({
+              id: `tmp-${idx + 1}`,
+              recordName: 'edge',
+              address: addr,
+              enabled: true,
+            }))
+          : [],
       linkedHostId: '',
       dryRun: !firstReady,
       enabled: true,
@@ -385,7 +470,10 @@ export function DnsBatchView({ providers, rules, records, hosts, lang, onReload 
       .split(/[\n,;]+/)
       .map((s) => s.trim())
       .filter(Boolean);
-    if (lines.length === 0) return;
+    if (lines.length === 0) {
+      showNotice(isZh ? '请先在输入框中粘贴至少一个 IPv6 地址' : 'Paste at least one IPv6 address first', 'warning');
+      return;
+    }
 
     const appended: DnsIpv6Target[] = lines.map((addr, idx) => ({
       id: `v6-new-${Date.now()}-${idx}`,
@@ -403,10 +491,15 @@ export function DnsBatchView({ providers, rules, records, hosts, lang, onReload 
       ipv6Targets: [...prev.ipv6Targets, ...appended],
     }));
     setBulkIpv6Text('');
+    showNotice(
+      isZh ? `已批量追加 ${appended.length} 个 IPv6 目标` : `Added ${appended.length} IPv6 target(s)`,
+      'success'
+    );
   };
 
   const handleSaveRule = async (e: React.FormEvent) => {
     e.preventDefault();
+    setSavingRule(true);
     try {
       if (editingRule) {
         await apiRequest(`/api/dns/rules/${editingRule.id}`, {
@@ -421,16 +514,23 @@ export function DnsBatchView({ providers, rules, records, hosts, lang, onReload 
       }
       setShowRuleModal(false);
       await onReload();
-      showNotice(t('savedSuccessfully'));
+      showNotice(t('savedSuccessfully'), 'success');
     } catch (err) {
-      showNotice(err instanceof Error ? err.message : 'Failed to save rule');
+      showNotice(err instanceof Error ? err.message : 'Failed to save rule', 'error');
+    } finally {
+      setSavingRule(false);
     }
   };
 
   const handleDeleteRule = async (id: string) => {
-    await apiRequest(`/api/dns/rules/${id}`, { method: 'DELETE' });
-    setSelectedRuleIds((prev) => prev.filter((x) => x !== id));
-    await onReload();
+    try {
+      await apiRequest(`/api/dns/rules/${id}`, { method: 'DELETE' });
+      setSelectedRuleIds((prev) => prev.filter((x) => x !== id));
+      await onReload();
+      showNotice(isZh ? '已删除 DNS 同步规则' : 'Deleted DNS sync rule', 'success');
+    } catch (err) {
+      showNotice(err instanceof Error ? err.message : isZh ? '删除规则失败' : 'Delete failed', 'error');
+    }
   };
 
   return (
@@ -447,35 +547,214 @@ export function DnsBatchView({ providers, rules, records, hosts, lang, onReload 
         </div>
 
         <div className="flex flex-wrap items-center gap-2 shrink-0">
-          <button
-            type="button"
-            disabled={detectingIp}
-            onClick={() => void handleDetectIp()}
-            className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-medium rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 transition-colors whitespace-nowrap shrink-0"
-          >
-            <Radar className="w-3.5 h-3.5" />
-            {t('detectPublicIp')}
-          </button>
+          <div className="relative">
+            <button
+              type="button"
+              disabled={detectingIp}
+              onClick={() => void handleDetectIp()}
+              className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-medium rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 disabled:opacity-50 transition-colors whitespace-nowrap shrink-0"
+            >
+              {detectingIp ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Radar className="w-3.5 h-3.5" />}
+              {t('detectPublicIp')}
+            </button>
+
+            {/* Floating Detected Public IP Popover (never shifts tabs or tables below) */}
+            {detectedIps && showDetectedPopover && (
+              <>
+                <div
+                  className="fixed inset-0 z-30"
+                  onClick={() => setShowDetectedPopover(false)}
+                  aria-hidden="true"
+                />
+                <div className="fixed sm:absolute right-4 sm:right-0 top-20 sm:top-full sm:mt-2 z-40 w-[min(92vw,540px)] max-h-[70vh] overflow-y-auto px-4 py-3.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 shadow-xl text-xs space-y-2.5">
+                  <div className="flex items-center justify-between gap-2 pb-2 border-b border-slate-100 dark:border-slate-800">
+                    <span className="font-semibold text-slate-900 dark:text-white">
+                      {isZh ? '本机公网 IP 探测结果' : 'Detected Public IPs'}
+                    </span>
+                    <div className="flex items-center gap-1.5">
+                      <button
+                        type="button"
+                        disabled={detectingIp}
+                        onClick={() => void handleDetectIp()}
+                        className="inline-flex items-center gap-1 px-2 py-1 rounded border border-slate-200 dark:border-slate-700 text-[11px] text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800 disabled:opacity-50"
+                      >
+                        <RefreshCw className={`w-3 h-3 ${detectingIp ? 'animate-spin' : ''}`} />
+                        {isZh ? '重新探测' : 'Re-detect'}
+                      </button>
+                      {detectedIps.ipv6List.length > 1 && (
+                        <>
+                          <button
+                            type="button"
+                            onClick={() => void handleCopyDetected('v6-all', detectedIps.ipv6List.join('\n'))}
+                            className="inline-flex items-center gap-1 px-2 py-1 rounded border border-slate-200 dark:border-slate-700 text-[11px] text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800"
+                          >
+                            {copiedIpKey === 'v6-all' ? (
+                              <Check className="w-3 h-3 text-emerald-500" />
+                            ) : (
+                              <Copy className="w-3 h-3" />
+                            )}
+                            {isZh ? '复制全部 IPv6' : 'Copy All IPv6'}
+                          </button>
+                          {detectedIps.ipv6List.length > 4 && (
+                            <button
+                              type="button"
+                              onClick={() => setExpandDetectedV6((v) => !v)}
+                              className="inline-flex items-center gap-1 px-2 py-1 rounded border border-slate-200 dark:border-slate-700 text-[11px] text-blue-600 dark:text-blue-400 hover:bg-slate-50 dark:hover:bg-slate-800"
+                            >
+                              {expandDetectedV6 ? (
+                                <>
+                                  <ChevronUp className="w-3 h-3" />
+                                  {isZh ? '收起' : 'Collapse'}
+                                </>
+                              ) : (
+                                <>
+                                  <ChevronDown className="w-3 h-3" />
+                                  {isZh ? `展开 (${detectedIps.ipv6List.length})` : `All (${detectedIps.ipv6List.length})`}
+                                </>
+                              )}
+                            </button>
+                          )}
+                        </>
+                      )}
+                      <button
+                        type="button"
+                        onClick={() => setShowDetectedPopover(false)}
+                        aria-label={isZh ? '关闭探测结果' : 'Dismiss'}
+                        className="p-1 rounded text-slate-400 hover:text-slate-600 dark:hover:text-slate-200"
+                      >
+                        <X className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="space-y-2">
+                    <div className="font-mono text-slate-700 dark:text-slate-300 flex flex-wrap items-center gap-x-3 gap-y-1.5">
+                      <span className="inline-flex items-center gap-1.5">
+                        <span className="font-sans font-semibold text-slate-500 dark:text-slate-400">IPv4:</span>
+                        <span>{detectedIps.ipv4 ?? (isZh ? '未探测到' : 'n/a')}</span>
+                        {detectedIps.ipv4 && (
+                          <button
+                            type="button"
+                            onClick={() => void handleCopyDetected('v4', detectedIps.ipv4!)}
+                            title={isZh ? '复制 IPv4' : 'Copy IPv4'}
+                            className="p-0.5 text-slate-400 hover:text-slate-700 dark:hover:text-slate-200"
+                          >
+                            {copiedIpKey === 'v4' ? <Check className="w-3.5 h-3.5 text-emerald-500" /> : <Copy className="w-3.5 h-3.5" />}
+                          </button>
+                        )}
+                      </span>
+                      <span aria-hidden="true" className="text-slate-300 dark:text-slate-700">
+                        |
+                      </span>
+                      <span className="inline-flex items-center gap-1.5">
+                        <span className="font-sans font-semibold text-slate-500 dark:text-slate-400">
+                          {detectedIps.ipv6List.length > 1
+                            ? isZh
+                              ? `IPv6 (共 ${detectedIps.ipv6List.length} 个):`
+                              : `IPv6 (${detectedIps.ipv6List.length}):`
+                            : 'IPv6:'}
+                        </span>
+                        {detectedIps.ipv6List.length === 0 ? (
+                          <span className="text-amber-600 dark:text-amber-400 font-sans">
+                            {isZh ? '未探测到' : 'Not detected'}
+                          </span>
+                        ) : detectedIps.ipv6List.length === 1 ? (
+                          <>
+                            <span className="break-all">{detectedIps.ipv6List[0]}</span>
+                            <button
+                              type="button"
+                              onClick={() => void handleCopyDetected('v6-0', detectedIps.ipv6List[0])}
+                              title={isZh ? '复制 IPv6' : 'Copy IPv6'}
+                              className="p-0.5 text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 shrink-0"
+                            >
+                              {copiedIpKey === 'v6-0' ? (
+                                <Check className="w-3.5 h-3.5 text-emerald-500" />
+                              ) : (
+                                <Copy className="w-3.5 h-3.5" />
+                              )}
+                            </button>
+                          </>
+                        ) : null}
+                        {detectedIps.ipv6Source && detectedIps.ipv6Source !== 'none' && (
+                          <span className="font-sans text-[11px] text-slate-400 dark:text-slate-500">
+                            (
+                            {detectedIps.ipv6Source === 'interface_and_egress'
+                              ? isZh
+                                ? '本机网卡 + 公网探测'
+                                : 'NIC + Egress'
+                              : detectedIps.ipv6Source === 'interface'
+                              ? isZh
+                                ? '本机网卡'
+                                : 'Local NIC'
+                              : detectedIps.ipv6Source === 'egress'
+                              ? isZh
+                                ? '公网出口'
+                                : 'Egress'
+                              : isZh
+                              ? `关联云主机 · ${detectedIps.ipv6SourceLabel || ''}`
+                              : `Cloud Host · ${detectedIps.ipv6SourceLabel || ''}`}
+                            )
+                          </span>
+                        )}
+                      </span>
+                    </div>
+
+                    {detectedIps.ipv6List.length > 1 && (
+                      <div className="grid grid-cols-1 gap-1.5 pt-2 border-t border-slate-100 dark:border-slate-800/80">
+                        {(expandDetectedV6 ? detectedIps.ipv6List : detectedIps.ipv6List.slice(0, 4)).map((addr, idx) => {
+                          const copyKey = `v6-${idx}`;
+                          return (
+                            <div
+                              key={addr}
+                              className="flex items-center justify-between gap-2 px-2.5 py-1.5 rounded bg-slate-50 dark:bg-slate-950/70 border border-slate-200/70 dark:border-slate-800 font-mono text-[11px]"
+                            >
+                              <div className="flex items-center gap-2 min-w-0">
+                                <span className="text-slate-400 select-none shrink-0">#{idx + 1}</span>
+                                <span className="text-slate-800 dark:text-slate-200 truncate" title={addr}>
+                                  {addr}
+                                </span>
+                              </div>
+                              <button
+                                type="button"
+                                onClick={() => void handleCopyDetected(copyKey, addr)}
+                                title={isZh ? '复制此 IPv6' : 'Copy IPv6'}
+                                className="p-0.5 text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 shrink-0"
+                              >
+                                {copiedIpKey === copyKey ? (
+                                  <Check className="w-3 h-3 text-emerald-500" />
+                                ) : (
+                                  <Copy className="w-3 h-3" />
+                                )}
+                              </button>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+
+                    {detectedIps.ipv6List.length === 0 && detectedIps.ipv6Hint && (
+                      <div className="text-[11px] text-slate-500 dark:text-slate-400 leading-relaxed">
+                        {detectedIps.ipv6Hint}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </>
+            )}
+          </div>
           {subTab === 'rules' ? (
             <>
-              {selectedRuleIds.length > 0 && (
-                <button
-                  type="button"
-                  disabled={syncing}
-                  onClick={() => void handleBatchSync(selectedRuleIds)}
-                  className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-medium rounded-lg border border-blue-200 dark:border-blue-800 bg-blue-50 dark:bg-blue-950/40 text-blue-700 dark:text-blue-300 hover:bg-blue-100 dark:hover:bg-blue-900/50 transition-colors whitespace-nowrap shrink-0"
-                >
-                  <RefreshCw className={`w-3.5 h-3.5 ${syncing ? 'animate-spin' : ''}`} />
-                  {t('syncSelected')} ({selectedRuleIds.length})
-                </button>
-              )}
               <button
                 type="button"
                 disabled={syncing}
                 onClick={() => void handleBatchSync()}
-                className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-medium rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 transition-colors whitespace-nowrap shrink-0"
+                className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-medium rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 disabled:opacity-50 transition-colors whitespace-nowrap shrink-0"
               >
-                <Play className="w-3.5 h-3.5" />
+                {syncing && !syncingRuleId ? (
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                ) : (
+                  <Play className="w-3.5 h-3.5" />
+                )}
                 {t('syncAllEnabled')}
               </button>
               <button
@@ -520,21 +799,7 @@ export function DnsBatchView({ providers, rules, records, hosts, lang, onReload 
         </div>
       )}
 
-      {/* Detected Public IP banner & toast */}
-      {(detectedIps || toastMsg) && (
-        <div className="flex flex-wrap items-center justify-between gap-3 px-4 py-3 rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 text-xs">
-          {detectedIps && (
-            <div className="font-mono text-slate-700 dark:text-slate-300 flex flex-wrap items-center gap-x-4 gap-y-1">
-              <span>IPv4: {detectedIps.ipv4 ?? 'n/a'}</span>
-              <span aria-hidden="true">·</span>
-              <span>IPv6: {detectedIps.ipv6 ?? 'n/a'}</span>
-            </div>
-          )}
-          {toastMsg && (
-            <div className="font-medium text-blue-600 dark:text-blue-400">{toastMsg}</div>
-          )}
-        </div>
-      )}
+
 
       {/* Segmented Control: Domain DNS Records, DNS Providers, Bound Domain Sync Rules */}
       <div className="inline-flex flex-wrap items-center gap-1 p-1 rounded-lg bg-slate-200/70 dark:bg-slate-800/80">
@@ -578,6 +843,7 @@ export function DnsBatchView({ providers, rules, records, hosts, lang, onReload 
         <DnsRecordsPanel
           providers={providers}
           records={records}
+          detectedIps={detectedIps}
           lang={lang}
           onReload={onReload}
           onJumpToProviders={() => setSubTab('providers')}
@@ -669,7 +935,7 @@ export function DnsBatchView({ providers, rules, records, hosts, lang, onReload 
                               {rule.ipv6Targets.filter((v) => v.enabled).length} active ·{' '}
                               {rule.ipv6Mode === 'round_robin' ? 'Round-Robin' : 'Per-Host'}
                             </div>
-                            {rule.ipv6Targets.slice(0, 3).map((v6) => (
+                            {(expandedRuleV6Ids.has(rule.id) ? rule.ipv6Targets : rule.ipv6Targets.slice(0, 3)).map((v6) => (
                               <div
                                 key={v6.id}
                                 className="text-slate-700 dark:text-slate-300 truncate max-w-[280px]"
@@ -680,9 +946,26 @@ export function DnsBatchView({ providers, rules, records, hosts, lang, onReload 
                               </div>
                             ))}
                             {rule.ipv6Targets.length > 3 && (
-                              <div className="text-[11px] text-slate-400">
-                                +{rule.ipv6Targets.length - 3} more AAAA
-                              </div>
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  setExpandedRuleV6Ids((prev) => {
+                                    const next = new Set(prev);
+                                    if (next.has(rule.id)) next.delete(rule.id);
+                                    else next.add(rule.id);
+                                    return next;
+                                  })
+                                }
+                                className="inline-flex items-center gap-0.5 text-[11px] font-sans text-blue-600 dark:text-blue-400 hover:underline"
+                              >
+                                {expandedRuleV6Ids.has(rule.id)
+                                  ? isZh
+                                    ? '收起'
+                                    : 'Collapse'
+                                  : isZh
+                                  ? `展开其余 ${rule.ipv6Targets.length - 3} 条 AAAA`
+                                  : `+${rule.ipv6Targets.length - 3} more AAAA`}
+                              </button>
                             )}
                           </div>
                         ) : (
@@ -706,14 +989,12 @@ export function DnsBatchView({ providers, rules, records, hosts, lang, onReload 
                         <div className="mt-0.5 font-mono text-[11px] tabular-nums text-slate-500 dark:text-slate-400">
                           {formatTimeAgo(rule.lastSyncedAt)}
                         </div>
-                        {rule.lastMessage && (
-                          <div
-                            className="mt-0.5 text-[11px] text-slate-500 dark:text-slate-400 max-w-[220px] truncate"
-                            title={rule.lastMessage}
-                          >
-                            {rule.lastMessage}
-                          </div>
-                        )}
+                        <div
+                          className="mt-0.5 text-[11px] text-slate-500 dark:text-slate-400 max-w-[220px] truncate min-h-[16px]"
+                          title={rule.lastMessage || undefined}
+                        >
+                          {rule.lastMessage || '—'}
+                        </div>
                       </td>
                       <td className="py-3.5 px-4 text-right whitespace-nowrap">
                         <div className="inline-flex items-center gap-1">
@@ -722,9 +1003,13 @@ export function DnsBatchView({ providers, rules, records, hosts, lang, onReload 
                             disabled={syncing}
                             onClick={() => void handleBatchSync([rule.id])}
                             title={t('runNow')}
-                            className="p-1.5 rounded-md text-blue-600 dark:text-blue-400 hover:bg-blue-50 dark:hover:bg-blue-950/50 transition-colors"
+                            className="p-1.5 rounded-md text-blue-600 dark:text-blue-400 hover:bg-blue-50 dark:hover:bg-blue-950/50 disabled:opacity-50 transition-colors"
                           >
-                            <Play className="w-4 h-4" />
+                            {syncingRuleId === rule.id ? (
+                              <Loader2 className="w-4 h-4 animate-spin" />
+                            ) : (
+                              <Play className="w-4 h-4" />
+                            )}
                           </button>
                           <button
                             type="button"
@@ -757,6 +1042,29 @@ export function DnsBatchView({ providers, rules, records, hosts, lang, onReload 
               </tbody>
             </table>
           </div>
+          {selectedRuleIds.length > 0 && (
+            <div className="fixed bottom-5 left-1/2 -translate-x-1/2 z-40 max-w-[94vw] flex items-center gap-3 px-4 py-2.5 rounded-xl border border-blue-200 dark:border-blue-800 bg-white/95 dark:bg-slate-900/95 backdrop-blur shadow-xl text-xs">
+              <span className="font-semibold text-blue-700 dark:text-blue-300 tabular-nums whitespace-nowrap">
+                {isZh ? `已选中 ${selectedRuleIds.length} 条同步规则` : `${selectedRuleIds.length} rule(s) selected`}
+              </span>
+              <button
+                type="button"
+                disabled={syncing}
+                onClick={() => void handleBatchSync(selectedRuleIds)}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-blue-600 text-white font-semibold hover:bg-blue-700 disabled:opacity-50 whitespace-nowrap"
+              >
+                <RefreshCw className={`w-3.5 h-3.5 ${syncing ? 'animate-spin' : ''}`} />
+                {t('syncSelected')} ({selectedRuleIds.length})
+              </button>
+              <button
+                type="button"
+                onClick={() => setSelectedRuleIds([])}
+                className="px-2 py-1 text-slate-500 hover:text-slate-700 dark:hover:text-slate-300 whitespace-nowrap"
+              >
+                {isZh ? '取消选择' : 'Clear'}
+              </button>
+            </div>
+          )}
         </div>
       ) : (
         /* DNS Providers Table (Reusable Account Credentials) */
@@ -1006,8 +1314,10 @@ export function DnsBatchView({ providers, rules, records, hosts, lang, onReload 
                 </button>
                 <button
                   type="submit"
-                  className="px-4 py-2 text-xs font-semibold rounded-lg bg-blue-600 text-white hover:bg-blue-700"
+                  disabled={savingProvider}
+                  className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-semibold rounded-lg bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50"
                 >
+                  {savingProvider && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
                   {t('save')}
                 </button>
               </div>
@@ -1475,8 +1785,10 @@ export function DnsBatchView({ providers, rules, records, hosts, lang, onReload 
                   </button>
                   <button
                     type="submit"
-                    className="px-4 py-2 text-xs font-semibold rounded-lg bg-blue-600 text-white hover:bg-blue-700"
+                    disabled={savingRule}
+                    className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-semibold rounded-lg bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50"
                   >
+                    {savingRule && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
                     {t('save')}
                   </button>
                 </div>

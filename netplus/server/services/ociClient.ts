@@ -198,6 +198,7 @@ export async function ociApiRequest<T = unknown>(params: {
   apiPath: string;
   body?: unknown;
   timeoutMs?: number;
+  noRetryOn429?: boolean;
 }): Promise<{ ok: boolean; status: number; data?: T; error?: string }> {
   const region = params.creds.region.trim().toLowerCase();
   if (!isValidOciRegion(region)) {
@@ -291,6 +292,14 @@ export async function ociApiRequest<T = unknown>(params: {
         );
         attempt = await executeOnce(new Date(Date.now() + ociClockSkewMs));
       }
+    }
+  }
+
+  // Retry transient OCI 429 TooManyRequests bursts (e.g. concurrent VNIC/IPv6 inspection)
+  if (!params.noRetryOn429) {
+    for (let retry = 0; retry < 2 && !attempt.ok && attempt.status === 429; retry += 1) {
+      await new Promise((r) => setTimeout(r, 600 * (retry + 1)));
+      attempt = await executeOnce();
     }
   }
 
@@ -631,6 +640,8 @@ export async function inspectOciVnicIps(
       privateIp?: string;
       publicIp?: string;
       isPrimary?: boolean;
+      ipv6Addresses?: string[];
+      ipv6AddressCidrs?: string[];
     }>({
       creds: built.creds,
       service: 'iaas',
@@ -643,7 +654,15 @@ export async function inspectOciVnicIps(
       method: 'GET',
       apiPath: `/20160918/privateIps?vnicId=${encodeURIComponent(vnicId)}`,
     }),
-    ociApiRequest<Array<{ id: string; ipAddress: string; lifecycleState?: string }>>({
+    ociApiRequest<
+      Array<{
+        id?: string;
+        ipAddress?: string;
+        vnicId?: string;
+        lifecycleState?: string;
+        ipState?: string;
+      }>
+    >({
       creds: built.creds,
       service: 'iaas',
       method: 'GET',
@@ -653,6 +672,12 @@ export async function inspectOciVnicIps(
 
   if (!vnicRes.ok || !vnicRes.data) {
     return { ok: false, error: vnicRes.error || `Failed to inspect OCI VNIC (${vnicRes.status})` };
+  }
+
+  if (!v6Res.ok) {
+    console.warn(
+      `[NetPlus][OCI] ListIpv6s(vnicId=${vnicId}) returned HTTP ${v6Res.status}: ${v6Res.error || 'unknown error'}`
+    );
   }
 
   const primaryPriv = (privRes.data ?? []).find((p) => p.isPrimary) ?? (privRes.data ?? [])[0];
@@ -675,12 +700,90 @@ export async function inspectOciVnicIps(
     }
   }
 
-  const ipv6s = (v6Res.data ?? [])
-    .filter((v) => !v.lifecycleState || v.lifecycleState === 'AVAILABLE')
-    .map((v) => ({
-      id: v.id,
-      ipAddress: v.ipAddress,
-    }));
+  const normalizeIpv6 = (raw?: string): string | null => {
+    const trimmed = String(raw || '').trim();
+    if (!trimmed) return null;
+    const withoutHostMask = trimmed.replace(/\/128$/, '');
+    if (net.isIPv6(withoutHostMask)) return withoutHostMask;
+    const slashIdx = withoutHostMask.indexOf('/');
+    if (slashIdx > 0) {
+      const base = withoutHostMask.slice(0, slashIdx).trim();
+      if (net.isIPv6(base)) return base;
+    }
+    return null;
+  };
+
+  let rawV6Objects = Array.isArray(v6Res.data) ? v6Res.data : [];
+
+  // Fallback: some OCI compartments/regions return IPv6 objects via subnetId query when vnicId query returns empty/error
+  if ((!v6Res.ok || rawV6Objects.length === 0) && vnicRes.data.subnetId && isValidOcid(vnicRes.data.subnetId)) {
+    const subnetV6Res = await ociApiRequest<
+      Array<{
+        id?: string;
+        ipAddress?: string;
+        vnicId?: string;
+        lifecycleState?: string;
+        ipState?: string;
+      }>
+    >({
+      creds: built.creds,
+      service: 'iaas',
+      method: 'GET',
+      apiPath: `/20160918/ipv6s?subnetId=${encodeURIComponent(vnicRes.data.subnetId)}`,
+    });
+    if (subnetV6Res.ok && Array.isArray(subnetV6Res.data)) {
+      const vnicAddrSet = new Set(
+        (vnicRes.data.ipv6Addresses ?? [])
+          .map((a) => normalizeIpv6(a)?.toLowerCase())
+          .filter(Boolean) as string[]
+      );
+      rawV6Objects = subnetV6Res.data.filter((item) => {
+        if (item.vnicId && item.vnicId === vnicId) return true;
+        const norm = normalizeIpv6(item.ipAddress)?.toLowerCase();
+        return Boolean(norm && vnicAddrSet.has(norm));
+      });
+    }
+  }
+
+  const ipv6Map = new Map<string, { id: string; ipAddress: string }>();
+
+  // 1. Add all non-terminated IPv6 objects from ListIpv6s (carries real ocid1.ipv6... IDs)
+  for (const item of rawV6Objects) {
+    const state = String(item.lifecycleState || '').toUpperCase();
+    if (state === 'TERMINATED' || state === 'TERMINATING') continue;
+    const ipAddress = normalizeIpv6(item.ipAddress);
+    if (!ipAddress) continue;
+    const key = ipAddress.toLowerCase();
+    const existing = ipv6Map.get(key);
+    const id = String(item.id || '').trim();
+    if (!existing || (!existing.id && id)) {
+      ipv6Map.set(key, { id, ipAddress });
+    }
+  }
+
+  // 2. Always merge direct ipv6Addresses returned by GetVnic (even if ListIpv6s lacked permissions or returned empty)
+  for (const rawAddr of vnicRes.data.ipv6Addresses ?? []) {
+    const ipAddress = normalizeIpv6(rawAddr);
+    if (!ipAddress) continue;
+    const key = ipAddress.toLowerCase();
+    if (!ipv6Map.has(key)) {
+      ipv6Map.set(key, { id: '', ipAddress });
+    }
+  }
+
+  // 3. If VNIC has assigned IPv6 prefix CIDRs (e.g. /80) and no individual addresses matched, expose base prefix address
+  if (ipv6Map.size === 0 && Array.isArray(vnicRes.data.ipv6AddressCidrs)) {
+    for (const rawCidr of vnicRes.data.ipv6AddressCidrs) {
+      const ipAddress = normalizeIpv6(rawCidr);
+      if (!ipAddress) continue;
+      const key = ipAddress.toLowerCase();
+      if (!ipv6Map.has(key)) {
+        ipv6Map.set(key, { id: '', ipAddress });
+      }
+    }
+  }
+
+  const ipv6s = Array.from(ipv6Map.values());
 
   return {
     ok: true,
@@ -1037,16 +1140,24 @@ export async function listOciInstancesDetailed(
     let primaryVnic:
       | Omit<OciVnicSummary, 'instanceId' | 'instanceName' | 'instanceShape' | 'instanceState' | 'availabilityDomain'>
       | undefined;
+    const mergedV6Map = new Map<string, { id: string; ipAddress: string }>();
 
     for (const vid of vnicIds) {
       const inspected = await inspectOciVnicIps(profile, privateKeyPem, vid);
       if (!inspected.ok || !inspected.vnic) continue;
       if (!primaryVnic || inspected.vnic.isPrimary) {
         primaryVnic = inspected.vnic;
-        if (inspected.vnic.isPrimary) break;
+      }
+      for (const v6 of inspected.vnic.ipv6s) {
+        const key = v6.ipAddress.toLowerCase();
+        const prev = mergedV6Map.get(key);
+        if (!prev || (!prev.id && v6.id)) {
+          mergedV6Map.set(key, v6);
+        }
       }
     }
 
+    const mergedIpv6s = Array.from(mergedV6Map.values());
     const ocpus = inst.shapeConfig?.ocpus;
     const memoryInGBs = inst.shapeConfig?.memoryInGBs;
 
@@ -1067,8 +1178,8 @@ export async function listOciInstancesDetailed(
       publicIp: primaryVnic?.publicIp,
       publicIpId: primaryVnic?.publicIpId,
       publicIpLifetime: primaryVnic?.publicIpLifetime,
-      ipv6List: (primaryVnic?.ipv6s ?? []).map((v) => v.ipAddress),
-      ipv6Entries: primaryVnic?.ipv6s ?? [],
+      ipv6List: mergedIpv6s.map((v) => v.ipAddress),
+      ipv6Entries: mergedIpv6s.filter((v) => Boolean(v.id)),
       timeCreated: inst.timeCreated,
     });
   }
@@ -1122,19 +1233,21 @@ export async function getOciInstanceDetail(
     return { ok: false, error: instRes.error || `OCI getInstance failed (HTTP ${instRes.status})` };
   }
 
-  let vnicId = knownVnicId && isValidOcid(knownVnicId) ? knownVnicId : undefined;
-  if (!vnicId) {
-    const compId = built.creds.compartmentOcid || built.creds.tenancyOcid;
-    const attRes = await ociApiRequest<Array<{ vnicId: string; lifecycleState: string }>>({
-      creds: built.creds,
-      service: 'iaas',
-      method: 'GET',
-      apiPath: `/20160918/vnicAttachments?compartmentId=${encodeURIComponent(compId)}&instanceId=${encodeURIComponent(instanceId)}`,
-    });
-    const attached = (attRes.data ?? []).find((a) => a.lifecycleState === 'ATTACHED' && a.vnicId);
-    vnicId = attached?.vnicId;
+  const compId = built.creds.compartmentOcid || built.creds.tenancyOcid;
+  const attRes = await ociApiRequest<Array<{ vnicId: string; lifecycleState: string }>>({
+    creds: built.creds,
+    service: 'iaas',
+    method: 'GET',
+    apiPath: `/20160918/vnicAttachments?compartmentId=${encodeURIComponent(compId)}&instanceId=${encodeURIComponent(instanceId)}`,
+  });
+  const attachedVnicIds = (attRes.data ?? [])
+    .filter((a) => a.lifecycleState === 'ATTACHED' && a.vnicId)
+    .map((a) => a.vnicId);
+  if (attachedVnicIds.length === 0 && knownVnicId && isValidOcid(knownVnicId)) {
+    attachedVnicIds.push(knownVnicId);
   }
 
+  let vnicId = knownVnicId && isValidOcid(knownVnicId) ? knownVnicId : attachedVnicIds[0];
   let publicIp: string | undefined;
   let publicIpId: string | undefined;
   let publicIpLifetime: 'EPHEMERAL' | 'RESERVED' | undefined;
@@ -1142,15 +1255,36 @@ export async function getOciInstanceDetail(
   let ipv6Entries: Array<{ id: string; ipAddress: string }> | undefined;
   let primaryPrivateIpId: string | undefined;
 
-  if (vnicId) {
-    const vnicInfo = await inspectOciVnicIps(profile, privateKeyPem, vnicId);
-    if (vnicInfo.ok && vnicInfo.vnic) {
-      publicIp = vnicInfo.vnic.publicIp;
-      publicIpId = vnicInfo.vnic.publicIpId;
-      publicIpLifetime = vnicInfo.vnic.publicIpLifetime;
-      ipv6Entries = vnicInfo.vnic.ipv6s;
-      ipv6List = vnicInfo.vnic.ipv6s.map((v) => v.ipAddress);
-      primaryPrivateIpId = vnicInfo.vnic.primaryPrivateIpId;
+  if (attachedVnicIds.length > 0) {
+    let primaryVnic:
+      | Omit<OciVnicSummary, 'instanceId' | 'instanceName' | 'instanceShape' | 'instanceState' | 'availabilityDomain'>
+      | undefined;
+    const mergedV6Map = new Map<string, { id: string; ipAddress: string }>();
+
+    for (const vid of attachedVnicIds) {
+      const vnicInfo = await inspectOciVnicIps(profile, privateKeyPem, vid);
+      if (!vnicInfo.ok || !vnicInfo.vnic) continue;
+      if (!primaryVnic || vnicInfo.vnic.isPrimary) {
+        primaryVnic = vnicInfo.vnic;
+      }
+      for (const v6 of vnicInfo.vnic.ipv6s) {
+        const key = v6.ipAddress.toLowerCase();
+        const prev = mergedV6Map.get(key);
+        if (!prev || (!prev.id && v6.id)) {
+          mergedV6Map.set(key, v6);
+        }
+      }
+    }
+
+    if (primaryVnic) {
+      vnicId = primaryVnic.vnicId;
+      publicIp = primaryVnic.publicIp;
+      publicIpId = primaryVnic.publicIpId;
+      publicIpLifetime = primaryVnic.publicIpLifetime;
+      primaryPrivateIpId = primaryVnic.primaryPrivateIpId;
+      const mergedV6 = Array.from(mergedV6Map.values());
+      ipv6List = mergedV6.map((v) => v.ipAddress);
+      ipv6Entries = mergedV6.filter((v) => Boolean(v.id));
     }
   }
 

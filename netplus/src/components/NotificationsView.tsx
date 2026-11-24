@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
-import { Bell, Pencil, Plus, Send, Trash2, X } from 'lucide-react';
+import { Bell, Loader2, Pencil, Plus, Send, Trash2, X } from 'lucide-react';
 import { apiRequest, formatTimeAgo } from '../lib/api';
+import { toast } from '../lib/toast';
 import type {
   LanguageCode,
   NotificationChannel,
@@ -37,7 +38,8 @@ const ALL_EVENTS: Array<{ id: NotificationEventType; zh: string; en: string }> =
 export function NotificationsView({ channels, lang, onReload }: NotificationsViewProps) {
   const isZh = lang === 'zh-CN';
   const [testingId, setTestingId] = useState<string | null>(null);
-  const [toast, setToast] = useState<string | null>(null);
+  const [busyId, setBusyId] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
   const [showModal, setShowModal] = useState(false);
   const [editing, setEditing] = useState<NotificationChannel | null>(null);
 
@@ -57,9 +59,8 @@ export function NotificationsView({ channels, lang, onReload }: NotificationsVie
     secret: '',
   });
 
-  const showBanner = (msg: string) => {
-    setToast(msg);
-    setTimeout(() => setToast(null), 4500);
+  const showBanner = (msg: string, kind: 'success' | 'error' | 'info' = 'info') => {
+    toast.show(msg, kind);
   };
 
   const openNew = () => {
@@ -104,6 +105,7 @@ export function NotificationsView({ channels, lang, onReload }: NotificationsVie
 
   const handleSave = async (e: React.FormEvent) => {
     e.preventDefault();
+    setSaving(true);
     try {
       if (editing) {
         await apiRequest(`/api/notifications/channels/${editing.id}`, {
@@ -118,18 +120,34 @@ export function NotificationsView({ channels, lang, onReload }: NotificationsVie
       }
       setShowModal(false);
       await onReload();
-      showBanner(isZh ? '系统通知渠道已保存' : 'System notification channel saved');
+      showBanner(isZh ? '系统通知渠道已保存' : 'System notification channel saved', 'success');
     } catch (err) {
-      showBanner(err instanceof Error ? err.message : 'Save failed');
+      showBanner(err instanceof Error ? err.message : isZh ? '保存失败' : 'Save failed', 'error');
+    } finally {
+      setSaving(false);
     }
   };
 
   const handleToggle = async (ch: NotificationChannel) => {
-    await apiRequest(`/api/notifications/channels/${ch.id}`, {
-      method: 'PUT',
-      body: JSON.stringify({ enabled: !ch.enabled }),
-    });
-    await onReload();
+    setBusyId(ch.id);
+    try {
+      const next = !ch.enabled;
+      await apiRequest(`/api/notifications/channels/${ch.id}`, {
+        method: 'PUT',
+        body: JSON.stringify({ enabled: next }),
+      });
+      await onReload();
+      showBanner(
+        isZh
+          ? `${ch.name} 已${next ? '启用' : '停用'}`
+          : `${ch.name} ${next ? 'enabled' : 'disabled'}`,
+        'success'
+      );
+    } catch (err) {
+      showBanner(err instanceof Error ? err.message : isZh ? '状态切换失败' : 'Toggle failed', 'error');
+    } finally {
+      setBusyId(null);
+    }
   };
 
   const handleTest = async (ch: NotificationChannel) => {
@@ -140,19 +158,31 @@ export function NotificationsView({ channels, lang, onReload }: NotificationsVie
         { method: 'POST' }
       );
       await onReload();
-      showBanner(`${ch.name}: ${res.ok ? 'OK' : 'Error'} — ${res.message}`);
+      showBanner(
+        `${ch.name}: ${res.ok ? (isZh ? '发送成功' : 'OK') : isZh ? '发送失败' : 'Error'} — ${res.message}`,
+        res.ok ? 'success' : 'error'
+      );
     } catch (err) {
       showBanner(
-        `${ch.name}: Error — ${err instanceof Error ? err.message : isZh ? '测试请求失败' : 'Test request failed'}`
+        `${ch.name}: ${err instanceof Error ? err.message : isZh ? '测试请求失败' : 'Test request failed'}`,
+        'error'
       );
     } finally {
       setTestingId(null);
     }
   };
 
-  const handleDelete = async (id: string) => {
-    await apiRequest(`/api/notifications/channels/${id}`, { method: 'DELETE' });
-    await onReload();
+  const handleDelete = async (ch: NotificationChannel) => {
+    setBusyId(ch.id);
+    try {
+      await apiRequest(`/api/notifications/channels/${ch.id}`, { method: 'DELETE' });
+      await onReload();
+      showBanner(isZh ? `已删除通知渠道 ${ch.name}` : `Deleted channel ${ch.name}`, 'success');
+    } catch (err) {
+      showBanner(err instanceof Error ? err.message : isZh ? '删除失败' : 'Delete failed', 'error');
+    } finally {
+      setBusyId(null);
+    }
   };
 
   return (
@@ -179,12 +209,6 @@ export function NotificationsView({ channels, lang, onReload }: NotificationsVie
         </button>
       </div>
 
-      {toast && (
-        <div className="px-4 py-3 rounded-lg border border-blue-200 dark:border-blue-900 bg-blue-50/70 dark:bg-blue-950/30 text-xs text-blue-700 dark:text-blue-300">
-          {toast}
-        </div>
-      )}
-
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
         {channels.map((ch) => (
           <div
@@ -210,8 +234,9 @@ export function NotificationsView({ channels, lang, onReload }: NotificationsVie
 
                 <button
                   type="button"
+                  disabled={busyId === ch.id}
                   onClick={() => void handleToggle(ch)}
-                  className={`text-xs font-medium whitespace-nowrap shrink-0 ${
+                  className={`text-xs font-medium whitespace-nowrap shrink-0 disabled:opacity-50 ${
                     ch.enabled ? 'text-emerald-600 dark:text-emerald-400' : 'text-slate-400'
                   }`}
                 >
@@ -239,17 +264,22 @@ export function NotificationsView({ channels, lang, onReload }: NotificationsVie
                   : 'No secret / SendKey configured yet'}
               </div>
 
-              {ch.lastMessage && (
-                <div
-                  className={`text-[11px] font-mono ${
-                    ch.lastStatus === 'ok'
-                      ? 'text-emerald-600 dark:text-emerald-400'
-                      : 'text-amber-600 dark:text-amber-400'
-                  }`}
-                >
-                  {formatTimeAgo(ch.lastSentAt)} · {ch.lastMessage}
-                </div>
-              )}
+              <div
+                className={`text-[11px] font-mono truncate min-h-[16px] ${
+                  !ch.lastMessage
+                    ? 'text-slate-400 dark:text-slate-500 font-sans'
+                    : ch.lastStatus === 'ok'
+                    ? 'text-emerald-600 dark:text-emerald-400'
+                    : 'text-amber-600 dark:text-amber-400'
+                }`}
+                title={ch.lastMessage ? `${formatTimeAgo(ch.lastSentAt)} · ${ch.lastMessage}` : undefined}
+              >
+                {ch.lastMessage
+                  ? `${formatTimeAgo(ch.lastSentAt)} · ${ch.lastMessage}`
+                  : isZh
+                  ? '尚未发送测试'
+                  : 'No test sent yet'}
+              </div>
             </div>
 
             <div className="pt-3 border-t border-slate-200 dark:border-slate-800 flex items-center justify-end gap-2">
@@ -257,22 +287,29 @@ export function NotificationsView({ channels, lang, onReload }: NotificationsVie
                 type="button"
                 disabled={testingId === ch.id}
                 onClick={() => void handleTest(ch)}
-                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg border border-slate-200 dark:border-slate-700 text-blue-600 dark:text-blue-400 hover:bg-blue-50 dark:hover:bg-blue-950/40 whitespace-nowrap"
+                className="inline-flex items-center justify-center gap-1.5 min-w-[92px] px-3 py-1.5 text-xs font-medium rounded-lg border border-slate-200 dark:border-slate-700 text-blue-600 dark:text-blue-400 hover:bg-blue-50 dark:hover:bg-blue-950/40 disabled:opacity-50 whitespace-nowrap"
               >
-                <Send className="w-3.5 h-3.5" />
+                {testingId === ch.id ? (
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                ) : (
+                  <Send className="w-3.5 h-3.5" />
+                )}
                 {isZh ? '发送测试' : 'Send Test'}
               </button>
               <button
                 type="button"
                 onClick={() => openEdit(ch)}
+                title={isZh ? '编辑' : 'Edit'}
                 className="p-1.5 rounded-lg border border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800"
               >
                 <Pencil className="w-4 h-4" />
               </button>
               <button
                 type="button"
-                onClick={() => void handleDelete(ch.id)}
-                className="p-1.5 rounded-lg border border-slate-200 dark:border-slate-700 text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-950/40"
+                disabled={busyId === ch.id}
+                onClick={() => void handleDelete(ch)}
+                title={isZh ? '删除' : 'Delete'}
+                className="p-1.5 rounded-lg border border-slate-200 dark:border-slate-700 text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-950/40 disabled:opacity-50"
               >
                 <Trash2 className="w-4 h-4" />
               </button>
@@ -546,8 +583,10 @@ export function NotificationsView({ channels, lang, onReload }: NotificationsVie
                   </button>
                   <button
                     type="submit"
-                    className="px-4 py-2 text-xs font-semibold rounded-lg bg-blue-600 text-white hover:bg-blue-700"
+                    disabled={saving}
+                    className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-semibold rounded-lg bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50"
                   >
+                    {saving && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
                     {isZh ? '保存' : 'Save'}
                   </button>
                 </div>

@@ -18,6 +18,8 @@ import {
   X,
 } from 'lucide-react';
 import { apiRequest, formatTimeAgo } from '../lib/api';
+import { copyText } from '../lib/clipboard';
+import { toast } from '../lib/toast';
 import type {
   DnsProvider,
   DnsRecordType,
@@ -28,10 +30,15 @@ import type {
 interface DnsRecordsPanelProps {
   providers: DnsProvider[];
   records: ManagedDnsRecord[];
+  detectedIps?: {
+    ipv4: string | null;
+    ipv6: string | null;
+    ipv6List: string[];
+  } | null;
   lang: LanguageCode;
   onReload: () => Promise<void>;
   onJumpToProviders: () => void;
-  onNotify: (msg: string) => void;
+  onNotify: (msg: string, kind?: 'success' | 'error' | 'info' | 'warning') => void;
 }
 
 const RECORD_TYPES: DnsRecordType[] = ['A', 'AAAA', 'CNAME', 'TXT', 'MX', 'NS', 'SRV', 'CAA', 'PTR'];
@@ -106,6 +113,7 @@ interface DomainOverviewRow {
 export function DnsRecordsPanel({
   providers,
   records,
+  detectedIps,
   lang,
   onReload,
   onJumpToProviders,
@@ -391,7 +399,10 @@ export function DnsRecordsPanel({
   const handleQuickSyncDomain = async (row: DomainOverviewRow) => {
     const prov = providerMap.get(row.providerId);
     if (!prov || !isProviderConfigured(prov)) {
-      onNotify(isZh ? '该服务商未配置 API 密钥，无法拉取远端记录' : 'Provider has no API secret configured');
+      onNotify(
+        isZh ? '该服务商未配置 API 密钥，无法拉取远端记录' : 'Provider has no API secret configured',
+        'warning'
+      );
       return;
     }
     setSyncingDomainKey(row.key);
@@ -414,10 +425,11 @@ export function DnsRecordsPanel({
       onNotify(
         isZh
           ? `已刷新 ${row.domain}：共 ${res.total} 条解析（新增 ${res.addedCount}，更新 ${res.updatedCount}，清理 ${res.removedCount}）`
-          : `Synced ${res.total} records for ${row.domain} (+${res.addedCount}, ~${res.updatedCount}, -${res.removedCount})`
+          : `Synced ${res.total} records for ${row.domain} (+${res.addedCount}, ~${res.updatedCount}, -${res.removedCount})`,
+        'success'
       );
     } catch (err) {
-      onNotify(err instanceof Error ? err.message : 'Sync domain failed');
+      onNotify(err instanceof Error ? err.message : 'Sync domain failed', 'error');
     } finally {
       setSyncingDomainKey(null);
     }
@@ -680,19 +692,25 @@ export function DnsRecordsPanel({
       onNotify(
         isZh
           ? `已将 ${res.updatedCount} 条 DNS 记录移动到分组「${res.groupName}」`
-          : `Moved ${res.updatedCount} record(s) to group "${res.groupName}"`
+          : `Moved ${res.updatedCount} record(s) to group "${res.groupName}"`,
+        'success'
       );
     } catch (err) {
-      onNotify(err instanceof Error ? err.message : 'Batch group move failed');
+      onNotify(err instanceof Error ? err.message : 'Batch group move failed', 'error');
     } finally {
       setBatchBusy(false);
     }
   };
 
-  const handleCopyContent = (rec: ManagedDnsRecord) => {
-    void navigator.clipboard?.writeText(rec.content);
-    setCopiedId(rec.id);
-    setTimeout(() => setCopiedId((prev) => (prev === rec.id ? null : prev)), 1500);
+  const handleCopyContent = async (rec: ManagedDnsRecord) => {
+    const ok = await copyText(rec.content);
+    if (ok) {
+      setCopiedId(rec.id);
+      setTimeout(() => setCopiedId((prev) => (prev === rec.id ? null : prev)), 1500);
+      toast.success(isZh ? `已复制记录值：${rec.content}` : `Copied: ${rec.content}`);
+    } else {
+      toast.error(isZh ? '复制失败，请手动选中复制' : 'Clipboard copy failed');
+    }
   };
 
   const selectedFormProvider = providerMap.get(recordForm.providerId);
@@ -1098,40 +1116,41 @@ export function DnsRecordsPanel({
               </div>
             </div>
 
-            {/* Batch Group Move Toolbar */}
-            {selectedIds.size > 0 && (
-              <div className="flex flex-wrap items-center justify-between gap-3 px-3 py-2 rounded-lg border border-blue-200 dark:border-blue-900 bg-blue-50/60 dark:bg-blue-950/30 text-xs">
-                <span className="font-medium text-blue-800 dark:text-blue-200 tabular-nums">
-                  {isZh ? `已选中 ${selectedIds.size} 条记录` : `${selectedIds.size} record(s) selected`}
-                </span>
-                <div className="flex items-center gap-2">
-                  <input
-                    list="dns-record-group-options"
-                    value={batchGroupTarget}
-                    onChange={(e) => setBatchGroupTarget(e.target.value)}
-                    placeholder={isZh ? '输入或选择目标分组...' : 'Target group...'}
-                    className="px-2.5 py-1 rounded-md border border-blue-200 dark:border-blue-800 bg-white dark:bg-slate-900 text-xs w-40"
-                  />
-                  <button
-                    type="button"
-                    disabled={batchBusy || !batchGroupTarget.trim()}
-                    onClick={() => void handleBatchGroupMove()}
-                    className="inline-flex items-center gap-1 px-3 py-1 rounded-md bg-blue-600 text-white font-medium hover:bg-blue-700 disabled:opacity-50 whitespace-nowrap"
-                  >
-                    {batchBusy && <Loader2 className="w-3 h-3 animate-spin" />}
-                    {isZh ? '批量归入分组' : 'Move to Group'}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setSelectedIds(new Set())}
-                    className="text-slate-500 hover:text-slate-700 dark:hover:text-slate-300"
-                  >
-                    {isZh ? '取消选择' : 'Clear'}
-                  </button>
-                </div>
-              </div>
-            )}
           </div>
+
+          {/* Floating Batch Group Move Dock (never shifts the records table vertically) */}
+          {selectedIds.size > 0 && (
+            <div className="fixed bottom-5 left-1/2 -translate-x-1/2 z-40 max-w-[94vw] flex flex-wrap items-center gap-3 px-4 py-2.5 rounded-xl border border-blue-200 dark:border-blue-800 bg-white/95 dark:bg-slate-900/95 backdrop-blur shadow-xl text-xs">
+              <span className="font-semibold text-blue-700 dark:text-blue-300 tabular-nums whitespace-nowrap">
+                {isZh ? `已选中 ${selectedIds.size} 条记录` : `${selectedIds.size} record(s) selected`}
+              </span>
+              <div className="flex items-center gap-2">
+                <input
+                  list="dns-record-group-options"
+                  value={batchGroupTarget}
+                  onChange={(e) => setBatchGroupTarget(e.target.value)}
+                  placeholder={isZh ? '输入或选择目标分组...' : 'Target group...'}
+                  className="px-2.5 py-1.5 rounded-md border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 text-xs w-40"
+                />
+                <button
+                  type="button"
+                  disabled={batchBusy || !batchGroupTarget.trim()}
+                  onClick={() => void handleBatchGroupMove()}
+                  className="inline-flex items-center gap-1 px-3 py-1.5 rounded-md bg-blue-600 text-white font-medium hover:bg-blue-700 disabled:opacity-50 whitespace-nowrap"
+                >
+                  {batchBusy && <Loader2 className="w-3 h-3 animate-spin" />}
+                  {isZh ? '批量归入分组' : 'Move to Group'}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setSelectedIds(new Set())}
+                  className="px-2 py-1 text-slate-500 hover:text-slate-700 dark:hover:text-slate-300 whitespace-nowrap"
+                >
+                  {isZh ? '取消选择' : 'Clear'}
+                </button>
+              </div>
+            </div>
+          )}
 
           {/* Records Table for Selected Domain */}
           <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 overflow-hidden">
@@ -1275,11 +1294,9 @@ export function DnsRecordsPanel({
                                     ? '本地'
                                     : 'Local'}
                             </div>
-                            {rec.lastSyncedAt && (
-                              <div className="text-[10px] font-mono text-slate-400 tabular-nums">
-                                {formatTimeAgo(rec.lastSyncedAt)}
-                              </div>
-                            )}
+                            <div className="text-[10px] font-mono text-slate-400 tabular-nums min-h-[14px]">
+                              {rec.lastSyncedAt ? formatTimeAgo(rec.lastSyncedAt) : '—'}
+                            </div>
                           </td>
                           <td className="py-3 px-4 align-middle text-right whitespace-nowrap">
                             <div className="inline-flex items-center gap-1">
@@ -1635,6 +1652,40 @@ export function DnsRecordsPanel({
                   placeholder={contentPlaceholder(recordForm.type, isZh)}
                   className="w-full px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 font-mono"
                 />
+                {recordForm.type === 'A' && detectedIps?.ipv4 && (
+                  <div className="mt-1.5 flex items-center gap-2 text-[11px]">
+                    <span className="text-slate-400">{isZh ? '快速填入探测 IPv4：' : 'Detected IPv4:'}</span>
+                    <button
+                      type="button"
+                      onClick={() => setRecordForm((prev) => ({ ...prev, content: detectedIps.ipv4! }))}
+                      className="font-mono text-blue-600 dark:text-blue-400 hover:underline"
+                    >
+                      {detectedIps.ipv4}
+                    </button>
+                  </div>
+                )}
+                {recordForm.type === 'AAAA' && detectedIps && detectedIps.ipv6List.length > 0 && (
+                  <div className="mt-1.5 space-y-1 text-[11px]">
+                    <div className="text-slate-400">
+                      {isZh
+                        ? `快速填入探测到的 IPv6（共 ${detectedIps.ipv6List.length} 个）：`
+                        : `Quick-fill detected IPv6 (${detectedIps.ipv6List.length}):`}
+                    </div>
+                    <div className="max-h-24 overflow-y-auto space-y-1">
+                      {detectedIps.ipv6List.map((addr, idx) => (
+                        <button
+                          key={addr}
+                          type="button"
+                          onClick={() => setRecordForm((prev) => ({ ...prev, content: addr }))}
+                          className="w-full flex items-center gap-2 px-2 py-1 rounded border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-950/60 hover:border-blue-400 text-left font-mono text-[11px] text-slate-700 dark:text-slate-300"
+                        >
+                          <span className="text-slate-400 shrink-0">#{idx + 1}</span>
+                          <span className="truncate">{addr}</span>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
               </div>
 
               <div className="grid grid-cols-2 sm:grid-cols-3 gap-3.5">

@@ -27,6 +27,7 @@ import {
 } from 'lucide-react';
 import { translate, type TranslationKeys } from '../i18n/translations';
 import { apiRequest, formatTimeAgo } from '../lib/api';
+import { toast } from '../lib/toast';
 import type {
   CloudAccount,
   CloudDiscoveredInstance,
@@ -261,13 +262,14 @@ export function CloudHostsView({
   const [groupFilter, setGroupFilter] = useState<string>('all');
   const [regionFilter, setRegionFilter] = useState<string>('all');
   const [searchQuery, setSearchQuery] = useState('');
-  const [toastMsg, setToastMsg] = useState<{ kind: 'info' | 'error'; text: string } | null>(null);
 
   // Action busy states
   const [syncingAll, setSyncingAll] = useState(false);
   const [pushingId, setPushingId] = useState<string | null>(null);
   const [refreshingId, setRefreshingId] = useState<string | null>(null);
   const [monitoringId, setMonitoringId] = useState<string | null>(null);
+  const [deletingHostId, setDeletingHostId] = useState<string | null>(null);
+  const [deletingMonId, setDeletingMonId] = useState<string | null>(null);
   const [powerBusyKey, setPowerBusyKey] = useState<string | null>(null);
   const [ipBusyKey, setIpBusyKey] = useState<string | null>(null);
   const [confirmPower, setConfirmPower] = useState<{ host: CloudHost; action: OciInstanceAction } | null>(null);
@@ -554,9 +556,8 @@ export function CloudHostsView({
     });
   }, [managedHosts, providerFilter, groupFilter, regionFilter, searchQuery, getHostBoundRules, dnsProviderMap, isZh]);
 
-  const showNotice = (text: string, kind: 'info' | 'error' = 'info') => {
-    setToastMsg({ kind, text });
-    setTimeout(() => setToastMsg(null), 5500);
+  const showNotice = (text: string, kind: 'info' | 'error' | 'success' = 'success') => {
+    toast.show(text, kind);
   };
 
   const canControlHost = (host: CloudHost): boolean => {
@@ -769,6 +770,7 @@ export function CloudHostsView({
           ? `已导入 ${res.added.length} 台 ${providerShortLabel(source.provider, true)} 实例到分组「${importGroupName.trim() || source.defaultGroup}」${res.monitorsCreated ? `（已开启 ${res.monitorsCreated} 项监控）` : ''}${res.skippedCount ? `，跳过 ${res.skippedCount} 台重复` : ''}`
           : `Imported ${res.added.length} ${source.provider.toUpperCase()} instance(s)`
       );
+      setShowImportModal(false);
     } catch (err) {
       setImportError(err instanceof Error ? err.message : 'Import failed');
     } finally {
@@ -911,9 +913,13 @@ export function CloudHostsView({
   };
 
   const handleDeleteCloudAccount = async (acc: CloudAccount) => {
-    await apiRequest(`/api/clouds/accounts/${acc.id}`, { method: 'DELETE' });
-    await onReload();
-    showNotice(isZh ? `已删除云账号 ${acc.name}` : `Deleted cloud account ${acc.name}`);
+    try {
+      await apiRequest(`/api/clouds/accounts/${acc.id}`, { method: 'DELETE' });
+      await onReload();
+      showNotice(isZh ? `已删除云账号 ${acc.name}` : `Deleted cloud account ${acc.name}`, 'success');
+    } catch (err) {
+      showNotice(err instanceof Error ? err.message : isZh ? '删除云账号失败' : 'Delete cloud account failed', 'error');
+    }
   };
 
   // ---- Unified Oracle OCI Regional Profile CRUD ----
@@ -978,7 +984,10 @@ export function CloudHostsView({
 
   const handleApplyOciConfigSnippet = () => {
     const parsed = parseOciConfigText(ociConfigSnippet);
-    if (!parsed.tenancyOcid && !parsed.userOcid && !parsed.region) return;
+    if (!parsed.tenancyOcid && !parsed.userOcid && !parsed.region) {
+      toast.warning(isZh ? '未识别到有效的 tenancy / user / region 字段' : 'No valid tenancy / user / region found in snippet');
+      return;
+    }
     setOciProfForm((prev) => ({
       ...prev,
       tenancyOcid: parsed.tenancyOcid || prev.tenancyOcid,
@@ -989,6 +998,7 @@ export function CloudHostsView({
     }));
     setShowOciConfigPaste(false);
     setOciConfigSnippet('');
+    toast.success(isZh ? '已自动填充 OCI 配置文件字段' : 'Populated fields from OCI config snippet');
   };
 
   const handleAutoDiscoverOciProfile = async () => {
@@ -1104,9 +1114,13 @@ export function CloudHostsView({
   };
 
   const handleDeleteOciProfile = async (p: OciProfile) => {
-    await apiRequest(`/api/oci/profiles/${p.id}`, { method: 'DELETE' });
-    await onReload();
-    showNotice(isZh ? `已删除 OCI 凭据 ${p.name}` : `Deleted OCI profile ${p.name}`);
+    try {
+      await apiRequest(`/api/oci/profiles/${p.id}`, { method: 'DELETE' });
+      await onReload();
+      showNotice(isZh ? `已删除 OCI 凭据 ${p.name}` : `Deleted OCI profile ${p.name}`, 'success');
+    } catch (err) {
+      showNotice(err instanceof Error ? err.message : isZh ? '删除 OCI 凭据失败' : 'Delete OCI profile failed', 'error');
+    }
   };
 
   // ---- Bind Domain Modal ----
@@ -1500,9 +1514,17 @@ export function CloudHostsView({
     }
   };
 
-  const handleDeleteHost = async (id: string) => {
-    await apiRequest(`/api/clouds/hosts/${id}`, { method: 'DELETE' });
-    await onReload();
+  const handleDeleteHost = async (host: CloudHost) => {
+    setDeletingHostId(host.id);
+    try {
+      await apiRequest(`/api/clouds/hosts/${host.id}`, { method: 'DELETE' });
+      await onReload();
+      showNotice(isZh ? `已删除云主机实例 ${host.name}` : `Deleted host ${host.name}`, 'success');
+    } catch (err) {
+      showNotice(err instanceof Error ? err.message : isZh ? '删除实例失败' : 'Delete host failed', 'error');
+    } finally {
+      setDeletingHostId(null);
+    }
   };
 
   // ---- Monitor Tab Actions ----
@@ -1511,17 +1533,34 @@ export function CloudHostsView({
     try {
       await apiRequest('/api/monitors/check-all', { method: 'POST' });
       await onReload();
-      showNotice(isZh ? '已完成全部监控探针检测' : 'Completed all monitor probes');
+      showNotice(isZh ? '已完成全部监控探针检测' : 'Completed all monitor probes', 'success');
+    } catch (err) {
+      showNotice(err instanceof Error ? err.message : isZh ? '批量探测失败' : 'Probe all failed', 'error');
     } finally {
       setCheckingAllMon(false);
     }
   };
 
-  const handleCheckOneMonitor = async (id: string) => {
-    setCheckingMonId(id);
+  const handleCheckOneMonitor = async (m: MonitorTarget) => {
+    setCheckingMonId(m.id);
     try {
-      await apiRequest(`/api/monitors/${id}/check`, { method: 'POST' });
+      const res = await apiRequest<{ monitor?: MonitorTarget }>(`/api/monitors/${m.id}/check`, {
+        method: 'POST',
+      });
       await onReload();
+      const updated = res.monitor;
+      if (updated) {
+        const latency = updated.lastLatencyMs !== undefined ? ` · ${updated.lastLatencyMs}ms` : '';
+        const detail = updated.lastMessage ? ` — ${updated.lastMessage}` : '';
+        showNotice(
+          `${updated.name}: ${updated.status.toUpperCase()}${latency}${detail}`,
+          updated.status === 'down' ? 'error' : 'success'
+        );
+      } else {
+        showNotice(isZh ? `已完成 ${m.name} 探测` : `Probed ${m.name}`, 'success');
+      }
+    } catch (err) {
+      showNotice(err instanceof Error ? err.message : isZh ? '探测失败' : 'Probe failed', 'error');
     } finally {
       setCheckingMonId(null);
     }
@@ -1541,15 +1580,23 @@ export function CloudHostsView({
       });
       setShowMonitorModal(false);
       await onReload();
-      showNotice(t('savedSuccessfully'));
+      showNotice(t('savedSuccessfully'), 'success');
     } catch (err) {
       showNotice(err instanceof Error ? err.message : 'Failed to create monitor', 'error');
     }
   };
 
-  const handleDeleteMonitor = async (id: string) => {
-    await apiRequest(`/api/monitors/${id}`, { method: 'DELETE' });
-    await onReload();
+  const handleDeleteMonitor = async (m: MonitorTarget) => {
+    setDeletingMonId(m.id);
+    try {
+      await apiRequest(`/api/monitors/${m.id}`, { method: 'DELETE' });
+      await onReload();
+      showNotice(isZh ? `已删除监控探针 ${m.name}` : `Deleted monitor ${m.name}`, 'success');
+    } catch (err) {
+      showNotice(err instanceof Error ? err.message : isZh ? '删除监控失败' : 'Delete monitor failed', 'error');
+    } finally {
+      setDeletingMonId(null);
+    }
   };
 
   const renderStatusIndicator = (host: CloudHost, linkedMon?: MonitorTarget) => {
@@ -1744,18 +1791,6 @@ export function CloudHostsView({
           {isZh ? `实时监控探针 (${monitors.length})` : `Live Monitors (${monitors.length})`}
         </button>
       </div>
-
-      {toastMsg && (
-        <div
-          className={`px-4 py-3 rounded-lg border text-xs ${
-            toastMsg.kind === 'error'
-              ? 'border-red-200 dark:border-red-900 bg-red-50/70 dark:bg-red-950/30 text-red-700 dark:text-red-300'
-              : 'border-blue-200 dark:border-blue-900 bg-blue-50/70 dark:bg-blue-950/30 text-blue-700 dark:text-blue-300'
-          }`}
-        >
-          {toastMsg.text}
-        </div>
-      )}
 
       {/* ==================== TAB 1: MULTI-CLOUD INSTANCES ==================== */}
       {subTab === 'hosts' && (
@@ -2142,11 +2177,9 @@ export function CloudHostsView({
                         {/* Column 3: Status + Monitoring */}
                         <td className="py-3.5 px-4 whitespace-nowrap">
                           {renderStatusIndicator(h, linkedMon)}
-                          {h.lastCheckedAt && (
-                            <div className="mt-1 text-[10px] font-mono text-slate-400 tabular-nums">
-                              {formatTimeAgo(h.lastCheckedAt)}
-                            </div>
-                          )}
+                          <div className="mt-1 text-[10px] font-mono text-slate-400 tabular-nums min-h-[14px]">
+                            {h.lastCheckedAt ? formatTimeAgo(h.lastCheckedAt) : '—'}
+                          </div>
                         </td>
 
                         {/* Column 4: Per-Host Manual DNS Sync + Probe + Power + Edit/Delete */}
@@ -2242,11 +2275,17 @@ export function CloudHostsView({
                             </button>
                             <button
                               type="button"
-                              onClick={() => void handleDeleteHost(h.id)}
+                              disabled={deletingHostId === h.id}
+                              onClick={() => void handleDeleteHost(h)}
                               aria-label={t('delete')}
-                              className="p-1.5 rounded-md text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-950/40"
+                              title={t('delete')}
+                              className="p-1.5 rounded-md text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-950/40 disabled:opacity-50"
                             >
-                              <Trash2 className="w-3.5 h-3.5" />
+                              {deletingHostId === h.id ? (
+                                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                              ) : (
+                                <Trash2 className="w-3.5 h-3.5" />
+                              )}
                             </button>
                           </div>
                         </td>
@@ -2374,9 +2413,9 @@ export function CloudHostsView({
                           <div className={`font-semibold ${statusColor}`}>
                             {acc.status.toUpperCase()} · {acc.instanceCount} {isZh ? '台' : 'VM'}
                           </div>
-                          {acc.lastCheckedAt && (
-                            <div className="text-[10px] text-slate-400">{formatTimeAgo(acc.lastCheckedAt)}</div>
-                          )}
+                          <div className="text-[10px] text-slate-400 min-h-[14px]">
+                            {acc.lastCheckedAt ? formatTimeAgo(acc.lastCheckedAt) : '—'}
+                          </div>
                         </td>
                         <td className="py-3.5 px-5 text-right whitespace-nowrap">
                           <div className="inline-flex items-center gap-1.5">
@@ -2603,9 +2642,12 @@ export function CloudHostsView({
                           {m.target}
                           {m.port ? `:${m.port}` : ''}
                         </div>
-                        {m.lastMessage && (
-                          <div className="text-[11px] text-slate-400 mt-0.5 truncate max-w-md">{m.lastMessage}</div>
-                        )}
+                        <div
+                          className="text-[11px] text-slate-400 mt-0.5 truncate max-w-md min-h-[16px]"
+                          title={m.lastMessage || undefined}
+                        >
+                          {m.lastMessage || '—'}
+                        </div>
                       </td>
                       <td className="py-3 px-4 font-mono uppercase text-slate-600 dark:text-slate-300">{m.type}</td>
                       <td className="py-3 px-4 font-mono tabular-nums">
@@ -2637,7 +2679,7 @@ export function CloudHostsView({
                           <button
                             type="button"
                             disabled={checkingMonId === m.id}
-                            onClick={() => void handleCheckOneMonitor(m.id)}
+                            onClick={() => void handleCheckOneMonitor(m)}
                             className="inline-flex items-center gap-1 px-2.5 py-1.5 text-[11px] font-medium rounded-md border border-slate-200 dark:border-slate-700 text-blue-600 dark:text-blue-400 hover:bg-blue-50 dark:hover:bg-blue-950/40 disabled:opacity-50"
                           >
                             {checkingMonId === m.id ? (
@@ -2649,10 +2691,16 @@ export function CloudHostsView({
                           </button>
                           <button
                             type="button"
-                            onClick={() => void handleDeleteMonitor(m.id)}
-                            className="p-1.5 rounded-md text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-950/40"
+                            disabled={deletingMonId === m.id}
+                            onClick={() => void handleDeleteMonitor(m)}
+                            title={t('delete')}
+                            className="p-1.5 rounded-md text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-950/40 disabled:opacity-50"
                           >
-                            <Trash2 className="w-3.5 h-3.5" />
+                            {deletingMonId === m.id ? (
+                              <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                            ) : (
+                              <Trash2 className="w-3.5 h-3.5" />
+                            )}
                           </button>
                         </div>
                       </td>

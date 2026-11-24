@@ -28,6 +28,7 @@ import { NotificationsView } from './components/NotificationsView';
 import { OciManagerView } from './components/OciManagerView';
 import { OverviewView } from './components/OverviewView';
 import { SecurityContainerView } from './components/SecurityContainerView';
+import { ToastViewport } from './components/ToastViewport';
 import { LANGUAGE_OPTIONS, translate, type TranslationKeys } from './i18n/translations';
 import { apiRequest, setAuthToken, setOnUnauthorized } from './lib/api';
 import type {
@@ -191,19 +192,22 @@ export default function App() {
 
   if (!currentUser) {
     return (
-      <AuthGate
-        status={authStatus}
-        lang={lang}
-        onChangeLang={setLang}
-        dark={dark}
-        onToggleDark={() => setDark((d) => !d)}
-        onAuthenticated={(user) => {
-          setCurrentUser(user);
-          setAuthStatus((prev) =>
-            prev ? { ...prev, authenticated: true, username: user } : prev
-          );
-        }}
-      />
+      <>
+        <ToastViewport />
+        <AuthGate
+          status={authStatus}
+          lang={lang}
+          onChangeLang={setLang}
+          dark={dark}
+          onToggleDark={() => setDark((d) => !d)}
+          onAuthenticated={(user) => {
+            setCurrentUser(user);
+            setAuthStatus((prev) =>
+              prev ? { ...prev, authenticated: true, username: user } : prev
+            );
+          }}
+        />
+      </>
     );
   }
 
@@ -308,6 +312,7 @@ export default function App() {
 
   return (
     <div className="min-h-screen flex bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-slate-100">
+      <ToastViewport />
       {/* Desktop Sidebar */}
       <aside className="hidden lg:block w-64 shrink-0 border-r border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 sticky top-0 h-screen">
         {renderSidebarContent()}

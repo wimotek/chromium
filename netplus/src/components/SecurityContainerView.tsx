@@ -1,7 +1,8 @@
 import React, { useEffect, useState } from 'react';
-import { Download, Lock, RefreshCw, Save, Sparkles } from 'lucide-react';
+import { Download, Loader2, Lock, RefreshCw, Save, Sparkles } from 'lucide-react';
 import { translate, type TranslationKeys } from '../i18n/translations';
 import { apiRequest, getAuthToken } from '../lib/api';
+import { toast } from '../lib/toast';
 import type { LanguageCode, SecurityConfig, TlsCertificateStatus } from '../types/models';
 
 interface SecurityContainerViewProps {
@@ -33,13 +34,11 @@ export function SecurityContainerView({
     sanIps: '',
     days: 825,
   });
-  const [tlsMsg, setTlsMsg] = useState<string | null>(null);
-  const [toastMsg, setToastMsg] = useState<string | null>(null);
+  const [updatingCreds, setUpdatingCreds] = useState(false);
 
   const [newUsername, setNewUsername] = useState(currentUsername);
   const [currentPassword, setCurrentPassword] = useState('');
   const [newPassword, setNewPassword] = useState('');
-  const [passMsg, setPassMsg] = useState<{ ok: boolean; text: string } | null>(null);
 
   useEffect(() => {
     void apiRequest<{
@@ -59,17 +58,17 @@ export function SecurityContainerView({
 
   const handleReloadTls = async () => {
     setReloadingTls(true);
-    setTlsMsg(null);
     try {
       const res = await apiRequest<{ ok: boolean; message: string; status: TlsCertificateStatus }>(
         '/api/tls/reload',
         { method: 'POST' }
       );
       setTlsStatus(res.status);
-      setTlsMsg(res.message);
       await onRefreshOverview();
+      toast.show(res.message, res.ok ? 'success' : 'error');
     } catch (err) {
-      setTlsMsg(err instanceof Error ? err.message : 'TLS reload failed');
+      const msg = err instanceof Error ? err.message : 'TLS reload failed';
+      toast.error(msg);
     } finally {
       setReloadingTls(false);
     }
@@ -78,7 +77,6 @@ export function SecurityContainerView({
   const handleGenerateCustomCert = async (e: React.FormEvent) => {
     e.preventDefault();
     setGeneratingCert(true);
-    setTlsMsg(null);
     try {
       const res = await apiRequest<{ ok: boolean; message: string; status: TlsCertificateStatus }>(
         '/api/tls/generate',
@@ -88,11 +86,12 @@ export function SecurityContainerView({
         }
       );
       setTlsStatus(res.status);
-      setTlsMsg(res.message);
       setShowCustomCertForm(false);
       await onRefreshOverview();
+      toast.show(res.message, res.ok ? 'success' : 'error');
     } catch (err) {
-      setTlsMsg(err instanceof Error ? err.message : 'Failed to generate certificate');
+      const msg = err instanceof Error ? err.message : 'Failed to generate certificate';
+      toast.error(msg);
     } finally {
       setGeneratingCert(false);
     }
@@ -104,7 +103,10 @@ export function SecurityContainerView({
       const res = await fetch('/api/tls/cert.pem', {
         headers: token ? { Authorization: `Bearer ${token}` } : {},
       });
-      if (!res.ok) return;
+      if (!res.ok) {
+        toast.error(isZh ? '下载公钥证书失败' : 'Failed to download certificate');
+        return;
+      }
       const pem = await res.text();
       const blob = new Blob([pem], { type: 'application/x-pem-file' });
       const url = URL.createObjectURL(blob);
@@ -113,8 +115,9 @@ export function SecurityContainerView({
       a.download = 'netplus-cert.pem';
       a.click();
       URL.revokeObjectURL(url);
-    } catch {
-      // ignore
+      toast.success(isZh ? '已下载公钥证书 netplus-cert.pem' : 'Downloaded netplus-cert.pem');
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : isZh ? '下载公钥证书失败' : 'Download failed');
     }
   };
 
@@ -129,8 +132,9 @@ export function SecurityContainerView({
       });
       setConfig(res.config);
       await onRefreshOverview();
-      setToastMsg(t('savedSuccessfully'));
-      setTimeout(() => setToastMsg(null), 3500);
+      toast.success(t('savedSuccessfully'));
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : isZh ? '保存配置失败' : 'Failed to save configuration');
     } finally {
       setSaving(false);
     }
@@ -138,16 +142,16 @@ export function SecurityContainerView({
 
   const handleUpdateCredentials = async (e: React.FormEvent) => {
     e.preventDefault();
-    setPassMsg(null);
     const trimmedUser = newUsername.trim();
     if (trimmedUser && !/^[a-zA-Z0-9._-]{3,32}$/.test(trimmedUser)) {
-      setPassMsg({ ok: false, text: t('usernameInvalid') });
+      toast.error(t('usernameInvalid'));
       return;
     }
     if (newPassword && newPassword.length < 8) {
-      setPassMsg({ ok: false, text: t('passwordTooShort') });
+      toast.error(t('passwordTooShort'));
       return;
     }
+    setUpdatingCreds(true);
     try {
       const res = await apiRequest<{
         ok: boolean;
@@ -168,16 +172,14 @@ export function SecurityContainerView({
         setNewUsername(res.username);
         onUsernameChanged(res.username);
       }
-      setPassMsg({
-        ok: true,
-        text: isZh
-          ? res.usernameChanged && res.passwordChanged
-            ? `管理员用户名（${res.username}）与密码均已更新`
-            : res.usernameChanged
-            ? `管理员用户名已修改为：${res.username}`
-            : '管理员密码已更新'
-          : t('savedSuccessfully'),
-      });
+      const successText = isZh
+        ? res.usernameChanged && res.passwordChanged
+          ? `管理员用户名（${res.username}）与密码均已更新`
+          : res.usernameChanged
+          ? `管理员用户名已修改为：${res.username}`
+          : '管理员密码已更新'
+        : t('savedSuccessfully');
+      toast.success(successText);
     } catch (err) {
       const code = err instanceof Error ? err.message : 'Failed';
       const friendly =
@@ -194,7 +196,9 @@ export function SecurityContainerView({
           : code === 'WEAK_PASSWORD'
           ? t('passwordTooShort')
           : code;
-      setPassMsg({ ok: false, text: friendly });
+      toast.error(friendly);
+    } finally {
+      setUpdatingCreds(false);
     }
   };
 
@@ -210,12 +214,6 @@ export function SecurityContainerView({
         </h1>
         <p className="mt-1 text-sm text-slate-600 dark:text-slate-400">{t('securitySubtitle')}</p>
       </div>
-
-      {toastMsg && (
-        <div className="px-4 py-3 rounded-lg border border-emerald-200 dark:border-emerald-900 bg-emerald-50/70 dark:bg-emerald-950/30 text-xs text-emerald-700 dark:text-emerald-300">
-          {toastMsg}
-        </div>
-      )}
 
       <form onSubmit={handleSaveConfig} className="space-y-6">
         {/* Anti-Bot & Rate-Limit Settings */}
@@ -424,7 +422,7 @@ export function SecurityContainerView({
               disabled={saving}
               className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-semibold rounded-lg bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50 whitespace-nowrap"
             >
-              <Save className="w-3.5 h-3.5" />
+              {saving ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Save className="w-3.5 h-3.5" />}
               {t('save')}
             </button>
           </div>
@@ -447,17 +445,6 @@ export function SecurityContainerView({
                 : 'Update the administrator username, password, or both. Current password is required to authorize changes.'}
             </p>
           </div>
-          {passMsg && (
-            <div
-              className={`px-3 py-2 rounded-lg text-xs ${
-                passMsg.ok
-                  ? 'bg-emerald-50 dark:bg-emerald-950/30 border border-emerald-200 dark:border-emerald-900 text-emerald-700 dark:text-emerald-300'
-                  : 'bg-red-50 dark:bg-red-950/30 border border-red-200 dark:border-red-900 text-red-700 dark:text-red-300'
-              }`}
-            >
-              {passMsg.text}
-            </div>
-          )}
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 text-xs">
             <div>
               <label className="block font-medium mb-1.5">
@@ -504,8 +491,10 @@ export function SecurityContainerView({
           <div className="flex justify-end">
             <button
               type="submit"
-              className="px-4 py-2 text-xs font-semibold rounded-lg bg-blue-600 text-white hover:bg-blue-700 whitespace-nowrap"
+              disabled={updatingCreds}
+              className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-semibold rounded-lg bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50 whitespace-nowrap"
             >
+              {updatingCreds && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
               {isZh ? '更新管理员凭据' : 'Update Credentials'}
             </button>
           </div>
@@ -554,12 +543,6 @@ export function SecurityContainerView({
               </button>
             </div>
           </div>
-
-          {tlsMsg && (
-            <div className="px-3.5 py-2.5 rounded-lg bg-slate-100 dark:bg-slate-800/70 text-xs font-mono text-slate-700 dark:text-slate-300">
-              {tlsMsg}
-            </div>
-          )}
 
           {tlsStatus.permissionIssue && (
             <div className="px-3.5 py-2.5 rounded-lg border border-amber-200 dark:border-amber-900 bg-amber-50/70 dark:bg-amber-950/30 text-xs text-amber-800 dark:text-amber-300">

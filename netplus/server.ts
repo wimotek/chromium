@@ -191,9 +191,17 @@ function createSession(username: string, ip: string): { token: string; expiresAt
 
 function sanitizeIpv6List(raw: unknown): string[] {
   if (!Array.isArray(raw)) return [];
-  return raw
-    .map((v) => String(v ?? '').trim())
-    .filter((v) => v.length > 0 && net.isIPv6(v));
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const item of raw) {
+    const v = String(item ?? '').trim().replace(/\/128$/, '');
+    if (!v || !net.isIPv6(v)) continue;
+    const key = v.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(v);
+  }
+  return out;
 }
 
 function sanitizeEvents(raw: unknown): NotificationEventType[] {
@@ -2856,8 +2864,14 @@ export async function createServer(options: CreateServerOptions = {}) {
 
   app.post('/api/oci/sniper', requireAuth, (req: AuthedRequest, res) => {
     const b = req.body ?? {};
-    if (!b.name || !b.profileId || !b.displayName) {
+    const profileId = String(b.profileId || '').trim();
+    if (!b.name || !profileId || !b.displayName) {
       res.status(400).json({ error: 'Task name, profileId, and displayName are required' });
+      return;
+    }
+    const linkedProfile = store.getState().ociProfiles.find((p) => p.id === profileId);
+    if (!linkedProfile) {
+      res.status(400).json({ error: '所选 OCI 区域凭据不存在，请重新选择有效的 OCI 账号' });
       return;
     }
     const now = new Date().toISOString();
@@ -2915,7 +2929,19 @@ export async function createServer(options: CreateServerOptions = {}) {
     }
     const b = req.body ?? {};
     if (b.name !== undefined) task.name = String(b.name).trim();
-    if (b.profileId !== undefined) task.profileId = String(b.profileId);
+    if (b.profileId !== undefined) {
+      const nextProfileId = String(b.profileId).trim();
+      const linkedProfile = store.getState().ociProfiles.find((p) => p.id === nextProfileId);
+      if (!linkedProfile) {
+        res.status(400).json({ error: '所选 OCI 区域凭据不存在，请重新选择有效的 OCI 账号' });
+        return;
+      }
+      if (task.profileId !== nextProfileId && task.status === 'failed') {
+        task.status = 'paused';
+        task.lastMessage = undefined;
+      }
+      task.profileId = nextProfileId;
+    }
     if (b.displayName !== undefined) task.displayName = String(b.displayName).trim();
     if (b.shape !== undefined) task.shape = b.shape === 'VM.Standard.E2.1.Micro' ? 'VM.Standard.E2.1.Micro' : 'VM.Standard.A1.Flex';
     if (b.ocpus !== undefined) task.ocpus = Math.min(4, Math.max(1, Number(b.ocpus) || 1));
@@ -5509,20 +5535,49 @@ export async function createServer(options: CreateServerOptions = {}) {
     [parentDist, cwdDist, localDist].find((candidate) =>
       fs.existsSync(path.join(candidate, 'index.html'))
     ) || parentDist;
-  let viteServer: { close: () => Promise<void> } | null = null;
+  let viteServer: {
+    middlewares: express.RequestHandler;
+    close: () => Promise<void>;
+  } | null = null;
+  let viteReadyPromise: Promise<void> | null = null;
 
   if (!isProd) {
-    const { createServer: createViteServer } = await import('vite');
     const disableHmr = process.env.DISABLE_HMR === 'true';
-    const vite = await createViteServer({
-      server: {
-        middlewareMode: true,
-        ...(disableHmr ? { hmr: false, ws: false, watch: null } : {}),
-      },
-      appType: 'spa',
+    viteReadyPromise = import('vite')
+      .then(({ createServer: createViteServer }) =>
+        createViteServer({
+          server: {
+            middlewareMode: true,
+            ...(disableHmr ? { hmr: false, ws: false, watch: null } : {}),
+          },
+          appType: 'spa',
+        })
+      )
+      .then((vite) => {
+        viteServer = vite;
+      });
+
+    // Mount immediately so HTTP listens without waiting for Vite cold-start;
+    // non-API requests transparently wait for Vite middleware readiness.
+    app.use((req, res, next) => {
+      if (viteServer) {
+        viteServer.middlewares(req, res, next);
+        return;
+      }
+      if (!viteReadyPromise) {
+        next();
+        return;
+      }
+      viteReadyPromise
+        .then(() => {
+          if (viteServer) {
+            viteServer.middlewares(req, res, next);
+          } else {
+            next();
+          }
+        })
+        .catch(next);
     });
-    viteServer = vite;
-    app.use(vite.middlewares);
   } else if (fs.existsSync(distPath)) {
     app.use(express.static(distPath));
     app.get('*', (req, res, next) => {
@@ -5564,7 +5619,7 @@ export async function createServer(options: CreateServerOptions = {}) {
       ? defaultAppPort
       : envPort || defaultAppPort;
   const port = cliPort || resolvedEnvPort;
-  const host = cliHost || '0.0.0.0';
+  const host = cliHost || process.env.HOST?.trim() || '0.0.0.0';
 
   const server = app.listen(port, host, () => {
     const adminInfo = store.getAdminInitSummary();
@@ -5591,29 +5646,44 @@ export async function createServer(options: CreateServerOptions = {}) {
       console.log('  (Displayed ONCE. Please sign in and change password in Security Settings.)');
       console.log('========================================================================');
     }
-    // Automatically bind HTTPS in the background so HTTP responds to health probes immediately
+    // Automatically bind HTTPS asynchronously so HTTP responds to health probes immediately
     setImmediate(() => {
-      try {
-        tlsManager.startHttpsIfAvailable(app);
-      } catch (err) {
+      void tlsManager.startHttpsIfAvailable(app).catch((err) => {
         console.warn('[NetPlus][TLS] Skipped HTTPS startup:', err instanceof Error ? err.message : err);
-      }
+      });
     });
   });
+
+  if (viteReadyPromise) {
+    viteReadyPromise.catch((err) => {
+      console.error('[NetPlus] Failed to initialize Vite dev middleware:', err);
+      process.exit(1);
+    });
+  }
 
   server.on('error', (err) => {
     console.error(`[NetPulse] HTTP server error on ${host}:${port}:`, err);
     process.exit(1);
   });
 
+  let shuttingDown = false;
   const shutdown = () => {
+    if (shuttingDown) return;
+    shuttingDown = true;
     schedulerEngine.stop();
     tlsManager.close();
     void viteServer?.close().catch(() => undefined);
-    server.close(() => process.exit(0));
+    const forceExit = setTimeout(() => process.exit(0), 1000);
+    forceExit.unref();
+    server.close(() => {
+      clearTimeout(forceExit);
+      process.exit(0);
+    });
+    server.closeAllConnections?.();
   };
   process.on('SIGTERM', shutdown);
   process.on('SIGINT', shutdown);
+  process.on('SIGHUP', shutdown);
 }
 
 const isDirectExecution =

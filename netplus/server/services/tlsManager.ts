@@ -1,4 +1,4 @@
-import { execFileSync } from 'node:child_process';
+import { execFile, execFileSync } from 'node:child_process';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import https from 'node:https';
@@ -126,7 +126,8 @@ class TlsCertificateManager {
     status: TlsCertificateStatus;
   } {
     const rawCn = (options?.commonName || 'netplus.local').trim();
-    const cn = VALID_HOST_PATTERN.test(rawCn) ? rawCn : 'netplus.local';
+    const isBoolLike = /^(true|false|1|0|yes|no)$/i.test(rawCn);
+    const cn = !isBoolLike && VALID_HOST_PATTERN.test(rawCn) ? rawCn : 'netplus.local';
     const days = Math.min(3650, Math.max(30, Number(options?.days) || 825));
 
     const dnsSet = new Set<string>(['localhost', 'netplus.local']);
@@ -314,6 +315,7 @@ class TlsCertificateManager {
     this.httpsServer = https.createServer({ cert, key }, this.boundApp);
     this.httpsServer.on('error', (err) => {
       console.warn(`[NetPlus][TLS] HTTPS listener error on port ${port}:`, err.message);
+      this.httpsServer = null;
     });
     this.httpsServer.listen(port, '0.0.0.0', () => {
       this.lastLoadedAt = new Date().toISOString();
@@ -330,7 +332,113 @@ class TlsCertificateManager {
     }
   }
 
-  startHttpsIfAvailable(app: Express): TlsCertificateStatus {
+  private generateSelfSignedCertificateAsync(options?: SelfSignedCertOptions): Promise<{
+    ok: boolean;
+    message: string;
+    status: TlsCertificateStatus;
+  }> {
+    const rawCn = (options?.commonName || 'netplus.local').trim();
+    const isBoolLike = /^(true|false|1|0|yes|no)$/i.test(rawCn);
+    const cn = !isBoolLike && VALID_HOST_PATTERN.test(rawCn) ? rawCn : 'netplus.local';
+    const days = Math.min(3650, Math.max(30, Number(options?.days) || 825));
+
+    const dnsSet = new Set<string>(['localhost', 'netplus.local']);
+    if (net.isIP(cn) === 0 && VALID_HOST_PATTERN.test(cn)) dnsSet.add(cn);
+    const hostName = os.hostname().trim();
+    if (VALID_HOST_PATTERN.test(hostName) && net.isIP(hostName) === 0) dnsSet.add(hostName);
+    for (const d of options?.sanDomains ?? []) {
+      const clean = d.trim();
+      if (clean && VALID_HOST_PATTERN.test(clean) && net.isIP(clean) === 0) dnsSet.add(clean);
+    }
+
+    const ipSet = new Set<string>(['127.0.0.1', '::1']);
+    if (net.isIP(cn) !== 0) ipSet.add(cn);
+    for (const ip of options?.sanIps ?? []) {
+      const clean = ip.trim();
+      if (clean && net.isIP(clean) !== 0) ipSet.add(clean);
+    }
+
+    const sanEntries = [
+      ...Array.from(dnsSet).map((d) => `DNS:${d}`),
+      ...Array.from(ipSet).map((ip) => `IP:${ip}`),
+    ];
+
+    const customDir = this.getCustomCertDir();
+    fs.mkdirSync(customDir, { recursive: true, mode: 0o700 });
+
+    const certPath = path.join(customDir, 'fullchain.pem');
+    const keyPath = path.join(customDir, 'privkey.pem');
+    const tmpCert = `${certPath}.tmp`;
+    const tmpKey = `${keyPath}.tmp`;
+
+    return new Promise((resolve) => {
+      execFile(
+        'openssl',
+        [
+          'req',
+          '-x509',
+          '-newkey',
+          'ec',
+          '-pkeyopt',
+          'ec_paramgen_curve:prime256v1',
+          '-nodes',
+          '-keyout',
+          tmpKey,
+          '-out',
+          tmpCert,
+          '-days',
+          String(days),
+          '-subj',
+          `/CN=${cn}/O=NetPlus Console`,
+          '-addext',
+          `subjectAltName=${sanEntries.join(',')}`,
+          '-addext',
+          'basicConstraints=critical,CA:FALSE',
+          '-addext',
+          'keyUsage=critical,digitalSignature,keyEncipherment',
+          '-addext',
+          'extendedKeyUsage=serverAuth',
+        ],
+        { timeout: 15_000 },
+        (err) => {
+          if (err) {
+            for (const f of [tmpKey, tmpCert]) {
+              try {
+                if (fs.existsSync(f)) fs.unlinkSync(f);
+              } catch {
+                // ignore cleanup failure
+              }
+            }
+            resolve({
+              ok: false,
+              message: `Failed to generate self-signed certificate: ${err.message || 'OpenSSL error'}`,
+              status: this.inspectStatus(),
+            });
+            return;
+          }
+          try {
+            fs.chmodSync(tmpKey, 0o600);
+            fs.chmodSync(tmpCert, 0o644);
+            fs.renameSync(tmpKey, keyPath);
+            fs.renameSync(tmpCert, certPath);
+            resolve({
+              ok: true,
+              message: `Generated custom self-signed TLS certificate (CN=${cn}, ${days}d)`,
+              status: this.inspectStatus(),
+            });
+          } catch (fsErr) {
+            resolve({
+              ok: false,
+              message: `Failed to persist self-signed certificate: ${fsErr instanceof Error ? fsErr.message : 'FS error'}`,
+              status: this.inspectStatus(),
+            });
+          }
+        }
+      );
+    });
+  }
+
+  async startHttpsIfAvailable(app: Express): Promise<TlsCertificateStatus> {
     this.boundApp = app;
     const port = this.getHttpsPort();
     if (port <= 0) {
@@ -340,11 +448,12 @@ class TlsCertificateManager {
 
     let status = this.inspectStatus();
 
-    // Auto-generate a self-signed certificate when /certs:ro is not mounted
+    // Auto-generate a self-signed certificate asynchronously when /certs:ro is not mounted
     if (status.source === 'none' && process.env.TLS_AUTO_SELF_SIGNED !== 'false') {
-      const cn = process.env.TLS_SELF_SIGNED_CN?.trim() || 'netplus.local';
+      const rawCn = process.env.TLS_SELF_SIGNED_CN?.trim() || '';
+      const cn = rawCn && !/^(true|false|1|0|yes|no)$/i.test(rawCn) ? rawCn : 'netplus.local';
       console.log(`[NetPlus][TLS] No mounted cert in ${status.certDir}; generating persistent self-signed ECDSA cert (CN=${cn}) in ${status.customCertDir}`);
-      const gen = this.generateSelfSignedCertificate({
+      const gen = await this.generateSelfSignedCertificateAsync({
         commonName: cn,
         days: Number(process.env.TLS_SELF_SIGNED_DAYS) || 825,
       });
@@ -434,8 +543,16 @@ class TlsCertificateManager {
   }
 
   close() {
-    if (this.reloadTimer) clearInterval(this.reloadTimer);
-    this.httpsServer?.close();
+    if (this.reloadTimer) {
+      clearInterval(this.reloadTimer);
+      this.reloadTimer = null;
+    }
+    if (this.httpsServer) {
+      const srv = this.httpsServer;
+      this.httpsServer = null;
+      srv.close();
+      srv.closeAllConnections?.();
+    }
   }
 }
 

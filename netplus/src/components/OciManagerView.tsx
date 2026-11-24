@@ -21,6 +21,8 @@ import {
 } from 'lucide-react';
 import { translate, type TranslationKeys } from '../i18n/translations';
 import { apiRequest, formatTimeAgo } from '../lib/api';
+import { copyText } from '../lib/clipboard';
+import { toast } from '../lib/toast';
 import type {
   DnsSyncRule,
   LanguageCode,
@@ -82,7 +84,8 @@ export function OciManagerView({
   const t = (key: TranslationKeys) => translate(lang, key);
   const isZh = lang === 'zh-CN';
   const [busyId, setBusyId] = useState<string | null>(null);
-  const [toastMsg, setToastMsg] = useState<string | null>(null);
+  const [busyAction, setBusyAction] = useState<'toggle' | 'test' | 'delete' | null>(null);
+  const [savingTask, setSavingTask] = useState(false);
 
   // Script export modal (supports both Bash & Python — zero main.tf)
   const [scriptModal, setScriptModal] = useState<{
@@ -92,6 +95,7 @@ export function OciManagerView({
     script: string;
   } | null>(null);
   const [loadingScript, setLoadingScript] = useState(false);
+  const [loadingScriptTaskId, setLoadingScriptTaskId] = useState<string | null>(null);
   const [copiedScript, setCopiedScript] = useState(false);
 
   // Sniper modal + zero-main.tf auto-resolve + SSH keygen state
@@ -111,33 +115,45 @@ export function OciManagerView({
     profileId: '',
     displayName: 'oci-arm-node-01',
     shape: 'VM.Standard.A1.Flex' as 'VM.Standard.A1.Flex' | 'VM.Standard.E2.1.Micro',
-    ocpus: 4,
-    memoryInGBs: 24,
-    bootVolumeSizeInGBs: 100,
+    ocpus: '4',
+    memoryInGBs: '24',
+    bootVolumeSizeInGBs: '100',
     osPreset: FALLBACK_OS_PRESETS[0],
     imageOcid: '',
     sshPublicKey: '',
     availabilityDomains: [] as string[],
     assignPublicIp: true,
     assignIpv6: true,
-    intervalSeconds: 45,
-    jitterPercent: 20,
+    intervalSeconds: '45',
+    jitterPercent: '20',
     retryOnOutOfCapacity: true,
-    backoffOn429Seconds: 180,
-    maxAttempts: 0,
+    backoffOn429Seconds: '180',
+    maxAttempts: '0',
     autoStopOnSuccess: true,
     autoBindDnsRuleId: '',
     useSystemNotifications: true,
     notifyChannelIds: [] as string[],
   });
 
+  const cleanDigitsInput = (raw: string): string => {
+    const digits = raw.replace(/[^\d]/g, '');
+    if (digits.length > 1) return digits.replace(/^0+(?=\d)/, '');
+    return digits;
+  };
+
+  const clampNumericField = (raw: string, min: number, max: number | undefined, fallback: number): number => {
+    const parsed = parseInt(raw, 10);
+    if (!Number.isFinite(parsed)) return fallback;
+    const boundedMin = Math.max(min, parsed);
+    return max !== undefined ? Math.min(max, boundedMin) : boundedMin;
+  };
+
   const profileMap = useMemo(() => new Map(profiles.map((p) => [p.id, p])), [profiles]);
   const readyProfilesCount = useMemo(() => profiles.filter((p) => p.hasPrivateKey).length, [profiles]);
   const selectedSniperProfile = profileMap.get(taskForm.profileId);
 
-  const showNotice = (msg: string) => {
-    setToastMsg(msg);
-    setTimeout(() => setToastMsg(null), 5000);
+  const showNotice = (msg: string, kind: 'success' | 'error' | 'info' | 'warning' = 'info') => {
+    toast.show(msg, kind);
   };
 
   // Auto-fetch live OCI OS Images for Sniper Task when profile + shape change
@@ -220,10 +236,13 @@ export function OciManagerView({
       showNotice(
         isZh
           ? `免 main.tf 参数自动拉取成功：已自动匹配 ${res.availabilityDomains?.length ?? 0} 个可用域、公网子网与最新官方系统镜像`
-          : `Auto-resolved ${res.availabilityDomains?.length ?? 0} AD(s), public subnet, and latest official OS image`
+          : `Auto-resolved ${res.availabilityDomains?.length ?? 0} AD(s), public subnet, and latest official OS image`,
+        'success'
       );
     } catch (err) {
-      setAutoResolveError(err instanceof Error ? err.message : 'Auto-resolve failed');
+      const msg = err instanceof Error ? err.message : 'Auto-resolve failed';
+      setAutoResolveError(msg);
+      showNotice(msg, 'error');
     } finally {
       setAutoResolving(false);
     }
@@ -243,6 +262,9 @@ export function OciManagerView({
         fingerprint: res.fingerprint,
       });
       setTaskForm((prev) => ({ ...prev, sshPublicKey: res.publicKey }));
+      showNotice(isZh ? '已生成 Ed25519 SSH 密钥对并填入公钥' : 'Generated Ed25519 SSH keypair', 'success');
+    } catch (err) {
+      showNotice(err instanceof Error ? err.message : isZh ? '生成 SSH 密钥失败' : 'SSH key generation failed', 'error');
     } finally {
       setGeneratingSshKey(false);
     }
@@ -250,13 +272,15 @@ export function OciManagerView({
 
   const handleDownloadGeneratedPrivateKey = () => {
     if (!generatedSshKey) return;
+    const filename = `${(taskForm.displayName || 'oci-arm').replace(/[^a-zA-Z0-9_-]/g, '-')}-ed25519.pem`;
     const blob = new Blob([generatedSshKey.privateKeyPem], { type: 'application/x-pem-file' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `${(taskForm.displayName || 'oci-arm').replace(/[^a-zA-Z0-9_-]/g, '-')}-ed25519.pem`;
+    a.download = filename;
     a.click();
     URL.revokeObjectURL(url);
+    showNotice(isZh ? `已下载私钥文件 ${filename}` : `Downloaded ${filename}`, 'success');
   };
 
   const openNewSniper = () => {
@@ -270,20 +294,20 @@ export function OciManagerView({
       profileId: firstProf?.id ?? '',
       displayName: 'oci-arm-node-01',
       shape: 'VM.Standard.A1.Flex',
-      ocpus: 4,
-      memoryInGBs: 24,
-      bootVolumeSizeInGBs: 100,
+      ocpus: '4',
+      memoryInGBs: '24',
+      bootVolumeSizeInGBs: '100',
       osPreset: FALLBACK_OS_PRESETS[0],
       imageOcid: '',
       sshPublicKey: '',
       availabilityDomains: firstProf?.availabilityDomains ?? [],
       assignPublicIp: true,
       assignIpv6: true,
-      intervalSeconds: 45,
-      jitterPercent: 20,
+      intervalSeconds: '45',
+      jitterPercent: '20',
       retryOnOutOfCapacity: true,
-      backoffOn429Seconds: 180,
-      maxAttempts: 0,
+      backoffOn429Seconds: '180',
+      maxAttempts: '0',
       autoStopOnSuccess: true,
       autoBindDnsRuleId: '',
       useSystemNotifications: true,
@@ -293,29 +317,34 @@ export function OciManagerView({
   };
 
   const openEditSniper = (task: OciSniperTask) => {
+    const matchedProf = profileMap.get(task.profileId);
+    const fallbackProf = matchedProf ?? profiles.find((p) => p.hasPrivateKey) ?? profiles[0];
     setEditingTask(task);
     setResolvedSummary(null);
     setAutoResolveError(null);
     setGeneratedSshKey(null);
     setTaskForm({
       name: task.name,
-      profileId: task.profileId,
+      profileId: fallbackProf?.id ?? '',
       displayName: task.displayName,
       shape: task.shape,
-      ocpus: task.ocpus,
-      memoryInGBs: task.memoryInGBs,
-      bootVolumeSizeInGBs: task.bootVolumeSizeInGBs,
+      ocpus: String(task.ocpus),
+      memoryInGBs: String(task.memoryInGBs),
+      bootVolumeSizeInGBs: String(task.bootVolumeSizeInGBs),
       osPreset: task.osPreset,
       imageOcid: task.imageOcid,
       sshPublicKey: task.sshPublicKey,
-      availabilityDomains: task.availabilityDomains ?? [],
+      availabilityDomains:
+        matchedProf && task.availabilityDomains?.length
+          ? task.availabilityDomains
+          : fallbackProf?.availabilityDomains ?? task.availabilityDomains ?? [],
       assignPublicIp: task.assignPublicIp,
       assignIpv6: task.assignIpv6,
-      intervalSeconds: task.intervalSeconds,
-      jitterPercent: task.jitterPercent,
+      intervalSeconds: String(task.intervalSeconds),
+      jitterPercent: String(task.jitterPercent),
       retryOnOutOfCapacity: task.retryOnOutOfCapacity,
-      backoffOn429Seconds: task.backoffOn429Seconds,
-      maxAttempts: task.maxAttempts,
+      backoffOn429Seconds: String(task.backoffOn429Seconds),
+      maxAttempts: String(task.maxAttempts),
       autoStopOnSuccess: task.autoStopOnSuccess,
       autoBindDnsRuleId: task.autoBindDnsRuleId ?? '',
       useSystemNotifications: task.useSystemNotifications !== false,
@@ -326,31 +355,58 @@ export function OciManagerView({
 
   const handleSaveSniper = async (e: React.FormEvent) => {
     e.preventDefault();
+    const effectiveProfile =
+      profileMap.get(taskForm.profileId) ?? profiles.find((p) => p.hasPrivateKey) ?? profiles[0];
+    if (!effectiveProfile) {
+      showNotice(
+        isZh
+          ? '暂无可用的 OCI 凭据，请先在「多云主机管理 → 云账号凭据」添加 OCI 账号。'
+          : 'No OCI profile available. Please add an OCI credential first.',
+        'error'
+      );
+      return;
+    }
     const payload = {
       ...taskForm,
+      profileId: effectiveProfile.id,
+      ocpus: clampNumericField(taskForm.ocpus, 1, 4, 4),
+      memoryInGBs: clampNumericField(taskForm.memoryInGBs, 1, 24, 24),
+      bootVolumeSizeInGBs: clampNumericField(taskForm.bootVolumeSizeInGBs, 50, 200, 100),
+      intervalSeconds: clampNumericField(taskForm.intervalSeconds, 15, undefined, 45),
+      jitterPercent: clampNumericField(taskForm.jitterPercent, 0, 50, 20),
+      backoffOn429Seconds: clampNumericField(taskForm.backoffOn429Seconds, 30, undefined, 180),
+      maxAttempts: clampNumericField(taskForm.maxAttempts, 0, undefined, 0),
       availabilityDomains:
         taskForm.availabilityDomains.length > 0
           ? taskForm.availabilityDomains
-          : selectedSniperProfile?.availabilityDomains ?? ['AD-1'],
+          : effectiveProfile.availabilityDomains ?? ['AD-1'],
     };
-    if (editingTask) {
-      await apiRequest(`/api/oci/sniper/${editingTask.id}`, {
-        method: 'PUT',
-        body: JSON.stringify(payload),
-      });
-    } else {
-      await apiRequest('/api/oci/sniper', {
-        method: 'POST',
-        body: JSON.stringify(payload),
-      });
+    setSavingTask(true);
+    try {
+      if (editingTask) {
+        await apiRequest(`/api/oci/sniper/${editingTask.id}`, {
+          method: 'PUT',
+          body: JSON.stringify(payload),
+        });
+      } else {
+        await apiRequest('/api/oci/sniper', {
+          method: 'POST',
+          body: JSON.stringify(payload),
+        });
+      }
+      setShowSniperModal(false);
+      await onReload();
+      showNotice(t('savedSuccessfully'), 'success');
+    } catch (err) {
+      showNotice(err instanceof Error ? err.message : isZh ? '保存失败，请重试' : 'Failed to save sniper task', 'error');
+    } finally {
+      setSavingTask(false);
     }
-    setShowSniperModal(false);
-    await onReload();
-    showNotice(t('savedSuccessfully'));
   };
 
   const handleToggleSniper = async (task: OciSniperTask) => {
     setBusyId(task.id);
+    setBusyAction('toggle');
     try {
       const nextStatus = task.status === 'running' ? 'paused' : 'running';
       await apiRequest(`/api/oci/sniper/${task.id}`, {
@@ -358,34 +414,55 @@ export function OciManagerView({
         body: JSON.stringify({ status: nextStatus }),
       });
       await onReload();
+      showNotice(
+        isZh
+          ? `抢注任务「${task.name}」已${nextStatus === 'running' ? '启动' : '暂停'}`
+          : `Sniper "${task.name}" ${nextStatus === 'running' ? 'started' : 'paused'}`,
+        'success'
+      );
+    } catch (err) {
+      showNotice(err instanceof Error ? err.message : isZh ? '切换任务状态失败' : 'Failed to toggle sniper task', 'error');
     } finally {
       setBusyId(null);
+      setBusyAction(null);
     }
   };
 
   const handleRunOnce = async (task: OciSniperTask) => {
     setBusyId(task.id);
+    setBusyAction('test');
     try {
-      const res = await apiRequest<{ result: { message: string } }>(
+      const res = await apiRequest<{ result: { outcome?: string; message: string } }>(
         `/api/oci/sniper/${task.id}/run-once`,
         { method: 'POST' }
       );
       await onReload();
-      showNotice(res.result.message);
+      const outcome = res.result.outcome;
+      showNotice(
+        res.result.message,
+        outcome === 'succeeded' ? 'success' : outcome === 'error' ? 'error' : 'info'
+      );
+    } catch (err) {
+      showNotice(err instanceof Error ? err.message : isZh ? '测试执行失败' : 'Sniper test failed', 'error');
     } finally {
       setBusyId(null);
+      setBusyAction(null);
     }
   };
 
   const fetchScriptForTask = async (taskId: string, format: 'bash' | 'python') => {
     setLoadingScript(true);
+    setLoadingScriptTaskId(taskId);
     try {
       const res = await apiRequest<{ filename: string; script: string }>(
         `/api/oci/sniper/${taskId}/script?format=${format}`
       );
       setScriptModal({ taskId, format, filename: res.filename, script: res.script });
+    } catch (err) {
+      showNotice(err instanceof Error ? err.message : isZh ? '导出脚本失败' : 'Failed to export script', 'error');
     } finally {
       setLoadingScript(false);
+      setLoadingScriptTaskId(null);
     }
   };
 
@@ -399,11 +476,22 @@ export function OciManagerView({
     a.download = scriptModal.filename;
     a.click();
     URL.revokeObjectURL(url);
+    showNotice(isZh ? `已下载脚本 ${scriptModal.filename}` : `Downloaded ${scriptModal.filename}`, 'success');
   };
 
-  const handleDeleteSniper = async (id: string) => {
-    await apiRequest(`/api/oci/sniper/${id}`, { method: 'DELETE' });
-    await onReload();
+  const handleDeleteSniper = async (task: OciSniperTask) => {
+    setBusyId(task.id);
+    setBusyAction('delete');
+    try {
+      await apiRequest(`/api/oci/sniper/${task.id}`, { method: 'DELETE' });
+      await onReload();
+      showNotice(isZh ? `已删除抢注任务「${task.name}」` : `Deleted sniper "${task.name}"`, 'success');
+    } catch (err) {
+      showNotice(err instanceof Error ? err.message : isZh ? '删除任务失败' : 'Delete failed', 'error');
+    } finally {
+      setBusyId(null);
+      setBusyAction(null);
+    }
   };
 
   const adChoices = useMemo(() => {
@@ -473,12 +561,6 @@ export function OciManagerView({
         )}
       </div>
 
-      {toastMsg && (
-        <div className="px-4 py-3 rounded-lg border border-blue-200 dark:border-blue-900 bg-blue-50/70 dark:bg-blue-950/30 text-xs text-blue-700 dark:text-blue-300">
-          {toastMsg}
-        </div>
-      )}
-
       {/* ARM Sniper Tasks List */}
       <div className="space-y-4">
         {tasks.map((task) => {
@@ -520,7 +602,13 @@ export function OciManagerView({
                     </span>
                   </div>
                   <div className="text-xs text-slate-500 dark:text-slate-400 font-mono flex flex-wrap items-center gap-x-2.5 gap-y-1">
-                    <span>{prof ? `${prof.name} (${prof.region})` : 'unknown-profile'}</span>
+                    <span className={prof ? '' : 'text-red-600 dark:text-red-400 font-semibold'}>
+                      {prof
+                        ? `${prof.name} (${prof.region})`
+                        : isZh
+                        ? '关联 OCI 凭据已失效（请点编辑重新绑定）'
+                        : 'Missing OCI profile (click Edit to rebind)'}
+                    </span>
                     <span aria-hidden="true">·</span>
                     <span>{task.shape}</span>
                     <span aria-hidden="true">·</span>
@@ -538,30 +626,45 @@ export function OciManagerView({
                     type="button"
                     disabled={busyId === task.id}
                     onClick={() => void handleToggleSniper(task)}
-                    className={`inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold rounded-lg transition-colors whitespace-nowrap shrink-0 ${
+                    className={`inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold rounded-lg disabled:opacity-50 transition-colors whitespace-nowrap shrink-0 ${
                       isRunning
                         ? 'bg-amber-600 text-white hover:bg-amber-700'
                         : 'bg-emerald-600 text-white hover:bg-emerald-700'
                     }`}
                   >
-                    {isRunning ? <Pause className="w-3.5 h-3.5" /> : <Play className="w-3.5 h-3.5" />}
+                    {busyId === task.id && busyAction === 'toggle' ? (
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    ) : isRunning ? (
+                      <Pause className="w-3.5 h-3.5" />
+                    ) : (
+                      <Play className="w-3.5 h-3.5" />
+                    )}
                     {isRunning ? t('pauseSniper') : t('startSniper')}
                   </button>
                   <button
                     type="button"
                     disabled={busyId === task.id}
                     onClick={() => void handleRunOnce(task)}
-                    className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-medium rounded-lg border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 whitespace-nowrap shrink-0"
+                    className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-medium rounded-lg border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 disabled:opacity-50 whitespace-nowrap shrink-0"
                   >
-                    <Zap className="w-3.5 h-3.5" />
+                    {busyId === task.id && busyAction === 'test' ? (
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    ) : (
+                      <Zap className="w-3.5 h-3.5" />
+                    )}
                     {t('testOnce')}
                   </button>
                   <button
                     type="button"
+                    disabled={loadingScriptTaskId === task.id}
                     onClick={() => void fetchScriptForTask(task.id, 'python')}
-                    className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-medium rounded-lg border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 whitespace-nowrap shrink-0"
+                    className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-medium rounded-lg border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 disabled:opacity-50 whitespace-nowrap shrink-0"
                   >
-                    <Code2 className="w-3.5 h-3.5" />
+                    {loadingScriptTaskId === task.id ? (
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    ) : (
+                      <Code2 className="w-3.5 h-3.5" />
+                    )}
                     {t('exportScript')}
                   </button>
                   <button
@@ -574,11 +677,16 @@ export function OciManagerView({
                   </button>
                   <button
                     type="button"
-                    onClick={() => void handleDeleteSniper(task.id)}
+                    disabled={busyId === task.id}
+                    onClick={() => void handleDeleteSniper(task)}
                     title={t('delete')}
-                    className="p-2 rounded-lg border border-slate-200 dark:border-slate-700 text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-950/40"
+                    className="p-2 rounded-lg border border-slate-200 dark:border-slate-700 text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-950/40 disabled:opacity-50"
                   >
-                    <Trash2 className="w-3.5 h-3.5" />
+                    {busyId === task.id && busyAction === 'delete' ? (
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    ) : (
+                      <Trash2 className="w-3.5 h-3.5" />
+                    )}
                   </button>
                 </div>
               </div>
@@ -611,12 +719,15 @@ export function OciManagerView({
                 </div>
               </div>
 
-              {task.lastMessage && (
-                <div className="pt-3 border-t border-slate-200/70 dark:border-slate-800/70 text-xs font-mono text-slate-600 dark:text-slate-400 break-words">
-                  <span className="font-sans font-medium text-slate-500 mr-2">{t('lastResponse')}:</span>
-                  {task.lastMessage}
-                </div>
-              )}
+              <div
+                className="pt-3 border-t border-slate-200/70 dark:border-slate-800/70 text-xs font-mono text-slate-600 dark:text-slate-400 truncate min-h-[29px]"
+                title={task.lastMessage || undefined}
+              >
+                <span className="font-sans font-medium text-slate-500 mr-2">{t('lastResponse')}:</span>
+                <span className={task.lastMessage ? '' : 'font-sans text-slate-400 dark:text-slate-500'}>
+                  {task.lastMessage || (isZh ? '尚无执行记录' : 'No attempts yet')}
+                </span>
+              </div>
             </div>
           );
         })}
@@ -692,6 +803,11 @@ export function OciManagerView({
                     }}
                     className="w-full px-3 py-2 text-sm rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950"
                   >
+                    {profiles.length === 0 && (
+                      <option value="">
+                        {isZh ? '请先在云凭证管理中添加 OCI 账号' : 'Add an OCI credential first'}
+                      </option>
+                    )}
                     {profiles.map((p) => (
                       <option key={p.id} value={p.id}>
                         {p.name} ({p.region}){p.hasPrivateKey ? '' : isZh ? ' [未配私钥]' : ' [No PEM]'}
@@ -800,33 +916,53 @@ export function OciManagerView({
                 <div>
                   <label className="block text-xs font-medium mb-1">{t('ocpus')} (1-4)</label>
                   <input
-                    type="number"
-                    min={1}
-                    max={4}
+                    type="text"
+                    inputMode="numeric"
                     value={taskForm.ocpus}
-                    onChange={(e) => setTaskForm({ ...taskForm, ocpus: Number(e.target.value) })}
+                    onChange={(e) => setTaskForm({ ...taskForm, ocpus: cleanDigitsInput(e.target.value) })}
+                    onBlur={() =>
+                      setTaskForm((prev) => ({
+                        ...prev,
+                        ocpus: String(clampNumericField(prev.ocpus, 1, 4, 4)),
+                      }))
+                    }
+                    placeholder="1-4"
                     className="w-full px-3 py-2 text-sm font-mono rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950"
                   />
                 </div>
                 <div>
                   <label className="block text-xs font-medium mb-1">{t('memoryGb')} (1-24)</label>
                   <input
-                    type="number"
-                    min={1}
-                    max={24}
+                    type="text"
+                    inputMode="numeric"
                     value={taskForm.memoryInGBs}
-                    onChange={(e) => setTaskForm({ ...taskForm, memoryInGBs: Number(e.target.value) })}
+                    onChange={(e) => setTaskForm({ ...taskForm, memoryInGBs: cleanDigitsInput(e.target.value) })}
+                    onBlur={() =>
+                      setTaskForm((prev) => ({
+                        ...prev,
+                        memoryInGBs: String(clampNumericField(prev.memoryInGBs, 1, 24, 24)),
+                      }))
+                    }
+                    placeholder="1-24"
                     className="w-full px-3 py-2 text-sm font-mono rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950"
                   />
                 </div>
                 <div>
                   <label className="block text-xs font-medium mb-1">{t('bootVolumeGb')}</label>
                   <input
-                    type="number"
-                    min={50}
-                    max={200}
+                    type="text"
+                    inputMode="numeric"
                     value={taskForm.bootVolumeSizeInGBs}
-                    onChange={(e) => setTaskForm({ ...taskForm, bootVolumeSizeInGBs: Number(e.target.value) })}
+                    onChange={(e) =>
+                      setTaskForm({ ...taskForm, bootVolumeSizeInGBs: cleanDigitsInput(e.target.value) })
+                    }
+                    onBlur={() =>
+                      setTaskForm((prev) => ({
+                        ...prev,
+                        bootVolumeSizeInGBs: String(clampNumericField(prev.bootVolumeSizeInGBs, 50, 200, 100)),
+                      }))
+                    }
+                    placeholder="50-200"
                     className="w-full px-3 py-2 text-sm font-mono rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950"
                   />
                 </div>
@@ -1006,41 +1142,70 @@ export function OciManagerView({
                 <div>
                   <label className="block text-xs font-medium mb-1">{t('pollingIntervalSec')}</label>
                   <input
-                    type="number"
-                    min={15}
+                    type="text"
+                    inputMode="numeric"
                     value={taskForm.intervalSeconds}
-                    onChange={(e) => setTaskForm({ ...taskForm, intervalSeconds: Number(e.target.value) })}
+                    onChange={(e) => setTaskForm({ ...taskForm, intervalSeconds: cleanDigitsInput(e.target.value) })}
+                    onBlur={() =>
+                      setTaskForm((prev) => ({
+                        ...prev,
+                        intervalSeconds: String(clampNumericField(prev.intervalSeconds, 15, undefined, 45)),
+                      }))
+                    }
+                    placeholder="≥ 15"
                     className="w-full px-3 py-2 text-xs font-mono rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950"
                   />
                 </div>
                 <div>
                   <label className="block text-xs font-medium mb-1">{t('jitterPercent')}</label>
                   <input
-                    type="number"
-                    min={0}
-                    max={50}
+                    type="text"
+                    inputMode="numeric"
                     value={taskForm.jitterPercent}
-                    onChange={(e) => setTaskForm({ ...taskForm, jitterPercent: Number(e.target.value) })}
+                    onChange={(e) => setTaskForm({ ...taskForm, jitterPercent: cleanDigitsInput(e.target.value) })}
+                    onBlur={() =>
+                      setTaskForm((prev) => ({
+                        ...prev,
+                        jitterPercent: String(clampNumericField(prev.jitterPercent, 0, 50, 20)),
+                      }))
+                    }
+                    placeholder="0-50"
                     className="w-full px-3 py-2 text-xs font-mono rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950"
                   />
                 </div>
                 <div>
                   <label className="block text-xs font-medium mb-1">{t('backoff429Sec')}</label>
                   <input
-                    type="number"
-                    min={30}
+                    type="text"
+                    inputMode="numeric"
                     value={taskForm.backoffOn429Seconds}
-                    onChange={(e) => setTaskForm({ ...taskForm, backoffOn429Seconds: Number(e.target.value) })}
+                    onChange={(e) =>
+                      setTaskForm({ ...taskForm, backoffOn429Seconds: cleanDigitsInput(e.target.value) })
+                    }
+                    onBlur={() =>
+                      setTaskForm((prev) => ({
+                        ...prev,
+                        backoffOn429Seconds: String(clampNumericField(prev.backoffOn429Seconds, 30, undefined, 180)),
+                      }))
+                    }
+                    placeholder="≥ 30"
                     className="w-full px-3 py-2 text-xs font-mono rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950"
                   />
                 </div>
                 <div>
                   <label className="block text-xs font-medium mb-1">{t('maxAttempts')}</label>
                   <input
-                    type="number"
-                    min={0}
+                    type="text"
+                    inputMode="numeric"
                     value={taskForm.maxAttempts}
-                    onChange={(e) => setTaskForm({ ...taskForm, maxAttempts: Number(e.target.value) })}
+                    onChange={(e) => setTaskForm({ ...taskForm, maxAttempts: cleanDigitsInput(e.target.value) })}
+                    onBlur={() =>
+                      setTaskForm((prev) => ({
+                        ...prev,
+                        maxAttempts: String(clampNumericField(prev.maxAttempts, 0, undefined, 0)),
+                      }))
+                    }
+                    placeholder="0 = ∞"
                     className="w-full px-3 py-2 text-xs font-mono rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950"
                   />
                 </div>
@@ -1176,8 +1341,10 @@ export function OciManagerView({
                 </button>
                 <button
                   type="submit"
-                  className="px-4 py-2 text-xs font-semibold rounded-lg bg-blue-600 text-white hover:bg-blue-700"
+                  disabled={savingTask}
+                  className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-semibold rounded-lg bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50"
                 >
+                  {savingTask && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
                   {t('save')}
                 </button>
               </div>
@@ -1229,9 +1396,14 @@ export function OciManagerView({
                 <button
                   type="button"
                   onClick={async () => {
-                    await navigator.clipboard.writeText(scriptModal.script);
-                    setCopiedScript(true);
-                    setTimeout(() => setCopiedScript(false), 1800);
+                    const ok = await copyText(scriptModal.script);
+                    if (ok) {
+                      setCopiedScript(true);
+                      setTimeout(() => setCopiedScript(false), 1800);
+                      showNotice(isZh ? '脚本已复制到剪贴板' : 'Script copied to clipboard', 'success');
+                    } else {
+                      showNotice(isZh ? '复制失败，请手动选中复制' : 'Clipboard copy failed', 'error');
+                    }
                   }}
                   className="inline-flex items-center gap-1 px-3 py-1.5 text-xs font-medium rounded-lg border border-slate-200 dark:border-slate-700"
                 >
