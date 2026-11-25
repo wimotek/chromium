@@ -49,7 +49,7 @@ func main() {
 
 	// 4. Load system configuration (enters Setup Wizard mode if not yet initialized)
 	cfgManager := config.NewManager(dataDir)
-	router, cleanup, err := api.NewRouter(cfgManager, keyManager, certSource)
+	router, cleanup, err := api.NewRouter(cfgManager, keyManager)
 	if err != nil {
 		log.Fatalf("[FATAL] Failed to initialize HTTP router: %v", err)
 	}
