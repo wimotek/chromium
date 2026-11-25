@@ -49,7 +49,7 @@ func main() {
 
 	// 4. Load system configuration (enters Setup Wizard mode if not yet initialized)
 	cfgManager := config.NewManager(dataDir)
-	router, cleanup, err := api.NewRouter(cfgManager, keyManager)
+	router, cleanup, err := api.NewRouter(cfgManager, keyManager, certSource)
 	if err != nil {
 		log.Fatalf("[FATAL] Failed to initialize HTTP router: %v", err)
 	}
@@ -73,14 +73,14 @@ func main() {
 
 	errCh := make(chan error, 2)
 	go func() {
-		log.Printf("[HTTP] wimotek/oauth listening on %s", httpAddr)
+		log.Printf("[HTTP] wimotek/Oauth listening on %s", httpAddr)
 		if err := httpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errCh <- fmt.Errorf("http server error: %w", err)
 		}
 	}()
 
 	go func() {
-		log.Printf("[HTTPS] wimotek/oauth listening on %s", httpsAddr)
+		log.Printf("[HTTPS] wimotek/Oauth listening on %s", httpsAddr)
 		if err := httpsServer.ListenAndServeTLS("", ""); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errCh <- fmt.Errorf("https server error: %w", err)
 		}

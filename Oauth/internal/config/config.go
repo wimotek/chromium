@@ -14,17 +14,20 @@ type DBConfig struct {
 }
 
 type RedisConfig struct {
-	Enabled  bool   `json:"enabled"`
-	Addr     string `json:"addr"`
-	Password string `json:"password,omitempty"`
-	DB       int    `json:"db"`
+	Enabled       bool   `json:"enabled"`
+	Addr          string `json:"addr"`
+	Password      string `json:"password,omitempty"`
+	DB            int    `json:"db"`
+	SimulatedDown bool   `json:"simulated_down,omitempty"`
 }
 
 type SystemConfig struct {
-	Initialized bool        `json:"initialized"`
-	IssuerURL   string      `json:"issuer_url"`
-	Database    DBConfig    `json:"database"`
-	Redis       RedisConfig `json:"redis"`
+	Initialized       bool        `json:"initialized"`
+	IssuerURL         string      `json:"issuer_url"`
+	AdminEmail        string      `json:"admin_email"`
+	AdminPasswordHash string      `json:"admin_password_hash,omitempty"`
+	Database          DBConfig    `json:"database"`
+	Redis             RedisConfig `json:"redis"`
 }
 
 type Manager struct {
@@ -39,9 +42,14 @@ func NewManager(dataDir string) *Manager {
 		current: SystemConfig{
 			Initialized: false,
 			IssuerURL:   "http://localhost:8080",
+			AdminEmail:  "admin@wimotek.dev",
 			Database: DBConfig{
 				Driver: "sqlite3",
 				DSN:    filepath.Join(dataDir, "wimotek_oauth.db"),
+			},
+			Redis: RedisConfig{
+				Enabled: false,
+				Addr:    "127.0.0.1:6379",
 			},
 		},
 	}
@@ -66,6 +74,22 @@ func (m *Manager) Get() SystemConfig {
 	return m.current
 }
 
+func (m *Manager) saveLocked(cfg SystemConfig) error {
+	raw, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		return err
+	}
+	tmpPath := m.filePath + ".tmp"
+	if err := os.WriteFile(tmpPath, raw, 0o600); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpPath, m.filePath); err != nil {
+		return err
+	}
+	m.current = cfg
+	return nil
+}
+
 // CompleteSetup atomically persists configuration and locks the setup wizard permanently.
 func (m *Manager) CompleteSetup(cfg SystemConfig) error {
 	m.mu.Lock()
@@ -76,18 +100,21 @@ func (m *Manager) CompleteSetup(cfg SystemConfig) error {
 	}
 
 	cfg.Initialized = true
-	raw, err := json.MarshalIndent(cfg, "", "  ")
-	if err != nil {
-		return err
-	}
+	return m.saveLocked(cfg)
+}
 
-	tmpPath := m.filePath + ".tmp"
-	if err := os.WriteFile(tmpPath, raw, 0o600); err != nil {
-		return err
-	}
-	if err := os.Rename(tmpPath, m.filePath); err != nil {
-		return err
-	}
-	m.current = cfg
-	return nil
+// Update persists updated runtime configuration (e.g. cache failover toggle).
+func (m *Manager) Update(cfg SystemConfig) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.saveLocked(cfg)
+}
+
+// ResetSetup unlocks the Setup Wizard (admin-only action).
+func (m *Manager) ResetSetup() error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	cfg := m.current
+	cfg.Initialized = false
+	return m.saveLocked(cfg)
 }
