@@ -1,4 +1,4 @@
-name: Release Multi-Arch Docker Image
+name: Build Oauth Docker Image
 
 on:
   push:
