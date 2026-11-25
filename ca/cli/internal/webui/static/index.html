@@ -1,0 +1,1712 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Wimotek CLI · PKI Client &amp; Local Certificate Manager</title>
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+  <link rel="icon" type="image/x-icon" href="/favicon.ico" sizes="any" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Plus+Jakarta+Sans:wght@500;600;700&family=Public+Sans:wght@400;500;600&display=swap" rel="stylesheet" />
+  <style>
+    :root {
+      --bg-canvas: #F8FAFC;
+      --bg-surface: #FFFFFF;
+      --bg-sidebar: #0F172A;
+      --bg-sidebar-hover: #1E293B;
+      --border: #E2E8F0;
+      --border-strong: #CBD5E1;
+      --text-primary: #0F172A;
+      --text-secondary: #475569;
+      --text-muted: #64748B;
+      --accent: #0F766E;
+      --accent-hover: #115E59;
+      --accent-soft: #F0FDFA;
+      --danger: #B91C1C;
+      --danger-soft: #FEF2F2;
+      --warn: #B45309;
+      --warn-soft: #FFFBEB;
+      --ok: #15803D;
+      --ok-soft: #F0FDF4;
+    }
+    * { box-sizing: border-box; }
+    html, body {
+      margin: 0;
+      padding: 0;
+      background: var(--bg-canvas);
+      color: var(--text-primary);
+      font-family: 'Public Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      font-size: 14px;
+      line-height: 1.5;
+      -webkit-font-smoothing: antialiased;
+    }
+    h1, h2, h3, h4 {
+      font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif;
+      margin: 0;
+      letter-spacing: -0.015em;
+    }
+    code, pre, .mono {
+      font-family: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-variant-numeric: tabular-nums;
+      overflow-wrap: anywhere;
+    }
+    .tabular { font-variant-numeric: tabular-nums; }
+    .app-shell {
+      display: grid;
+      grid-template-columns: 256px minmax(0, 1fr);
+      min-height: 100vh;
+    }
+    .sidebar {
+      background: var(--bg-sidebar);
+      color: #E2E8F0;
+      display: flex;
+      flex-direction: column;
+      border-inline-end: 1px solid #1E293B;
+      position: sticky;
+      top: 0;
+      height: 100vh;
+    }
+    .brand {
+      padding: 20px 20px 16px;
+      border-bottom: 1px solid #1E293B;
+    }
+    .brand-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .brand-mark {
+      width: 30px;
+      height: 30px;
+      border-radius: 6px;
+      background: var(--accent);
+      color: #fff;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      font-weight: 700;
+      font-family: 'Plus Jakarta Sans', sans-serif;
+      font-size: 15px;
+      flex-shrink: 0;
+    }
+    .brand-title { font-size: 15px; font-weight: 700; color: #F8FAFC; }
+    .brand-sub { font-size: 11px; color: #94A3B8; margin-top: 2px; }
+    .ctx-switcher {
+      padding: 12px 16px;
+      border-bottom: 1px solid #1E293B;
+    }
+    .ctx-switcher label {
+      display: block;
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: #94A3B8;
+      margin-bottom: 6px;
+    }
+    .ctx-switcher select {
+      width: 100%;
+      background: #1E293B;
+      color: #F8FAFC;
+      border: 1px solid #334155;
+      border-radius: 6px;
+      padding: 7px 10px;
+      font-size: 13px;
+      font-family: inherit;
+    }
+    .nav {
+      padding: 12px 10px;
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+      flex: 1;
+      overflow-y: auto;
+    }
+    .nav-btn {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      width: 100%;
+      text-align: start;
+      background: transparent;
+      border: none;
+      color: #CBD5E1;
+      padding: 9px 12px;
+      border-radius: 6px;
+      font-size: 13.5px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: background 0.12s, color 0.12s;
+    }
+    .nav-btn:hover { background: var(--bg-sidebar-hover); color: #fff; }
+    .nav-btn.active {
+      background: #134E4A;
+      color: #FFFFFF;
+      font-weight: 600;
+    }
+    .sidebar-foot {
+      padding: 14px 16px;
+      border-top: 1px solid #1E293B;
+      font-size: 12px;
+      color: #94A3B8;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    .sidebar-foot a {
+      color: #5EEAD4;
+      text-decoration: none;
+      font-weight: 500;
+    }
+    .sidebar-foot a:hover { text-decoration: underline; }
+    .main {
+      display: flex;
+      flex-direction: column;
+      min-width: 0;
+    }
+    .topbar {
+      background: var(--bg-surface);
+      border-bottom: 1px solid var(--border);
+      padding: 14px 28px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      position: sticky;
+      top: 0;
+      z-index: 10;
+    }
+    .topbar-left { min-width: 0; }
+    .topbar-title { font-size: 17px; font-weight: 700; color: var(--text-primary); }
+    .topbar-meta { font-size: 12.5px; color: var(--text-muted); margin-top: 2px; }
+    .topbar-actions { display: flex; align-items: center; gap: 10px; flex-shrink: 0; }
+    .content {
+      padding: 24px 28px 40px;
+      max-width: 1240px;
+      width: 100%;
+    }
+    .stats-grid {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 14px;
+      margin-bottom: 22px;
+    }
+    .stat-card {
+      background: var(--bg-surface);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 16px 18px;
+    }
+    .stat-label { font-size: 12px; color: var(--text-muted); font-weight: 500; }
+    .stat-value {
+      font-family: 'Plus Jakarta Sans', sans-serif;
+      font-size: 26px;
+      font-weight: 700;
+      color: var(--text-primary);
+      margin-top: 4px;
+      font-variant-numeric: tabular-nums;
+    }
+    .card {
+      background: var(--bg-surface);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      margin-bottom: 18px;
+    }
+    .card-head {
+      padding: 15px 20px;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+    .card-title { font-size: 15px; font-weight: 600; color: var(--text-primary); }
+    .card-desc { font-size: 12.5px; color: var(--text-muted); margin-top: 2px; }
+    .card-body { padding: 18px 20px; }
+    .grid-2 { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+    .grid-3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; }
+    .field { display: flex; flex-direction: column; gap: 5px; margin-bottom: 12px; }
+    .field label { font-size: 12.5px; font-weight: 600; color: var(--text-secondary); }
+    .field input, .field select, .field textarea {
+      width: 100%;
+      padding: 8px 11px;
+      border: 1px solid var(--border-strong);
+      border-radius: 6px;
+      font-size: 13.5px;
+      font-family: inherit;
+      color: var(--text-primary);
+      background: #fff;
+    }
+    .field textarea {
+      font-family: 'IBM Plex Mono', monospace;
+      font-size: 12px;
+      min-height: 130px;
+      resize: vertical;
+    }
+    .field input:focus, .field select:focus, .field textarea:focus {
+      outline: none;
+      border-color: var(--accent);
+      box-shadow: 0 0 0 2px rgba(15, 118, 110, 0.14);
+    }
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      padding: 7px 14px;
+      border-radius: 6px;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      border: 1px solid var(--border-strong);
+      background: #fff;
+      color: var(--text-primary);
+      transition: background 0.12s, border-color 0.12s;
+    }
+    .btn:hover { background: #F1F5F9; }
+    .btn-primary {
+      background: var(--accent);
+      border-color: var(--accent);
+      color: #fff;
+    }
+    .btn-primary:hover { background: var(--accent-hover); border-color: var(--accent-hover); }
+    .btn-danger {
+      background: #fff;
+      border-color: #FCA5A5;
+      color: var(--danger);
+    }
+    .btn-danger:hover { background: var(--danger-soft); }
+    .btn-sm { padding: 4px 10px; font-size: 12px; }
+    .table-wrap { width: 100%; overflow-x: auto; }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 13px;
+    }
+    th {
+      text-align: start;
+      padding: 10px 12px;
+      font-size: 11.5px;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      color: var(--text-muted);
+      border-bottom: 1px solid var(--border);
+      background: #F8FAFC;
+      white-space: nowrap;
+    }
+    td {
+      padding: 11px 12px;
+      border-bottom: 1px solid var(--border);
+      vertical-align: top;
+      overflow-wrap: anywhere;
+    }
+    tr:last-child td { border-bottom: none; }
+    .status-dot {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 12.5px;
+      font-weight: 600;
+    }
+    .dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      display: inline-block;
+    }
+    .dot-ok { background: var(--ok); }
+    .dot-warn { background: var(--warn); }
+    .dot-danger { background: var(--danger); }
+    .cmd-box {
+      background: #0F172A;
+      color: #E2E8F0;
+      border-radius: 6px;
+      padding: 12px 14px;
+      position: relative;
+      margin-bottom: 12px;
+    }
+    .cmd-box pre {
+      margin: 0;
+      font-size: 12px;
+      line-height: 1.55;
+      white-space: pre-wrap;
+      padding-inline-end: 68px;
+    }
+    .copy-btn {
+      position: absolute;
+      top: 8px;
+      inset-inline-end: 8px;
+      background: #1E293B;
+      color: #E2E8F0;
+      border: 1px solid #334155;
+      border-radius: 5px;
+      padding: 4px 9px;
+      font-size: 11.5px;
+      cursor: pointer;
+    }
+    .copy-btn:hover { background: #334155; }
+    .kv-list {
+      display: grid;
+      grid-template-columns: 180px minmax(0, 1fr);
+      gap: 8px 16px;
+      font-size: 13px;
+    }
+    .kv-k { color: var(--text-muted); font-weight: 500; }
+    .kv-v { color: var(--text-primary); overflow-wrap: anywhere; }
+    .alert {
+      padding: 10px 14px;
+      border-radius: 6px;
+      font-size: 13px;
+      margin-bottom: 14px;
+      border: 1px solid transparent;
+    }
+    .alert-ok { background: var(--ok-soft); border-color: #BBF7D0; color: var(--ok); }
+    .alert-err { background: var(--danger-soft); border-color: #FECACA; color: var(--danger); }
+    .alert-warn { background: var(--warn-soft); border-color: #FDE68A; color: var(--warn); }
+    .progress-bar {
+      height: 6px;
+      background: #E2E8F0;
+      border-radius: 3px;
+      overflow: hidden;
+      margin-top: 6px;
+    }
+    .progress-fill { height: 100%; background: var(--accent); }
+    .hidden { display: none !important; }
+    .row-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+    .checkbox-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 13px;
+      color: var(--text-secondary);
+      margin-bottom: 12px;
+    }
+    .toast {
+      position: fixed;
+      bottom: 20px;
+      inset-inline-end: 20px;
+      background: #0F172A;
+      color: #F8FAFC;
+      padding: 10px 16px;
+      border-radius: 6px;
+      font-size: 13px;
+      box-shadow: 0 10px 25px rgba(15, 23, 42, 0.22);
+      z-index: 100;
+    }
+    .auth-gate {
+      max-width: 400px;
+      margin: 12vh auto;
+      background: #fff;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 24px;
+    }
+    @media (max-width: 960px) {
+      .app-shell { grid-template-columns: 1fr; }
+      .sidebar { position: static; height: auto; }
+      .stats-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .grid-2, .grid-3 { grid-template-columns: 1fr; }
+      .kv-list { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <div id="authGate" class="auth-gate hidden">
+    <h2 style="font-size:18px;margin-bottom:6px;">Wimotek CLI Web Console</h2>
+    <p style="font-size:13px;color:var(--text-muted);margin:0 0 16px;">Enter the CLI web password configured via <code>--web-password</code>.</p>
+    <div id="authErr" class="alert alert-err hidden"></div>
+    <div class="field">
+      <label for="webPassInput">Access Password</label>
+      <input id="webPassInput" type="password" placeholder="Enter password" />
+    </div>
+    <button id="authUnlockBtn" class="btn btn-primary" style="width:100%;">Unlock Console</button>
+  </div>
+
+  <div id="appShell" class="app-shell">
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-row">
+          <div class="brand-mark">W</div>
+          <div>
+            <div class="brand-title">wimotek-cli</div>
+            <div class="brand-sub" data-i18n="brandSub">Step-Aligned PKI Client</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="ctx-switcher">
+        <label for="contextSelect" data-i18n="activeContext">Active CA Context</label>
+        <select id="contextSelect"></select>
+      </div>
+
+      <nav class="nav">
+        <button class="nav-btn active" data-tab="certs" data-i18n="navCerts">Managed Certificates</button>
+        <button class="nav-btn" data-tab="contexts" data-i18n="navContexts">CA Contexts &amp; Bootstrap</button>
+        <button class="nav-btn" data-tab="inspect" data-i18n="navInspect">X.509 Inspector &amp; Verify</button>
+        <button class="nav-btn" data-tab="crypto" data-i18n="navCrypto">Crypto &amp; PFX Studio</button>
+        <button class="nav-btn" data-tab="commands" data-i18n="navCommands">Step-Aligned CLI Commands</button>
+      </nav>
+
+      <div class="sidebar-foot">
+        <div id="cliVersionMeta" class="mono">wimotek-cli</div>
+        <div id="previewBackLink" class="hidden">
+          <a href="/" data-i18n="backToCA">← Back to Wimotek CA Server</a>
+        </div>
+      </div>
+    </aside>
+
+    <main class="main">
+      <header class="topbar">
+        <div class="topbar-left">
+          <div class="topbar-title" id="pageTitle">Managed Certificates</div>
+          <div class="topbar-meta mono" id="activeCAMeta">No active CA context</div>
+        </div>
+        <div class="topbar-actions">
+          <button id="healthCheckBtn" class="btn btn-sm" data-i18n="btnHealth">Test CA Health</button>
+          <button id="langToggleBtn" class="btn btn-sm">EN / 中文</button>
+        </div>
+      </header>
+
+      <div class="content">
+        <div id="banner" class="alert hidden"></div>
+
+        <section class="stats-grid">
+          <div class="stat-card">
+            <div class="stat-label" data-i18n="statContexts">CA Contexts</div>
+            <div class="stat-value" id="statContexts">0</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-label" data-i18n="statActive">Active Local Certs</div>
+            <div class="stat-value" id="statActive">0</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-label" data-i18n="statDue">Due for Renewal (≤15d)</div>
+            <div class="stat-value" id="statDue">0</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-label" data-i18n="statRevoked">Revoked</div>
+            <div class="stat-value" id="statRevoked">0</div>
+          </div>
+        </section>
+
+        <!-- TAB 1: MANAGED CERTS -->
+        <section id="tab-certs" class="tab-panel">
+          <div class="card">
+            <div class="card-head">
+              <div>
+                <div class="card-title" data-i18n="issueTitle">Issue &amp; Track Local Certificate</div>
+                <div class="card-desc" data-i18n="issueDesc">Generates private key locally, submits CSR to active CA, saves atomically in confined certs directory, and enables auto-renewal.</div>
+              </div>
+            </div>
+            <div class="card-body">
+              <form id="issueForm">
+                <div class="grid-3">
+                  <div class="field">
+                    <label data-i18n="lblProfile">Profile / Template</label>
+                    <select id="issueProfile">
+                      <option value="tls_server">tls_server (HTTPS / Internal Web)</option>
+                      <option value="tls_client">tls_client (mTLS Service / API)</option>
+                      <option value="entra_cba">entra_cba (Microsoft Entra CBA)</option>
+                      <option value="pdf_signing">pdf_signing (Adobe / RFC9336 PDF)</option>
+                      <option value="code_signing">code_signing (Code Signing)</option>
+                      <option value="smime_email">smime_email (S/MIME Email)</option>
+                      <option value="wifi_eap">wifi_eap (802.1X Wi-Fi / VPN EAP-TLS)</option>
+                      <option value="iot_device">iot_device (IoT / Edge Device mTLS)</option>
+                    </select>
+                  </div>
+                  <div class="field">
+                    <label data-i18n="lblCN">Common Name (CN)</label>
+                    <input id="issueCN" required placeholder="app.corp.internal" />
+                  </div>
+                  <div class="field">
+                    <label data-i18n="lblSlug">Local File Slug (optional)</label>
+                    <input id="issueName" placeholder="app-corp-internal" />
+                  </div>
+                </div>
+                <div class="grid-3">
+                  <div class="field">
+                    <label data-i18n="lblSANs">SANs (comma-separated DNS / IP)</label>
+                    <input id="issueSANs" placeholder="app.corp.internal, 10.0.1.25" />
+                  </div>
+                  <div class="field">
+                    <label data-i18n="lblUPN">UPN / Email (for Entra CBA / S/MIME)</label>
+                    <input id="issueUPN" placeholder="alice@corp.internal" />
+                  </div>
+                  <div class="field">
+                    <label data-i18n="lblKeyType">Key Algorithm</label>
+                    <select id="issueKeyType">
+                      <option value="EC">ECDSA P-256 (Recommended)</option>
+                      <option value="EC384">ECDSA P-384</option>
+                      <option value="OKP">Ed25519 (OKP)</option>
+                      <option value="RSA2048">RSA 2048-bit</option>
+                      <option value="RSA4096">RSA 4096-bit</option>
+                    </select>
+                  </div>
+                </div>
+                <div class="grid-3">
+                  <div class="field">
+                    <label data-i18n="lblRenewBefore">Auto-Renew Threshold</label>
+                    <input id="issueRenewBefore" value="33%" placeholder="33% or 168h or 15d" />
+                  </div>
+                  <div class="field">
+                    <label data-i18n="lblDays">Validity Days (0 = CA profile default)</label>
+                    <input id="issueDays" type="number" min="0" max="1095" value="0" />
+                  </div>
+                  <div class="field" style="justify-content:flex-end;">
+                    <label class="checkbox-row" style="margin:0 0 8px;">
+                      <input id="issueAutoRenew" type="checkbox" checked style="width:auto;" />
+                      <span data-i18n="lblAutoRenew">Enable daemon auto-renewal</span>
+                    </label>
+                  </div>
+                </div>
+                <button type="submit" class="btn btn-primary" data-i18n="btnIssue">Generate Key &amp; Request Certificate</button>
+              </form>
+            </div>
+          </div>
+
+          <div class="card">
+            <div class="card-head">
+              <div>
+                <div class="card-title" data-i18n="managedListTitle">Locally Managed Certificates</div>
+                <div class="card-desc mono" id="certsDirMeta"></div>
+              </div>
+              <button id="refreshCertsBtn" class="btn btn-sm" data-i18n="btnRefresh">Refresh</button>
+            </div>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th data-i18n="colSubject">Subject / Profile</th>
+                    <th data-i18n="colSerial">Serial / Key</th>
+                    <th data-i18n="colExpiry">Expiry &amp; Renewal</th>
+                    <th data-i18n="colStatus">Status</th>
+                    <th data-i18n="colActions">Actions</th>
+                  </tr>
+                </thead>
+                <tbody id="managedCertsBody"></tbody>
+              </table>
+            </div>
+          </div>
+        </section>
+
+        <!-- TAB 2: CA CONTEXTS & BOOTSTRAP -->
+        <section id="tab-contexts" class="tab-panel hidden">
+          <div class="grid-2">
+            <div class="card">
+              <div class="card-head">
+                <div>
+                  <div class="card-title" data-i18n="bootstrapTitle">Bootstrap New CA Context</div>
+                  <div class="card-desc" data-i18n="bootstrapDesc">Aligned with <code>step ca bootstrap</code>: fetches Root CA, verifies SHA-256 fingerprint, and stores credentials with 0600 permissions.</div>
+                </div>
+              </div>
+              <div class="card-body">
+                <form id="bootstrapForm">
+                  <div class="grid-2">
+                    <div class="field">
+                      <label data-i18n="lblCtxName">Context Name</label>
+                      <input id="bsName" required value="default" placeholder="prod-ca" />
+                    </div>
+                    <div class="field">
+                      <label data-i18n="lblCAURL">CA Server URL</label>
+                      <input id="bsURL" required placeholder="https://ca.company.internal:8443" />
+                    </div>
+                  </div>
+                  <div class="field">
+                    <label data-i18n="lblFP">Root CA SHA-256 Fingerprint (recommended to pin)</label>
+                    <input id="bsFP" class="mono" placeholder="Optional 64-hex fingerprint to verify against MITM" />
+                  </div>
+                  <div class="field">
+                    <label data-i18n="lblToken">Provisioner Token (wca_...) or Session Bearer Token</label>
+                    <input id="bsToken" type="password" placeholder="wca_... (leave blank if logging in with username/password)" />
+                  </div>
+                  <div class="grid-2">
+                    <div class="field">
+                      <label data-i18n="lblUser">Or CA Username (auto PoW login)</label>
+                      <input id="bsUser" placeholder="admin" />
+                    </div>
+                    <div class="field">
+                      <label data-i18n="lblPass">CA Password</label>
+                      <input id="bsPass" type="password" placeholder="Optional" />
+                    </div>
+                  </div>
+                  <label class="checkbox-row">
+                    <input id="bsInsecure" type="checkbox" style="width:auto;" />
+                    <span data-i18n="lblInsecure">Allow self-signed HTTPS during initial bootstrap</span>
+                  </label>
+                  <button type="submit" class="btn btn-primary" data-i18n="btnBootstrap">Bootstrap &amp; Activate Context</button>
+                </form>
+              </div>
+            </div>
+
+            <div class="card">
+              <div class="card-head">
+                <div>
+                  <div class="card-title" data-i18n="trustTitle">OS Root Trust Installation</div>
+                  <div class="card-desc" data-i18n="trustDesc">Copy the command for your platform or run <code>wimotek-cli certificate install</code> locally.</div>
+                </div>
+              </div>
+              <div class="card-body" id="trustCmdsContainer"></div>
+            </div>
+          </div>
+
+          <div class="card">
+            <div class="card-head">
+              <div class="card-title" data-i18n="savedContextsTitle">Saved CA Contexts</div>
+            </div>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th data-i18n="colCtxName">Context</th>
+                    <th data-i18n="colCAURL">CA URL</th>
+                    <th data-i18n="colFP">Root SHA-256 Fingerprint</th>
+                    <th data-i18n="colToken">Credential</th>
+                    <th data-i18n="colActions">Actions</th>
+                  </tr>
+                </thead>
+                <tbody id="contextsBody"></tbody>
+              </table>
+            </div>
+          </div>
+        </section>
+
+        <!-- TAB 3: INSPECTOR & VERIFY -->
+        <section id="tab-inspect" class="tab-panel hidden">
+          <div class="grid-2">
+            <div class="card">
+              <div class="card-head">
+                <div>
+                  <div class="card-title" data-i18n="inspectInputTitle">Inspect X.509 Certificate or CSR</div>
+                  <div class="card-desc" data-i18n="inspectInputDesc">Aligned with <code>step certificate inspect</code> &amp; <code>verify</code>.</div>
+                </div>
+              </div>
+              <div class="card-body">
+                <div class="field">
+                  <label data-i18n="lblPastePEM">Certificate Chain or CSR PEM</label>
+                  <textarea id="inspectPemInput" placeholder="-----BEGIN CERTIFICATE-----&#10;...&#10;-----END CERTIFICATE-----"></textarea>
+                </div>
+                <div class="field">
+                  <label data-i18n="lblVerifyHost">Optional Hostname for Chain Verification</label>
+                  <input id="verifyServerName" placeholder="app.corp.internal" />
+                </div>
+                <div class="row-actions">
+                  <button id="runInspectBtn" class="btn btn-primary" data-i18n="btnInspect">Inspect PEM</button>
+                  <button id="runVerifyBtn" class="btn" data-i18n="btnVerify">Verify Against Active Root CA</button>
+                </div>
+              </div>
+            </div>
+
+            <div class="card">
+              <div class="card-head">
+                <div class="card-title" data-i18n="inspectResultTitle">Decoded X.509 Structure</div>
+              </div>
+              <div class="card-body">
+                <div id="verifyResultBox" class="alert hidden"></div>
+                <div id="inspectResultBox" style="color:var(--text-muted);font-size:13px;" data-i18n="inspectEmpty">Paste a PEM certificate or click Inspect on any managed certificate.</div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- TAB 4: CRYPTO & PFX STUDIO -->
+        <section id="tab-crypto" class="tab-panel hidden">
+          <div class="grid-2">
+            <div class="card">
+              <div class="card-head">
+                <div>
+                  <div class="card-title" data-i18n="kpTitle">Keypair &amp; Secret Generator</div>
+                  <div class="card-desc"><code>wimotek-cli crypto keypair</code> / <code>crypto rand</code></div>
+                </div>
+              </div>
+              <div class="card-body">
+                <div class="grid-2">
+                  <div class="field">
+                    <label data-i18n="lblKeyType">Key Algorithm</label>
+                    <select id="kpAlgo">
+                      <option value="EC">ECDSA P-256</option>
+                      <option value="EC384">ECDSA P-384</option>
+                      <option value="OKP">Ed25519 (OKP)</option>
+                      <option value="RSA2048">RSA 2048</option>
+                      <option value="RSA4096">RSA 4096</option>
+                    </select>
+                  </div>
+                  <div class="field" style="justify-content:flex-end;">
+                    <button id="genKeypairBtn" class="btn btn-primary" data-i18n="btnGenKey">Generate Keypair</button>
+                  </div>
+                </div>
+                <div id="kpOutput" class="hidden">
+                  <div class="field">
+                    <label>Public Key (PEM)</label>
+                    <textarea id="kpPubOut" readonly style="min-height:85px;"></textarea>
+                  </div>
+                  <div class="field">
+                    <label>Private Key (PKCS#8 PEM)</label>
+                    <textarea id="kpPrivOut" readonly style="min-height:110px;"></textarea>
+                  </div>
+                </div>
+                <hr style="border:none;border-top:1px solid var(--border);margin:16px 0;" />
+                <div class="grid-3">
+                  <div class="field">
+                    <label data-i18n="lblRandFmt">Random Format</label>
+                    <select id="randFmt">
+                      <option value="hex">hex</option>
+                      <option value="base64">base64url</option>
+                      <option value="alphanumeric">alphanumeric</option>
+                    </select>
+                  </div>
+                  <div class="field">
+                    <label data-i18n="lblRandLen">Length</label>
+                    <input id="randLen" type="number" min="8" max="128" value="32" />
+                  </div>
+                  <div class="field" style="justify-content:flex-end;">
+                    <button id="genRandBtn" class="btn" data-i18n="btnGenRand">Generate Secret</button>
+                  </div>
+                </div>
+                <div id="randOutWrap" class="cmd-box hidden">
+                  <pre id="randOut"></pre>
+                  <button class="copy-btn" data-copy-target="randOut">Copy</button>
+                </div>
+              </div>
+            </div>
+
+            <div class="card">
+              <div class="card-head">
+                <div>
+                  <div class="card-title" data-i18n="pfxTitle">Modern2023 PKCS#12 (.pfx) Packager</div>
+                  <div class="card-desc"><code>wimotek-cli certificate p12</code> (Windows 11 / macOS / OpenSSL 3 compatible)</div>
+                </div>
+              </div>
+              <div class="card-body">
+                <form id="pfxForm">
+                  <div class="field">
+                    <label>Certificate PEM</label>
+                    <textarea id="pfxCert" required style="min-height:95px;" placeholder="-----BEGIN CERTIFICATE-----"></textarea>
+                  </div>
+                  <div class="field">
+                    <label>Private Key PEM</label>
+                    <textarea id="pfxKey" required style="min-height:95px;" placeholder="-----BEGIN PRIVATE KEY-----"></textarea>
+                  </div>
+                  <div class="grid-2">
+                    <div class="field">
+                      <label data-i18n="lblPfxPass">PFX Password</label>
+                      <input id="pfxPass" type="password" placeholder="Optional password" />
+                    </div>
+                    <div class="field">
+                      <label data-i18n="lblPfxFile">Output Filename</label>
+                      <input id="pfxFile" value="client-bundle" />
+                    </div>
+                  </div>
+                  <button type="submit" class="btn btn-primary" data-i18n="btnBuildPfx">Build &amp; Download .pfx</button>
+                </form>
+              </div>
+            </div>
+          </div>
+
+          <div class="card">
+            <div class="card-head">
+              <div>
+                <div class="card-title" data-i18n="selfSignedTitle">Offline Self-Signed Certificate Builder</div>
+                <div class="card-desc"><code>wimotek-cli certificate create</code> (for air-gapped dev or local root testing)</div>
+              </div>
+            </div>
+            <div class="card-body">
+              <form id="selfSignedForm">
+                <div class="grid-3">
+                  <div class="field">
+                    <label>Common Name</label>
+                    <input id="ssCN" required placeholder="dev.local" />
+                  </div>
+                  <div class="field">
+                    <label>SANs (comma-separated)</label>
+                    <input id="ssSANs" placeholder="dev.local, localhost, 127.0.0.1" />
+                  </div>
+                  <div class="field">
+                    <label>Validity Days</label>
+                    <input id="ssDays" type="number" min="1" max="3650" value="365" />
+                  </div>
+                </div>
+                <label class="checkbox-row">
+                  <input id="ssIsCA" type="checkbox" style="width:auto;" />
+                  <span data-i18n="lblIsCA">Generate as self-signed Root CA (BasicConstraints CA=true)</span>
+                </label>
+                <button type="submit" class="btn btn-primary" data-i18n="btnSelfSigned">Create Offline Certificate</button>
+              </form>
+              <div id="ssOutput" class="grid-2 hidden" style="margin-top:16px;">
+                <div class="field">
+                  <label>Certificate PEM</label>
+                  <textarea id="ssCertOut" readonly></textarea>
+                </div>
+                <div class="field">
+                  <label>Private Key PEM</label>
+                  <textarea id="ssKeyOut" readonly></textarea>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- TAB 5: STEP-ALIGNED CLI REFERENCE -->
+        <section id="tab-commands" class="tab-panel hidden">
+          <div class="card">
+            <div class="card-head">
+              <div>
+                <div class="card-title" data-i18n="cmdRefTitle">Step-Aligned CLI Command Reference</div>
+                <div class="card-desc" data-i18n="cmdRefDesc">Auto-populated with your active CA context URL and Root CA SHA-256 fingerprint.</div>
+              </div>
+            </div>
+            <div class="card-body" id="cliRefContainer"></div>
+          </div>
+        </section>
+      </div>
+    </main>
+  </div>
+
+  <div id="toast" class="toast hidden"></div>
+
+  <script>
+    const I18N = {
+      zh: {
+        brandSub: '对齐 Step CLI · PKI 客户端',
+        activeContext: '当前 CA 上下文',
+        navCerts: '本地托管证书与续签',
+        navContexts: 'CA 上下文与引导',
+        navInspect: 'X.509 解析与链验签',
+        navCrypto: '密钥与 PFX 打包工坊',
+        navCommands: 'Step 对齐命令速查',
+        backToCA: '← 返回 Wimotek CA 控制台',
+        btnHealth: '检测 CA 连通性',
+        statContexts: '已配置 CA 上下文',
+        statActive: '本地有效证书',
+        statDue: '临近续签 (≤15天)',
+        statRevoked: '已吊销',
+        issueTitle: '本地生成密钥并申请托管证书',
+        issueDesc: '私钥仅在客户端本地生成，提交 CSR 到当前 CA 签发并原子落盘，支持后台守护进程自动续签。',
+        lblProfile: '证书模板 (Profile)',
+        lblCN: '通用名 (Common Name)',
+        lblSlug: '本地目录标识 (可选)',
+        lblSANs: 'SAN 域名 / IP (逗号分隔)',
+        lblUPN: 'UPN / 邮箱 (Entra CBA / S/MIME)',
+        lblKeyType: '私钥算法',
+        lblRenewBefore: '自动续签阈值',
+        lblDays: '有效天数 (0 表示使用 CA 默认)',
+        lblAutoRenew: '加入守护进程自动续签队列',
+        btnIssue: '生成私钥并申请签发',
+        managedListTitle: '本地托管证书清单',
+        btnRefresh: '刷新',
+        colSubject: '主体 / 模板',
+        colSerial: '序列号 / 算法',
+        colExpiry: '到期时间与续签',
+        colStatus: '状态',
+        colActions: '操作',
+        bootstrapTitle: '引导并接入新 CA 上下文',
+        bootstrapDesc: '对齐 step ca bootstrap：下载根证书、恒定时间校验 SHA-256 指纹并以 0600 权限安全保存凭证。',
+        lblCtxName: '上下文名称',
+        lblCAURL: 'CA 服务器地址',
+        lblFP: '根证书 SHA-256 指纹 (建议固定防中间人)',
+        lblToken: '签发器令牌 (wca_...) 或会话令牌',
+        lblUser: '或 CA 用户名 (自动解 PoW 登录)',
+        lblPass: 'CA 密码',
+        lblInsecure: '首次引导时允许自签 HTTPS 证书',
+        btnBootstrap: '引导并设为当前上下文',
+        trustTitle: '系统根证书信任导入命令',
+        trustDesc: '复制对应平台命令，或在终端执行 wimotek-cli certificate install 一键导入。',
+        savedContextsTitle: '已保存的 CA 上下文',
+        colCtxName: '上下文',
+        colCAURL: 'CA 地址',
+        colFP: '根证书 SHA-256 指纹',
+        colToken: '已存凭证',
+        inspectInputTitle: '解析 X.509 证书或 CSR',
+        inspectInputDesc: '对齐 step certificate inspect 与 verify，完整解析 msUPN 与文档签名 OID。',
+        lblPastePEM: '证书链或 CSR (PEM)',
+        lblVerifyHost: '可选验签主机名 (DNS)',
+        btnInspect: '解析 PEM',
+        btnVerify: '对照当前根证书验签',
+        inspectResultTitle: 'X.509 结构解析结果',
+        inspectEmpty: '粘贴 PEM 证书或点击托管证书列表中的“解析”按钮。',
+        kpTitle: '密钥对与随机密钥生成',
+        btnGenKey: '生成密钥对',
+        lblRandFmt: '随机格式',
+        lblRandLen: '长度',
+        btnGenRand: '生成随机密钥',
+        pfxTitle: 'Modern2023 PKCS#12 (.pfx) 打包',
+        lblPfxPass: 'PFX 保护密码',
+        lblPfxFile: '输出文件名',
+        btnBuildPfx: '打包并下载 .pfx',
+        selfSignedTitle: '离线自签证书生成器',
+        lblIsCA: '生成为自签根 CA (BasicConstraints CA=true)',
+        btnSelfSigned: '生成离线证书',
+        cmdRefTitle: '对齐 Smallstep (step) 的命令行速查',
+        cmdRefDesc: '已自动填入当前 CA 地址与根证书指纹，点击右上角即可复制。'
+      },
+      en: {
+        brandSub: 'Step-Aligned PKI Client',
+        activeContext: 'Active CA Context',
+        navCerts: 'Managed Certificates',
+        navContexts: 'CA Contexts & Bootstrap',
+        navInspect: 'X.509 Inspector & Verify',
+        navCrypto: 'Crypto & PFX Studio',
+        navCommands: 'Step-Aligned CLI Commands',
+        backToCA: '← Back to Wimotek CA Server',
+        btnHealth: 'Test CA Health',
+        statContexts: 'CA Contexts',
+        statActive: 'Active Local Certs',
+        statDue: 'Due for Renewal (≤15d)',
+        statRevoked: 'Revoked',
+        issueTitle: 'Issue & Track Local Certificate',
+        issueDesc: 'Generates private key locally, submits CSR to active CA, writes atomically to confined certs dir, and enables auto-renewal.',
+        lblProfile: 'Profile / Template',
+        lblCN: 'Common Name (CN)',
+        lblSlug: 'Local File Slug (optional)',
+        lblSANs: 'SANs (comma-separated DNS / IP)',
+        lblUPN: 'UPN / Email (Entra CBA / S/MIME)',
+        lblKeyType: 'Key Algorithm',
+        lblRenewBefore: 'Auto-Renew Threshold',
+        lblDays: 'Validity Days (0 = CA default)',
+        lblAutoRenew: 'Enable daemon auto-renewal',
+        btnIssue: 'Generate Key & Request Certificate',
+        managedListTitle: 'Locally Managed Certificates',
+        btnRefresh: 'Refresh',
+        colSubject: 'Subject / Profile',
+        colSerial: 'Serial / Key',
+        colExpiry: 'Expiry & Renewal',
+        colStatus: 'Status',
+        colActions: 'Actions',
+        bootstrapTitle: 'Bootstrap New CA Context',
+        bootstrapDesc: 'Aligned with step ca bootstrap: fetches Root CA, verifies SHA-256 fingerprint, and stores credentials with 0600 permissions.',
+        lblCtxName: 'Context Name',
+        lblCAURL: 'CA Server URL',
+        lblFP: 'Root CA SHA-256 Fingerprint (recommended)',
+        lblToken: 'Provisioner Token (wca_...) or Session Token',
+        lblUser: 'Or CA Username (auto PoW login)',
+        lblPass: 'CA Password',
+        lblInsecure: 'Allow self-signed HTTPS during initial bootstrap',
+        btnBootstrap: 'Bootstrap & Activate Context',
+        trustTitle: 'OS Root Trust Installation',
+        trustDesc: 'Copy the command for your OS or run wimotek-cli certificate install locally.',
+        savedContextsTitle: 'Saved CA Contexts',
+        colCtxName: 'Context',
+        colCAURL: 'CA URL',
+        colFP: 'Root SHA-256 Fingerprint',
+        colToken: 'Credential',
+        inspectInputTitle: 'Inspect X.509 Certificate or CSR',
+        inspectInputDesc: 'Aligned with step certificate inspect & verify, decoding msUPN and PDF signing OIDs.',
+        lblPastePEM: 'Certificate Chain or CSR PEM',
+        lblVerifyHost: 'Optional Hostname for Verification',
+        btnInspect: 'Inspect PEM',
+        btnVerify: 'Verify Against Active Root CA',
+        inspectResultTitle: 'Decoded X.509 Structure',
+        inspectEmpty: 'Paste a PEM certificate or click Inspect on any managed certificate.',
+        kpTitle: 'Keypair & Secret Generator',
+        btnGenKey: 'Generate Keypair',
+        lblRandFmt: 'Format',
+        lblRandLen: 'Length',
+        btnGenRand: 'Generate Secret',
+        pfxTitle: 'Modern2023 PKCS#12 (.pfx) Packager',
+        lblPfxPass: 'PFX Password',
+        lblPfxFile: 'Output Filename',
+        btnBuildPfx: 'Build & Download .pfx',
+        selfSignedTitle: 'Offline Self-Signed Certificate Builder',
+        lblIsCA: 'Generate as self-signed Root CA (BasicConstraints CA=true)',
+        btnSelfSigned: 'Create Offline Certificate',
+        cmdRefTitle: 'Step-Aligned CLI Command Reference',
+        cmdRefDesc: 'Auto-populated with your active CA URL and Root CA SHA-256 fingerprint.'
+      }
+    };
+
+    const state = {
+      lang: localStorage.getItem('wimotek_cli_lang') || 'zh',
+      password: sessionStorage.getItem('wimotek_cli_pw') || '',
+      tab: 'certs',
+      overview: null
+    };
+
+    function t(key) {
+      return (I18N[state.lang] && I18N[state.lang][key]) || I18N.en[key] || key;
+    }
+
+    function applyLang() {
+      document.documentElement.lang = state.lang === 'zh' ? 'zh-CN' : 'en';
+      document.querySelectorAll('[data-i18n]').forEach(el => {
+        el.textContent = t(el.getAttribute('data-i18n'));
+      });
+      updatePageTitle();
+    }
+
+    function updatePageTitle() {
+      const map = {
+        certs: 'navCerts',
+        contexts: 'navContexts',
+        inspect: 'navInspect',
+        crypto: 'navCrypto',
+        commands: 'navCommands'
+      };
+      document.getElementById('pageTitle').textContent = t(map[state.tab] || 'navCerts');
+    }
+
+    function showToast(msg) {
+      const el = document.getElementById('toast');
+      el.textContent = msg;
+      el.classList.remove('hidden');
+      clearTimeout(showToast._timer);
+      showToast._timer = setTimeout(() => el.classList.add('hidden'), 2400);
+    }
+
+    function showBanner(type, msg) {
+      const el = document.getElementById('banner');
+      el.className = 'alert ' + (type === 'ok' ? 'alert-ok' : type === 'warn' ? 'alert-warn' : 'alert-err');
+      el.textContent = msg;
+      el.classList.remove('hidden');
+    }
+
+    function clearBanner() {
+      document.getElementById('banner').classList.add('hidden');
+    }
+
+    async function api(path, opts = {}) {
+      const headers = Object.assign({ 'Content-Type': 'application/json' }, opts.headers || {});
+      if (state.password) headers['Authorization'] = 'Bearer ' + state.password;
+      const res = await fetch(path, Object.assign({}, opts, { headers }));
+      const ct = res.headers.get('content-type') || '';
+      if (!ct.includes('application/json')) {
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        return res;
+      }
+      const data = await res.json();
+      if (!res.ok) {
+        if (res.status === 401) {
+          document.getElementById('appShell').classList.add('hidden');
+          document.getElementById('authGate').classList.remove('hidden');
+        }
+        throw new Error(data.error || ('HTTP ' + res.status));
+      }
+      return data;
+    }
+
+    async function copyText(text) {
+      try {
+        await navigator.clipboard.writeText(text);
+        showToast(state.lang === 'zh' ? '已复制到剪贴板' : 'Copied to clipboard');
+      } catch {
+        showToast(state.lang === 'zh' ? '复制失败，请手动复制' : 'Copy failed');
+      }
+    }
+
+    function fmtUnix(ts) {
+      if (!ts) return '—';
+      const d = new Date(ts * 1000);
+      return d.toISOString().replace('T', ' ').slice(0, 16) + ' UTC';
+    }
+
+    function daysRemaining(notAfter) {
+      if (!notAfter) return 0;
+      return Math.floor((notAfter - Math.floor(Date.now() / 1000)) / 86400);
+    }
+
+    function makeCmdBlock(label, cmd) {
+      const wrap = document.createElement('div');
+      if (label) {
+        const lbl = document.createElement('div');
+        lbl.style.cssText = 'font-size:12px;font-weight:600;color:var(--text-secondary);margin-bottom:5px;';
+        lbl.textContent = label;
+        wrap.appendChild(lbl);
+      }
+      const box = document.createElement('div');
+      box.className = 'cmd-box';
+      const pre = document.createElement('pre');
+      pre.textContent = cmd;
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'copy-btn';
+      btn.textContent = state.lang === 'zh' ? '复制' : 'Copy';
+      btn.addEventListener('click', () => copyText(cmd));
+      box.appendChild(pre);
+      box.appendChild(btn);
+      wrap.appendChild(box);
+      return wrap;
+    }
+
+    function renderOverview() {
+      const ov = state.overview;
+      if (!ov) return;
+
+      document.getElementById('cliVersionMeta').textContent = 'wimotek-cli ' + (ov.version || 'dev');
+      document.getElementById('statContexts').textContent = String(ov.stats?.contexts ?? 0);
+      document.getElementById('statActive').textContent = String(ov.stats?.active ?? 0);
+      document.getElementById('statDue').textContent = String(ov.stats?.due_soon ?? 0);
+      document.getElementById('statRevoked').textContent = String(ov.stats?.revoked ?? 0);
+      document.getElementById('certsDirMeta').textContent = ov.certs_dir ? ('Storage: ' + ov.certs_dir) : '';
+
+      const sel = document.getElementById('contextSelect');
+      sel.replaceChildren();
+      const contexts = ov.contexts || [];
+      if (contexts.length === 0) {
+        const opt = document.createElement('option');
+        opt.value = '';
+        opt.textContent = state.lang === 'zh' ? '(尚未引导 CA 上下文)' : '(No CA context yet)';
+        sel.appendChild(opt);
+      } else {
+        contexts.forEach(c => {
+          const opt = document.createElement('option');
+          opt.value = c.name;
+          opt.textContent = c.name + ' · ' + c.ca_url;
+          if (c.name === ov.current_context) opt.selected = true;
+          sel.appendChild(opt);
+        });
+      }
+
+      const active = ov.active_context;
+      document.getElementById('activeCAMeta').textContent = active
+        ? (active.name + ' · ' + active.ca_url + ' · SHA256:' + (active.fingerprint || '').slice(0, 16) + '...')
+        : (state.lang === 'zh' ? '尚未配置 CA 上下文，请先在「CA 上下文与引导」中接入 CA' : 'No active CA context configured');
+
+      renderCertsTable(ov.managed_certs || []);
+      renderContextsTable(contexts, ov.current_context);
+      renderTrustCommands(ov.trust_commands || {});
+      renderCLIRef(active);
+    }
+
+    function renderCertsTable(certs) {
+      const tbody = document.getElementById('managedCertsBody');
+      tbody.replaceChildren();
+      if (certs.length === 0) {
+        const tr = document.createElement('tr');
+        const td = document.createElement('td');
+        td.colSpan = 5;
+        td.style.cssText = 'text-align:center;color:var(--text-muted);padding:26px;';
+        td.textContent = state.lang === 'zh'
+          ? '尚无本地托管证书。可在上方表单一键生成私钥并签发，或使用 wimotek-cli ca certificate 命令。'
+          : 'No locally managed certificates yet. Issue one above or run wimotek-cli ca certificate.';
+        tr.appendChild(td);
+        tbody.appendChild(tr);
+        return;
+      }
+
+      certs.forEach(c => {
+        const tr = document.createElement('tr');
+
+        const tdSub = document.createElement('td');
+        const cn = document.createElement('div');
+        cn.style.fontWeight = '600';
+        cn.textContent = c.common_name;
+        const subMeta = document.createElement('div');
+        subMeta.className = 'mono';
+        subMeta.style.cssText = 'font-size:11.5px;color:var(--text-muted);margin-top:2px;';
+        subMeta.textContent = c.profile + ' · ctx:' + c.context + (c.sans && c.sans.length ? (' · ' + c.sans.join(', ')) : '');
+        tdSub.appendChild(cn);
+        tdSub.appendChild(subMeta);
+
+        const tdSer = document.createElement('td');
+        const ser = document.createElement('div');
+        ser.className = 'mono';
+        ser.style.fontSize = '12px';
+        ser.textContent = c.serial_hex || '—';
+        const kp = document.createElement('div');
+        kp.style.cssText = 'font-size:11.5px;color:var(--text-muted);margin-top:2px;';
+        kp.textContent = (c.key_type || 'EC') + ' · ' + (c.name || '');
+        tdSer.appendChild(ser);
+        tdSer.appendChild(kp);
+
+        const tdExp = document.createElement('td');
+        const rem = daysRemaining(c.not_after);
+        const expLine = document.createElement('div');
+        expLine.className = 'tabular';
+        expLine.textContent = fmtUnix(c.not_after) + ' (' + rem + 'd)';
+        const renLine = document.createElement('div');
+        renLine.style.cssText = 'font-size:11.5px;color:var(--text-muted);margin-top:2px;';
+        renLine.textContent = (c.auto_renew ? 'Auto-renew @ ' : 'Manual · ') + (c.renew_before || '33%');
+        tdExp.appendChild(expLine);
+        tdExp.appendChild(renLine);
+
+        const tdSt = document.createElement('td');
+        const stSpan = document.createElement('span');
+        stSpan.className = 'status-dot';
+        const dot = document.createElement('span');
+        const isRev = c.status === 'revoked';
+        const isSoon = !isRev && rem <= 15;
+        dot.className = 'dot ' + (isRev ? 'dot-danger' : isSoon ? 'dot-warn' : 'dot-ok');
+        const txt = document.createElement('span');
+        txt.textContent = isRev ? 'Revoked' : isSoon ? 'Renew Soon' : 'Active';
+        stSpan.appendChild(dot);
+        stSpan.appendChild(txt);
+        tdSt.appendChild(stSpan);
+
+        const tdAct = document.createElement('td');
+        const acts = document.createElement('div');
+        acts.className = 'row-actions';
+
+        const mkBtn = (label, cls, fn) => {
+          const b = document.createElement('button');
+          b.type = 'button';
+          b.className = 'btn btn-sm ' + (cls || '');
+          b.textContent = label;
+          b.addEventListener('click', fn);
+          return b;
+        };
+
+        acts.appendChild(mkBtn(state.lang === 'zh' ? '解析' : 'Inspect', '', () => inspectManagedCert(c.id)));
+        acts.appendChild(mkBtn(state.lang === 'zh' ? '立即续签' : 'Renew', '', () => renewManagedCert(c.id)));
+        acts.appendChild(mkBtn('.crt', '', () => downloadCert(c.id, 'crt')));
+        acts.appendChild(mkBtn('.pfx', '', () => downloadCert(c.id, 'pfx')));
+        if (!isRev) {
+          acts.appendChild(mkBtn(state.lang === 'zh' ? '吊销' : 'Revoke', 'btn-danger', () => revokeManagedCert(c.id, c.common_name)));
+        }
+        tdAct.appendChild(acts);
+
+        tr.append(tdSub, tdSer, tdExp, tdSt, tdAct);
+        tbody.appendChild(tr);
+      });
+    }
+
+    function renderContextsTable(contexts, currentName) {
+      const tbody = document.getElementById('contextsBody');
+      tbody.replaceChildren();
+      if (contexts.length === 0) {
+        const tr = document.createElement('tr');
+        const td = document.createElement('td');
+        td.colSpan = 5;
+        td.style.cssText = 'text-align:center;color:var(--text-muted);padding:20px;';
+        td.textContent = state.lang === 'zh' ? '暂无已保存上下文' : 'No saved contexts';
+        tr.appendChild(td);
+        tbody.appendChild(tr);
+        return;
+      }
+      contexts.forEach(c => {
+        const tr = document.createElement('tr');
+        const tdName = document.createElement('td');
+        tdName.style.fontWeight = '600';
+        tdName.textContent = c.name + (c.name === currentName ? ' ★' : '');
+
+        const tdUrl = document.createElement('td');
+        tdUrl.className = 'mono';
+        tdUrl.textContent = c.ca_url;
+
+        const tdFp = document.createElement('td');
+        tdFp.className = 'mono';
+        tdFp.style.fontSize = '11.5px';
+        tdFp.textContent = c.fingerprint || '—';
+
+        const tdTok = document.createElement('td');
+        tdTok.className = 'mono';
+        tdTok.textContent = c.token_masked || '—';
+
+        const tdAct = document.createElement('td');
+        const row = document.createElement('div');
+        row.className = 'row-actions';
+        if (c.name !== currentName) {
+          const useBtn = document.createElement('button');
+          useBtn.className = 'btn btn-sm';
+          useBtn.textContent = state.lang === 'zh' ? '设为当前' : 'Select';
+          useBtn.addEventListener('click', async () => {
+            try {
+              await api('/cli/api/contexts/select', { method: 'POST', body: JSON.stringify({ name: c.name }) });
+              await loadOverview();
+              showToast('Context switched to ' + c.name);
+            } catch (e) { showBanner('err', e.message); }
+          });
+          row.appendChild(useBtn);
+        }
+        const cpBtn = document.createElement('button');
+        cpBtn.className = 'btn btn-sm';
+        cpBtn.textContent = state.lang === 'zh' ? '复制指纹' : 'Copy FP';
+        cpBtn.addEventListener('click', () => copyText(c.fingerprint || ''));
+        row.appendChild(cpBtn);
+
+        const delBtn = document.createElement('button');
+        delBtn.className = 'btn btn-sm btn-danger';
+        delBtn.textContent = state.lang === 'zh' ? '删除' : 'Remove';
+        delBtn.addEventListener('click', async () => {
+          try {
+            await api('/cli/api/contexts/' + encodeURIComponent(c.name), { method: 'DELETE' });
+            await loadOverview();
+            showToast('Removed context ' + c.name);
+          } catch (e) { showBanner('err', e.message); }
+        });
+        row.appendChild(delBtn);
+
+        tdAct.appendChild(row);
+        tr.append(tdName, tdUrl, tdFp, tdTok, tdAct);
+        tbody.appendChild(tr);
+      });
+    }
+
+    function renderTrustCommands(cmds) {
+      const box = document.getElementById('trustCmdsContainer');
+      box.replaceChildren();
+      const entries = [
+        ['Linux (Debian / Ubuntu / Alpine)', cmds.linux || 'sudo cp ~/.wimotek/contexts/default/root_ca.crt /usr/local/share/ca-certificates/wimotek-root.crt\nsudo update-ca-certificates'],
+        ['macOS (System Keychain)', cmds.macos || 'sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain ~/.wimotek/contexts/default/root_ca.crt'],
+        ['Windows (PowerShell Admin)', cmds.windows || 'certutil -addstore -f "ROOT" "$env:USERPROFILE\\.wimotek\\contexts\\default\\root_ca.crt"']
+      ];
+      entries.forEach(([lbl, cmd]) => box.appendChild(makeCmdBlock(lbl, cmd)));
+    }
+
+    function renderCLIRef(active) {
+      const url = (active && active.ca_url) || 'https://ca.company.internal:8443';
+      const fp = (active && active.fingerprint) || '<ROOT_SHA256_FINGERPRINT>';
+      const box = document.getElementById('cliRefContainer');
+      box.replaceChildren();
+      const items = [
+        ['1. Bootstrap CA Context & Trust Root (aligned with `step ca bootstrap`)',
+          `wimotek-cli ca bootstrap --ca-url ${url} --fingerprint ${fp} --install`],
+        ['2. Authenticate & Save Token (auto-solves offline PoW or stores wca_ provisioner token)',
+          `wimotek-cli ca token --username admin\n# Or save a Provisioner token:\nwimotek-cli ca bootstrap --ca-url ${url} --fingerprint ${fp} --token wca_your_token`],
+        ['3. Request a TLS Server Certificate Locally (aligned with `step ca certificate`)',
+          `wimotek-cli ca certificate app.corp.internal app.crt app.key --profile tls_server --san app.corp.internal --san 10.0.1.25`],
+        ['4. Automated Renewal Daemon (aligned with `step ca renew --daemon`)',
+          `wimotek-cli ca renew app.crt app.key --daemon --expires-in 33%`],
+        ['5. Inspect, Verify & Convert X.509 Certificates (aligned with `step certificate`)',
+          `wimotek-cli certificate inspect app.crt\nwimotek-cli certificate verify app.crt --server-name app.corp.internal\nwimotek-cli certificate needs-renewal app.crt --expires-in 33%\nwimotek-cli certificate p12 app.pfx app.crt app.key --password "changeit"`],
+        ['6. Launch Embedded Web Management Console + Background Auto-Renewer',
+          `wimotek-cli web --listen 127.0.0.1:9443 --auto-renew-interval 15m`]
+      ];
+      items.forEach(([title, cmd]) => box.appendChild(makeCmdBlock(title, cmd)));
+    }
+
+    function renderInspection(info) {
+      const box = document.getElementById('inspectResultBox');
+      box.replaceChildren();
+      const kv = document.createElement('div');
+      kv.className = 'kv-list';
+      const rows = [
+        ['Type', (info.kind || 'certificate').toUpperCase() + (info.is_ca ? ' (CA)' : ' (Leaf)')],
+        ['Subject DN', info.subject_dn || '—'],
+        ['Issuer DN', info.issuer_dn || '—'],
+        ['Serial (Hex)', info.serial_colon || info.serial_hex || '—'],
+        ['SHA-256 Fingerprint', info.fingerprint_sha256 || '—'],
+        ['Public Key / Sig', (info.public_key_algorithm || '—') + ' / ' + (info.signature_algorithm || '—')],
+        ['Validity (UTC)', info.not_before_utc ? (info.not_before_utc + ' → ' + info.not_after_utc) : '—'],
+        ['Remaining / Used', info.kind === 'certificate' ? (info.remaining_days + ' days (' + info.lifetime_used_pct + '% used · needs renewal: ' + info.needs_renewal + ')') : '—'],
+        ['DNS SANs', (info.dns_names && info.dns_names.length) ? info.dns_names.join(', ') : '—'],
+        ['IP SANs', (info.ip_addresses && info.ip_addresses.length) ? info.ip_addresses.join(', ') : '—'],
+        ['Email / UPN', [info.upn ? ('msUPN: ' + info.upn) : '', ...(info.email_addresses || [])].filter(Boolean).join(', ') || '—'],
+        ['Key Usage', (info.key_usages && info.key_usages.length) ? info.key_usages.join(', ') : '—'],
+        ['Extended Key Usage', (info.ext_key_usages && info.ext_key_usages.length) ? info.ext_key_usages.join(', ') : '—'],
+        ['CRL Dist Points', (info.crl_distribution_points && info.crl_distribution_points.length) ? info.crl_distribution_points.join(', ') : '—']
+      ];
+      rows.forEach(([k, v]) => {
+        const dk = document.createElement('div');
+        dk.className = 'kv-k';
+        dk.textContent = k;
+        const dv = document.createElement('div');
+        dv.className = 'kv-v mono';
+        dv.style.fontSize = '12.5px';
+        dv.textContent = v;
+        kv.append(dk, dv);
+      });
+      box.appendChild(kv);
+
+      if (info.kind === 'certificate') {
+        const bar = document.createElement('div');
+        bar.className = 'progress-bar';
+        const fill = document.createElement('div');
+        fill.className = 'progress-fill';
+        fill.style.width = Math.min(100, Math.max(0, info.lifetime_used_pct || 0)) + '%';
+        bar.appendChild(fill);
+        box.appendChild(bar);
+      }
+    }
+
+    async function inspectManagedCert(id) {
+      try {
+        const res = await api('/cli/api/inspect', { method: 'POST', body: JSON.stringify({ cert_id: id }) });
+        document.getElementById('inspectPemInput').value = res.pem || '';
+        renderInspection(res.inspection);
+        document.getElementById('verifyResultBox').classList.add('hidden');
+        switchTab('inspect');
+      } catch (e) { showBanner('err', e.message); }
+    }
+
+    async function renewManagedCert(id) {
+      clearBanner();
+      try {
+        const res = await api('/cli/api/certs/' + encodeURIComponent(id) + '/renew', {
+          method: 'POST',
+          body: JSON.stringify({ force: true })
+        });
+        await loadOverview();
+        showBanner('ok', (state.lang === 'zh' ? '证书续签成功，新序列号：' : 'Renewed certificate, new serial: ') + res.certificate.serial_hex);
+      } catch (e) { showBanner('err', e.message); }
+    }
+
+    async function revokeManagedCert(id, cn) {
+      clearBanner();
+      try {
+        await api('/cli/api/certs/' + encodeURIComponent(id) + '/revoke', {
+          method: 'POST',
+          body: JSON.stringify({ reason: 0 })
+        });
+        await loadOverview();
+        showBanner('warn', (state.lang === 'zh' ? '已向 CA 吊销证书：' : 'Revoked certificate on CA: ') + cn);
+      } catch (e) { showBanner('err', e.message); }
+    }
+
+    async function downloadCert(id, format) {
+      try {
+        const res = await api('/cli/api/certs/' + encodeURIComponent(id) + '/download?format=' + encodeURIComponent(format));
+        const blob = await res.blob();
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = id + '.' + format;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        URL.revokeObjectURL(url);
+      } catch (e) { showBanner('err', e.message); }
+    }
+
+    function switchTab(tab) {
+      state.tab = tab;
+      document.querySelectorAll('.nav-btn').forEach(b => b.classList.toggle('active', b.getAttribute('data-tab') === tab));
+      document.querySelectorAll('.tab-panel').forEach(p => p.classList.toggle('hidden', p.id !== 'tab-' + tab));
+      updatePageTitle();
+    }
+
+    async function loadOverview() {
+      const ov = await api('/cli/api/overview');
+      state.overview = ov;
+      renderOverview();
+    }
+
+    // Event bindings
+    document.querySelectorAll('.nav-btn').forEach(btn => {
+      btn.addEventListener('click', () => switchTab(btn.getAttribute('data-tab')));
+    });
+
+    document.getElementById('langToggleBtn').addEventListener('click', () => {
+      state.lang = state.lang === 'zh' ? 'en' : 'zh';
+      localStorage.setItem('wimotek_cli_lang', state.lang);
+      applyLang();
+      renderOverview();
+    });
+
+    document.getElementById('contextSelect').addEventListener('change', async (e) => {
+      if (!e.target.value) return;
+      try {
+        await api('/cli/api/contexts/select', { method: 'POST', body: JSON.stringify({ name: e.target.value }) });
+        await loadOverview();
+        showToast('Active context: ' + e.target.value);
+      } catch (err) { showBanner('err', err.message); }
+    });
+
+    document.getElementById('healthCheckBtn').addEventListener('click', async () => {
+      clearBanner();
+      try {
+        const res = await api('/cli/api/contexts/health', { method: 'POST', body: JSON.stringify({}) });
+        showBanner('ok', `CA ${res.context} (${res.ca_url}) healthy · ${res.latency_ms} ms`);
+      } catch (err) { showBanner('err', err.message); }
+    });
+
+    document.getElementById('refreshCertsBtn').addEventListener('click', () => loadOverview().catch(e => showBanner('err', e.message)));
+
+    document.getElementById('issueForm').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      clearBanner();
+      const ktVal = document.getElementById('issueKeyType').value;
+      let key_type = 'EC', curve = 'P-256', rsa_bits = 2048;
+      if (ktVal === 'EC384') { key_type = 'EC'; curve = 'P-384'; }
+      else if (ktVal === 'OKP') { key_type = 'OKP'; }
+      else if (ktVal === 'RSA2048') { key_type = 'RSA'; rsa_bits = 2048; }
+      else if (ktVal === 'RSA4096') { key_type = 'RSA'; rsa_bits = 4096; }
+
+      const sans = document.getElementById('issueSANs').value.split(',').map(s => s.trim()).filter(Boolean);
+      const upnVal = document.getElementById('issueUPN').value.trim();
+      try {
+        const res = await api('/cli/api/certs/issue', {
+          method: 'POST',
+          body: JSON.stringify({
+            name: document.getElementById('issueName').value.trim(),
+            profile: document.getElementById('issueProfile').value,
+            common_name: document.getElementById('issueCN').value.trim(),
+            sans,
+            upn: upnVal,
+            email: upnVal.includes('@') ? upnVal : '',
+            key_type,
+            curve,
+            rsa_bits,
+            validity_days: Number(document.getElementById('issueDays').value) || 0,
+            renew_before: document.getElementById('issueRenewBefore').value.trim() || '33%',
+            auto_renew: document.getElementById('issueAutoRenew').checked
+          })
+        });
+        document.getElementById('issueCN').value = '';
+        document.getElementById('issueName').value = '';
+        document.getElementById('issueSANs').value = '';
+        await loadOverview();
+        showBanner('ok', (state.lang === 'zh' ? '证书已签发并安全保存：' : 'Issued & saved locally: ') + res.certificate.common_name + ' (' + res.certificate.serial_hex + ')');
+      } catch (err) { showBanner('err', err.message); }
+    });
+
+    document.getElementById('bootstrapForm').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      clearBanner();
+      try {
+        const res = await api('/cli/api/contexts/bootstrap', {
+          method: 'POST',
+          body: JSON.stringify({
+            name: document.getElementById('bsName').value.trim() || 'default',
+            ca_url: document.getElementById('bsURL').value.trim(),
+            fingerprint: document.getElementById('bsFP').value.trim(),
+            token: document.getElementById('bsToken').value.trim(),
+            username: document.getElementById('bsUser').value.trim(),
+            password: document.getElementById('bsPass').value,
+            insecure_skip_verify: document.getElementById('bsInsecure').checked,
+            set_current: true
+          })
+        });
+        document.getElementById('bsToken').value = '';
+        document.getElementById('bsPass').value = '';
+        await loadOverview();
+        showBanner('ok', `Context "${res.context.name}" bootstrapped · Root SHA-256: ${res.fingerprint}`);
+      } catch (err) { showBanner('err', err.message); }
+    });
+
+    document.getElementById('runInspectBtn').addEventListener('click', async () => {
+      clearBanner();
+      try {
+        const res = await api('/cli/api/inspect', {
+          method: 'POST',
+          body: JSON.stringify({ pem: document.getElementById('inspectPemInput').value })
+        });
+        renderInspection(res.inspection);
+      } catch (err) { showBanner('err', err.message); }
+    });
+
+    document.getElementById('runVerifyBtn').addEventListener('click', async () => {
+      clearBanner();
+      try {
+        const res = await api('/cli/api/verify', {
+          method: 'POST',
+          body: JSON.stringify({
+            cert_pem: document.getElementById('inspectPemInput').value,
+            server_name: document.getElementById('verifyServerName').value.trim()
+          })
+        });
+        const vb = document.getElementById('verifyResultBox');
+        vb.classList.remove('hidden');
+        if (res.valid) {
+          vb.className = 'alert alert-ok';
+          vb.textContent = 'VALID CHAIN · ' + (res.chain_subjects || []).join(' → ');
+        } else {
+          vb.className = 'alert alert-err';
+          vb.textContent = 'VERIFICATION FAILED · ' + (res.error || 'unknown error');
+        }
+      } catch (err) { showBanner('err', err.message); }
+    });
+
+    document.getElementById('genKeypairBtn').addEventListener('click', async () => {
+      const val = document.getElementById('kpAlgo').value;
+      let key_type = 'EC', curve = 'P-256', rsa_bits = 2048;
+      if (val === 'EC384') { key_type = 'EC'; curve = 'P-384'; }
+      else if (val === 'OKP') { key_type = 'OKP'; }
+      else if (val === 'RSA2048') { key_type = 'RSA'; rsa_bits = 2048; }
+      else if (val === 'RSA4096') { key_type = 'RSA'; rsa_bits = 4096; }
+      try {
+        const res = await api('/cli/api/crypto/keypair', { method: 'POST', body: JSON.stringify({ key_type, curve, rsa_bits }) });
+        document.getElementById('kpPubOut').value = res.public_pem;
+        document.getElementById('kpPrivOut').value = res.private_pem;
+        document.getElementById('kpOutput').classList.remove('hidden');
+      } catch (err) { showBanner('err', err.message); }
+    });
+
+    document.getElementById('genRandBtn').addEventListener('click', async () => {
+      try {
+        const res = await api('/cli/api/crypto/rand', {
+          method: 'POST',
+          body: JSON.stringify({
+            format: document.getElementById('randFmt').value,
+            length: Number(document.getElementById('randLen').value) || 32
+          })
+        });
+        document.getElementById('randOut').textContent = res.value;
+        document.getElementById('randOutWrap').classList.remove('hidden');
+      } catch (err) { showBanner('err', err.message); }
+    });
+
+    document.querySelector('[data-copy-target="randOut"]').addEventListener('click', () => {
+      copyText(document.getElementById('randOut').textContent);
+    });
+
+    document.getElementById('pfxForm').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      clearBanner();
+      try {
+        const res = await api('/cli/api/crypto/pfx', {
+          method: 'POST',
+          body: JSON.stringify({
+            cert_pem: document.getElementById('pfxCert').value,
+            key_pem: document.getElementById('pfxKey').value,
+            password: document.getElementById('pfxPass').value,
+            filename: document.getElementById('pfxFile').value.trim() || 'bundle'
+          })
+        });
+        const blob = await res.blob();
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = (document.getElementById('pfxFile').value.trim() || 'bundle') + '.pfx';
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        URL.revokeObjectURL(url);
+        showToast('Downloaded Modern2023 .pfx bundle');
+      } catch (err) { showBanner('err', err.message); }
+    });
+
+    document.getElementById('selfSignedForm').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      clearBanner();
+      try {
+        const res = await api('/cli/api/crypto/self-signed', {
+          method: 'POST',
+          body: JSON.stringify({
+            common_name: document.getElementById('ssCN').value.trim(),
+            sans: document.getElementById('ssSANs').value.split(',').map(s => s.trim()).filter(Boolean),
+            validity_days: Number(document.getElementById('ssDays').value) || 365,
+            is_ca: document.getElementById('ssIsCA').checked,
+            key_type: 'EC'
+          })
+        });
+        document.getElementById('ssCertOut').value = res.cert_pem;
+        document.getElementById('ssKeyOut').value = res.private_pem;
+        document.getElementById('ssOutput').classList.remove('hidden');
+        showToast('Created self-signed certificate');
+      } catch (err) { showBanner('err', err.message); }
+    });
+
+    document.getElementById('authUnlockBtn').addEventListener('click', async () => {
+      state.password = document.getElementById('webPassInput').value;
+      sessionStorage.setItem('wimotek_cli_pw', state.password);
+      try {
+        await loadOverview();
+        document.getElementById('authGate').classList.add('hidden');
+        document.getElementById('appShell').classList.remove('hidden');
+      } catch (err) {
+        const ae = document.getElementById('authErr');
+        ae.textContent = err.message;
+        ae.classList.remove('hidden');
+      }
+    });
+
+    async function init() {
+      applyLang();
+      try {
+        const st = await (await fetch('/cli/api/auth/status')).json();
+        if (st.preview_mode) {
+          document.getElementById('previewBackLink').classList.remove('hidden');
+        }
+        if (st.password_required && !state.password) {
+          document.getElementById('appShell').classList.add('hidden');
+          document.getElementById('authGate').classList.remove('hidden');
+          return;
+        }
+        await loadOverview();
+      } catch (err) {
+        showBanner('err', err.message);
+      }
+    }
+    init();
+  </script>
+</body>
+</html>
