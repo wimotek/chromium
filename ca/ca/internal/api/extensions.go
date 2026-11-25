@@ -242,11 +242,11 @@ func (s *Server) handleCreateToken(w http.ResponseWriter, r *http.Request, sess 
 		Enabled:             true,
 		CreatedAt:           time.Now().Unix(),
 	}
-	if err := s.store.CreateProvisioner(r.Context(), rec); err != nil {
+	if err := s.store.InsertProvisioner(r.Context(), rec); err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	_ = s.store.RecordAudit(r.Context(), store.AuditRecord{
+	_ = s.store.AppendAudit(r.Context(), store.AuditRecord{
 		ID:         store.GenerateRandomID(8),
 		Actor:      sess.Username,
 		Action:     "token.create",

@@ -171,7 +171,7 @@ func (s *Server) handleAuthStatus(w http.ResponseWriter, r *http.Request) {
 		"org_name":        orgName,
 		"base_url":        s.base,
 		"languages":       i18n.SupportedLanguages,
-		"oauth_providers": s.oauthProvidersMeta(),
+		"oauth_providers": s.oauthProvidersMeta(r.Context()),
 	})
 }
 

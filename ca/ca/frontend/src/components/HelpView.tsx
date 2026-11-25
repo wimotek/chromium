@@ -106,9 +106,10 @@ resp = requests.post(
 print(resp.json())`;
 
   const oauthEnvBlock = `# Primary Unified SSO / IdP Gateway: wimotek/OAuth (PKCE S256)
-WIMOTEK_OAUTH_ISSUER=https://ais-dev-mjxg7khj3qsigvnmjpozen-587929382584.asia-northeast1.run.app
-WIMOTEK_OAUTH_CLIENT_ID=wimotek_erp_portal
-WIMOTEK_OAUTH_CLIENT_SECRET=your-wimotek-oauth-client-secret
+# Example only — you can also edit these directly in Admin UI -> My Profile
+WIMOTEK_OAUTH_ISSUER=https://oauth.example.com
+WIMOTEK_OAUTH_CLIENT_ID=your_oauth_client_id
+WIMOTEK_OAUTH_CLIENT_SECRET=your_oauth_client_secret
 WIMOTEK_OAUTH_SCOPES="openid profile email"
 
 # Optional Direct IdPs (only needed if bypassing wimotek/OAuth)

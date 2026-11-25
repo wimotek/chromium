@@ -265,6 +265,21 @@ export interface OAuthProviderInfo {
   issuer?: string;
 }
 
+export interface OAuthGatewayConfig {
+  issuer: string;
+  client_id: string;
+  has_client_secret: boolean;
+  client_secret_masked: string;
+  scopes: string;
+  authorization_endpoint: string;
+  token_endpoint: string;
+  userinfo_endpoint: string;
+  callback_url: string;
+  alias_callback_url: string;
+  configured: boolean;
+  source: 'database' | 'env' | 'unconfigured';
+}
+
 export interface SetupWizardPayload {
   username: string;
   password: string;
@@ -506,6 +521,29 @@ class ApiClient {
     return this.request<{ unlinked: boolean; user: UserProfile }>(
       `/api/profile/social/${encodeURIComponent(provider)}`,
       { method: 'DELETE' }
+    );
+  }
+
+  getOAuthGatewayConfig() {
+    return this.request<{ gateway: OAuthGatewayConfig }>('/api/admin/oauth/gateway');
+  }
+
+  saveOAuthGatewayConfig(payload: {
+    issuer: string;
+    client_id: string;
+    client_secret?: string;
+    clear_secret?: boolean;
+    scopes?: string;
+    authorization_endpoint?: string;
+    token_endpoint?: string;
+    userinfo_endpoint?: string;
+  }) {
+    return this.request<{ gateway: OAuthGatewayConfig; providers?: OAuthProviderInfo[] }>(
+      '/api/admin/oauth/gateway',
+      {
+        method: 'PUT',
+        body: JSON.stringify(payload),
+      }
     );
   }
 

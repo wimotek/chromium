@@ -14,6 +14,9 @@ import {
   Mail,
   ChevronDown,
   ChevronUp,
+  Layers,
+  Webhook,
+  Info,
 } from 'lucide-react';
 import {
   api,
@@ -145,7 +148,13 @@ export const AuthGate: React.FC<AuthGateProps> = ({
         if (!active) return;
         setNeedsSetup(st.needs_setup);
         setPreviewMode(Boolean(st.preview_mode));
-        if (st.oauth_providers) setOauthProviders(st.oauth_providers);
+        if (st.oauth_providers) {
+          setOauthProviders(st.oauth_providers);
+          const wMeta = st.oauth_providers.find((p) => p.provider === 'wimotek');
+          if (!st.preview_mode && !wMeta?.configured) {
+            setShowLocalAuth(true);
+          }
+        }
         if (st.org_name) setOrgName(st.org_name);
         if (st.base_url) setBaseUrl(st.base_url);
         else if (typeof window !== 'undefined') setBaseUrl(window.location.origin);
@@ -496,90 +505,125 @@ export const AuthGate: React.FC<AuthGateProps> = ({
   };
 
   return (
-    <div className="min-h-screen bg-[#F8FAFC] flex flex-col lg:flex-row">
-      {/* Structural Left / Start Architectural Column */}
-      <aside className="lg:w-[42%] bg-[#0F172A] text-slate-100 p-8 lg:p-14 flex flex-col justify-between border-e border-slate-800">
-        <div className="flex items-center justify-between gap-4">
-          <div className="flex items-center gap-3">
-            <ShieldCheck className="w-6 h-6 text-teal-400 shrink-0" aria-hidden="true" />
-            <span className="font-display text-lg font-bold tracking-tight text-white whitespace-nowrap">
+    <div className="min-h-screen bg-[#F1F5F9] text-slate-900 flex flex-col">
+      {/* Unified Minimal Top Bar */}
+      <header className="w-full max-w-[1040px] mx-auto px-5 sm:px-8 pt-6 pb-2 flex items-center justify-between gap-4">
+        <div className="flex items-center gap-2.5 min-w-0">
+          <img
+            src="/favicon.svg"
+            alt=""
+            aria-hidden="true"
+            className="w-7 h-7 rounded-md shrink-0"
+          />
+          <div className="flex items-baseline gap-2 min-w-0">
+            <span className="font-display text-base font-bold tracking-tight text-slate-900 whitespace-nowrap">
               {t.app.name}
             </span>
-          </div>
-
-          <div className="flex items-center gap-2">
-            <Globe className="w-4 h-4 text-slate-400 shrink-0" aria-hidden="true" />
-            <label htmlFor="auth-lang" className="sr-only">
-              Language
-            </label>
-            <select
-              id="auth-lang"
-              value={locale}
-              onChange={(e) => onLocaleChange(e.target.value as LocaleCode)}
-              className="bg-slate-800 text-slate-100 text-xs font-medium rounded-md px-2.5 py-1.5 border border-slate-700 focus:outline-none focus:border-teal-500"
-            >
-              {LOCALE_OPTIONS.map((opt) => (
-                <option key={opt.code} value={opt.code}>
-                  {opt.label}
-                </option>
-              ))}
-            </select>
+            <span className="hidden sm:inline text-xs text-slate-500 font-medium truncate">
+              Enterprise PKI Console
+            </span>
           </div>
         </div>
 
-        <div className="my-10 lg:my-0 space-y-6 max-w-lg">
-          <h1 className="font-display text-3xl lg:text-4xl font-bold tracking-tight text-white leading-tight wrap-anywhere">
-            {t.app.tagline}
-          </h1>
-          <p className="text-slate-300 text-sm lg:text-base leading-relaxed wrap-anywhere">
-            {t.app.subtitle}
-          </p>
-
-          <div className="pt-6 border-t border-slate-800 grid grid-cols-1 sm:grid-cols-2 gap-6 text-xs text-slate-300">
-            <div className="space-y-1">
-              <div className="font-semibold text-white">8 Enterprise Templates</div>
-              <p className="text-slate-400 leading-relaxed wrap-anywhere">
-                Entra ID CBA, PDF Signing, TLS Server, mTLS Client, Code Signing, S/MIME, Wi-Fi EAP, and IoT.
-              </p>
-            </div>
-            <div className="space-y-1">
-              <div className="font-semibold text-white">Tiered Users & Quotas</div>
-              <p className="text-slate-400 leading-relaxed wrap-anywhere">
-                Role-based active certificate quotas with personal X.509 profile auto-fill on issuance.
-              </p>
-            </div>
-            <div className="space-y-1">
-              <div className="font-semibold text-white">Expiry Alerts</div>
-              <p className="text-slate-400 leading-relaxed wrap-anywhere">
-                Automated reminders via Email, ServerChan, Telegram, or Webhooks with deduplication.
-              </p>
-            </div>
-            <div className="space-y-1">
-              <div className="font-semibold text-white">Zero-Config Resilience</div>
-              <p className="text-slate-400 leading-relaxed wrap-anywhere">
-                SQLite WAL Read/Write split, atomic WithTx retries, HybridCache fallback, and CRL double-delete.
-              </p>
-            </div>
-          </div>
+        <div className="flex items-center gap-2 shrink-0">
+          <Globe className="w-4 h-4 text-slate-400 shrink-0" aria-hidden="true" />
+          <label htmlFor="auth-lang" className="sr-only">
+            Language
+          </label>
+          <select
+            id="auth-lang"
+            value={locale}
+            onChange={(e) => onLocaleChange(e.target.value as LocaleCode)}
+            className="bg-white text-slate-700 text-xs font-medium rounded-lg px-2.5 py-1.5 border border-slate-200 hover:border-slate-300 focus:outline-none focus:border-teal-600 cursor-pointer"
+          >
+            {LOCALE_OPTIONS.map((opt) => (
+              <option key={opt.code} value={opt.code}>
+                {opt.label}
+              </option>
+            ))}
+          </select>
         </div>
+      </header>
 
-        <div className="text-xs text-slate-400 flex flex-wrap items-center gap-x-2 gap-y-1">
-          <span>Go 1.24 · CGO_ENABLED=0</span>
-          <span aria-hidden="true">·</span>
-          <span>RFC 5280 / RFC 6960 / RFC 9336</span>
-        </div>
-      </aside>
+      {/* Cohesive Centered Architectural Console Sheet */}
+      <main className="flex-1 flex items-center justify-center px-4 sm:px-8 py-6 lg:py-10">
+        <div
+          className={`w-full ${
+            needsSetup ? 'max-w-[1020px]' : 'max-w-[940px]'
+          } bg-white border border-slate-200/90 rounded-2xl shadow-[0_1px_3px_rgba(15,23,42,0.04),0_12px_32px_-12px_rgba(15,23,42,0.08)] overflow-hidden grid grid-cols-1 lg:grid-cols-12`}
+        >
+          {/* Harmonized Light-Slate Left / Start Architectural Summary */}
+          <aside className="lg:col-span-5 bg-[#F8FAFC] border-b lg:border-b-0 lg:border-e border-slate-200/80 p-7 sm:p-9 lg:p-10 flex flex-col justify-between gap-8">
+            <div className="space-y-6">
+              <div className="space-y-2.5">
+                <div className="inline-flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider text-teal-700">
+                  <ShieldCheck className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
+                  <span>Two-Tier ECDSA P-256 CA</span>
+                </div>
+                <h1 className="font-display text-2xl lg:text-[26px] font-bold tracking-tight text-slate-900 leading-[1.22] text-balance">
+                  {t.app.tagline}
+                </h1>
+                <p className="text-sm text-slate-600 leading-relaxed">
+                  {t.app.subtitle}
+                </p>
+              </div>
 
-      {/* Main Wizard / Authentication Column */}
-      <main className="flex-1 flex items-center justify-center p-6 sm:p-10 lg:p-12">
-        <div className={`w-full ${needsSetup ? 'max-w-xl' : 'max-w-md'} bg-white border border-slate-200 rounded-xl p-7 sm:p-8 space-y-6`}>
-          {loadingStatus ? (
-            <div className="space-y-4 py-6" aria-busy="true">
-              <div className="h-6 w-2/3 bg-slate-100 rounded animate-pulse" />
-              <div className="h-4 w-full bg-slate-100 rounded animate-pulse" />
-              <div className="h-10 w-full bg-slate-100 rounded animate-pulse" />
-              <div className="h-10 w-full bg-slate-100 rounded animate-pulse" />
+              <div className="pt-5 border-t border-slate-200/80 space-y-4">
+                <div className="flex items-start gap-3">
+                  <div className="w-8 h-8 rounded-lg bg-white border border-slate-200 text-teal-700 flex items-center justify-center shrink-0 mt-0.5">
+                    <Layers className="w-4 h-4" aria-hidden="true" />
+                  </div>
+                  <div className="space-y-0.5 min-w-0">
+                    <div className="text-xs font-semibold text-slate-900">8 Enterprise Templates</div>
+                    <p className="text-xs text-slate-500 leading-relaxed">
+                      TLS Server, PDF Signing, Entra ID CBA, Code Signing, S/MIME, Wi-Fi EAP &amp; IoT.
+                    </p>
+                  </div>
+                </div>
+
+                <div className="flex items-start gap-3">
+                  <div className="w-8 h-8 rounded-lg bg-white border border-slate-200 text-teal-700 flex items-center justify-center shrink-0 mt-0.5">
+                    <KeyRound className="w-4 h-4" aria-hidden="true" />
+                  </div>
+                  <div className="space-y-0.5 min-w-0">
+                    <div className="text-xs font-semibold text-slate-900">Scoped Tokens, Vault &amp; MCP</div>
+                    <p className="text-xs text-slate-500 leading-relaxed">
+                      Role-based active quotas, OpenBao/Vault PKI routes, ACME discovery, and MCP agent server.
+                    </p>
+                  </div>
+                </div>
+
+                <div className="flex items-start gap-3">
+                  <div className="w-8 h-8 rounded-lg bg-white border border-slate-200 text-teal-700 flex items-center justify-center shrink-0 mt-0.5">
+                    <Webhook className="w-4 h-4" aria-hidden="true" />
+                  </div>
+                  <div className="space-y-0.5 min-w-0">
+                    <div className="text-xs font-semibold text-slate-900">Expiry Alerts &amp; Webhook Relay</div>
+                    <p className="text-xs text-slate-500 leading-relaxed">
+                      Automated reminders &amp; personal ServerChan-compatible webhook forwarding.
+                    </p>
+                  </div>
+                </div>
+              </div>
             </div>
+
+            <div className="pt-4 border-t border-slate-200/80 text-[11px] font-mono text-slate-500 flex flex-wrap items-center gap-x-2 gap-y-1">
+              <span>Go 1.24 · CGO_ENABLED=0</span>
+              <span aria-hidden="true">·</span>
+              <span>RFC 5280 / 6960 / 8555</span>
+            </div>
+          </aside>
+
+          {/* Right / End Authentication & Wizard Column */}
+          <section className="lg:col-span-7 bg-white p-7 sm:p-9 lg:p-10 flex flex-col justify-center">
+            <div className="w-full max-w-md mx-auto space-y-6">
+              {loadingStatus ? (
+                <div className="space-y-4 py-6" aria-busy="true">
+                  <div className="h-6 w-2/3 bg-slate-100 rounded animate-pulse" />
+                  <div className="h-4 w-full bg-slate-100 rounded animate-pulse" />
+                  <div className="h-10 w-full bg-slate-100 rounded animate-pulse" />
+                  <div className="h-10 w-full bg-slate-100 rounded animate-pulse" />
+                </div>
           ) : needsSetup ? (
             <>
               <div className="space-y-2">
@@ -1180,7 +1224,7 @@ export const AuthGate: React.FC<AuthGateProps> = ({
                       <ArrowRight className="w-4 h-4 shrink-0" aria-hidden="true" />
                     </button>
 
-                    {issuerHost && (
+                    {issuerHost ? (
                       <div className="flex items-center justify-between gap-2 text-[11px] text-slate-500 font-mono px-0.5">
                         <span className="truncate" title={wimotekMeta?.issuer}>
                           IdP: {issuerHost}
@@ -1188,6 +1232,11 @@ export const AuthGate: React.FC<AuthGateProps> = ({
                         <span className="shrink-0 text-teal-700 font-sans font-medium">
                           PKCE S256
                         </span>
+                      </div>
+                    ) : (
+                      <div className="flex items-start gap-2 rounded-lg bg-slate-50 border border-slate-200/80 px-3 py-2 text-[11px] text-slate-600 leading-relaxed">
+                        <Info className="w-3.5 h-3.5 text-slate-400 shrink-0 mt-0.5" aria-hidden="true" />
+                        <span>{t.auth.gatewayNotConfiguredHint}</span>
                       </div>
                     )}
 
@@ -1479,6 +1528,8 @@ export const AuthGate: React.FC<AuthGateProps> = ({
               </a>
             </div>
           )}
+            </div>
+          </section>
         </div>
       </main>
     </div>

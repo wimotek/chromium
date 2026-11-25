@@ -10,9 +10,11 @@ import {
   Link2,
   Unlink,
   Plus,
+  Settings2,
 } from 'lucide-react';
 import {
   api,
+  type OAuthGatewayConfig,
   type OAuthProvider,
   type OAuthProviderInfo,
   type UserProfile,
@@ -76,6 +78,21 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
   const [socialMsg, setSocialMsg] = useState('');
   const [socialErr, setSocialErr] = useState('');
 
+  // Admin-editable wimotek/OAuth Gateway configuration state
+  const [gwEditorOpen, setGwEditorOpen] = useState(false);
+  const [gwConfig, setGwConfig] = useState<OAuthGatewayConfig | null>(null);
+  const [gwIssuer, setGwIssuer] = useState('');
+  const [gwClientId, setGwClientId] = useState('');
+  const [gwClientSecret, setGwClientSecret] = useState('');
+  const [gwClearSecret, setGwClearSecret] = useState(false);
+  const [gwScopes, setGwScopes] = useState('openid profile email');
+  const [gwAuthEndpoint, setGwAuthEndpoint] = useState('');
+  const [gwTokenEndpoint, setGwTokenEndpoint] = useState('');
+  const [gwUserinfoEndpoint, setGwUserinfoEndpoint] = useState('');
+  const [gwSaving, setGwSaving] = useState(false);
+  const [gwMsg, setGwMsg] = useState('');
+  const [gwErr, setGwErr] = useState('');
+
   // 2FA & Passkey state
   const [passkeyName, setPasskeyName] = useState('');
   const [passkeyBusy, setPasskeyBusy] = useState(false);
@@ -94,12 +111,34 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
     setLocality(user.locality || '');
   }, [user]);
 
+  const syncGatewayForm = (cfg: OAuthGatewayConfig) => {
+    setGwConfig(cfg);
+    setGwIssuer(cfg.issuer || '');
+    setGwClientId(cfg.client_id || '');
+    setGwClientSecret('');
+    setGwClearSecret(false);
+    setGwScopes(cfg.scopes || 'openid profile email');
+    setGwAuthEndpoint(cfg.authorization_endpoint || '');
+    setGwTokenEndpoint(cfg.token_endpoint || '');
+    setGwUserinfoEndpoint(cfg.userinfo_endpoint || '');
+  };
+
   useEffect(() => {
     api
       .getOAuthProviders()
       .then((res) => setProviders(res.providers || []))
       .catch(() => {});
   }, []);
+
+  useEffect(() => {
+    if (user?.role !== 'admin') return;
+    api
+      .getOAuthGatewayConfig()
+      .then((res) => {
+        if (res.gateway) syncGatewayForm(res.gateway);
+      })
+      .catch(() => {});
+  }, [user?.role]);
 
   // Listen for OAuth popup completion (matches server.ts OAUTH_AUTH_SUCCESS / OAUTH_AUTH_ERROR)
   useEffect(() => {
@@ -245,6 +284,67 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
       setSocialErr(err instanceof Error ? err.message : 'Failed to unlink account');
     } finally {
       setSocialBusy(null);
+    }
+  };
+
+  const handleSaveGateway = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setGwSaving(true);
+    setGwErr('');
+    setGwMsg('');
+    try {
+      const res = await api.saveOAuthGatewayConfig({
+        issuer: gwIssuer.trim(),
+        client_id: gwClientId.trim(),
+        client_secret: gwClientSecret.trim() || undefined,
+        clear_secret: gwClearSecret,
+        scopes: gwScopes.trim() || 'openid profile email',
+        authorization_endpoint: gwAuthEndpoint.trim(),
+        token_endpoint: gwTokenEndpoint.trim(),
+        userinfo_endpoint: gwUserinfoEndpoint.trim(),
+      });
+      if (res.gateway) syncGatewayForm(res.gateway);
+      if (res.providers) {
+        setProviders(res.providers);
+      } else {
+        const refreshed = await api.getOAuthProviders().catch(() => null);
+        if (refreshed?.providers) setProviders(refreshed.providers);
+      }
+      setGwMsg(t.profile.gatewaySaved);
+    } catch (err) {
+      setGwErr(err instanceof Error ? err.message : 'Failed to save gateway parameters');
+    } finally {
+      setGwSaving(false);
+    }
+  };
+
+  const handleResetGateway = async () => {
+    setGwSaving(true);
+    setGwErr('');
+    setGwMsg('');
+    try {
+      const res = await api.saveOAuthGatewayConfig({
+        issuer: '',
+        client_id: '',
+        client_secret: '',
+        clear_secret: true,
+        scopes: 'openid profile email',
+        authorization_endpoint: '',
+        token_endpoint: '',
+        userinfo_endpoint: '',
+      });
+      if (res.gateway) syncGatewayForm(res.gateway);
+      if (res.providers) {
+        setProviders(res.providers);
+      } else {
+        const refreshed = await api.getOAuthProviders().catch(() => null);
+        if (refreshed?.providers) setProviders(refreshed.providers);
+      }
+      setGwMsg(t.profile.gatewaySaved);
+    } catch (err) {
+      setGwErr(err instanceof Error ? err.message : 'Failed to reset gateway parameters');
+    } finally {
+      setGwSaving(false);
     }
   };
 
@@ -501,16 +601,23 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
         {(() => {
           const wLinked = linkedMap.get('wimotek');
           const wMeta = providers.find((p) => p.provider === 'wimotek');
-          const primaryCallback = wMeta?.callback_url || `${window.location.origin}/api/auth/oauth/wimotek/callback`;
-          const aliasCallback = (() => {
-            try {
-              return `${new URL(primaryCallback).origin}/callback`;
-            } catch {
-              return `${window.location.origin}/callback`;
-            }
-          })();
+          const activeIssuer = gwConfig?.issuer || wMeta?.issuer || '';
+          const isConfigured = Boolean(gwConfig ? gwConfig.configured : wMeta?.configured);
+          const primaryCallback =
+            gwConfig?.callback_url ||
+            wMeta?.callback_url ||
+            `${window.location.origin}/api/auth/oauth/wimotek/callback`;
+          const aliasCallback =
+            gwConfig?.alias_callback_url ||
+            (() => {
+              try {
+                return `${new URL(primaryCallback).origin}/callback`;
+              } catch {
+                return `${window.location.origin}/callback`;
+              }
+            })();
           return (
-            <div className="border border-teal-200 bg-teal-50/40 rounded-xl p-4 space-y-3">
+            <div className="border border-slate-200 bg-slate-50/60 rounded-xl p-4 sm:p-5 space-y-4">
               <div className="flex flex-wrap items-start justify-between gap-3">
                 <div className="space-y-1 min-w-0 flex-1">
                   <div className="flex flex-wrap items-center gap-2">
@@ -518,9 +625,18 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
                       {t.profile.wimotekGatewayTitle}
                     </span>
                     <span
-                      className={`text-[11px] font-semibold px-2 py-0.5 rounded border ${
-                        wLinked
+                      className={`text-[11px] font-medium px-2 py-0.5 rounded border ${
+                        isConfigured
                           ? 'bg-emerald-50 text-emerald-800 border-emerald-200'
+                          : 'bg-amber-50 text-amber-800 border-amber-200'
+                      }`}
+                    >
+                      {isConfigured ? t.profile.gatewayConfigured : t.profile.gatewayNotConfigured}
+                    </span>
+                    <span
+                      className={`text-[11px] font-medium px-2 py-0.5 rounded border ${
+                        wLinked
+                          ? 'bg-teal-50 text-teal-800 border-teal-200'
                           : 'bg-white text-slate-600 border-slate-200'
                       }`}
                     >
@@ -528,66 +644,264 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
                     </span>
                   </div>
                   <p className="text-xs text-slate-600">{t.profile.wimotekGatewayDesc}</p>
-                  {wLinked ? (
+                  {wLinked && (
                     <div className="text-xs text-slate-700 pt-1 wrap-anywhere">
                       <span className="font-medium">{wLinked.display_name}</span>
                       {wLinked.email && (
                         <span className="font-mono text-[11px] text-slate-500 ms-2">{wLinked.email}</span>
                       )}
                     </div>
-                  ) : (
-                    <div className="text-[11px] text-slate-500 pt-0.5">
-                      {wMeta?.configured
-                        ? 'PKCE S256 Gateway Ready'
-                        : previewMode
-                          ? 'Preview SSO simulation ready · Set WIMOTEK_OAUTH_CLIENT_SECRET for live IdP'
-                          : 'Configure WIMOTEK_OAUTH_CLIENT_SECRET to activate live IdP'}
-                    </div>
                   )}
                 </div>
 
-                {wLinked ? (
-                  <button
-                    type="button"
-                    disabled={socialBusy === 'wimotek'}
-                    onClick={() => handleUnbindSocial('wimotek')}
-                    className="inline-flex items-center justify-center gap-1.5 px-3.5 py-2 rounded-lg border border-red-200 bg-white text-red-700 hover:bg-red-50 text-xs font-medium cursor-pointer whitespace-nowrap"
-                  >
-                    <Unlink className="w-3.5 h-3.5" aria-hidden="true" />
-                    <span>{t.common.unbind}</span>
-                  </button>
-                ) : (
-                  <button
-                    type="button"
-                    disabled={socialBusy === 'wimotek'}
-                    onClick={() => handleBindSocial('wimotek')}
-                    className="inline-flex items-center justify-center gap-1.5 px-3.5 py-2 rounded-lg bg-[#0F766E] hover:bg-[#115E59] text-white text-xs font-medium cursor-pointer whitespace-nowrap"
-                  >
-                    <Link2 className="w-3.5 h-3.5" aria-hidden="true" />
-                    <span>{socialBusy === 'wimotek' ? '...' : t.common.bind}</span>
-                  </button>
-                )}
+                <div className="flex flex-wrap items-center gap-2">
+                  {user.role === 'admin' && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setGwEditorOpen((prev) => !prev);
+                        setGwMsg('');
+                        setGwErr('');
+                      }}
+                      aria-expanded={gwEditorOpen}
+                      className="inline-flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg border border-slate-300 bg-white text-slate-700 hover:bg-slate-50 text-xs font-medium cursor-pointer whitespace-nowrap"
+                    >
+                      <Settings2 className="w-3.5 h-3.5 text-teal-700" aria-hidden="true" />
+                      <span>{gwEditorOpen ? t.profile.gatewayCloseBtn : t.profile.gatewayEditBtn}</span>
+                    </button>
+                  )}
+
+                  {wLinked ? (
+                    <button
+                      type="button"
+                      disabled={socialBusy === 'wimotek'}
+                      onClick={() => handleUnbindSocial('wimotek')}
+                      className="inline-flex items-center justify-center gap-1.5 px-3.5 py-2 rounded-lg border border-red-200 bg-white text-red-700 hover:bg-red-50 text-xs font-medium cursor-pointer whitespace-nowrap"
+                    >
+                      <Unlink className="w-3.5 h-3.5" aria-hidden="true" />
+                      <span>{t.common.unbind}</span>
+                    </button>
+                  ) : (
+                    <button
+                      type="button"
+                      disabled={socialBusy === 'wimotek'}
+                      onClick={() => handleBindSocial('wimotek')}
+                      className="inline-flex items-center justify-center gap-1.5 px-3.5 py-2 rounded-lg bg-[#0F766E] hover:bg-[#115E59] text-white text-xs font-medium cursor-pointer whitespace-nowrap"
+                    >
+                      <Link2 className="w-3.5 h-3.5" aria-hidden="true" />
+                      <span>{socialBusy === 'wimotek' ? '...' : t.common.bind}</span>
+                    </button>
+                  )}
+                </div>
               </div>
 
-              <div className="pt-2.5 border-t border-teal-200/70 space-y-1.5 text-[11px]">
-                {wMeta?.issuer && (
-                  <div className="flex items-center justify-between gap-2 bg-white border border-slate-200 rounded px-2.5 py-1.5">
-                    <span className="font-medium text-slate-600 shrink-0 w-24">Issuer</span>
-                    <code dir="ltr" className="font-mono text-slate-700 truncate flex-1">{wMeta.issuer}</code>
-                    <CopyButton compact value={wMeta.issuer} label={t.common.copy} copiedLabel={t.common.copied} />
-                  </div>
-                )}
-                <div className="flex items-center justify-between gap-2 bg-white border border-slate-200 rounded px-2.5 py-1.5">
+              {/* Readonly Summary Rows */}
+              <div className="pt-3 border-t border-slate-200/80 space-y-1.5 text-[11px]">
+                <div className="flex items-center justify-between gap-2 bg-white border border-slate-200 rounded-lg px-3 py-1.5">
+                  <span className="font-medium text-slate-600 shrink-0 w-24">Issuer</span>
+                  {activeIssuer ? (
+                    <>
+                      <code dir="ltr" className="font-mono text-slate-800 truncate flex-1">
+                        {activeIssuer}
+                      </code>
+                      <CopyButton compact value={activeIssuer} label={t.common.copy} copiedLabel={t.common.copied} />
+                    </>
+                  ) : (
+                    <span className="text-slate-400 italic flex-1">
+                      {t.profile.gatewayNotConfigured}
+                    </span>
+                  )}
+                </div>
+                <div className="flex items-center justify-between gap-2 bg-white border border-slate-200 rounded-lg px-3 py-1.5">
                   <span className="font-medium text-slate-600 shrink-0 w-24">Callback</span>
-                  <code dir="ltr" className="font-mono text-slate-700 truncate flex-1">{primaryCallback}</code>
+                  <code dir="ltr" className="font-mono text-slate-700 truncate flex-1">
+                    {primaryCallback}
+                  </code>
                   <CopyButton compact value={primaryCallback} label={t.common.copy} copiedLabel={t.common.copied} />
                 </div>
-                <div className="flex items-center justify-between gap-2 bg-white border border-slate-200 rounded px-2.5 py-1.5">
+                <div className="flex items-center justify-between gap-2 bg-white border border-slate-200 rounded-lg px-3 py-1.5">
                   <span className="font-medium text-slate-600 shrink-0 w-24">Short Alias</span>
-                  <code dir="ltr" className="font-mono text-slate-700 truncate flex-1">{aliasCallback}</code>
+                  <code dir="ltr" className="font-mono text-slate-700 truncate flex-1">
+                    {aliasCallback}
+                  </code>
                   <CopyButton compact value={aliasCallback} label={t.common.copy} copiedLabel={t.common.copied} />
                 </div>
               </div>
+
+              {/* Admin-Editable Gateway Parameters Panel */}
+              {user.role === 'admin' && gwEditorOpen && (
+                <form
+                  onSubmit={handleSaveGateway}
+                  className="bg-white border border-slate-200 rounded-xl p-4 sm:p-5 space-y-4"
+                >
+                  {!isConfigured && (
+                    <div className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 leading-relaxed">
+                      {t.profile.gatewayUnconfiguredNotice}
+                    </div>
+                  )}
+
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3.5">
+                    <div className="md:col-span-2">
+                      <label htmlFor="gw-issuer" className="block text-xs font-medium text-slate-700 mb-1">
+                        {t.profile.gatewayIssuerLabel}
+                      </label>
+                      <input
+                        id="gw-issuer"
+                        type="url"
+                        value={gwIssuer}
+                        onChange={(e) => setGwIssuer(e.target.value)}
+                        placeholder={t.profile.gatewayIssuerPlaceholder}
+                        className="w-full rounded-lg border border-slate-300 px-3 py-2 text-xs font-mono text-slate-900 placeholder:text-slate-400 focus:border-teal-600 focus:outline-none"
+                      />
+                    </div>
+
+                    <div>
+                      <label htmlFor="gw-client-id" className="block text-xs font-medium text-slate-700 mb-1">
+                        {t.profile.gatewayClientIdLabel}
+                      </label>
+                      <input
+                        id="gw-client-id"
+                        type="text"
+                        value={gwClientId}
+                        onChange={(e) => setGwClientId(e.target.value)}
+                        placeholder={t.profile.gatewayClientIdPlaceholder}
+                        className="w-full rounded-lg border border-slate-300 px-3 py-2 text-xs font-mono text-slate-900 placeholder:text-slate-400 focus:border-teal-600 focus:outline-none"
+                      />
+                    </div>
+
+                    <div>
+                      <label htmlFor="gw-scopes" className="block text-xs font-medium text-slate-700 mb-1">
+                        {t.profile.gatewayScopesLabel}
+                      </label>
+                      <input
+                        id="gw-scopes"
+                        type="text"
+                        value={gwScopes}
+                        onChange={(e) => setGwScopes(e.target.value)}
+                        placeholder="openid profile email"
+                        className="w-full rounded-lg border border-slate-300 px-3 py-2 text-xs font-mono text-slate-900 placeholder:text-slate-400 focus:border-teal-600 focus:outline-none"
+                      />
+                    </div>
+
+                    <div className="md:col-span-2">
+                      <div className="flex items-center justify-between gap-2 mb-1">
+                        <label htmlFor="gw-client-secret" className="block text-xs font-medium text-slate-700">
+                          {t.profile.gatewayClientSecretLabel}
+                        </label>
+                        {gwConfig?.has_client_secret && (
+                          <span className="text-[11px] font-mono text-emerald-700">
+                            Saved: {gwConfig.client_secret_masked}
+                          </span>
+                        )}
+                      </div>
+                      <input
+                        id="gw-client-secret"
+                        type="password"
+                        autoComplete="new-password"
+                        value={gwClientSecret}
+                        onChange={(e) => {
+                          setGwClientSecret(e.target.value);
+                          if (e.target.value) setGwClearSecret(false);
+                        }}
+                        placeholder={
+                          gwConfig?.has_client_secret
+                            ? t.profile.gatewayClientSecretKeepPlaceholder
+                            : t.profile.gatewayClientSecretPlaceholder
+                        }
+                        className="w-full rounded-lg border border-slate-300 px-3 py-2 text-xs font-mono text-slate-900 placeholder:text-slate-400 focus:border-teal-600 focus:outline-none"
+                      />
+                      {gwConfig?.has_client_secret && (
+                        <label className="mt-1.5 inline-flex items-center gap-1.5 text-[11px] text-slate-600 cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={gwClearSecret}
+                            onChange={(e) => setGwClearSecret(e.target.checked)}
+                            className="h-3.5 w-3.5 rounded border-slate-300 text-teal-700"
+                          />
+                          <span>{t.profile.gatewayClearSecret}</span>
+                        </label>
+                      )}
+                    </div>
+                  </div>
+
+                  <details className="text-xs border-t border-slate-100 pt-3">
+                    <summary className="cursor-pointer font-medium text-slate-600 hover:text-slate-900 select-none">
+                      {t.profile.gatewayAdvancedEndpoints}
+                    </summary>
+                    <div className="mt-3 grid grid-cols-1 gap-3">
+                      <div>
+                        <label htmlFor="gw-auth-ep" className="block text-[11px] font-medium text-slate-600 mb-1">
+                          Authorization Endpoint
+                        </label>
+                        <input
+                          id="gw-auth-ep"
+                          type="url"
+                          value={gwAuthEndpoint}
+                          onChange={(e) => setGwAuthEndpoint(e.target.value)}
+                          placeholder="Auto-discovered — e.g. https://oauth.example.com/oauth/authorize"
+                          className="w-full rounded-lg border border-slate-300 px-3 py-1.5 text-xs font-mono text-slate-900 placeholder:text-slate-400 focus:border-teal-600 focus:outline-none"
+                        />
+                      </div>
+                      <div>
+                        <label htmlFor="gw-token-ep" className="block text-[11px] font-medium text-slate-600 mb-1">
+                          Token Endpoint
+                        </label>
+                        <input
+                          id="gw-token-ep"
+                          type="url"
+                          value={gwTokenEndpoint}
+                          onChange={(e) => setGwTokenEndpoint(e.target.value)}
+                          placeholder="Auto-discovered — e.g. https://oauth.example.com/oauth/token"
+                          className="w-full rounded-lg border border-slate-300 px-3 py-1.5 text-xs font-mono text-slate-900 placeholder:text-slate-400 focus:border-teal-600 focus:outline-none"
+                        />
+                      </div>
+                      <div>
+                        <label htmlFor="gw-userinfo-ep" className="block text-[11px] font-medium text-slate-600 mb-1">
+                          Userinfo Endpoint
+                        </label>
+                        <input
+                          id="gw-userinfo-ep"
+                          type="url"
+                          value={gwUserinfoEndpoint}
+                          onChange={(e) => setGwUserinfoEndpoint(e.target.value)}
+                          placeholder="Auto-discovered — e.g. https://oauth.example.com/oauth/userinfo"
+                          className="w-full rounded-lg border border-slate-300 px-3 py-1.5 text-xs font-mono text-slate-900 placeholder:text-slate-400 focus:border-teal-600 focus:outline-none"
+                        />
+                      </div>
+                    </div>
+                  </details>
+
+                  {gwMsg && (
+                    <div className="inline-flex items-center gap-1.5 text-xs font-medium text-emerald-700">
+                      <Check className="w-3.5 h-3.5" aria-hidden="true" />
+                      <span>{gwMsg}</span>
+                    </div>
+                  )}
+                  {gwErr && (
+                    <div role="alert" className="text-xs text-red-700 bg-red-50 border border-red-200 rounded-lg px-3 py-2">
+                      {gwErr}
+                    </div>
+                  )}
+
+                  <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-slate-100">
+                    <button
+                      type="button"
+                      disabled={gwSaving}
+                      onClick={handleResetGateway}
+                      className="px-3 py-2 rounded-lg border border-slate-300 text-slate-700 hover:bg-slate-50 text-xs font-medium cursor-pointer"
+                    >
+                      {t.profile.gatewayResetBtn}
+                    </button>
+                    <button
+                      type="submit"
+                      disabled={gwSaving}
+                      className="px-4 py-2 rounded-lg bg-[#0F766E] hover:bg-[#115E59] disabled:opacity-60 text-white text-xs font-medium cursor-pointer"
+                    >
+                      {gwSaving ? '...' : t.profile.gatewaySaveBtn}
+                    </button>
+                  </div>
+                </form>
+              )}
             </div>
           );
         })()}
