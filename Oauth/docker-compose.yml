@@ -1,0 +1,27 @@
+services:
+  wimotek-oauth:
+    image: wimotek/oauth:latest
+    # Optional: pull from GitHub Container Registry instead of Docker Hub
+    # image: ghcr.io/wimotek/oauth:latest
+    container_name: wimotek-Oauth
+    restart: unless-stopped
+    ports:
+      - "8080:8080"   # HTTP
+      - "8443:8443"   # HTTPS (loads /certs if provided, otherwise auto-generates under /data/certs)
+    volumes:
+      - ./data:/data          # Read-Write: SQLite3 WAL DB, config.json, RS256 keys, auto-generated master.key & TLS certs
+      # - ./certs:/certs:ro   # Optional Read-Only: custom TLS certs (tls.crt/tls.key or fullchain.pem/privkey.pem)
+    environment:
+      - TZ=Asia/Shanghai
+      # [Optional] AES-256-GCM master key for encrypting third-party OAuth secrets, Apple .p8 keys, TOTP & webhook secrets.
+      # If unset, a random 32-byte key is automatically generated and saved to /data/keys/master.key (mode 0600).
+      # Only required when scaling multiple replicas against a shared external MySQL database.
+      # - WIMOTEK_MASTER_KEY=replace-with-strong-32-byte-secret
+      #
+      # [Optional] Override container HTTP/HTTPS listen addresses (defaults: :8080 and :8443)
+      # - WIMOTEK_HTTP_ADDR=:8080
+      # - WIMOTEK_HTTPS_ADDR=:8443
+      #
+      # [Optional] Override container data/certs mount paths (defaults: /data and /certs)
+      # - WIMOTEK_DATA_DIR=/data
+      # - WIMOTEK_CERTS_DIR=/certs
