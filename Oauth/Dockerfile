@@ -7,7 +7,11 @@ FROM node:22-alpine AS web-builder
 WORKDIR /src/web
 
 COPY web/package.json web/package-lock.json* ./
-RUN npm ci --no-audit --no-fund || npm install --no-audit --no-fund
+RUN if [ -f package-lock.json ]; then \
+      npm ci --no-audit --no-fund --legacy-peer-deps; \
+    else \
+      npm install --no-audit --no-fund --legacy-peer-deps; \
+    fi
 
 COPY web/ ./
 RUN npm run build
@@ -21,8 +25,6 @@ WORKDIR /src
 RUN apk add --no-cache git ca-certificates tzdata
 
 COPY go.mod go.sum* ./
-RUN go mod download
-
 COPY cmd/ ./cmd/
 COPY internal/ ./internal/
 COPY web/embed.go ./web/embed.go
@@ -31,7 +33,8 @@ COPY --from=web-builder /src/web/dist ./web/dist
 ARG TARGETOS=linux
 ARG TARGETARCH=amd64
 
-RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
+RUN go mod tidy && \
+    CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
     go build -trimpath -ldflags="-s -w" -o /out/wimotek-oauth ./cmd/server
 
 # ==============================================================================
