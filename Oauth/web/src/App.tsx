@@ -7,8 +7,6 @@ import {
   ShieldCheck,
   Fingerprint,
   BookOpen,
-  FolderArchive,
-  Download,
   Sun,
   Moon,
   LogOut,
@@ -24,6 +22,7 @@ import type {
   Locale,
   OAuthApplication,
   OidcFlowTrace,
+  SigningKeyStatus,
   SocialConnector,
   SystemConfig,
   WebhookDeliveryLog,
@@ -40,9 +39,8 @@ import { IdentityDirectoryView } from './components/IdentityDirectoryView';
 import { SecurityPolicyView } from './components/SecurityPolicyView';
 import { LoginLabView } from './components/LoginLabView';
 import { SdkDocsView } from './components/SdkDocsView';
-import { RepoExportView } from './components/RepoExportView';
 
-type ConsoleTab = 'overview' | 'applications' | 'connectors' | 'users' | 'security' | 'login_lab' | 'sdks' | 'repo';
+type ConsoleTab = 'overview' | 'applications' | 'connectors' | 'users' | 'security' | 'login_lab' | 'sdks';
 
 const DEFAULT_AUTH_POLICY: AuthPolicyConfig = {
   enablePasswordArgon2id: true,
@@ -54,7 +52,7 @@ const DEFAULT_AUTH_POLICY: AuthPolicyConfig = {
   ipRateLimitPerMin: 60,
   lockoutThreshold: 3,
   captchaProvider: 'turnstile',
-  captchaSiteKey: '0x4AAAAAAAB_WimotekTurnstileDemoKey',
+  captchaSiteKey: '',
 };
 
 export default function App() {
@@ -64,6 +62,7 @@ export default function App() {
   const [darkMode, setDarkMode] = useState<boolean>(false);
 
   const [bootLoading, setBootLoading] = useState(true);
+  const [bootError, setBootError] = useState<string | null>(null);
   const [config, setConfig] = useState<SystemConfig | null>(null);
   const [sessionToken, setSessionToken] = useState<string | null>(null);
   const [user, setUser] = useState<AuthUser | null>(null);
@@ -79,12 +78,12 @@ export default function App() {
   const [webhookLogs, setWebhookLogs] = useState<WebhookDeliveryLog[]>([]);
   const [counts, setCounts] = useState({ applications: 0, enabledConnectors: 0, totalConnectors: 0 });
   const [jwksKid, setJwksKid] = useState('');
+  const [signingKeyStatus, setSigningKeyStatus] = useState<SigningKeyStatus | null>(null);
   const [cacheStats, setCacheStats] = useState({ mode: 'redis', redisKeys: 0, sqlFallbackKeys: 0 });
   const [selectedLabClientId, setSelectedLabClientId] = useState('wimotek_erp_portal');
   const [latestTrace, setLatestTrace] = useState<OidcFlowTrace | null>(null);
   const [authError, setAuthError] = useState<string | null>(null);
   const [busyAuthProvider, setBusyAuthProvider] = useState<string | null>(null);
-  const [downloadingZip, setDownloadingZip] = useState(false);
 
   const t = TRANSLATIONS[locale];
 
@@ -108,6 +107,7 @@ export default function App() {
       setConfig(ov.config);
       setCounts(ov.counts);
       setJwksKid(ov.jwksKid);
+      if (ov.signingKeyStatus) setSigningKeyStatus(ov.signingKeyStatus);
       setCacheStats(ov.cacheStats);
       if (ov.authPolicy) setAuthPolicy(ov.authPolicy);
     }
@@ -134,52 +134,42 @@ export default function App() {
     }
   }, []);
 
-  const executeOneClickLogin = useCallback(
-    async (provider = 'one_click', clientId?: string): Promise<OidcFlowTrace | null> => {
-      setBusyAuthProvider(provider);
-      setAuthError(null);
-      try {
-        const res = await fetch('/api/auth/one-click', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ provider, clientId: clientId || selectedLabClientId }),
-        });
-        const data = await res.json();
-        if (!res.ok) {
-          throw new Error(data.message || 'One-Click Login failed');
-        }
-        setConfig(data.config);
-        setUser(data.user);
-        setSessionToken(data.sessionToken);
-        setLatestTrace(data.trace);
-        await fetchProtectedData(data.sessionToken);
-        return data.trace as OidcFlowTrace;
-      } catch (err) {
-        setAuthError(err instanceof Error ? err.message : 'Sign-in failed');
-        return null;
-      } finally {
-        setBusyAuthProvider(null);
-      }
-    },
-    [fetchProtectedData, selectedLabClientId]
-  );
-
-  // Initial boot: inspect setup status; honor `?autostart=1` to jump straight to authenticated Console
+  // Initial boot: inspect setup status from Go backend
   useEffect(() => {
     let mounted = true;
     async function boot() {
       try {
+        setBootError(null);
         const res = await fetch('/api/setup/status');
+        if (!res.ok) {
+          throw new Error(`Setup status returned HTTP ${res.status}`);
+        }
         const data = await res.json();
         if (!mounted) return;
-        setConfig(data.config);
-        setConnectors(data.connectors || []);
-        if (data.authPolicy) setAuthPolicy(data.authPolicy);
-        setCacheStats(data.cacheStats || { mode: 'redis', redisKeys: 0, sqlFallbackKeys: 0 });
 
-        const params = new URLSearchParams(window.location.search);
-        if (params.get('autostart') === '1') {
-          await executeOneClickLogin('one_click');
+        const normalizedConfig: SystemConfig = data.config ?? {
+          initialized: Boolean(data.initialized),
+          dbDriver: data.db_driver === 'mysql' ? 'mysql' : 'sqlite3',
+          dbDsn: data.db_dsn || '/data/wimotek_oauth.db',
+          sqliteWalEnabled: true,
+          sqliteBusyTimeoutMs: 5000,
+          sqliteMaxWriteConns: 1,
+          redisEnabled: Boolean(data.redis_enabled),
+          redisAddr: data.redis_addr || '',
+          redisSimulatedDown: false,
+          activeCacheMode: data.redis_enabled ? 'redis' : 'sql_fallback',
+          issuerUrl: data.issuer_url || window.location.origin,
+          adminEmail: data.admin_email || '',
+          tlsSource: data.tls_cert_source || '/data/certs/selfsigned.crt',
+        };
+
+        setConfig(normalizedConfig);
+        setConnectors(Array.isArray(data.connectors) ? data.connectors : []);
+        if (data.authPolicy) setAuthPolicy(data.authPolicy);
+        setCacheStats(data.cacheStats || { mode: normalizedConfig.activeCacheMode, redisKeys: 0, sqlFallbackKeys: 0 });
+      } catch (err) {
+        if (mounted) {
+          setBootError(err instanceof Error ? err.message : 'Unable to reach wimotek/Oauth backend API');
         }
       } finally {
         if (mounted) setBootLoading(false);
@@ -189,26 +179,7 @@ export default function App() {
     return () => {
       mounted = false;
     };
-  }, [executeOneClickLogin]);
-
-  async function handleDownloadZip() {
-    setDownloadingZip(true);
-    try {
-      const res = await fetch('/api/export/zip');
-      if (!res.ok) throw new Error('Export failed');
-      const blob = await res.blob();
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = 'wimotek-Oauth-complete.zip';
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      URL.revokeObjectURL(url);
-    } finally {
-      setDownloadingZip(false);
-    }
-  }
+  }, []);
 
   async function handleCompleteSetup(payload: {
     dbDriver: DbDriver;
@@ -256,6 +227,10 @@ export default function App() {
     }
   }
 
+  async function handleSocialSignIn(provider: string) {
+    setAuthError(`Configure the ${provider} connector credentials in Social Connectors to redirect users to the upstream IdP.`);
+  }
+
   async function handleSimulateCacheFailover(simulatedDown: boolean) {
     if (!sessionToken) return;
     const res = await fetch('/api/system/cache-sim', {
@@ -270,6 +245,40 @@ export default function App() {
       const data = await res.json();
       setConfig(data.config);
       setCacheStats(data.cacheStats);
+    }
+  }
+
+  async function handleRotateSigningKey(mode: 'graceful' | 'emergency', graceMinutes = 120) {
+    if (!sessionToken) return null;
+    const res = await fetch('/api/security/signing-key/rotate', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${sessionToken}`,
+      },
+      body: JSON.stringify({ mode, graceMinutes }),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      throw new Error(data.message || 'Key rotation failed');
+    }
+    if (data.jwksKid) setJwksKid(data.jwksKid);
+    if (data.signingKeyStatus) setSigningKeyStatus(data.signingKeyStatus);
+    return data as { ok: boolean; mode: 'graceful' | 'emergency'; previousKid: string; jwksKid: string; signingKeyStatus: SigningKeyStatus };
+  }
+
+  async function handlePurgeRetiringKeys() {
+    if (!sessionToken) return;
+    const res = await fetch('/api/security/signing-key/purge-retiring', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${sessionToken}`,
+      },
+    });
+    if (res.ok) {
+      const data = await res.json();
+      if (data.jwksKid) setJwksKid(data.jwksKid);
+      if (data.signingKeyStatus) setSigningKeyStatus(data.signingKeyStatus);
     }
   }
 
@@ -461,11 +470,33 @@ export default function App() {
     }
   }
 
-  if (bootLoading || !config) {
+  if (bootLoading) {
     return (
       <div className="min-h-screen bg-slate-50 dark:bg-[#0B0F19] flex items-center justify-center">
         <div className="text-sm text-slate-500 dark:text-slate-400 font-mono">
           Initializing wimotek/Oauth...
+        </div>
+      </div>
+    );
+  }
+
+  if (bootError || !config) {
+    return (
+      <div className="min-h-screen bg-slate-50 dark:bg-[#0B0F19] flex items-center justify-center p-6">
+        <div className="max-w-md w-full bg-white dark:bg-[#111827] border border-slate-200 dark:border-slate-800 rounded-xl p-6 space-y-4 text-center">
+          <div className="font-display text-base font-bold text-slate-900 dark:text-white">
+            wimotek/Oauth
+          </div>
+          <p className="text-xs text-red-600 dark:text-red-400 font-mono">
+            {bootError || 'Backend API did not return a valid system configuration.'}
+          </p>
+          <button
+            type="button"
+            onClick={() => window.location.reload()}
+            className="px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-medium"
+          >
+            Retry Connection
+          </button>
         </div>
       </div>
     );
@@ -481,11 +512,6 @@ export default function App() {
         onToggleDark={() => setDarkMode((v) => !v)}
         initialConfig={config}
         onComplete={handleCompleteSetup}
-        onOneClickDemo={async () => {
-          await executeOneClickLogin('one_click');
-        }}
-        onDownloadZip={handleDownloadZip}
-        downloadingZip={downloadingZip}
       />
     );
   }
@@ -526,16 +552,6 @@ export default function App() {
               >
                 {darkMode ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
               </button>
-
-              <button
-                type="button"
-                onClick={handleDownloadZip}
-                disabled={downloadingZip}
-                className="px-3.5 py-2 text-xs font-medium rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 hover:bg-slate-50 dark:hover:bg-slate-800 flex items-center gap-1.5 whitespace-nowrap"
-              >
-                <Download className="w-3.5 h-3.5" />
-                <span>{downloadingZip ? t.downloadingZip : t.downloadAllZip}</span>
-              </button>
             </div>
           </div>
         </header>
@@ -547,9 +563,7 @@ export default function App() {
             authPolicy={authPolicy}
             clientId={selectedLabClientId}
             onPasswordSignIn={handlePasswordSignIn}
-            onSocialSignIn={async (provider) => {
-              await executeOneClickLogin(provider);
-            }}
+            onSocialSignIn={handleSocialSignIn}
             onAuthCompleted={handleAuthCompleted}
             busyProvider={busyAuthProvider}
             errorMessage={authError}
@@ -559,7 +573,7 @@ export default function App() {
     );
   }
 
-  // Screen 3: Authenticated Admin Console (SaaS Sidebar + Contextual Top Bar)
+  // Screen 3: Authenticated Admin Console (Production — 7 Core Modules Only)
   const navItems: { id: ConsoleTab; label: string; icon: React.ComponentType<{ className?: string }> }[] = [
     { id: 'overview', label: t.navOverview, icon: LayoutDashboard },
     { id: 'applications', label: t.navApplications, icon: AppWindow },
@@ -568,10 +582,9 @@ export default function App() {
     { id: 'security', label: t.navSecurity, icon: ShieldCheck },
     { id: 'login_lab', label: t.navLoginLab, icon: Fingerprint },
     { id: 'sdks', label: t.navSdks, icon: BookOpen },
-    { id: 'repo', label: t.navRepo, icon: FolderArchive },
   ];
 
-  const activeNav = navItems.find((n) => n.id === activeTab)!;
+  const activeNav = navItems.find((n) => n.id === activeTab) || navItems[0];
 
   return (
     <div className="min-h-screen bg-slate-50 dark:bg-[#0B0F19] text-slate-900 dark:text-slate-100 flex">
@@ -715,17 +728,6 @@ export default function App() {
             >
               {darkMode ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
             </button>
-
-            <button
-              type="button"
-              onClick={handleDownloadZip}
-              disabled={downloadingZip}
-              className="px-3 py-2 text-xs font-medium rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white flex items-center gap-1.5 whitespace-nowrap shrink-0 transition-colors disabled:opacity-60"
-            >
-              <Download className="w-3.5 h-3.5 shrink-0" />
-              <span className="hidden sm:inline">{downloadingZip ? t.downloadingZip : t.downloadAllZip}</span>
-              <span className="sm:hidden">ZIP</span>
-            </button>
           </div>
         </header>
 
@@ -737,12 +739,11 @@ export default function App() {
               config={config}
               counts={counts}
               jwksKid={jwksKid}
+              signingKeyStatus={signingKeyStatus}
               cacheStats={cacheStats}
               onSimulateCacheFailover={handleSimulateCacheFailover}
-              onJumpToLoginLab={() => {
-                setActiveTab('login_lab');
-                void executeOneClickLogin('one_click', selectedLabClientId);
-              }}
+              onRotateSigningKey={handleRotateSigningKey}
+              onPurgeRetiringKeys={handlePurgeRetiringKeys}
               onRerunWizard={handleRerunWizard}
             />
           )}
@@ -756,7 +757,6 @@ export default function App() {
               onTestAppFlow={(clientId) => {
                 setSelectedLabClientId(clientId);
                 setActiveTab('login_lab');
-                void executeOneClickLogin('one_click', clientId);
               }}
             />
           )}
@@ -802,7 +802,8 @@ export default function App() {
               authPolicy={authPolicy}
               selectedClientId={selectedLabClientId}
               onSelectClientId={setSelectedLabClientId}
-              onRunOidcLogin={executeOneClickLogin}
+              onPasswordSignIn={handlePasswordSignIn}
+              onSocialSignIn={handleSocialSignIn}
               onAuthCompleted={handleAuthCompleted}
               latestTrace={latestTrace}
             />
@@ -813,14 +814,6 @@ export default function App() {
               locale={locale}
               issuerUrl={config.issuerUrl}
               applications={applications}
-            />
-          )}
-
-          {activeTab === 'repo' && (
-            <RepoExportView
-              locale={locale}
-              onDownloadZip={handleDownloadZip}
-              downloadingZip={downloadingZip}
             />
           )}
         </main>

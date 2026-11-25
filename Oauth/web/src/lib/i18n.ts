@@ -79,7 +79,6 @@ export interface TranslationSchema {
   navSecurity: string;
   navLoginLab: string;
   navSdks: string;
-  navRepo: string;
   tabPassword: string;
   tabEmailOtp: string;
   tabPasskey: string;
@@ -88,9 +87,6 @@ export interface TranslationSchema {
   usersSubtitle: string;
   securityTitle: string;
   securitySubtitle: string;
-  downloadAllZip: string;
-  downloadingZip: string;
-  oneClickLogin: string;
   signOut: string;
   setupWizardTitle: string;
   setupWizardSubtitle: string;
@@ -101,7 +97,6 @@ export interface TranslationSchema {
   testConnection: string;
   skipRedis: string;
   completeSetup: string;
-  quickEnterDemo: string;
   loginTitle: string;
   loginSubtitle: string;
   emailLabel: string;
@@ -146,8 +141,6 @@ export interface TranslationSchema {
   fullMinimalSdk: string;
   copyCode: string;
   copied: string;
-  repoTitle: string;
-  repoSubtitle: string;
   tlsCertStatus: string;
 }
 
@@ -158,9 +151,8 @@ export const TRANSLATIONS: Record<Locale, TranslationSchema> = {
     navConnectors: '社会化登录',
     navUsers: '身份与用户库',
     navSecurity: '认证与风控策略',
-    navLoginLab: '登录页与一键登录',
+    navLoginLab: '托管登录页调试',
     navSdks: '文档中心',
-    navRepo: '源码结构与打包',
     tabPassword: '邮箱密码',
     tabEmailOtp: '邮箱免密 OTP',
     tabPasskey: 'Passkey 通行密钥',
@@ -169,9 +161,6 @@ export const TRANSLATIONS: Record<Locale, TranslationSchema> = {
     usersSubtitle: '仅存储核心账号身份（users）与多渠道绑定关系（user_identities），支持 JIT 即时同步、已验证邮箱平滑绑定老账号及封禁 Webhook 踢人。',
     securityTitle: '现代认证方式与隐形风控',
     securitySubtitle: '统一配置 Argon2id、邮箱 OTP/魔法链接、TOTP 2FA、Passkeys（WebAuthn）、RFC 8628 设备码及 IP 限流/指数退避/Turnstile 人机验证。',
-    downloadAllZip: '打包下载源码',
-    downloadingZip: '正在打包...',
-    oneClickLogin: '一键登录体验',
     signOut: '退出登录',
     setupWizardTitle: '首次运行安装向导',
     setupWizardSubtitle: '配置数据库引擎、缓存降级策略与管理员账号，完成后将自动锁定防重复初始化。',
@@ -182,7 +171,6 @@ export const TRANSLATIONS: Record<Locale, TranslationSchema> = {
     testConnection: '一键测试连接',
     skipRedis: '跳过 Redis（自动使用 SQL Cache）',
     completeSetup: '完成初始化并锁定',
-    quickEnterDemo: '一键登录直接进入控制台',
     loginTitle: '统一身份认证登录',
     loginSubtitle: '使用组织账号或社会化身份源安全接入您的业务系统',
     emailLabel: '工作邮箱',
@@ -215,7 +203,7 @@ export const TRANSLATIONS: Record<Locale, TranslationSchema> = {
     connectorDisabled: '未启用',
     saveConnector: '保存配置并生效',
     addCustomOidc: '新增通用 OIDC',
-    loginLabTitle: '托管登录页与一键 OIDC 全链路测试',
+    loginLabTitle: '托管登录页与 OIDC 调试台',
     loginLabSubtitle: '验证多语言排版自适应、多渠道自动折叠与完整 Authorization Code + PKCE (S256) 签发链路。',
     viewportDesktop: '桌面端视图',
     viewportMobile: '移动端视图',
@@ -223,12 +211,10 @@ export const TRANSLATIONS: Record<Locale, TranslationSchema> = {
     oidcTraceTitle: '实时 OIDC PKCE 链路与 RS256 令牌解析',
     sdksTitle: 'IdP 接入与文档中心',
     sdksSubtitle: '标准 OIDC / OAuth 2.0 令牌签发指南、五语言极简 SDK、封禁 Webhook 验签与生产部署手册。',
-    quickStartLines: '3~5 行极简接入示例',
+    quickStartLines: '快速接入示例',
     fullMinimalSdk: '完整轻量 SDK 封装源码',
     copyCode: '复制代码',
     copied: '已复制',
-    repoTitle: 'wimotek/Oauth 仓库隔离结构与源码打包',
-    repoSubtitle: '严格遵循 Oauth/、dev/、.github/workflows/ 目录隔离规范，支持一键下载完整可构建压缩包。',
     tlsCertStatus: 'TLS 证书加载策略',
   },
   'zh-TW': {
@@ -237,9 +223,8 @@ export const TRANSLATIONS: Record<Locale, TranslationSchema> = {
     navConnectors: '社群登入源',
     navUsers: '身分與帳號庫',
     navSecurity: '認證與風控策略',
-    navLoginLab: '登入頁與一鍵登入',
+    navLoginLab: '託管登入頁除錯',
     navSdks: '文件中心',
-    navRepo: '原始碼與打包',
     tabPassword: '信箱密碼',
     tabEmailOtp: '信箱免密 OTP',
     tabPasskey: 'Passkey 通行金鑰',
@@ -248,9 +233,6 @@ export const TRANSLATIONS: Record<Locale, TranslationSchema> = {
     usersSubtitle: '僅存核心帳號身分（users）與多渠道映射（user_identities），支援 JIT 即時同步、已驗證信箱平滑綁定舊帳號與封禁 Webhook 踢人。',
     securityTitle: '現代認證方式與隱形風控',
     securitySubtitle: '管理 Argon2id、信箱 OTP/魔法連結、TOTP 2FA、Passkeys（WebAuthn）、RFC 8628 裝置碼與 IP 限流/指數退避/Turnstile 驗證。',
-    downloadAllZip: '打包下載原始碼',
-    downloadingZip: '打包中...',
-    oneClickLogin: '一鍵登入體驗',
     signOut: '登出系統',
     setupWizardTitle: '首次啟動安裝精靈',
     setupWizardSubtitle: '設定資料庫引擎、快取降級策略與管理員帳號，完成後自動鎖定避免重複初始化。',
@@ -261,7 +243,6 @@ export const TRANSLATIONS: Record<Locale, TranslationSchema> = {
     testConnection: '一鍵測試連線',
     skipRedis: '略過 Redis（自動啟用 SQL Cache）',
     completeSetup: '完成初始化並鎖定',
-    quickEnterDemo: '一鍵登入直接進入控制台',
     loginTitle: '統一身分驗證登入',
     loginSubtitle: '使用組織帳號或社群身分來源安全存取您的業務應用',
     emailLabel: '工作信箱',
@@ -294,7 +275,7 @@ export const TRANSLATIONS: Record<Locale, TranslationSchema> = {
     connectorDisabled: '未啟用',
     saveConnector: '儲存並即時生效',
     addCustomOidc: '新增通用 OIDC',
-    loginLabTitle: '託管登入頁與一鍵 OIDC 全鏈路測試',
+    loginLabTitle: '託管登入頁與 OIDC 除錯台',
     loginLabSubtitle: '檢驗多國語言排版自適應、多通道自動摺疊與完整 Authorization Code + PKCE (S256) 流程。',
     viewportDesktop: '桌面端檢視',
     viewportMobile: '行動端檢視',
@@ -302,12 +283,10 @@ export const TRANSLATIONS: Record<Locale, TranslationSchema> = {
     oidcTraceTitle: '即時 OIDC PKCE 鏈路與 RS256 權杖解析',
     sdksTitle: 'IdP 串接與文件中心',
     sdksSubtitle: '標準 OIDC / OAuth 2.0 權杖簽發指南、五語言極簡 SDK、封禁 Webhook 驗簽與部署手冊。',
-    quickStartLines: '3~5 行極簡串接範例',
+    quickStartLines: '快速串接範例',
     fullMinimalSdk: '完整輕量 SDK 封裝碼',
     copyCode: '複製程式碼',
     copied: '已複製',
-    repoTitle: 'wimotek/Oauth 目錄隔離結構與打包下載',
-    repoSubtitle: '嚴格隔離 Oauth/、dev/、.github/workflows/，支援一鍵下載完整可建置專案壓縮檔。',
     tlsCertStatus: 'TLS 憑證載入策略',
   },
   en: {
@@ -318,7 +297,6 @@ export const TRANSLATIONS: Record<Locale, TranslationSchema> = {
     navSecurity: 'Auth & Risk Policy',
     navLoginLab: 'Hosted Login Lab',
     navSdks: 'Docs Center',
-    navRepo: 'Repository & Export',
     tabPassword: 'Password',
     tabEmailOtp: 'Email OTP',
     tabPasskey: 'Passkey',
@@ -327,9 +305,6 @@ export const TRANSLATIONS: Record<Locale, TranslationSchema> = {
     usersSubtitle: 'Core identity table (users) plus multi-channel mappings (user_identities) with JIT verified-email linking and signed account-ban webhooks.',
     securityTitle: 'Auth Methods & Invisible Risk Control',
     securitySubtitle: 'Configure Argon2id, Email OTP / Magic Link, TOTP 2FA, Passkeys (WebAuthn), RFC 8628 Device Flow, IP rate limiting, and Turnstile / hCaptcha.',
-    downloadAllZip: 'Download All ZIP',
-    downloadingZip: 'Packaging...',
-    oneClickLogin: 'One-Click Login',
     signOut: 'Sign Out',
     setupWizardTitle: 'First-Run Setup Wizard',
     setupWizardSubtitle: 'Configure database mode, resilient cache failover, Issuer URL, and super-admin credentials.',
@@ -340,7 +315,6 @@ export const TRANSLATIONS: Record<Locale, TranslationSchema> = {
     testConnection: 'Test Connection',
     skipRedis: 'Skip Redis (Auto SQL Cache)',
     completeSetup: 'Initialize & Lock System',
-    quickEnterDemo: 'One-Click Login to Console',
     loginTitle: 'Sign in to your account',
     loginSubtitle: 'Authenticate securely via unified OIDC credentials or connected identity providers',
     emailLabel: 'Work Email',
@@ -381,12 +355,10 @@ export const TRANSLATIONS: Record<Locale, TranslationSchema> = {
     oidcTraceTitle: 'Live PKCE Authorization Trace & Decoded RS256 ID Token',
     sdksTitle: 'IdP Integration & Docs Center',
     sdksSubtitle: 'OIDC / OAuth 2.0 token issuance guide, 5-language minimal SDKs, signed webhook verification, and deployment docs.',
-    quickStartLines: '3–5 Line Quick Integration',
+    quickStartLines: 'Quick Integration',
     fullMinimalSdk: 'Full Minimalist SDK Source',
     copyCode: 'Copy Code',
     copied: 'Copied',
-    repoTitle: 'wimotek/Oauth Repository Structure & Archive Export',
-    repoSubtitle: 'Strictly isolated Oauth/, dev/, and .github/workflows/ layout ready for multi-arch Docker builds.',
     tlsCertStatus: 'TLS Certificate Resolution',
   },
   ja: {
@@ -397,7 +369,6 @@ export const TRANSLATIONS: Record<Locale, TranslationSchema> = {
     navSecurity: '認証方式とリスク制御',
     navLoginLab: 'ログイン検証',
     navSdks: 'ドキュメント',
-    navRepo: '構成とダウンロード',
     tabPassword: 'パスワード',
     tabEmailOtp: 'メール OTP',
     tabPasskey: 'Passkey',
@@ -406,9 +377,6 @@ export const TRANSLATIONS: Record<Locale, TranslationSchema> = {
     usersSubtitle: '最小限の users と複数チャネル連携 user_identities で、JIT 同期・検証済メール自動紐付け・BAN Webhook 通知を実現します。',
     securityTitle: '認証方式とリスク制御',
     securitySubtitle: 'Argon2id、メール OTP/マジックリンク、TOTP 2FA、Passkeys、RFC 8628 デバイス認証、IP レート制限と Turnstile を一元管理。',
-    downloadAllZip: '一括 ZIP ダウンロード',
-    downloadingZip: 'パッケージ作成中...',
-    oneClickLogin: 'ワンクリックログイン',
     signOut: 'サインアウト',
     setupWizardTitle: '初回セットアップウィザード',
     setupWizardSubtitle: 'データベース方式、キャッシュ自動切替、発行者 URL、管理者アカウントを設定して初期化をロックします。',
@@ -419,7 +387,6 @@ export const TRANSLATIONS: Record<Locale, TranslationSchema> = {
     testConnection: '接続テスト',
     skipRedis: 'Redis をスキップ（SQL Cache 自動使用）',
     completeSetup: '初期化を完了してロック',
-    quickEnterDemo: 'ワンクリックログインで管理画面へ',
     loginTitle: '統合認証サインイン',
     loginSubtitle: '組織アカウントまたは外部ソーシャル ID プロバイダーで安全にサインインします',
     emailLabel: 'メールアドレス',
@@ -460,12 +427,10 @@ export const TRANSLATIONS: Record<Locale, TranslationSchema> = {
     oidcTraceTitle: 'リアルタイム PKCE フローと RS256 トークン解析',
     sdksTitle: 'IdP 連携・ドキュメントセンター',
     sdksSubtitle: 'OIDC / OAuth 2.0 トークン発行手順、5 言語ミニマル SDK、Webhook 署名検証、本番デプロイ手順を網羅。',
-    quickStartLines: '3〜5 行クイック導入例',
+    quickStartLines: 'クイック導入例',
     fullMinimalSdk: 'ミニマル SDK ソースコード',
     copyCode: 'コードをコピー',
     copied: 'コピー完了',
-    repoTitle: 'wimotek/Oauth リポジトリ分離構成と ZIP パッケージ',
-    repoSubtitle: 'Oauth/・dev/・.github/workflows/ の厳格な分離構成をそのままビルド可能な ZIP で取得できます。',
     tlsCertStatus: 'TLS 証明書解決ポリシー',
   },
   de: {
@@ -476,7 +441,6 @@ export const TRANSLATIONS: Record<Locale, TranslationSchema> = {
     navSecurity: 'Sicherheit & Risiko',
     navLoginLab: 'Anmeldevorschau',
     navSdks: 'Dokumentation',
-    navRepo: 'Quellcode & Export',
     tabPassword: 'Passwort',
     tabEmailOtp: 'E-Mail-OTP',
     tabPasskey: 'Passkey',
@@ -485,9 +449,6 @@ export const TRANSLATIONS: Record<Locale, TranslationSchema> = {
     usersSubtitle: 'Trennung von Kernkonten (users) und Anbieter-Zuordnungen (user_identities) mit JIT-Verknüpfung über verifizierte E-Mails und Sperr-Webhooks.',
     securityTitle: 'Moderne Authentifizierung & Risikokontrolle',
     securitySubtitle: 'Verwalten Sie Argon2id, E-Mail-OTP/Magic Link, TOTP 2FA, Passkeys (WebAuthn), RFC 8628 Device Flow, IP-Limits und Turnstile/hCaptcha.',
-    downloadAllZip: 'Quellcode als ZIP',
-    downloadingZip: 'Archiv wird erstellt...',
-    oneClickLogin: 'Ein-Klick-Anmeldung',
     signOut: 'Abmelden',
     setupWizardTitle: 'Ersteinrichtungsassistent',
     setupWizardSubtitle: 'Datenbankmodus, ausfallsicheren Cache, Issuer-Adresse und Administratorkonto sicher konfigurieren.',
@@ -498,7 +459,6 @@ export const TRANSLATIONS: Record<Locale, TranslationSchema> = {
     testConnection: 'Verbindung testen',
     skipRedis: 'Redis überspringen (SQL-Cache nutzen)',
     completeSetup: 'Initialisieren & sperren',
-    quickEnterDemo: 'Per Ein-Klick-Anmeldung starten',
     loginTitle: 'Zentrale Identitätsanmeldung',
     loginSubtitle: 'Melden Sie sich sicher mit Ihren Anmeldeinformationen oder verknüpften Identitätsanbietern an',
     emailLabel: 'Geschäftliche E-Mail-Adresse',
@@ -539,12 +499,10 @@ export const TRANSLATIONS: Record<Locale, TranslationSchema> = {
     oidcTraceTitle: 'Live-PKCE-Ablaufprotokoll & dekodiertes RS256-ID-Token',
     sdksTitle: 'IdP-Integrations- & Doku-Center',
     sdksSubtitle: 'OIDC/OAuth-2.0-Tokenausgabe, 5-Sprachen-SDKs, signierte Webhook-Prüfung und Produktions-Deployment.',
-    quickStartLines: '3–5 Zeilen Schnellintegration',
+    quickStartLines: 'Schnellintegration',
     fullMinimalSdk: 'Vollständiger Minimal-SDK-Quellcode',
     copyCode: 'Code kopieren',
     copied: 'Kopiert',
-    repoTitle: 'wimotek/Oauth Projektstruktur & ZIP-Komplettexport',
-    repoSubtitle: 'Strikt getrennte Verzeichnisse Oauth/, dev/ und .github/workflows/ als direkt baubares Archiv.',
     tlsCertStatus: 'TLS-Zertifikatsauflösung',
   },
 };

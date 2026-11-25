@@ -11,7 +11,8 @@ interface LoginLabViewProps {
   authPolicy?: AuthPolicyConfig;
   selectedClientId: string;
   onSelectClientId: (clientId: string) => void;
-  onRunOidcLogin: (provider: string, clientId: string) => Promise<OidcFlowTrace | null>;
+  onPasswordSignIn: (email: string, password: string) => Promise<void>;
+  onSocialSignIn: (provider: string) => Promise<void>;
   onAuthCompleted?: (result: { user: any; sessionToken: string; trace: OidcFlowTrace }) => void;
   latestTrace: OidcFlowTrace | null;
 }
@@ -23,27 +24,17 @@ export function LoginLabView({
   authPolicy,
   selectedClientId,
   onSelectClientId,
-  onRunOidcLogin,
+  onPasswordSignIn,
+  onSocialSignIn,
   onAuthCompleted,
   latestTrace,
 }: LoginLabViewProps) {
   const t = TRANSLATIONS[locale];
   const [viewport, setViewport] = useState<'desktop' | 'mobile'>('desktop');
   const [rtl, setRtl] = useState(false);
-  const [busyProvider, setBusyProvider] = useState<string | null>(null);
-
-  async function handleSignIn(provider: string) {
-    setBusyProvider(provider);
-    try {
-      await onRunOidcLogin(provider, selectedClientId);
-    } finally {
-      setBusyProvider(null);
-    }
-  }
 
   return (
     <div className="space-y-6">
-      {/* Header + Toolbar */}
       <div className="flex flex-col lg:flex-row lg:items-end justify-between gap-4">
         <div>
           <h1 className="font-display text-2xl font-bold tracking-tight text-slate-900 dark:text-white">
@@ -111,7 +102,6 @@ export function LoginLabView({
         </div>
       </div>
 
-      {/* Main Split: Live Hosted Login Canvas + Live OIDC PKCE Handshake Trace */}
       <div className="grid grid-cols-1 xl:grid-cols-12 gap-6 items-start">
         <div className="xl:col-span-6 bg-slate-100/80 dark:bg-[#0D1321] border border-slate-200 dark:border-slate-800 rounded-xl p-6 sm:p-8 flex justify-center">
           <div className={`w-full transition-all ${viewport === 'mobile' ? 'max-w-[360px]' : 'max-w-[440px]'}`}>
@@ -122,14 +112,13 @@ export function LoginLabView({
               clientId={selectedClientId}
               rtl={rtl}
               compact={viewport === 'mobile'}
-              onSocialSignIn={handleSignIn}
+              onPasswordSignIn={onPasswordSignIn}
+              onSocialSignIn={onSocialSignIn}
               onAuthCompleted={onAuthCompleted}
-              busyProvider={busyProvider}
             />
           </div>
         </div>
 
-        {/* Live OIDC Flow Inspector */}
         <section className="xl:col-span-6 bg-white dark:bg-[#111827] border border-slate-200 dark:border-slate-800 rounded-xl p-6 space-y-5">
           <div className="flex items-center justify-between gap-3 pb-3 border-b border-slate-100 dark:border-slate-800">
             <h2 className="text-sm font-semibold text-slate-900 dark:text-white">
@@ -147,7 +136,7 @@ export function LoginLabView({
             <div className="py-14 text-center space-y-2">
               <ShieldCheck className="w-8 h-8 mx-auto text-slate-300 dark:text-slate-700" />
               <p className="text-sm text-slate-600 dark:text-slate-400">
-                Click <strong>{t.oneClickLogin}</strong> or any social connector on the left to execute a live OIDC Authorization Code + PKCE (S256) flow.
+                Authenticate using any configured method on the left to inspect the live OIDC Authorization Code + PKCE (S256) trace.
               </p>
             </div>
           ) : (

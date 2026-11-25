@@ -104,7 +104,8 @@ docker run -d \
 | `GET /oauth/userinfo` | Authenticated OIDC profile claims |
 | `GET /oauth/logout` | End session / logout endpoint |
 
-See [`Oauth/docs/IDP_INTEGRATION_GUIDE.md`](./docs/IDP_INTEGRATION_GUIDE.md) for full integration instructions, curl examples, and HMAC-SHA256 `user.banned` webhook verification.
+See [`Oauth/docs/IDP_INTEGRATION_GUIDE.md`](./docs/IDP_INTEGRATION_GUIDE.md) for full integration instructions, curl examples, and HMAC-SHA256 `user.banned` webhook verification.  
+For Go developers (including beginners using `go mod init` / `go get` or offline single-file copy), see [`Oauth/docs/GO_SDK_GUIDE.md`](./docs/GO_SDK_GUIDE.md).
 
 ## Local Sandbox Testing
 

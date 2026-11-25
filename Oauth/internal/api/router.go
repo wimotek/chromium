@@ -29,16 +29,19 @@ import (
 )
 
 type apiConfigPayload struct {
-	Initialized        bool   `json:"initialized"`
-	DBDriver           string `json:"dbDriver"`
-	DBDsn              string `json:"dbDsn"`
-	RedisEnabled       bool   `json:"redisEnabled"`
-	RedisAddr          string `json:"redisAddr"`
-	RedisSimulatedDown bool   `json:"redisSimulatedDown"`
-	ActiveCacheMode    string `json:"activeCacheMode"`
-	IssuerURL          string `json:"issuerUrl"`
-	AdminEmail         string `json:"adminEmail"`
-	TLSCertSource      string `json:"tlsCertSource"`
+	Initialized         bool   `json:"initialized"`
+	DBDriver            string `json:"dbDriver"`
+	DBDsn               string `json:"dbDsn"`
+	SQLiteWalEnabled    bool   `json:"sqliteWalEnabled"`
+	SQLiteBusyTimeoutMs int    `json:"sqliteBusyTimeoutMs"`
+	SQLiteMaxWriteConns int    `json:"sqliteMaxWriteConns"`
+	RedisEnabled        bool   `json:"redisEnabled"`
+	RedisAddr           string `json:"redisAddr"`
+	RedisSimulatedDown  bool   `json:"redisSimulatedDown"`
+	ActiveCacheMode     string `json:"activeCacheMode"`
+	IssuerURL           string `json:"issuerUrl"`
+	AdminEmail          string `json:"adminEmail"`
+	TLSSource           string `json:"tlsSource"`
 }
 
 type authUser struct {
@@ -438,7 +441,6 @@ func NewRouter(cfgMgr *config.Manager, keys *crypto.KeyManager, certSources ...s
 
 	// Authentication Flows
 	mux.HandleFunc("POST /api/auth/login", s.handlePasswordLogin)
-	mux.HandleFunc("POST /api/auth/one-click", s.handleOneClickLogin)
 	mux.HandleFunc("POST /api/auth/email-otp/send", s.handleSendEmailOTP)
 	mux.HandleFunc("POST /api/auth/email-otp/verify", s.handleVerifyEmailOTP)
 	mux.HandleFunc("POST /api/auth/passkey/challenge", s.handlePasskeyChallenge)
@@ -475,25 +477,8 @@ func NewRouter(cfgMgr *config.Manager, keys *crypto.KeyManager, certSources ...s
 	mux.HandleFunc("GET /api/security/policy", s.requireAdmin(s.handleGetPolicy))
 	mux.HandleFunc("PUT /api/security/policy", s.requireAdmin(s.handleUpdatePolicy))
 	mux.HandleFunc("POST /api/security/risk/test-bruteforce", s.requireAdmin(s.handleTestBruteForce))
-
-	// Repo Inspector fallback in single-binary container runtime
-	mux.HandleFunc("GET /api/repo/tree", func(w http.ResponseWriter, _ *http.Request) {
-		writeJSON(w, http.StatusOK, map[string]any{"tree": []any{}})
-	})
-	mux.HandleFunc("GET /api/repo/file", func(w http.ResponseWriter, r *http.Request) {
-		rel := r.URL.Query().Get("path")
-		writeJSON(w, http.StatusOK, map[string]any{
-			"path":    rel,
-			"content": fmt.Sprintf("// Single-binary runtime mode.\n// Browse full SDK & source repository at https://github.com/wimotek/Oauth (%s)\n", rel),
-			"size":    0,
-		})
-	})
-	mux.HandleFunc("GET /api/export/zip", func(w http.ResponseWriter, _ *http.Request) {
-		writeJSON(w, http.StatusNotImplemented, map[string]any{
-			"error":   "runtime_binary_mode",
-			"message": "Source ZIP export is only available in development studio mode; clone the Git repository directly in production.",
-		})
-	})
+	mux.HandleFunc("POST /api/security/signing-key/rotate", s.requireAdmin(s.handleRotateSigningKey))
+	mux.HandleFunc("POST /api/security/signing-key/purge-retiring", s.requireAdmin(s.handlePurgeRetiringKeys))
 
 	// Embedded React SPA with clean index.html fallback
 	subFS, err := fs.Sub(web.DistFS, "dist")
@@ -559,21 +544,20 @@ func (s *appServer) activeCacheModeLocked() string {
 
 func (s *appServer) buildConfigPayloadLocked(r *http.Request) apiConfigPayload {
 	cfg := s.cfgMgr.Get()
-	adminEmail := cfg.AdminEmail
-	if adminEmail == "" {
-		adminEmail = "admin@wimotek.dev"
-	}
 	return apiConfigPayload{
-		Initialized:        cfg.Initialized,
-		DBDriver:           cfg.Database.Driver,
-		DBDsn:              cfg.Database.DSN,
-		RedisEnabled:       cfg.Redis.Enabled,
-		RedisAddr:          cfg.Redis.Addr,
-		RedisSimulatedDown: cfg.Redis.SimulatedDown,
-		ActiveCacheMode:    s.activeCacheModeLocked(),
-		IssuerURL:          s.getIssuer(r),
-		AdminEmail:         adminEmail,
-		TLSCertSource:      s.certSource,
+		Initialized:         cfg.Initialized,
+		DBDriver:            cfg.Database.Driver,
+		DBDsn:               cfg.Database.DSN,
+		SQLiteWalEnabled:    true,
+		SQLiteBusyTimeoutMs: 5000,
+		SQLiteMaxWriteConns: 1,
+		RedisEnabled:        cfg.Redis.Enabled,
+		RedisAddr:           cfg.Redis.Addr,
+		RedisSimulatedDown:  cfg.Redis.SimulatedDown,
+		ActiveCacheMode:     s.activeCacheModeLocked(),
+		IssuerURL:           s.getIssuer(r),
+		AdminEmail:          cfg.AdminEmail,
+		TLSSource:           s.certSource,
 	}
 }
 
@@ -660,7 +644,12 @@ func (s *appServer) verifyJWT(tokenStr string) (jwt.MapClaims, bool) {
 		if _, ok := t.Method.(*jwt.SigningMethodRSA); !ok {
 			return nil, fmt.Errorf("unexpected signing method")
 		}
-		return &s.keys.PrivateKey().PublicKey, nil
+		kid, _ := t.Header["kid"].(string)
+		pub := s.keys.PublicKeyByID(kid)
+		if pub == nil {
+			return nil, fmt.Errorf("unknown or revoked signing key")
+		}
+		return pub, nil
 	})
 	if err != nil || !parsed.Valid {
 		return nil, false
@@ -1293,7 +1282,7 @@ func (s *appServer) handleSetupReset(w http.ResponseWriter, _ *http.Request) {
 }
 
 // ============================================================================
-// Authentication Handlers (Argon2id, Email OTP, Passkey, TOTP, One-Click)
+// Authentication Handlers (Argon2id, Email OTP, Passkey, TOTP)
 // ============================================================================
 
 func (s *appServer) handlePasswordLogin(w http.ResponseWriter, r *http.Request) {
@@ -1315,7 +1304,7 @@ func (s *appServer) handlePasswordLogin(w http.ResponseWriter, r *http.Request) 
 
 	cfg := s.cfgMgr.Get()
 	if cfg.AdminPasswordHash == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "setup_required", "message": "Complete setup wizard or use One-Click Login / Email OTP / Passkey."})
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "setup_required", "message": "Complete the first-run setup wizard to configure the administrator account."})
 		return
 	}
 
@@ -1338,39 +1327,6 @@ func (s *appServer) handlePasswordLogin(w http.ResponseWriter, r *http.Request) 
 	tok := "wm_sess_" + randomHex(18)
 	s.sessions[tok] = u
 	writeJSON(w, http.StatusOK, map[string]any{"user": u, "sessionToken": tok})
-}
-
-func (s *appServer) handleOneClickLogin(w http.ResponseWriter, r *http.Request) {
-	var body struct {
-		Provider string `json:"provider"`
-		ClientID string `json:"clientId"`
-		Email    string `json:"email"`
-	}
-	_ = json.NewDecoder(r.Body).Decode(&body)
-
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	cfg := s.cfgMgr.Get()
-	if !cfg.Initialized {
-		cfg.Initialized = true
-		_ = s.cfgMgr.Update(cfg)
-	}
-
-	email := defaultStr(strings.TrimSpace(body.Email), defaultStr(cfg.AdminEmail, "admin@wimotek.dev"))
-	provKey := "microsoft"
-	provLabel := "One-Click SSO"
-	authMethod := "oidc_sso"
-	for _, c := range s.connectors {
-		if c.Provider == body.Provider {
-			provKey = c.Provider
-			provLabel = c.DisplayName
-			authMethod = "social_" + c.Provider
-			break
-		}
-	}
-	issued := s.issueLiveTraceLocked(r, body.ClientID, email, "Wimotek Admin", provKey, provLabel, authMethod)
-	writeJSON(w, http.StatusOK, issued)
 }
 
 func (s *appServer) handleSendEmailOTP(w http.ResponseWriter, r *http.Request) {
@@ -1399,11 +1355,6 @@ func (s *appServer) handleSendEmailOTP(w http.ResponseWriter, r *http.Request) {
 		"email":        email,
 		"expiresInSec": 300,
 		"cacheBackend": mode,
-		"sandboxPreview": map[string]string{
-			"code":         code,
-			"magicToken":   magicTok,
-			"magicLinkUrl": s.getIssuer(r) + "/auth/magic?token=" + magicTok,
-		},
 	})
 }
 
@@ -1595,8 +1546,61 @@ func (s *appServer) handleOverview(w http.ResponseWriter, r *http.Request) {
 			"totalConnectors":   len(s.connectors),
 			"users":             len(s.users),
 		},
-		"jwksKid":    s.keys.KeyID(),
-		"authPolicy": s.policy,
+		"jwksKid":          s.keys.KeyID(),
+		"signingKeyStatus": s.keys.Status(),
+		"authPolicy":       s.policy,
+	})
+}
+
+func (s *appServer) handleRotateSigningKey(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Mode         string `json:"mode"`
+		GraceMinutes int    `json:"graceMinutes"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&body)
+
+	emergency := body.Mode == "emergency"
+	graceMins := body.GraceMinutes
+	if graceMins < 5 {
+		graceMins = 120
+	}
+	if graceMins > 1440 {
+		graceMins = 1440
+	}
+
+	prevKid, status, err := s.keys.RotateRSA(emergency, time.Duration(graceMins)*time.Minute)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{
+			"error":   "rotation_failed",
+			"message": err.Error(),
+		})
+		return
+	}
+
+	mode := "graceful"
+	if emergency {
+		mode = "emergency"
+		s.mu.Lock()
+		s.refreshToks = make(map[string]authCodeRecord)
+		s.mu.Unlock()
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":               true,
+		"mode":             mode,
+		"previousKid":      prevKid,
+		"jwksKid":          status.ActiveKid,
+		"signingKeyStatus": status,
+	})
+}
+
+func (s *appServer) handlePurgeRetiringKeys(w http.ResponseWriter, _ *http.Request) {
+	purged, status := s.keys.PurgeRetiring()
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":               true,
+		"purgedCount":      purged,
+		"jwksKid":          status.ActiveKid,
+		"signingKeyStatus": status,
 	})
 }
 

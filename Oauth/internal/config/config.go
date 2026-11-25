@@ -42,7 +42,7 @@ func NewManager(dataDir string) *Manager {
 		current: SystemConfig{
 			Initialized: false,
 			IssuerURL:   "http://localhost:8080",
-			AdminEmail:  "admin@wimotek.dev",
+			AdminEmail:  "",
 			Database: DBConfig{
 				Driver: "sqlite3",
 				DSN:    filepath.Join(dataDir, "wimotek_oauth.db"),

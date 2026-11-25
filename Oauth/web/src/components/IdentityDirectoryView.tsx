@@ -49,15 +49,15 @@ export function IdentityDirectoryView({
   onDeleteWebhook,
 }: IdentityDirectoryViewProps) {
   const t = TRANSLATIONS[locale];
-  const [jitEmail, setJitEmail] = useState('alice.chen@acme-corp.com');
-  const [jitName, setJitName] = useState('Alice Chen');
+  const [jitEmail, setJitEmail] = useState('');
+  const [jitName, setJitName] = useState('');
   const [jitProvider, setJitProvider] = useState<IdentityProviderType>('microsoft');
   const [jitEmailVerified, setJitEmailVerified] = useState(true);
   const [jitResult, setJitResult] = useState<string | null>(null);
   const [simulating, setSimulating] = useState(false);
 
   const [whName, setWhName] = useState('');
-  const [whUrl, setWhUrl] = useState('https://crm.acme-corp.com/webhooks/oauth-ban');
+  const [whUrl, setWhUrl] = useState('');
   const [whSecret, setWhSecret] = useState('');
   const [whError, setWhError] = useState<string | null>(null);
 
@@ -126,7 +126,7 @@ export function IdentityDirectoryView({
         <form onSubmit={handleRunJit} className="grid grid-cols-1 md:grid-cols-12 gap-3 items-end">
           <div className="md:col-span-4">
             <label htmlFor="jit-email" className="block text-xs font-medium text-slate-700 dark:text-slate-300 mb-1">
-              Incoming Verified Email
+              User Email
             </label>
             <input
               id="jit-email"
@@ -134,6 +134,7 @@ export function IdentityDirectoryView({
               required
               value={jitEmail}
               onChange={(e) => setJitEmail(e.target.value)}
+              placeholder="user@example.com"
               className="w-full min-h-[38px] px-3 py-1.5 text-xs font-mono rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900"
             />
           </div>

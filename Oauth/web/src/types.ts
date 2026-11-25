@@ -19,6 +19,18 @@ export interface SystemConfig {
   adminEmail: string;
 }
 
+export interface RetiringKeyInfo {
+  kid: string;
+  expiresAt: string;
+}
+
+export interface SigningKeyStatus {
+  activeKid: string;
+  rotatedAt: string;
+  jwksKeyCount: number;
+  retiringKeys: RetiringKeyInfo[];
+}
+
 export interface OAuthApplication {
   id: string;
   name: string;
@@ -153,12 +165,4 @@ export interface OidcFlowTrace {
   };
   userInfo: Record<string, unknown>;
   elapsedMs: number;
-}
-
-export interface RepoFileNode {
-  path: string;
-  name: string;
-  type: 'file' | 'dir';
-  size?: number;
-  children?: RepoFileNode[];
 }

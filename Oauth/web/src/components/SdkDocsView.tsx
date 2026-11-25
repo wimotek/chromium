@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useState } from 'react';
 import {
   Copy,
   Check,
@@ -8,47 +8,152 @@ import {
   Webhook,
   Server,
   CheckCircle2,
+  ChevronRight,
+  ChevronDown,
+  FileCode2,
 } from 'lucide-react';
 import type { Locale, OAuthApplication } from '../types';
 import { TRANSLATIONS } from '../lib/i18n';
+import { EMBEDDED_SDKS, SDK_ORDER, type SdkLang } from '../lib/sdkSources';
 
 type DocsSection = 'idp_guide' | 'sdks' | 'webhooks_jit' | 'deployment';
-type SdkLang = 'python' | 'nodejs' | 'go' | 'java' | 'php';
-
-const SDK_META: { id: SdkLang; label: string; sdkPath: string }[] = [
-  { id: 'python', label: 'Python', sdkPath: 'Oauth/sdk/python/wimotek_oauth.py' },
-  { id: 'nodejs', label: 'Node.js', sdkPath: 'Oauth/sdk/nodejs/wimotek-oauth.ts' },
-  { id: 'go', label: 'Go', sdkPath: 'Oauth/sdk/go/client.go' },
-  { id: 'java', label: 'Java', sdkPath: 'Oauth/sdk/java/WimotekOAuthClient.java' },
-  { id: 'php', label: 'PHP', sdkPath: 'Oauth/sdk/php/WimotekOAuthClient.php' },
-];
 
 function buildQuickStart(lang: SdkLang, issuer: string, clientId: string, redirectUri: string): string {
   switch (lang) {
     case 'python':
-      return `from wimotek_oauth import WimotekOAuthClient
+      return `import os
+from wimotek_oauth import WimotekOAuthClient  # Save wimotek_oauth.py below into your project
 
-auth = WimotekOAuthClient("${issuer}", "${clientId}", os.environ["OAUTH_SECRET"], "${redirectUri}")
-login_url, state, verifier = auth.build_login_url()  # 1. Redirect user & store state/verifier
-result = auth.handle_callback(code, recv_state, state, verifier)  # 2. Verify PKCE + fetch user`;
+auth = WimotekOAuthClient(
+    issuer="${issuer}",
+    client_id="${clientId}",
+    client_secret=os.environ["OAUTH_SECRET"],
+    redirect_uri="${redirectUri}",
+)
+
+# 1. Redirect user to login_url & store state + verifier in session
+login_url, state, verifier = auth.build_login_url()
+
+# 2. In your /callback route, verify PKCE & fetch user claims
+result = auth.handle_callback(code, recv_state, state, verifier)
+print(result["user"]["email"])`;
     case 'nodejs':
-      return `import { WimotekOAuthClient } from './wimotek-oauth';
+      return `// Save wimotek-oauth.ts below into your project
+import { WimotekOAuthClient } from './wimotek-oauth';
 
-const oauth = new WimotekOAuthClient({ issuer: '${issuer}', clientId: '${clientId}', clientSecret: process.env.OAUTH_SECRET!, redirectUri: '${redirectUri}' });
-const { url, state, verifier } = oauth.createAuthSession(); // 1. Redirect user & save PKCE state
-const { user, tokens } = await oauth.handleCallback({ code, state, expectedState: state, verifier }); // 2. Exchange & verify`;
+const oauth = new WimotekOAuthClient({
+  issuer: '${issuer}',
+  clientId: '${clientId}',
+  clientSecret: process.env.OAUTH_SECRET!,
+  redirectUri: '${redirectUri}',
+});
+
+// 1. Redirect user to url & persist state + verifier in HttpOnly session
+const { url, state, verifier } = oauth.createAuthSession();
+
+// 2. Inside /callback, exchange authorization code with PKCE verifier
+const { user, tokens } = await oauth.handleCallback({
+  code,
+  state: recvState,
+  expectedState: state,
+  verifier,
+});`;
     case 'go':
-      return `client := &wimotekoauth.Client{Issuer: "${issuer}", ClientID: "${clientId}", ClientSecret: os.Getenv("OAUTH_SECRET"), RedirectURI: "${redirectUri}"}
-loginURL, state, verifier := client.BuildLoginURL() // 1. Redirect user & persist PKCE verifier
-res, err := client.HandleCallback(ctx, code, recvState, state, verifier) // 2. Verify & get userinfo`;
+      return `package main
+
+import (
+	"fmt"
+	"log"
+	"net/http"
+	"os"
+
+	// 方式 A：通过 go get 自动下载（推荐）
+	wimotekoauth "github.com/wimotek/oauth/sdk/go"
+	// 方式 B：离线单文件拷贝到 pkg/wimotekoauth/client.go 时改用下面这行：
+	// wimotekoauth "my-go-app/pkg/wimotekoauth"
+)
+
+var oauthClient = &wimotekoauth.Client{
+	Issuer:       "${issuer}",
+	ClientID:     "${clientId}",
+	ClientSecret: os.Getenv("OAUTH_SECRET"),
+	RedirectURI:  "${redirectUri}",
+}
+
+func main() {
+	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		fmt.Fprint(w, \`<h1>My Go App</h1><a href="/login">Sign in with wimotek/Oauth</a>\`)
+	})
+
+	// 1. 生成 PKCE (S256) 登录地址，将 state & verifier 存入 HttpOnly Cookie 后跳转
+	http.HandleFunc("/login", func(w http.ResponseWriter, r *http.Request) {
+		loginURL, state, verifier := oauthClient.BuildLoginURL()
+		http.SetCookie(w, &http.Cookie{Name: "oauth_state", Value: state, Path: "/", HttpOnly: true, MaxAge: 300})
+		http.SetCookie(w, &http.Cookie{Name: "oauth_verifier", Value: verifier, Path: "/", HttpOnly: true, MaxAge: 300})
+		http.Redirect(w, r, loginURL, http.StatusFound)
+	})
+
+	// 2. 回调校验 CSRF state + PKCE 并换取用户信息
+	http.HandleFunc("/callback", func(w http.ResponseWriter, r *http.Request) {
+		stateCookie, err1 := r.Cookie("oauth_state")
+		verifierCookie, err2 := r.Cookie("oauth_verifier")
+		if err1 != nil || err2 != nil {
+			http.Error(w, "Missing session cookies, please visit /login again", http.StatusBadRequest)
+			return
+		}
+		res, err := oauthClient.HandleCallback(
+			r.Context(),
+			r.URL.Query().Get("code"),
+			r.URL.Query().Get("state"),
+			stateCookie.Value,
+			verifierCookie.Value,
+		)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusUnauthorized)
+			return
+		}
+		http.SetCookie(w, &http.Cookie{Name: "oauth_state", Value: "", Path: "/", MaxAge: -1})
+		http.SetCookie(w, &http.Cookie{Name: "oauth_verifier", Value: "", Path: "/", MaxAge: -1})
+		fmt.Fprintf(w, "Signed in as %v (%v)\\n", res.User["name"], res.User["email"])
+	})
+
+	log.Println("Listening on http://localhost:4000")
+	log.Fatal(http.ListenAndServe(":4000", nil))
+}`;
     case 'java':
-      return `var oauth = new WimotekOAuthClient("${issuer}", "${clientId}", System.getenv("OAUTH_SECRET"), "${redirectUri}");
-var session = oauth.createAuthSession(); // 1. Redirect to session.authUrl() & save state/verifier
-String userJson = oauth.exchangeCodeForUserInfo(code, recvState, session.state(), session.codeVerifier()); // 2. Exchange`;
+      return `// Place WimotekOAuthClient.java below under com/wimotek/oauth/
+import com.wimotek.oauth.WimotekOAuthClient;
+
+var oauth = new WimotekOAuthClient(
+    "${issuer}",
+    "${clientId}",
+    System.getenv("OAUTH_SECRET"),
+    "${redirectUri}"
+);
+
+// 1. Redirect browser to session.authUrl() & store state/codeVerifier in HttpSession
+var session = oauth.createAuthSession();
+
+// 2. In /callback controller, exchange code + PKCE verifier for userinfo JSON
+String userJson = oauth.exchangeCodeForUserInfo(code, recvState, session.state(), session.codeVerifier());`;
     case 'php':
-      return `$oauth = new WimotekOAuthClient('${issuer}', '${clientId}', getenv('OAUTH_SECRET'), '${redirectUri}');
-$session = $oauth->createAuthSession(); // 1. Redirect to $session['url'] & store state/verifier
-$result = $oauth->handleCallback($_GET['code'], $_GET['state'], $_SESSION['state'], $_SESSION['verifier']); // 2. Get user`;
+      return `<?php
+// Save WimotekOAuthClient.php below into your project
+require_once __DIR__ . '/WimotekOAuthClient.php';
+
+$oauth = new WimotekOAuthClient(
+    '${issuer}',
+    '${clientId}',
+    getenv('OAUTH_SECRET'),
+    '${redirectUri}'
+);
+
+// 1. Redirect user to $session['url'] & persist state/verifier in $_SESSION
+$session = $oauth->createAuthSession();
+
+// 2. In /callback, exchange authorization code with PKCE verifier
+$result = $oauth->handleCallback($_GET['code'], $_GET['state'], $_SESSION['state'], $_SESSION['verifier']);`;
   }
 }
 
@@ -64,34 +169,14 @@ export function SdkDocsView({ locale, issuerUrl, applications }: SdkDocsViewProp
   const [section, setSection] = useState<DocsSection>('idp_guide');
   const [lang, setLang] = useState<SdkLang>('python');
   const [selectedAppId, setSelectedAppId] = useState(applications[0]?.id || '');
-  const [sdkSource, setSdkSource] = useState('');
-  const [loadingSource, setLoadingSource] = useState(false);
+  const [sdkSourceExpanded, setSdkSourceExpanded] = useState(false);
   const [copiedId, setCopiedId] = useState<string | null>(null);
 
   const selectedApp = applications.find((a) => a.id === selectedAppId) || applications[0];
-  const currentMeta = SDK_META.find((m) => m.id === lang)!;
+  const currentSdk = EMBEDDED_SDKS[lang];
   const cleanIssuer = issuerUrl.replace(/\/$/, '');
   const activeClientId = selectedApp?.clientId || 'wimotek_erp_portal';
   const activeRedirectUri = selectedApp?.redirectUris[0] || 'http://localhost:4000/callback';
-
-  useEffect(() => {
-    let active = true;
-    setLoadingSource(true);
-    fetch(`/api/repo/file?path=${encodeURIComponent(currentMeta.sdkPath)}`)
-      .then((r) => r.json())
-      .then((data) => {
-        if (active) setSdkSource(data.content || '');
-      })
-      .catch(() => {
-        if (active) setSdkSource('// Failed to load SDK file');
-      })
-      .finally(() => {
-        if (active) setLoadingSource(false);
-      });
-    return () => {
-      active = false;
-    };
-  }, [currentMeta.sdkPath]);
 
   const quickSnippet = buildQuickStart(lang, cleanIssuer, activeClientId, activeRedirectUri);
 
@@ -375,30 +460,108 @@ app.post('/webhooks/oauth-events', express.text({ type: 'application/json' }), (
       {section === 'sdks' && (
         <div className="space-y-6">
           <div role="tablist" aria-label="SDK Languages" className="inline-flex items-center p-1 rounded-lg bg-slate-100 dark:bg-slate-800/80 border border-slate-200 dark:border-slate-700 flex-wrap gap-1">
-            {SDK_META.map((item) => (
-              <button
-                key={item.id}
-                role="tab"
-                type="button"
-                aria-selected={lang === item.id}
-                onClick={() => setLang(item.id)}
-                className={`px-3.5 py-1.5 text-xs font-medium rounded-md transition-colors whitespace-nowrap ${
-                  lang === item.id
-                    ? 'bg-white dark:bg-[#111827] text-slate-900 dark:text-white shadow-xs'
-                    : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
-                }`}
-              >
-                {item.label}
-              </button>
-            ))}
+            {SDK_ORDER.map((id) => {
+              const item = EMBEDDED_SDKS[id];
+              return (
+                <button
+                  key={item.id}
+                  role="tab"
+                  type="button"
+                  aria-selected={lang === item.id}
+                  onClick={() => {
+                    setLang(item.id);
+                    setSdkSourceExpanded(false);
+                  }}
+                  className={`px-3.5 py-1.5 text-xs font-medium rounded-md transition-colors whitespace-nowrap ${
+                    lang === item.id
+                      ? 'bg-white dark:bg-[#111827] text-slate-900 dark:text-white shadow-xs'
+                      : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
+                  }`}
+                >
+                  {item.label}
+                </button>
+              );
+            })}
           </div>
+
+          {lang === 'go' && (
+            <section className="bg-white dark:bg-[#111827] border border-slate-200 dark:border-slate-800 rounded-xl overflow-hidden">
+              <div className="px-5 py-3.5 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between gap-3">
+                <div>
+                  <h2 className="text-sm font-semibold text-slate-900 dark:text-white">
+                    {isZh ? 'Go 新手快速上手：用 Go Module 自动下载（3 步跑通）' : 'Go Beginner Quickstart: Auto-Download via Go Modules (3 Steps)'}
+                  </h2>
+                  <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
+                    {isZh
+                      ? '完整图文排查指南见仓库 Oauth/docs/GO_SDK_GUIDE.md · 无需引入任何第三方 Web 框架'
+                      : 'Full beginner guide & troubleshooting in Oauth/docs/GO_SDK_GUIDE.md · Standard library only'}
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() =>
+                    copy(
+                      'go_mod_cmds',
+                      `mkdir my-go-app && cd my-go-app\ngo mod init my-go-app\n# 国内网络建议先配置一次 Go 模块代理加速：\ngo env -w GOPROXY=https://goproxy.cn,direct\n# 自动下载零依赖 Go SDK 模块：\ngo get github.com/wimotek/oauth/sdk/go@latest\n# 设置 Client Secret 并运行下方的 main.go：\nexport OAUTH_SECRET="your_client_secret"\ngo run main.go`
+                    )
+                  }
+                  className="px-2.5 py-1.5 text-xs font-medium rounded-md border border-slate-200 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800 flex items-center gap-1.5 whitespace-nowrap shrink-0"
+                >
+                  {copiedId === 'go_mod_cmds' ? <Check className="w-3.5 h-3.5 text-emerald-600" /> : <Copy className="w-3.5 h-3.5" />}
+                  <span>{copiedId === 'go_mod_cmds' ? t.copied : isZh ? '复制命令' : 'Copy Commands'}</span>
+                </button>
+              </div>
+              <div className="grid grid-cols-1 lg:grid-cols-2 divide-y lg:divide-y-0 lg:divide-x divide-slate-200 dark:divide-slate-800 text-xs">
+                <div className="p-5 space-y-2.5">
+                  <div className="font-semibold text-slate-900 dark:text-white">
+                    {isZh ? '方式 A：go get 自动下载（推荐）' : 'Method A: Auto-Download with go get (Recommended)'}
+                  </div>
+                  <p className="text-slate-600 dark:text-slate-400 leading-relaxed">
+                    {isZh
+                      ? 'Go 就像前端的 npm：先执行 go mod init 初始化项目，再用 go get 拉取独立零依赖子模块 github.com/wimotek/oauth/sdk/go，接着把下方 main.go 复制运行即可。'
+                      : 'Initialize go.mod, run go get to pull the standalone zero-dependency SDK submodule, then save and run the complete main.go below.'}
+                  </p>
+                  <pre className="p-3.5 rounded-lg bg-slate-50 dark:bg-[#0B0F19] border border-slate-200 dark:border-slate-800 font-mono text-[11px] text-slate-800 dark:text-slate-200 overflow-x-auto leading-relaxed">{`mkdir my-go-app && cd my-go-app
+go mod init my-go-app
+# 国内网络可选加速代理：
+go env -w GOPROXY=https://goproxy.cn,direct
+# 自动下载独立 SDK 模块（零第三方依赖）：
+go get github.com/wimotek/oauth/sdk/go@latest
+# 运行下方完整 main.go：
+export OAUTH_SECRET="<CLIENT_SECRET>"
+go run main.go`}</pre>
+                </div>
+
+                <div className="p-5 space-y-2.5">
+                  <div className="font-semibold text-slate-900 dark:text-white">
+                    {isZh ? '方式 B：内网 / 离线零依赖单文件拷贝' : 'Method B: Offline / Air-Gapped Single-File Copy'}
+                  </div>
+                  <p className="text-slate-600 dark:text-slate-400 leading-relaxed">
+                    {isZh
+                      ? '如果尚未推送 Git 仓库或处于内网隔离环境，展开最下方 93 行 client.go 源码，直接保存为项目里的 pkg/wimotekoauth/client.go，把 import 路径改为 "my-go-app/pkg/wimotekoauth" 即可离线运行。'
+                      : 'For private/offline environments or before publishing to Git, expand the 93-line client.go below, save it as pkg/wimotekoauth/client.go, and import "my-go-app/pkg/wimotekoauth".'}
+                  </p>
+                  <pre className="p-3.5 rounded-lg bg-slate-50 dark:bg-[#0B0F19] border border-slate-200 dark:border-slate-800 font-mono text-[11px] text-slate-800 dark:text-slate-200 overflow-x-auto leading-relaxed">{`my-go-app/
+├── go.mod                      # module my-go-app
+├── main.go                     # 下方可直接运行的完整示例
+└── pkg/
+    └── wimotekoauth/
+        └── client.go           # 展开下方 SDK 源码复制至此`}</pre>
+                </div>
+              </div>
+            </section>
+          )}
 
           <section className="bg-white dark:bg-[#111827] border border-slate-200 dark:border-slate-800 rounded-xl overflow-hidden">
             <div className="px-5 py-3.5 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between gap-3">
               <div className="flex items-center gap-2">
                 <Code2 className="w-4 h-4 text-indigo-600 dark:text-indigo-400" />
                 <h2 className="text-sm font-semibold text-slate-900 dark:text-white">
-                  {t.quickStartLines} ({currentMeta.label})
+                  {lang === 'go'
+                    ? isZh
+                      ? '完整可直接运行的 main.go 示例（含标准库 Cookie 会话）'
+                      : 'Complete Runnable main.go Example (Stdlib Cookie Session)'
+                    : `${t.quickStartLines} (${currentSdk.label})`}
                 </h2>
               </div>
               <button
@@ -410,31 +573,68 @@ app.post('/webhooks/oauth-events', express.text({ type: 'application/json' }), (
                 <span>{copiedId === 'quick' ? t.copied : t.copyCode}</span>
               </button>
             </div>
+            <div className="px-5 py-2.5 border-b border-slate-100 dark:border-slate-800/80 bg-indigo-50/40 dark:bg-indigo-950/20 text-xs text-slate-700 dark:text-slate-300 leading-relaxed">
+              {isZh ? currentSdk.packageHintZh : currentSdk.packageHintEn}
+            </div>
             <pre className="p-5 text-xs font-mono text-slate-800 dark:text-slate-200 bg-slate-50/70 dark:bg-[#0B0F19] overflow-x-auto leading-relaxed">
               {quickSnippet}
             </pre>
           </section>
 
+          {/* Collapsible Minimalist SDK Source (Markdown-style disclosure, collapsed by default) */}
           <section className="bg-white dark:bg-[#111827] border border-slate-200 dark:border-slate-800 rounded-xl overflow-hidden">
-            <div className="px-5 py-3.5 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between gap-3">
-              <div>
-                <h2 className="text-sm font-semibold text-slate-900 dark:text-white">
-                  {t.fullMinimalSdk}
-                </h2>
-                <p className="text-xs font-mono text-slate-500 dark:text-slate-400">{currentMeta.sdkPath}</p>
-              </div>
+            <div className="flex items-center justify-between gap-3 pr-5 hover:bg-slate-50/70 dark:hover:bg-slate-800/30 transition-colors">
               <button
                 type="button"
-                onClick={() => copy('sdk', sdkSource)}
-                className="px-2.5 py-1.5 text-xs font-medium rounded-md border border-slate-200 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800 flex items-center gap-1.5 whitespace-nowrap"
+                aria-expanded={sdkSourceExpanded}
+                onClick={() => setSdkSourceExpanded((v) => !v)}
+                className="flex-1 px-5 py-3.5 text-left flex items-center gap-3 min-w-0"
+              >
+                {sdkSourceExpanded ? (
+                  <ChevronDown className="w-4 h-4 shrink-0 text-indigo-600 dark:text-indigo-400" />
+                ) : (
+                  <ChevronRight className="w-4 h-4 shrink-0 text-slate-500 dark:text-slate-400" />
+                )}
+                <FileCode2 className="w-4 h-4 shrink-0 text-slate-500 dark:text-slate-400" />
+                <div className="min-w-0">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <h2 className="text-sm font-semibold text-slate-900 dark:text-white">
+                      {t.fullMinimalSdk}
+                    </h2>
+                    <span className="text-xs font-mono text-slate-500 dark:text-slate-400">
+                      ({currentSdk.lineCount} {isZh ? '行 · 零第三方依赖' : 'lines · zero deps'})
+                    </span>
+                  </div>
+                  <p className="text-xs font-mono text-slate-500 dark:text-slate-400 truncate mt-0.5">
+                    {currentSdk.path} ·{' '}
+                    <span className="font-sans text-indigo-600 dark:text-indigo-400">
+                      {sdkSourceExpanded
+                        ? isZh
+                          ? '点击收起源码'
+                          : 'Click to collapse source'
+                        : isZh
+                          ? '点击展开完整源码'
+                          : 'Click to expand full source'}
+                    </span>
+                  </p>
+                </div>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => copy('sdk', currentSdk.source)}
+                className="px-2.5 py-1.5 text-xs font-medium rounded-md border border-slate-200 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800 flex items-center gap-1.5 whitespace-nowrap shrink-0"
               >
                 {copiedId === 'sdk' ? <Check className="w-3.5 h-3.5 text-emerald-600" /> : <Copy className="w-3.5 h-3.5" />}
                 <span>{copiedId === 'sdk' ? t.copied : t.copyCode}</span>
               </button>
             </div>
-            <pre className="p-5 text-xs font-mono text-slate-800 dark:text-slate-200 bg-slate-50/70 dark:bg-[#0B0F19] overflow-x-auto max-h-[460px] leading-relaxed">
-              {loadingSource ? 'Loading SDK source...' : sdkSource}
-            </pre>
+
+            {sdkSourceExpanded && (
+              <pre className="p-5 border-t border-slate-200 dark:border-slate-800 text-xs font-mono text-slate-800 dark:text-slate-200 bg-slate-50/70 dark:bg-[#0B0F19] overflow-x-auto max-h-[520px] leading-relaxed">
+                {currentSdk.source}
+              </pre>
+            )}
           </section>
         </div>
       )}

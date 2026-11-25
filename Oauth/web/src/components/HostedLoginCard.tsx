@@ -3,14 +3,12 @@ import {
   ChevronDown,
   ChevronUp,
   KeyRound,
-  Zap,
   AlertCircle,
   Mail,
   Fingerprint,
   Smartphone,
   ShieldCheck,
   CheckCircle2,
-  Sparkles,
 } from 'lucide-react';
 import type { AuthPolicyConfig, Locale, OidcFlowTrace, SocialConnector } from '../types';
 import { TRANSLATIONS, partitionConnectors } from '../lib/i18n';
@@ -47,18 +45,14 @@ export function HostedLoginCard({
 }: HostedLoginCardProps) {
   const t = TRANSLATIONS[locale];
   const [mode, setMode] = useState<AuthModeTab>('password');
-  const [email, setEmail] = useState('admin@wimotek.dev');
+  const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [expanded, setExpanded] = useState(false);
   const [localError, setLocalError] = useState<string | null>(null);
   const [working, setWorking] = useState(false);
 
-  // Email OTP / Magic Link state
-  const [otpChallenge, setOtpChallenge] = useState<{
-    code: string;
-    magicToken: string;
-    magicLinkUrl: string;
-  } | null>(null);
+  // Email OTP state
+  const [otpSent, setOtpSent] = useState(false);
   const [otpInput, setOtpInput] = useState('');
 
   // Device Flow (RFC 8628) state
@@ -69,7 +63,6 @@ export function HostedLoginCard({
     approved?: boolean;
   } | null>(null);
 
-  // Turnstile / hCaptcha checkbox verification state
   const [captchaVerified, setCaptchaVerified] = useState(true);
 
   const policy: AuthPolicyConfig = authPolicy || {
@@ -82,7 +75,7 @@ export function HostedLoginCard({
     ipRateLimitPerMin: 60,
     lockoutThreshold: 3,
     captchaProvider: 'turnstile',
-    captchaSiteKey: '0x4AAAAAA_demo_turnstile_slot',
+    captchaSiteKey: '',
   };
 
   const { primary, overflow } = partitionConnectors(connectors, 3);
@@ -103,13 +96,11 @@ export function HostedLoginCard({
       return;
     }
     if (!email.trim() || !password) {
-      setLocalError('Please enter both email and password, or use One-Click Login.');
+      setLocalError('Please enter both email and password.');
       return;
     }
     if (onPasswordSignIn) {
       await onPasswordSignIn(email.trim(), password);
-    } else {
-      await onSocialSignIn('local_password');
     }
   }
 
@@ -125,8 +116,8 @@ export function HostedLoginCard({
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.message || 'Failed to send OTP');
-      setOtpChallenge(data.sandboxPreview);
-      setOtpInput(data.sandboxPreview.code);
+      setOtpSent(true);
+      setOtpInput('');
     } catch (err) {
       setLocalError(err instanceof Error ? err.message : 'OTP failed');
     } finally {
@@ -134,22 +125,18 @@ export function HostedLoginCard({
     }
   }
 
-  async function handleVerifyOtp(useMagic = false) {
+  async function handleVerifyOtp() {
     setLocalError(null);
     setWorking(true);
     try {
       const res = await fetch('/api/auth/email-otp/verify', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(
-          useMagic && otpChallenge
-            ? { magicToken: otpChallenge.magicToken, clientId }
-            : { email: email.trim(), code: otpInput.trim(), clientId }
-        ),
+        body: JSON.stringify({ email: email.trim(), code: otpInput.trim(), clientId }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.message || 'Verification failed');
-      setOtpChallenge(null);
+      setOtpSent(false);
       onAuthCompleted?.(data);
     } catch (err) {
       setLocalError(err instanceof Error ? err.message : 'Verification failed');
@@ -169,7 +156,7 @@ export function HostedLoginCard({
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           challenge: ch.challenge,
-          email: email.trim() || 'admin@wimotek.dev',
+          email: email.trim(),
           clientId,
           authenticator: 'TouchID / FaceID / Windows Hello',
         }),
@@ -210,7 +197,7 @@ export function HostedLoginCard({
       await fetch('/api/oauth/device/approve', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ userCode: deviceSession.user_code, email: email.trim() || 'admin@wimotek.dev' }),
+        body: JSON.stringify({ userCode: deviceSession.user_code, email: email.trim() }),
       });
       const pollRes = await fetch('/api/oauth/device/poll', {
         method: 'POST',
@@ -243,17 +230,6 @@ export function HostedLoginCard({
           {t.loginSubtitle}
         </p>
       </div>
-
-      {/* Primary One-Click SSO button */}
-      <button
-        type="button"
-        onClick={() => onSocialSignIn('one_click')}
-        disabled={Boolean(busyProvider) || working}
-        className="w-full min-h-[42px] px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-700 active:bg-indigo-800 disabled:opacity-60 text-white text-sm font-medium flex items-center justify-center gap-2 transition-colors"
-      >
-        <Zap className="w-4 h-4 shrink-0" />
-        <span className="i18n-safe leading-snug">{t.oneClickLogin}</span>
-      </button>
 
       {/* Multi-Auth Mode Switcher */}
       {availableTabs.length > 1 && (
@@ -296,6 +272,7 @@ export function HostedLoginCard({
               type="email"
               value={email}
               onChange={(e) => setEmail(e.target.value)}
+              placeholder="you@example.com"
               autoComplete="username"
               className="w-full min-h-[40px] px-3 py-2 text-sm rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100"
             />
@@ -316,7 +293,6 @@ export function HostedLoginCard({
             />
           </div>
 
-          {/* Cloudflare Turnstile / hCaptcha Slot */}
           {policy.captchaProvider !== 'none' && (
             <label className="flex items-center justify-between gap-3 px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50/70 dark:bg-slate-900/60 text-xs cursor-pointer">
               <span className="flex items-center gap-2 text-slate-700 dark:text-slate-300">
@@ -326,9 +302,7 @@ export function HostedLoginCard({
                   onChange={(e) => setCaptchaVerified(e.target.checked)}
                   className="w-4 h-4 rounded border-slate-300 text-indigo-600"
                 />
-                <span>
-                  {captchaVerified ? 'Human verified' : 'Verify you are human'}
-                </span>
+                <span>{captchaVerified ? 'Human verified' : 'Verify you are human'}</span>
               </span>
               <span className="text-[10px] font-mono text-slate-400">
                 {policy.captchaProvider === 'turnstile' ? 'Cloudflare Turnstile' : 'hCaptcha'}
@@ -347,7 +321,7 @@ export function HostedLoginCard({
         </form>
       )}
 
-      {/* Mode 2: Passwordless Email OTP & Magic Link */}
+      {/* Mode 2: Passwordless Email OTP */}
       {mode === 'email_otp' && (
         <div className="mt-4 space-y-3">
           <form onSubmit={handleSendOtp} className="space-y-2.5">
@@ -361,6 +335,7 @@ export function HostedLoginCard({
                 required
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
+                placeholder="you@example.com"
                 className="w-full min-h-[40px] px-3 py-2 text-sm rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900"
               />
             </div>
@@ -374,13 +349,10 @@ export function HostedLoginCard({
             </button>
           </form>
 
-          {otpChallenge && (
+          {otpSent && (
             <div className="p-3.5 rounded-lg bg-slate-50 dark:bg-[#0B0F19] border border-slate-200 dark:border-slate-800 space-y-2.5 text-xs">
-              <div className="flex items-center justify-between text-slate-500">
-                <span>Sandbox Email Preview (5m TTL)</span>
-                <code className="font-mono font-bold text-indigo-600 dark:text-indigo-400 tabular-nums">
-                  {otpChallenge.code}
-                </code>
+              <div className="text-slate-600 dark:text-slate-400">
+                A 6-digit verification code has been sent to your email (valid for 5 minutes).
               </div>
               <div className="flex gap-2">
                 <input
@@ -393,22 +365,13 @@ export function HostedLoginCard({
                 />
                 <button
                   type="button"
-                  onClick={() => handleVerifyOtp(false)}
+                  onClick={handleVerifyOtp}
                   disabled={working}
                   className="px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white font-medium whitespace-nowrap"
                 >
                   Verify OTP
                 </button>
               </div>
-              <button
-                type="button"
-                onClick={() => handleVerifyOtp(true)}
-                disabled={working}
-                className="w-full py-1.5 rounded-md border border-indigo-200 dark:border-indigo-900/60 text-indigo-700 dark:text-indigo-300 hover:bg-indigo-50 dark:hover:bg-indigo-950/40 font-medium flex items-center justify-center gap-1.5"
-              >
-                <Sparkles className="w-3.5 h-3.5" />
-                <span>Click Magic Link to Sign In</span>
-              </button>
             </div>
           )}
         </div>

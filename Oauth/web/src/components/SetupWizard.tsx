@@ -8,8 +8,6 @@ import {
   AlertCircle,
   ArrowRight,
   ArrowLeft,
-  Zap,
-  Download,
   Sun,
   Moon,
 } from 'lucide-react';
@@ -32,9 +30,6 @@ interface SetupWizardProps {
     adminEmail: string;
     adminPassword: string;
   }) => Promise<void>;
-  onOneClickDemo: () => Promise<void>;
-  onDownloadZip: () => void;
-  downloadingZip: boolean;
 }
 
 export function SetupWizard({
@@ -44,9 +39,6 @@ export function SetupWizard({
   onToggleDark,
   initialConfig,
   onComplete,
-  onOneClickDemo,
-  onDownloadZip,
-  downloadingZip,
 }: SetupWizardProps) {
   const t = TRANSLATIONS[locale];
   const [step, setStep] = useState(0);
@@ -62,7 +54,11 @@ export function SetupWizard({
   const [testingRedis, setTestingRedis] = useState(false);
 
   const [issuerUrl, setIssuerUrl] = useState(initialConfig.issuerUrl || window.location.origin);
-  const [adminEmail, setAdminEmail] = useState(initialConfig.adminEmail || 'admin@wimotek.dev');
+  const [adminEmail, setAdminEmail] = useState(
+    initialConfig.initialized && initialConfig.adminEmail && initialConfig.adminEmail !== 'admin@wimotek.dev'
+      ? initialConfig.adminEmail
+      : ''
+  );
   const [adminPassword, setAdminPassword] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -137,7 +133,6 @@ export function SetupWizard({
 
   return (
     <div className="min-h-screen bg-slate-50 dark:bg-[#0B0F19] text-slate-900 dark:text-slate-100 flex flex-col">
-      {/* Clean 3-Zone Top Bar */}
       <header className="w-full border-b border-slate-200 dark:border-slate-800 bg-white dark:bg-[#111827] px-6 py-3.5">
         <div className="max-w-5xl mx-auto flex items-center justify-between gap-6">
           <div className="flex items-center gap-2.5 shrink-0">
@@ -170,43 +165,20 @@ export function SetupWizard({
             >
               {darkMode ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
             </button>
-
-            <button
-              type="button"
-              onClick={onDownloadZip}
-              disabled={downloadingZip}
-              className="px-3.5 py-2 text-xs font-medium rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 hover:bg-slate-50 dark:hover:bg-slate-800 text-slate-800 dark:text-slate-100 flex items-center gap-1.5 whitespace-nowrap shrink-0 transition-colors"
-            >
-              <Download className="w-3.5 h-3.5" />
-              <span>{downloadingZip ? t.downloadingZip : t.downloadAllZip}</span>
-            </button>
           </div>
         </div>
       </header>
 
-      {/* Main Content */}
       <main className="flex-1 max-w-4xl w-full mx-auto px-4 sm:px-6 py-10 sm:py-14">
-        <div className="flex flex-col sm:flex-row sm:items-end justify-between gap-4 mb-8">
-          <div className="max-w-2xl">
-            <h1 className="font-display text-2xl sm:text-3xl font-bold tracking-tight text-slate-900 dark:text-white text-balance">
-              {t.setupWizardTitle}
-            </h1>
-            <p className="mt-2 text-sm text-slate-600 dark:text-slate-400 leading-relaxed i18n-safe">
-              {t.setupWizardSubtitle}
-            </p>
-          </div>
-
-          <button
-            type="button"
-            onClick={onOneClickDemo}
-            className="min-h-[42px] px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-medium flex items-center justify-center gap-2 whitespace-nowrap shrink-0 transition-colors shadow-xs"
-          >
-            <Zap className="w-4 h-4 shrink-0" />
-            <span>{t.quickEnterDemo}</span>
-          </button>
+        <div className="max-w-2xl mb-8">
+          <h1 className="font-display text-2xl sm:text-3xl font-bold tracking-tight text-slate-900 dark:text-white text-balance">
+            {t.setupWizardTitle}
+          </h1>
+          <p className="mt-2 text-sm text-slate-600 dark:text-slate-400 leading-relaxed i18n-safe">
+            {t.setupWizardSubtitle}
+          </p>
         </div>
 
-        {/* Step Indicator */}
         <nav aria-label="Setup steps" className="grid grid-cols-2 sm:grid-cols-4 gap-2 mb-6">
           {steps.map((s, idx) => {
             const Icon = s.icon;
@@ -234,7 +206,6 @@ export function SetupWizard({
           })}
         </nav>
 
-        {/* Step Card */}
         <section className="bg-white dark:bg-[#111827] border border-slate-200 dark:border-slate-800 rounded-xl p-6 sm:p-8">
           {step === 0 && (
             <div className="space-y-6">
@@ -272,7 +243,7 @@ export function SetupWizard({
                   type="button"
                   onClick={() => {
                     setDbDriver('mysql');
-                    setDbDsn('wimotek:dev_password@tcp(mysql:3306)/wimotek_oauth?parseTime=true');
+                    setDbDsn('wimotek:password@tcp(mysql:3306)/wimotek_oauth?parseTime=true');
                     setDbTest(null);
                   }}
                   className={`p-4 rounded-lg border text-left transition-colors ${
@@ -443,6 +414,7 @@ export function SetupWizard({
                     required
                     value={adminEmail}
                     onChange={(e) => setAdminEmail(e.target.value)}
+                    placeholder="admin@example.com"
                     className="w-full min-h-[42px] px-3.5 py-2 text-sm rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100"
                   />
                 </div>
@@ -472,7 +444,6 @@ export function SetupWizard({
             </form>
           )}
 
-          {/* Footer Navigation */}
           <div className="mt-8 pt-5 border-t border-slate-200 dark:border-slate-800 flex items-center justify-between gap-4">
             <button
               type="button"

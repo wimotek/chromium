@@ -48,21 +48,23 @@ func (p *Provider) DiscoveryHandler(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (p *Provider) JWKSHandler(w http.ResponseWriter, _ *http.Request) {
-	pub := p.keys.PrivateKey().PublicKey
-	n := base64.RawURLEncoding.EncodeToString(pub.N.Bytes())
-	e := base64.RawURLEncoding.EncodeToString(big.NewInt(int64(pub.E)).Bytes())
+	pubKeys := p.keys.PublicKeys()
+	keys := make([]map[string]any, 0, len(pubKeys))
+	for _, info := range pubKeys {
+		n := base64.RawURLEncoding.EncodeToString(info.Key.N.Bytes())
+		e := base64.RawURLEncoding.EncodeToString(big.NewInt(int64(info.Key.E)).Bytes())
+		keys = append(keys, map[string]any{
+			"kty": "RSA",
+			"use": "sig",
+			"alg": "RS256",
+			"kid": info.KeyID,
+			"n":   n,
+			"e":   e,
+		})
+	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
-		"keys": []map[string]any{
-			{
-				"kty": "RSA",
-				"use": "sig",
-				"alg": "RS256",
-				"kid": p.keys.KeyID(),
-				"n":   n,
-				"e":   e,
-			},
-		},
+		"keys": keys,
 	})
 }
 

@@ -20,13 +20,41 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 )
 
+type PublicKeyInfo struct {
+	KeyID string
+	Key   *rsa.PublicKey
+}
+
+type RetiringKeyMeta struct {
+	KeyID     string `json:"kid"`
+	ExpiresAt string `json:"expiresAt"`
+}
+
+type SigningKeyStatus struct {
+	ActiveKid    string            `json:"activeKid"`
+	RotatedAt    string            `json:"rotatedAt"`
+	JwksKeyCount int               `json:"jwksKeyCount"`
+	RetiringKeys []RetiringKeyMeta `json:"retiringKeys"`
+}
+
+type retiringPublicKey struct {
+	kid       string
+	pub       *rsa.PublicKey
+	expiresAt time.Time
+}
+
 type KeyManager struct {
-	masterKey  [32]byte
-	rsaKey     *rsa.PrivateKey
-	keyID      string
+	mu        sync.RWMutex
+	rsaPath   string
+	masterKey [32]byte
+	rsaKey    *rsa.PrivateKey
+	keyID     string
+	rotatedAt time.Time
+	retiring  []retiringPublicKey
 }
 
 func NewKeyManager(dataDir, envMasterKey string) (*KeyManager, error) {
@@ -63,19 +91,154 @@ func NewKeyManager(dataDir, envMasterKey string) (*KeyManager, error) {
 		return nil, err
 	}
 
-	pubBytes := x509.MarshalPKCS1PublicKey(&priv.PublicKey)
-	thumb := sha256.Sum256(pubBytes)
-	kid := base64.RawURLEncoding.EncodeToString(thumb[:8])
+	kid := computeRSAKeyID(&priv.PublicKey)
 
 	return &KeyManager{
+		rsaPath:   rsaPath,
 		masterKey: master,
 		rsaKey:    priv,
 		keyID:     kid,
+		rotatedAt: time.Now().UTC(),
 	}, nil
 }
 
-func (km *KeyManager) PrivateKey() *rsa.PrivateKey { return km.rsaKey }
-func (km *KeyManager) KeyID() string               { return km.keyID }
+func computeRSAKeyID(pub *rsa.PublicKey) string {
+	pubBytes := x509.MarshalPKCS1PublicKey(pub)
+	thumb := sha256.Sum256(pubBytes)
+	return base64.RawURLEncoding.EncodeToString(thumb[:8])
+}
+
+func (km *KeyManager) PrivateKey() *rsa.PrivateKey {
+	km.mu.RLock()
+	defer km.mu.RUnlock()
+	return km.rsaKey
+}
+
+func (km *KeyManager) KeyID() string {
+	km.mu.RLock()
+	defer km.mu.RUnlock()
+	return km.keyID
+}
+
+func (km *KeyManager) pruneExpiredLocked(now time.Time) {
+	kept := km.retiring[:0]
+	for _, r := range km.retiring {
+		if r.expiresAt.After(now) {
+			kept = append(kept, r)
+		}
+	}
+	km.retiring = kept
+}
+
+func (km *KeyManager) PublicKeys() []PublicKeyInfo {
+	km.mu.Lock()
+	defer km.mu.Unlock()
+	km.pruneExpiredLocked(time.Now().UTC())
+	out := make([]PublicKeyInfo, 0, 1+len(km.retiring))
+	out = append(out, PublicKeyInfo{KeyID: km.keyID, Key: &km.rsaKey.PublicKey})
+	for _, r := range km.retiring {
+		out = append(out, PublicKeyInfo{KeyID: r.kid, Key: r.pub})
+	}
+	return out
+}
+
+func (km *KeyManager) PublicKeyByID(kid string) *rsa.PublicKey {
+	km.mu.Lock()
+	defer km.mu.Unlock()
+	km.pruneExpiredLocked(time.Now().UTC())
+	if kid == "" || kid == km.keyID {
+		return &km.rsaKey.PublicKey
+	}
+	for _, r := range km.retiring {
+		if r.kid == kid {
+			return r.pub
+		}
+	}
+	return nil
+}
+
+func (km *KeyManager) statusLocked(now time.Time) SigningKeyStatus {
+	km.pruneExpiredLocked(now)
+	retiring := make([]RetiringKeyMeta, 0, len(km.retiring))
+	for _, r := range km.retiring {
+		retiring = append(retiring, RetiringKeyMeta{
+			KeyID:     r.kid,
+			ExpiresAt: r.expiresAt.UTC().Format(time.RFC3339),
+		})
+	}
+	return SigningKeyStatus{
+		ActiveKid:    km.keyID,
+		RotatedAt:    km.rotatedAt.UTC().Format(time.RFC3339),
+		JwksKeyCount: 1 + len(retiring),
+		RetiringKeys: retiring,
+	}
+}
+
+func (km *KeyManager) Status() SigningKeyStatus {
+	km.mu.Lock()
+	defer km.mu.Unlock()
+	return km.statusLocked(time.Now().UTC())
+}
+
+// RotateRSA generates and atomically persists a brand-new RSA-2048 signing keypair.
+// In graceful mode (emergency=false), the previous public key remains in JWKS for `grace`.
+// In emergency mode (emergency=true), all previous keys are purged immediately.
+func (km *KeyManager) RotateRSA(emergency bool, grace time.Duration) (string, SigningKeyStatus, error) {
+	newKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		return "", SigningKeyStatus{}, err
+	}
+	pemBytes := pem.EncodeToMemory(&pem.Block{
+		Type:  "RSA PRIVATE KEY",
+		Bytes: x509.MarshalPKCS1PrivateKey(newKey),
+	})
+
+	km.mu.Lock()
+	defer km.mu.Unlock()
+
+	tmpPath := km.rsaPath + ".tmp"
+	if err := os.WriteFile(tmpPath, pemBytes, 0o600); err != nil {
+		return "", SigningKeyStatus{}, err
+	}
+	if err := os.Rename(tmpPath, km.rsaPath); err != nil {
+		return "", SigningKeyStatus{}, err
+	}
+
+	now := time.Now().UTC()
+	prevKid := km.keyID
+	prevPub := km.rsaKey.PublicKey
+
+	if emergency {
+		km.retiring = nil
+	} else {
+		if grace < time.Minute {
+			grace = 2 * time.Hour
+		}
+		km.pruneExpiredLocked(now)
+		km.retiring = append([]retiringPublicKey{{
+			kid:       prevKid,
+			pub:       &prevPub,
+			expiresAt: now.Add(grace),
+		}}, km.retiring...)
+		if len(km.retiring) > 5 {
+			km.retiring = km.retiring[:5]
+		}
+	}
+
+	km.rsaKey = newKey
+	km.keyID = computeRSAKeyID(&newKey.PublicKey)
+	km.rotatedAt = now
+
+	return prevKid, km.statusLocked(now), nil
+}
+
+func (km *KeyManager) PurgeRetiring() (int, SigningKeyStatus) {
+	km.mu.Lock()
+	defer km.mu.Unlock()
+	count := len(km.retiring)
+	km.retiring = nil
+	return count, km.statusLocked(time.Now().UTC())
+}
 
 func (km *KeyManager) EncryptSecret(plaintext string) (string, error) {
 	if plaintext == "" {
