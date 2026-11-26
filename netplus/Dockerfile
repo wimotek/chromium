@@ -27,7 +27,7 @@ RUN npm run build:all \
 # ==============================================================================
 # Stage 3: Production Runtime Dependencies Only (dotenv, express, nodemailer)
 # ==============================================================================
-FROM node:22-alpine AS prod-deps
+FROM --platform=$BUILDPLATFORM node:22-alpine AS prod-deps
 WORKDIR /app
 COPY package.json package-lock.json* ./
 RUN if [ -f package-lock.json ]; then npm ci --omit=dev; else npm install --omit=dev; fi \
