@@ -376,6 +376,12 @@ export function CloudHostsView({
   const [addIpModalHost, setAddIpModalHost] = useState<CloudHost | null>(null);
   const [addIpVersion, setAddIpVersion] = useState<'ipv4' | 'ipv6'>('ipv6');
   const [addIpAddress, setAddIpAddress] = useState('');
+  const [addIpPrefixInfo, setAddIpPrefixInfo] = useState<{
+    loading: boolean;
+    cidr?: string;
+    prefix?: string;
+    cidrs: string[];
+  }>({ loading: false, cidrs: [] });
   const [addIpBusy, setAddIpBusy] = useState(false);
   const [addIpError, setAddIpError] = useState<string | null>(null);
 
@@ -1285,11 +1291,67 @@ export function CloudHostsView({
   };
 
   // ---- Host IP Lifecycle (Add / Swap / Delete IPv4 & IPv6 via OCI / AWS / Aliyun / GCP API) ----
+  const deriveLocalIpv6Prefix = (ipv6List: string[]): string => {
+    const sample = (ipv6List[0] || '').trim().split('/')[0].toLowerCase();
+    if (!sample || !sample.includes(':')) return '';
+    const halves = sample.split('::');
+    if (halves.length > 2) return '';
+    const left = halves[0] ? halves[0].split(':').filter(Boolean) : [];
+    const right = halves.length === 2 && halves[1] ? halves[1].split(':').filter(Boolean) : [];
+    const missing = 8 - (left.length + right.length);
+    if (halves.length === 1 && left.length !== 8) return '';
+    if (missing < 0) return '';
+    const full = [...left, ...Array(missing).fill('0'), ...right];
+    if (full.length !== 8) return '';
+    const prefix4 = full.slice(0, 4).map((g) => g.replace(/^0+/, '') || '0');
+    return `${prefix4.join(':')}::`;
+  };
+
+  const loadHostIpv6Prefix = async (host: CloudHost, shouldPrefill: boolean) => {
+    const localPrefix = deriveLocalIpv6Prefix(host.ipv6List || []);
+    setAddIpPrefixInfo({
+      loading: true,
+      cidr: localPrefix ? `${localPrefix}/64` : undefined,
+      prefix: localPrefix || undefined,
+      cidrs: localPrefix ? [`${localPrefix}/64`] : [],
+    });
+    if (shouldPrefill && localPrefix) {
+      setAddIpAddress(localPrefix);
+    }
+    try {
+      const res = await apiRequest<{
+        ok: boolean;
+        cidr?: string;
+        cidrs?: string[];
+        prefix?: string;
+      }>(`/api/clouds/hosts/${host.id}/ipv6-prefix`);
+      const nextPrefix = res.prefix || localPrefix || undefined;
+      const nextCidr = res.cidr || (nextPrefix ? `${nextPrefix}/64` : undefined);
+      setAddIpPrefixInfo({
+        loading: false,
+        cidr: nextCidr,
+        prefix: nextPrefix,
+        cidrs: res.cidrs && res.cidrs.length > 0 ? res.cidrs : nextCidr ? [nextCidr] : [],
+      });
+      if (shouldPrefill && nextPrefix) {
+        setAddIpAddress((prev) => (!prev || prev === localPrefix ? nextPrefix : prev));
+      }
+    } catch {
+      setAddIpPrefixInfo((prev) => ({ ...prev, loading: false }));
+    }
+  };
+
   const openAddIpModal = (host: CloudHost) => {
+    const initialVer: 'ipv4' | 'ipv6' = !host.ipv4 ? 'ipv4' : 'ipv6';
     setAddIpModalHost(host);
     setAddIpError(null);
     setAddIpAddress('');
-    setAddIpVersion(!host.ipv4 ? 'ipv4' : 'ipv6');
+    setAddIpVersion(initialVer);
+    if (host.provider !== 'gcp') {
+      void loadHostIpv6Prefix(host, initialVer === 'ipv6');
+    } else {
+      setAddIpPrefixInfo({ loading: false, cidrs: [] });
+    }
   };
 
   const handleSubmitAddIp = async (e: React.FormEvent) => {
@@ -1298,13 +1360,24 @@ export function CloudHostsView({
     setAddIpBusy(true);
     setAddIpError(null);
     try {
+      let cleanAddr = addIpAddress.trim();
+      // If user left only the prefilled bare subnet prefix (e.g. "2603:c020:4009:a100::"), let the cloud auto-assign
+      if (addIpVersion === 'ipv6' && cleanAddr) {
+        const barePrefix = addIpPrefixInfo.prefix?.toLowerCase();
+        if (
+          (barePrefix && (cleanAddr.toLowerCase() === barePrefix || `${cleanAddr.toLowerCase()}:` === barePrefix)) ||
+          cleanAddr.endsWith('::')
+        ) {
+          cleanAddr = '';
+        }
+      }
       const res = await apiRequest<{ ok: boolean; version: string; address: string }>(
         `/api/clouds/hosts/${addIpModalHost.id}/ips/add`,
         {
           method: 'POST',
           body: JSON.stringify({
             version: addIpVersion,
-            address: addIpAddress.trim() || undefined,
+            address: addIpVersion === 'ipv6' ? cleanAddr || undefined : undefined,
           }),
         }
       );
@@ -3759,7 +3832,12 @@ export function CloudHostsView({
                 </button>
                 <button
                   type="button"
-                  onClick={() => setAddIpVersion('ipv6')}
+                  onClick={() => {
+                    setAddIpVersion('ipv6');
+                    if (!addIpAddress && addIpPrefixInfo.prefix) {
+                      setAddIpAddress(addIpPrefixInfo.prefix);
+                    }
+                  }}
                   className={`py-2 rounded-lg border font-medium ${
                     addIpVersion === 'ipv6'
                       ? 'border-blue-600 bg-blue-50 dark:bg-blue-950/40 text-blue-700 dark:text-blue-300 font-semibold'
@@ -3771,16 +3849,55 @@ export function CloudHostsView({
               </div>
 
               {addIpVersion === 'ipv6' && addIpModalHost.provider !== 'gcp' && (
-                <div>
-                  <label className="block font-medium mb-1">
-                    {isZh ? '指定 IPv6 地址（留空由云端自动分配）' : 'Specific IPv6 (optional, blank = auto)'}
-                  </label>
+                <div className="space-y-1.5">
+                  <div className="flex items-center justify-between gap-2">
+                    <label className="block font-medium">
+                      {isZh
+                        ? '指定 IPv6 地址（已默认填入子网前缀，直接续写后缀或留空自动分配）'
+                        : 'Specific IPv6 (subnet prefix prefilled; append suffix or leave blank for auto)'}
+                    </label>
+                    {addIpPrefixInfo.loading && (
+                      <span className="inline-flex items-center gap-1 text-[10px] text-blue-600 dark:text-blue-400 shrink-0">
+                        <Loader2 className="w-3 h-3 animate-spin" />
+                        {isZh ? '读取子网前缀...' : 'Fetching prefix...'}
+                      </span>
+                    )}
+                  </div>
                   <input
                     value={addIpAddress}
                     onChange={(e) => setAddIpAddress(e.target.value)}
-                    placeholder="2603:..."
+                    placeholder={addIpPrefixInfo.prefix ? `${addIpPrefixInfo.prefix}10` : '2603:...'}
                     className="w-full px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 font-mono"
                   />
+                  <div className="flex flex-wrap items-center justify-between gap-2 text-[11px]">
+                    <span className="font-mono text-slate-500 dark:text-slate-400">
+                      {addIpPrefixInfo.cidr
+                        ? `${isZh ? '子网允许网段' : 'Subnet CIDR'}: ${addIpPrefixInfo.cidr}`
+                        : isZh
+                        ? '未检测到已有 IPv6 前缀，留空将由云端自动分配'
+                        : 'No IPv6 prefix detected; leave blank for auto-assign'}
+                    </span>
+                    <div className="inline-flex items-center gap-2 shrink-0">
+                      {addIpPrefixInfo.prefix && (
+                        <button
+                          type="button"
+                          onClick={() => setAddIpAddress(addIpPrefixInfo.prefix!)}
+                          className="text-blue-600 dark:text-blue-400 hover:underline"
+                        >
+                          {isZh ? '填入前缀' : 'Fill Prefix'}
+                        </button>
+                      )}
+                      {addIpAddress && (
+                        <button
+                          type="button"
+                          onClick={() => setAddIpAddress('')}
+                          className="text-slate-500 hover:text-slate-800 dark:hover:text-slate-200 hover:underline"
+                        >
+                          {isZh ? '清空改为自动分配' : 'Clear (Auto)'}
+                        </button>
+                      )}
+                    </div>
+                  </div>
                 </div>
               )}
 

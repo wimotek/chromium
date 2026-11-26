@@ -14,6 +14,7 @@ import {
   Plus,
   RefreshCw,
   Search,
+  ShieldCheck,
   Trash2,
   X,
   XCircle,
@@ -150,6 +151,8 @@ export function MonitorsView({
     expectedIp: '',
     expectedStatusCodes: '200-399',
     httpKeyword: '',
+    checkTlsCert: true,
+    tlsCertWarningDays: '14',
     intervalSeconds: '60',
     timeoutMs: '5000',
     failureThreshold: '2',
@@ -226,6 +229,8 @@ export function MonitorsView({
       expectedIp: '',
       expectedStatusCodes: '200-399',
       httpKeyword: '',
+      checkTlsCert: true,
+      tlsCertWarningDays: '14',
       intervalSeconds: '60',
       timeoutMs: '5000',
       failureThreshold: '2',
@@ -248,6 +253,8 @@ export function MonitorsView({
       expectedIp: m.expectedIp || '',
       expectedStatusCodes: m.expectedStatusCodes || '200-399',
       httpKeyword: m.httpKeyword || '',
+      checkTlsCert: m.checkTlsCert !== false,
+      tlsCertWarningDays: String(m.tlsCertWarningDays ?? 14),
       intervalSeconds: String(m.intervalSeconds || 60),
       timeoutMs: String(m.timeoutMs || 5000),
       failureThreshold: String(m.failureThreshold || 2),
@@ -273,6 +280,11 @@ export function MonitorsView({
         expectedStatusCodes:
           form.type === 'http' ? form.expectedStatusCodes.trim() || '200-399' : undefined,
         httpKeyword: form.type === 'http' ? form.httpKeyword.trim() || undefined : undefined,
+        checkTlsCert: form.type === 'http' ? form.checkTlsCert : undefined,
+        tlsCertWarningDays:
+          form.type === 'http'
+            ? Math.max(1, Math.min(365, Number(form.tlsCertWarningDays) || 14))
+            : undefined,
         intervalSeconds: Math.max(15, Number(form.intervalSeconds) || 60),
         timeoutMs: Math.max(1000, Math.min(30000, Number(form.timeoutMs) || 5000)),
         failureThreshold: Math.max(1, Math.min(10, Number(form.failureThreshold) || 2)),
@@ -440,8 +452,8 @@ export function MonitorsView({
           </h1>
           <p className="mt-1 text-sm text-slate-600 dark:text-slate-400">
             {isZh
-              ? '对齐 Uptime-Kuma 体验：HTTP(S) 状态码与关键词校验、TCP 端口与 DNS 探测，支持独立开关上线/下线通知与每 10 秒心跳实时刷新。'
-              : 'Uptime-Kuma style live probes for HTTP(S) status & keyword assertions, TCP ports, and DNS records — with independent down & recovery alerts.'}
+              ? '持续监测 HTTP(S) 状态码与响应关键词、SSL 证书到期时间、TCP 端口与 DNS 解析，支持独立配置上线/下线通知与每 10 秒心跳实时刷新。'
+              : 'Continuous live probes for HTTP(S) status & keyword assertions, SSL certificate expiry, TCP ports, and DNS records — with independent down & recovery alerts.'}
           </p>
         </div>
 
@@ -508,7 +520,7 @@ export function MonitorsView({
         </div>
       </div>
 
-      {/* Main Split Workspace (Uptime-Kuma Layout) */}
+      {/* Main Split Workspace */}
       {liveMonitors.length === 0 ? (
         <div className="p-12 rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 text-center space-y-3">
           <Activity className="w-10 h-10 text-slate-300 dark:text-slate-600 mx-auto" />
@@ -766,7 +778,7 @@ export function MonitorsView({
                     </div>
                   </div>
 
-                  {/* Uptime-Kuma 40-bar Heartbeat Strip */}
+                  {/* 40-bar Heartbeat Strip */}
                   <div className="p-4 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-950/60 space-y-2.5">
                     <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
                       <span className="font-medium text-slate-700 dark:text-slate-300">
@@ -837,6 +849,74 @@ export function MonitorsView({
                       </div>
                     </div>
                   </div>
+
+                  {/* SSL / TLS Certificate Expiry Strip for HTTPS Monitors */}
+                  {selectedMonitor.type === 'http' &&
+                    selectedMonitor.target.trim().toLowerCase().startsWith('https://') &&
+                    selectedMonitor.checkTlsCert !== false && (
+                      <div className="p-3.5 rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50/50 dark:bg-slate-950/50 flex flex-wrap items-center justify-between gap-3 text-xs">
+                        <div className="flex flex-wrap items-center gap-2.5">
+                          <ShieldCheck
+                            className={`w-4 h-4 shrink-0 ${
+                              typeof selectedMonitor.tlsDaysRemaining !== 'number'
+                                ? 'text-slate-400'
+                                : selectedMonitor.tlsDaysRemaining <= 0
+                                ? 'text-red-600 dark:text-red-400'
+                                : selectedMonitor.tlsDaysRemaining <= (selectedMonitor.tlsCertWarningDays ?? 14)
+                                ? 'text-amber-600 dark:text-amber-400'
+                                : 'text-emerald-600 dark:text-emerald-400'
+                            }`}
+                          />
+                          <span className="font-semibold text-slate-800 dark:text-slate-200">
+                            {isZh ? 'SSL/TLS 证书有效期：' : 'SSL/TLS Certificate:'}
+                          </span>
+                          {typeof selectedMonitor.tlsDaysRemaining === 'number' ? (
+                            <>
+                              <span
+                                className={`font-mono font-bold tabular-nums ${
+                                  selectedMonitor.tlsDaysRemaining <= 0
+                                    ? 'text-red-600 dark:text-red-400'
+                                    : selectedMonitor.tlsDaysRemaining <= (selectedMonitor.tlsCertWarningDays ?? 14)
+                                    ? 'text-amber-600 dark:text-amber-400'
+                                    : 'text-emerald-600 dark:text-emerald-400'
+                                }`}
+                              >
+                                {selectedMonitor.tlsDaysRemaining <= 0
+                                  ? isZh
+                                    ? `已过期 (${selectedMonitor.tlsDaysRemaining} 天)`
+                                    : `Expired (${selectedMonitor.tlsDaysRemaining}d)`
+                                  : isZh
+                                  ? `剩余 ${selectedMonitor.tlsDaysRemaining} 天`
+                                  : `${selectedMonitor.tlsDaysRemaining} days left`}
+                              </span>
+                              {selectedMonitor.tlsCertExpiry && (
+                                <span className="font-mono text-[11px] text-slate-500 dark:text-slate-400">
+                                  ({isZh ? '到期' : 'Expires'}: {selectedMonitor.tlsCertExpiry.slice(0, 10)})
+                                </span>
+                              )}
+                              {selectedMonitor.tlsCertIssuer && (
+                                <span className="text-[11px] text-slate-500 dark:text-slate-400">
+                                  · {selectedMonitor.tlsCertIssuer}
+                                </span>
+                              )}
+                            </>
+                          ) : selectedMonitor.tlsCertError ? (
+                            <span className="font-mono text-[11px] text-red-600 dark:text-red-400">
+                              {selectedMonitor.tlsCertError}
+                            </span>
+                          ) : (
+                            <span className="text-slate-400">
+                              {isZh ? '点击「立即探测」获取证书到期时间' : 'Click Probe to inspect certificate'}
+                            </span>
+                          )}
+                        </div>
+                        <span className="font-mono text-[11px] text-slate-400">
+                          {isZh
+                            ? `到期前 ${selectedMonitor.tlsCertWarningDays ?? 14} 天告警`
+                            : `Warn <= ${selectedMonitor.tlsCertWarningDays ?? 14}d`}
+                        </span>
+                      </div>
+                    )}
 
                   {/* Notification Policy Summary */}
                   <div className="p-3.5 rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50/50 dark:bg-slate-950/50 flex flex-wrap items-center justify-between gap-3 text-xs">
@@ -1054,28 +1134,54 @@ export function MonitorsView({
               </div>
 
               {form.type === 'http' && (
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
-                  <div>
-                    <label className="block font-medium mb-1">
-                      {isZh ? '允许的状态码范围' : 'Accepted Status Codes'}
-                    </label>
-                    <input
-                      value={form.expectedStatusCodes}
-                      onChange={(e) => setForm({ ...form, expectedStatusCodes: e.target.value })}
-                      placeholder="200-399"
-                      className="w-full px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 font-mono"
-                    />
+                <div className="space-y-3">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
+                    <div>
+                      <label className="block font-medium mb-1">
+                        {isZh ? '允许的状态码范围' : 'Accepted Status Codes'}
+                      </label>
+                      <input
+                        value={form.expectedStatusCodes}
+                        onChange={(e) => setForm({ ...form, expectedStatusCodes: e.target.value })}
+                        placeholder="200-399"
+                        className="w-full px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 font-mono"
+                      />
+                    </div>
+                    <div>
+                      <label className="block font-medium mb-1">
+                        {isZh ? '响应关键词校验（留空 = 纯 HTTP(S) 状态监测）' : 'Response Keyword (Blank = HTTP(S) Status Only)'}
+                      </label>
+                      <input
+                        value={form.httpKeyword}
+                        onChange={(e) => setForm({ ...form, httpKeyword: e.target.value })}
+                        placeholder={isZh ? '如：ok / healthy（留空仅校验状态码）' : 'e.g. ok (blank = status only)'}
+                        className="w-full px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 font-mono"
+                      />
+                    </div>
                   </div>
-                  <div>
-                    <label className="block font-medium mb-1">
-                      {isZh ? '页面响应关键词校验（可选）' : 'Response Keyword (Optional)'}
+                  <div className="p-3 rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-950/60 flex flex-wrap items-center justify-between gap-3">
+                    <label className="inline-flex items-center gap-2 font-medium text-slate-700 dark:text-slate-200">
+                      <input
+                        type="checkbox"
+                        checked={form.checkTlsCert}
+                        onChange={(e) => setForm({ ...form, checkTlsCert: e.target.checked })}
+                        className="rounded accent-emerald-600"
+                      />
+                      {isZh ? '监测 HTTPS SSL/TLS 证书到期时间' : 'Monitor HTTPS SSL/TLS Certificate Expiry'}
                     </label>
-                    <input
-                      value={form.httpKeyword}
-                      onChange={(e) => setForm({ ...form, httpKeyword: e.target.value })}
-                      placeholder={isZh ? '如：ok / healthy（留空不校验）' : 'e.g. ok (blank = skip)'}
-                      className="w-full px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 font-mono"
-                    />
+                    {form.checkTlsCert && (
+                      <div className="inline-flex items-center gap-2">
+                        <span className="text-slate-500">{isZh ? '提前告警天数：' : 'Warn Days:'}</span>
+                        <input
+                          type="number"
+                          min={1}
+                          max={365}
+                          value={form.tlsCertWarningDays}
+                          onChange={(e) => setForm({ ...form, tlsCertWarningDays: e.target.value })}
+                          className="w-20 px-2.5 py-1 rounded-md border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 font-mono"
+                        />
+                      </div>
+                    )}
                   </div>
                 </div>
               )}

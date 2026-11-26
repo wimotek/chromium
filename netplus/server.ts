@@ -10,6 +10,9 @@ import type {
   CronJob,
   CronJobType,
   DnsIpv6Target,
+  DnsPullPolicy,
+  DnsPullSnapshot,
+  DnsRecordType,
   DnsSyncRule,
   ExternalCloudProvider,
   IpPolicyAction,
@@ -87,6 +90,7 @@ import {
   computeOciFingerprint,
   discoverOciInstanceVnics,
   discoverOciResources,
+  extractIpv6Slash64Prefix,
   generateEd25519SshKeypair,
   getOciInstanceDetail,
   inspectOciVnicIps,
@@ -100,6 +104,7 @@ import {
   ociAllocatePublicIpv4,
   ociDeleteIpv6,
   ociDeletePublicIpv4,
+  ociGetVnicIpv6SubnetInfo,
   ociInstancePowerAction,
   ociSwapPublicIpv4,
 } from './server/services/ociClient.ts';
@@ -1394,6 +1399,8 @@ export async function createServer(options: CreateServerOptions = {}) {
       expectedIp: b.expectedIp ? String(b.expectedIp).trim() : undefined,
       httpKeyword: b.httpKeyword ? String(b.httpKeyword).trim() : undefined,
       expectedStatusCodes: b.expectedStatusCodes ? String(b.expectedStatusCodes).trim() : undefined,
+      checkTlsCert: b.checkTlsCert !== false,
+      tlsCertWarningDays: Math.min(365, Math.max(1, Number(b.tlsCertWarningDays) || 14)),
       intervalSeconds: Math.max(15, Number(b.intervalSeconds) || 60),
       timeoutMs: Math.min(12_000, Math.max(1000, Number(b.timeoutMs) || 5000)),
       failureThreshold: Math.min(10, Math.max(1, Number(b.failureThreshold) || 2)),
@@ -1448,6 +1455,10 @@ export async function createServer(options: CreateServerOptions = {}) {
     if (b.expectedIp !== undefined) mon.expectedIp = String(b.expectedIp).trim() || undefined;
     if (b.httpKeyword !== undefined) mon.httpKeyword = String(b.httpKeyword).trim() || undefined;
     if (b.expectedStatusCodes !== undefined) mon.expectedStatusCodes = String(b.expectedStatusCodes).trim() || undefined;
+    if (b.checkTlsCert !== undefined) mon.checkTlsCert = Boolean(b.checkTlsCert);
+    if (b.tlsCertWarningDays !== undefined) {
+      mon.tlsCertWarningDays = Math.min(365, Math.max(1, Number(b.tlsCertWarningDays) || 14));
+    }
     if (b.intervalSeconds !== undefined) mon.intervalSeconds = Math.max(15, Number(b.intervalSeconds) || 60);
     if (b.timeoutMs !== undefined) mon.timeoutMs = Math.min(12_000, Math.max(1000, Number(b.timeoutMs) || 5000));
     if (b.failureThreshold !== undefined) mon.failureThreshold = Math.min(10, Math.max(1, Number(b.failureThreshold) || 2));
@@ -2005,6 +2016,185 @@ export async function createServer(options: CreateServerOptions = {}) {
     res.json({ ok: true });
   });
 
+  // ---- DNS Pull Filter Policy (Whitelist/Blacklist & Record Types) + Latest 3 Snapshots ----
+  const ALLOWED_DNS_RECORD_TYPES: DnsRecordType[] = [
+    'A',
+    'AAAA',
+    'CNAME',
+    'TXT',
+    'MX',
+    'NS',
+    'SRV',
+    'CAA',
+    'PTR',
+  ];
+  const MAX_DNS_PULL_SNAPSHOTS = 3;
+
+  function sanitizeDnsPullPolicy(raw: unknown, fallback?: DnsPullPolicy): DnsPullPolicy {
+    const obj = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>;
+    const modeRaw = String(obj.filterMode ?? fallback?.filterMode ?? 'none').trim().toLowerCase();
+    const filterMode: DnsPullPolicy['filterMode'] =
+      modeRaw === 'whitelist' || modeRaw === 'blacklist' ? modeRaw : 'none';
+    const rawPatterns = Array.isArray(obj.patterns)
+      ? obj.patterns
+      : typeof obj.patterns === 'string'
+        ? obj.patterns.split(/[\n,;]+/)
+        : fallback?.patterns ?? [];
+    const patterns = Array.from(
+      new Set(
+        rawPatterns
+          .map((p) => String(p || '').trim().toLowerCase())
+          .filter((p) => p.length > 0 && p.length <= 253)
+      )
+    ).slice(0, 200);
+    const rawTypes = Array.isArray(obj.recordTypes) ? obj.recordTypes : fallback?.recordTypes ?? [];
+    const recordTypes = Array.from(
+      new Set(
+        rawTypes
+          .map((t) => String(t || '').trim().toUpperCase() as DnsRecordType)
+          .filter((t) => ALLOWED_DNS_RECORD_TYPES.includes(t))
+      )
+    );
+    return {
+      filterMode,
+      patterns,
+      recordTypes,
+      updatedAt: new Date().toISOString(),
+    };
+  }
+
+  function matchesWildcardPattern(candidate: string, pattern: string): boolean {
+    const c = candidate.trim().toLowerCase();
+    const p = pattern.trim().toLowerCase();
+    if (!c || !p) return false;
+    if (c === p) return true;
+    if (!p.includes('*')) {
+      return c === p || c.endsWith(`.${p}`);
+    }
+    const escaped = p.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*');
+    try {
+      return new RegExp(`^${escaped}$`, 'i').test(c);
+    } catch {
+      return false;
+    }
+  }
+
+  function recordMatchesPolicy(
+    item: { domain: string; fqdn: string; name: string; type: DnsRecordType },
+    policy: DnsPullPolicy
+  ): boolean {
+    if (policy.recordTypes.length > 0 && !policy.recordTypes.includes(item.type)) {
+      return false;
+    }
+    if (policy.filterMode === 'none' || policy.patterns.length === 0) {
+      return true;
+    }
+    const candidates = [item.domain, item.fqdn, item.name].filter(Boolean);
+    const matched = policy.patterns.some((pat) =>
+      candidates.some((cand) => matchesWildcardPattern(cand, pat))
+    );
+    return policy.filterMode === 'whitelist' ? matched : !matched;
+  }
+
+  function domainShouldBeFetched(domain: string, policy: DnsPullPolicy): boolean {
+    if (policy.filterMode === 'none' || policy.patterns.length === 0) return true;
+    const d = domain.trim().toLowerCase();
+    if (policy.filterMode === 'blacklist') {
+      // Skip entire domain only if an exact/wildcard pattern blocks the root domain itself
+      return !policy.patterns.some((pat) => matchesWildcardPattern(d, pat));
+    }
+    // Whitelist: fetch if any pattern matches the domain, matches a subdomain of the domain, or is a bare host pattern without dots (like "www" or "api*")
+    return policy.patterns.some((pat) => {
+      if (matchesWildcardPattern(d, pat)) return true;
+      if (pat.endsWith(`.${d}`)) return true;
+      if (!pat.includes('.')) return true;
+      return false;
+    });
+  }
+
+  function summarizePullPolicy(policy: DnsPullPolicy): string {
+    const parts: string[] = [];
+    if (policy.recordTypes.length > 0) {
+      parts.push(`类型: ${policy.recordTypes.join('/')}`);
+    }
+    if (policy.filterMode === 'whitelist' && policy.patterns.length > 0) {
+      parts.push(`白名单 (${policy.patterns.length} 项)`);
+    } else if (policy.filterMode === 'blacklist' && policy.patterns.length > 0) {
+      parts.push(`黑名单 (${policy.patterns.length} 项)`);
+    }
+    return parts.length > 0 ? parts.join(' · ') : '无过滤（全量拉取）';
+  }
+
+  function savePullSnapshot(snapshot: DnsPullSnapshot) {
+    const state = store.getState();
+    state.dnsPullSnapshots = [snapshot, ...(state.dnsPullSnapshots ?? [])].slice(0, MAX_DNS_PULL_SNAPSHOTS);
+  }
+
+  app.get('/api/dns/pull-policy', requireAuth, (_req, res) => {
+    res.json(store.getState().dnsPullPolicy);
+  });
+
+  app.put('/api/dns/pull-policy', requireAuth, (req: AuthedRequest, res) => {
+    const state = store.getState();
+    state.dnsPullPolicy = sanitizeDnsPullPolicy(req.body, state.dnsPullPolicy);
+    store.save();
+    store.appendAudit({
+      category: 'dns',
+      severity: 'info',
+      action: 'DNS_PULL_POLICY_UPDATED',
+      actor: req.sessionUser || 'admin',
+      ip: getClientIp(req),
+      target: 'dns_pull_policy',
+      details: summarizePullPolicy(state.dnsPullPolicy),
+    });
+    res.json(state.dnsPullPolicy);
+  });
+
+  app.get('/api/dns/pull-snapshots', requireAuth, (_req, res) => {
+    res.json((store.getState().dnsPullSnapshots ?? []).slice(0, MAX_DNS_PULL_SNAPSHOTS));
+  });
+
+  app.post('/api/dns/pull-snapshots/:id/restore', requireAuth, (req: AuthedRequest, res) => {
+    const state = store.getState();
+    const snap = (state.dnsPullSnapshots ?? []).find((s) => s.id === req.params.id);
+    if (!snap) {
+      res.status(404).json({ error: '未找到指定的拉取历史快照' });
+      return;
+    }
+
+    const domainSet = new Set(snap.domains.map((d) => d.toLowerCase()));
+    // Replace local records for the snapshot's provider & domains with the exact snapshot records
+    state.dnsRecords = state.dnsRecords.filter((r) => {
+      if (r.providerId !== snap.providerId) return true;
+      return !domainSet.has(r.domain.toLowerCase());
+    });
+
+    const now = new Date().toISOString();
+    const clonedRecords: ManagedDnsRecord[] = snap.records.map((rec) => ({
+      ...rec,
+      updatedAt: now,
+    }));
+    state.dnsRecords = [...clonedRecords, ...state.dnsRecords];
+    store.save();
+
+    store.appendAudit({
+      category: 'dns',
+      severity: 'warning',
+      action: 'DNS_SNAPSHOT_RESTORED',
+      actor: req.sessionUser || 'admin',
+      ip: getClientIp(req),
+      target: `${snap.providerName} (${snap.domains.join(', ')})`,
+      details: `Restored ${clonedRecords.length} DNS record(s) from snapshot ${snap.id} (${snap.createdAt})`,
+    });
+
+    res.json({
+      ok: true,
+      restoredCount: clonedRecords.length,
+      domains: snap.domains,
+      message: `已从历史快照恢复 ${clonedRecords.length} 条本地 DNS 记录（涉及 ${snap.domains.length} 个域名）`,
+    });
+  });
+
   app.post('/api/dns/records/pull', requireAuth, async (req: AuthedRequest, res) => {
     const state = store.getState();
     const b = req.body ?? {};
@@ -2012,6 +2202,9 @@ export async function createServer(options: CreateServerOptions = {}) {
     const domain = String(b.domain || '').trim().toLowerCase().replace(/\.$/, '');
     const zoneId = b.zoneId ? String(b.zoneId).trim() : undefined;
     const defaultGroupName = String(b.defaultGroupName || '').trim() || domain || '默认分组';
+    const effectivePolicy = b.policy
+      ? sanitizeDnsPullPolicy(b.policy, state.dnsPullPolicy)
+      : state.dnsPullPolicy;
 
     const provider = state.dnsProviders.find((p) => p.id === providerId);
     if (!provider) {
@@ -2026,6 +2219,9 @@ export async function createServer(options: CreateServerOptions = {}) {
       return;
     }
 
+    const filteredRecords = pulled.records.filter((item) => recordMatchesPolicy(item, effectivePolicy));
+    const filteredOutCount = pulled.records.length - filteredRecords.length;
+
     const now = new Date().toISOString();
     const existingForDomain = state.dnsRecords.filter(
       (r) => r.providerId === provider.id && r.domain.toLowerCase() === domain
@@ -2039,7 +2235,7 @@ export async function createServer(options: CreateServerOptions = {}) {
     let addedCount = 0;
     let updatedCount = 0;
 
-    for (const item of pulled.records) {
+    for (const item of filteredRecords) {
       seenRemoteIds.add(item.remoteRecordId);
       const existing = byRemoteId.get(item.remoteRecordId);
       if (existing) {
@@ -2085,7 +2281,7 @@ export async function createServer(options: CreateServerOptions = {}) {
       }
     }
 
-    // Remove stale remote-synced records for this provider+domain that no longer exist upstream
+    // Remove stale remote-synced records for this provider+domain that no longer exist upstream or were filtered out
     const beforeCount = state.dnsRecords.length;
     state.dnsRecords = state.dnsRecords.filter((r) => {
       if (r.providerId !== provider.id || r.domain.toLowerCase() !== domain) return true;
@@ -2095,6 +2291,25 @@ export async function createServer(options: CreateServerOptions = {}) {
       return true;
     });
     const removedCount = beforeCount - state.dnsRecords.length;
+
+    // Save snapshot of this pull result (strictly keeps latest 3 locally for recovery)
+    const snapshotRecords = state.dnsRecords
+      .filter((r) => r.providerId === provider.id && r.domain.toLowerCase() === domain)
+      .map((r) => ({ ...r }));
+    const snapshotId = `snap-${crypto.randomBytes(5).toString('hex')}`;
+    savePullSnapshot({
+      id: snapshotId,
+      createdAt: now,
+      providerId: provider.id,
+      providerName: provider.name,
+      scope: 'single',
+      domain,
+      domains: [domain],
+      recordCount: snapshotRecords.length,
+      filteredOutCount,
+      filterSummary: summarizePullPolicy(effectivePolicy),
+      records: snapshotRecords,
+    });
     store.save();
 
     store.appendAudit({
@@ -2104,16 +2319,20 @@ export async function createServer(options: CreateServerOptions = {}) {
       actor: req.sessionUser || 'admin',
       ip: getClientIp(req),
       target: `${provider.name} / ${domain}`,
-      details: `Pulled ${pulled.records.length} live DNS records (added=${addedCount}, updated=${updatedCount}, removed=${removedCount})`,
+      details: `Pulled ${filteredRecords.length}/${pulled.records.length} live DNS records (added=${addedCount}, updated=${updatedCount}, removed=${removedCount}, filteredOut=${filteredOutCount}, policy=${summarizePullPolicy(effectivePolicy)})`,
     });
 
     res.json({
       ok: true,
-      total: pulled.records.length,
+      total: filteredRecords.length,
+      rawTotal: pulled.records.length,
+      filteredOutCount,
       addedCount,
       updatedCount,
       removedCount,
       zoneId: pulled.zoneId,
+      snapshotId,
+      policySummary: summarizePullPolicy(effectivePolicy),
     });
   });
 
@@ -2122,6 +2341,9 @@ export async function createServer(options: CreateServerOptions = {}) {
     const b = req.body ?? {};
     const providerId = String(b.providerId || '').trim();
     const defaultGroupOverride = String(b.defaultGroupName || '').trim();
+    const effectivePolicy = b.policy
+      ? sanitizeDnsPullPolicy(b.policy, state.dnsPullPolicy)
+      : state.dnsPullPolicy;
     const requestedDomains = Array.isArray(b.domains)
       ? b.domains
           .map((d: unknown) => String(d || '').trim().toLowerCase().replace(/\.$/, ''))
@@ -2141,27 +2363,33 @@ export async function createServer(options: CreateServerOptions = {}) {
       return;
     }
 
-    const targets =
+    const baseTargets =
       requestedDomains.length > 0
         ? listed.domains.filter((d) => requestedDomains.includes(d.name.toLowerCase()))
         : listed.domains;
+    const targets = baseTargets.filter((d) => domainShouldBeFetched(d.name, effectivePolicy));
+    const skippedDomainsCount = baseTargets.length - targets.length;
 
     if (targets.length === 0) {
       res.json({
         ok: true,
         domainCount: 0,
+        skippedDomainsCount,
         totalRecords: 0,
+        filteredOutCount: 0,
         addedCount: 0,
         updatedCount: 0,
         removedCount: 0,
         domains: [],
         errors: [],
+        policySummary: summarizePullPolicy(effectivePolicy),
       });
       return;
     }
 
     const now = new Date().toISOString();
     let totalRecords = 0;
+    let totalFilteredOut = 0;
     let totalAdded = 0;
     let totalUpdated = 0;
     let totalRemoved = 0;
@@ -2176,6 +2404,9 @@ export async function createServer(options: CreateServerOptions = {}) {
         continue;
       }
 
+      const filteredRecords = pulled.records.filter((item) => recordMatchesPolicy(item, effectivePolicy));
+      totalFilteredOut += pulled.records.length - filteredRecords.length;
+
       const existingForDomain = state.dnsRecords.filter(
         (r) => r.providerId === provider.id && r.domain.toLowerCase() === cleanDomain
       );
@@ -2189,7 +2420,7 @@ export async function createServer(options: CreateServerOptions = {}) {
       let updated = 0;
       const groupName = defaultGroupOverride || cleanDomain;
 
-      for (const item of pulled.records) {
+      for (const item of filteredRecords) {
         seenRemoteIds.add(item.remoteRecordId);
         const existing = byRemoteId.get(item.remoteRecordId);
         if (existing) {
@@ -2244,16 +2475,37 @@ export async function createServer(options: CreateServerOptions = {}) {
       });
       const removed = beforeCount - state.dnsRecords.length;
 
-      totalRecords += pulled.records.length;
+      totalRecords += filteredRecords.length;
       totalAdded += added;
       totalUpdated += updated;
       totalRemoved += removed;
       domainSummaries.push({
         domain: cleanDomain,
-        count: pulled.records.length,
+        count: filteredRecords.length,
         added,
         updated,
         removed,
+      });
+    }
+
+    const pulledDomainNames = domainSummaries.map((d) => d.domain);
+    const pulledDomainSet = new Set(pulledDomainNames);
+    const snapshotRecords = state.dnsRecords
+      .filter((r) => r.providerId === provider.id && pulledDomainSet.has(r.domain.toLowerCase()))
+      .map((r) => ({ ...r }));
+    const snapshotId = `snap-${crypto.randomBytes(5).toString('hex')}`;
+    if (pulledDomainNames.length > 0) {
+      savePullSnapshot({
+        id: snapshotId,
+        createdAt: now,
+        providerId: provider.id,
+        providerName: provider.name,
+        scope: 'all',
+        domains: pulledDomainNames,
+        recordCount: snapshotRecords.length,
+        filteredOutCount: totalFilteredOut,
+        filterSummary: summarizePullPolicy(effectivePolicy),
+        records: snapshotRecords,
       });
     }
 
@@ -2266,18 +2518,22 @@ export async function createServer(options: CreateServerOptions = {}) {
       actor: req.sessionUser || 'admin',
       ip: getClientIp(req),
       target: `${provider.name} (${domainSummaries.length} domains)`,
-      details: `Pulled ${totalRecords} records across ${domainSummaries.length} domain(s) (added=${totalAdded}, updated=${totalUpdated}, removed=${totalRemoved}, errors=${errors.length})`,
+      details: `Pulled ${totalRecords} records across ${domainSummaries.length} domain(s) (added=${totalAdded}, updated=${totalUpdated}, removed=${totalRemoved}, filteredOut=${totalFilteredOut}, skippedDomains=${skippedDomainsCount}, errors=${errors.length})`,
     });
 
     res.json({
       ok: true,
       domainCount: domainSummaries.length,
+      skippedDomainsCount,
       totalRecords,
+      filteredOutCount: totalFilteredOut,
       addedCount: totalAdded,
       updatedCount: totalUpdated,
       removedCount: totalRemoved,
       domains: domainSummaries,
       errors,
+      snapshotId,
+      policySummary: summarizePullPolicy(effectivePolicy),
     });
   });
 
@@ -5335,6 +5591,44 @@ export async function createServer(options: CreateServerOptions = {}) {
     return { ok: true, account, secrets };
   }
 
+  // Discover authoritative IPv6 /64 subnet prefix for a Managed Cloud Host (prefills Specific IPv6 input)
+  app.get('/api/clouds/hosts/:id/ipv6-prefix', requireAuth, async (req, res) => {
+    const state = store.getState();
+    const host = state.cloudHosts.find((h) => h.id === req.params.id);
+    if (!host) {
+      res.status(404).json({ error: 'Cloud host not found' });
+      return;
+    }
+
+    const fallbackPrefix =
+      host.ipv6List.length > 0 ? extractIpv6Slash64Prefix(host.ipv6List[0]) || undefined : undefined;
+
+    if (host.provider === 'oracle') {
+      const ctx = await ensureHostOciNetwork(host);
+      if (ctx.ok) {
+        const info = await ociGetVnicIpv6SubnetInfo(ctx.profile, ctx.pem, ctx.vnicId);
+        if (info.ok && (info.prefix || info.primaryCidr)) {
+          res.json({
+            ok: true,
+            cidr: info.primaryCidr,
+            cidrs: info.cidrs,
+            prefix: info.prefix || fallbackPrefix,
+            source: info.primaryCidr ? 'oci_subnet' : 'existing_ipv6',
+          });
+          return;
+        }
+      }
+    }
+
+    res.json({
+      ok: true,
+      cidr: fallbackPrefix ? `${fallbackPrefix}/64` : undefined,
+      cidrs: fallbackPrefix ? [`${fallbackPrefix}/64`] : [],
+      prefix: fallbackPrefix,
+      source: fallbackPrefix ? 'existing_ipv6' : 'none',
+    });
+  });
+
   // Add IP (IPv4 or IPv6) on a Managed Cloud Host (OCI / AWS EC2 / Aliyun ECS / GCP)
   app.post('/api/clouds/hosts/:id/ips/add', requireAuth, async (req: AuthedRequest, res) => {
     const state = store.getState();
@@ -5400,7 +5694,22 @@ export async function createServer(options: CreateServerOptions = {}) {
         return;
       }
 
-      const added = await ociAddIpv6ToVnic(ctx.profile, ctx.pem, ctx.vnicId, requestedAddr || undefined);
+      let activeVnicId = ctx.vnicId;
+      let added = await ociAddIpv6ToVnic(ctx.profile, ctx.pem, activeVnicId, requestedAddr || undefined);
+      // If OCI returns 404/NotAuthorizedOrNotFound, refresh the live VNIC OCID once from instance detail and retry if changed
+      if (
+        !added.ok &&
+        host.instanceId &&
+        /not found|NotAuthorizedOrNotFound|404/i.test(added.error || '')
+      ) {
+        const refreshed = await getOciInstanceDetail(ctx.profile, ctx.pem, host.instanceId);
+        if (refreshed.ok && refreshed.vnicId && refreshed.vnicId !== activeVnicId) {
+          activeVnicId = refreshed.vnicId;
+          host.ociVnicId = refreshed.vnicId;
+          if (refreshed.primaryPrivateIpId) host.ociPrimaryPrivateIpId = refreshed.primaryPrivateIpId;
+          added = await ociAddIpv6ToVnic(ctx.profile, ctx.pem, activeVnicId, requestedAddr || undefined);
+        }
+      }
       if (!added.ok || !added.ipAddress) {
         res.status(502).json({ error: added.error || 'OCI 新增 IPv6 失败' });
         return;
@@ -6115,6 +6424,7 @@ export async function createServer(options: CreateServerOptions = {}) {
       targetIds: Array.isArray(b.targetIds) ? b.targetIds.map(String) : [],
       ipPolicy,
       enabled: b.enabled !== false,
+      systemProtected: jobType === 'monitor_sweep' || jobType === 'audit_cleanup',
       nextRunAt: computeNextCronRun(expr),
       runCount: 0,
       createdAt: now,
@@ -6200,6 +6510,13 @@ export async function createServer(options: CreateServerOptions = {}) {
     const idx = state.cronJobs.findIndex((j) => j.id === req.params.id);
     if (idx === -1) {
       res.status(404).json({ error: 'Cron job not found' });
+      return;
+    }
+    const target = state.cronJobs[idx];
+    if (target.systemProtected || target.type === 'monitor_sweep' || target.type === 'audit_cleanup') {
+      res.status(403).json({
+        error: '系统监控/巡检类定时任务禁止删除，如需暂停请使用禁用开关',
+      });
       return;
     }
     const [removed] = state.cronJobs.splice(idx, 1);

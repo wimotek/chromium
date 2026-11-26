@@ -1,5 +1,6 @@
 import dns from 'node:dns/promises';
 import net from 'node:net';
+import tls from 'node:tls';
 import type { MonitorCheckSample, MonitorTarget } from '../../src/types/models.ts';
 import { validateSafeExternalUrl } from '../lib/crypto.ts';
 import { store } from '../lib/store.ts';
@@ -147,6 +148,98 @@ async function probeHttp(
   }
 }
 
+interface TlsCertProbeResult {
+  ok: boolean;
+  expiryIso?: string;
+  daysRemaining?: number;
+  issuer?: string;
+  subject?: string;
+  error?: string;
+}
+
+function probeTlsCertificate(urlStr: string, timeoutMs: number): Promise<TlsCertProbeResult> {
+  return new Promise((resolve) => {
+    const check = validateSafeExternalUrl(urlStr);
+    if (!check.valid) {
+      resolve({ ok: false, error: check.reason || 'Blocked URL' });
+      return;
+    }
+    let parsed: URL;
+    try {
+      parsed = new URL(urlStr);
+    } catch {
+      resolve({ ok: false, error: 'Invalid HTTPS URL' });
+      return;
+    }
+    if (parsed.protocol !== 'https:') {
+      resolve({ ok: false, error: 'Not HTTPS' });
+      return;
+    }
+    const hostname = parsed.hostname.replace(/^\[|\]$/g, '');
+    if (isBlockedPrivateHost(hostname)) {
+      resolve({ ok: false, error: 'Private/loopback targets are blocked' });
+      return;
+    }
+    const port = parsed.port ? Number(parsed.port) : 443;
+    let settled = false;
+    const finish = (result: TlsCertProbeResult, sock?: tls.TLSSocket) => {
+      if (settled) return;
+      settled = true;
+      if (sock) sock.destroy();
+      resolve(result);
+    };
+
+    const socket = tls.connect({
+      host: hostname,
+      port: Number.isFinite(port) && port > 0 && port <= 65535 ? port : 443,
+      servername: net.isIP(hostname) ? undefined : hostname,
+      rejectUnauthorized: false,
+      timeout: Math.min(6000, Math.max(1500, timeoutMs)),
+    });
+
+    socket.once('secureConnect', () => {
+      try {
+        const cert = socket.getPeerCertificate();
+        if (!cert || !cert.valid_to) {
+          finish({ ok: false, error: 'No peer certificate presented' }, socket);
+          return;
+        }
+        const expiryMs = Date.parse(cert.valid_to);
+        if (!Number.isFinite(expiryMs)) {
+          finish({ ok: false, error: `Unparseable certificate date: ${cert.valid_to}` }, socket);
+          return;
+        }
+        const daysRemaining = Math.floor((expiryMs - Date.now()) / 86_400_000);
+        const issuerObj = cert.issuer as Record<string, string | string[]> | undefined;
+        const subjectObj = cert.subject as Record<string, string | string[]> | undefined;
+        const pickField = (obj: Record<string, string | string[]> | undefined, keys: string[]) => {
+          if (!obj) return undefined;
+          for (const k of keys) {
+            const v = obj[k];
+            if (typeof v === 'string' && v.trim()) return v.trim();
+            if (Array.isArray(v) && v[0]) return String(v[0]).trim();
+          }
+          return undefined;
+        };
+        finish(
+          {
+            ok: true,
+            expiryIso: new Date(expiryMs).toISOString(),
+            daysRemaining,
+            issuer: pickField(issuerObj, ['O', 'CN']),
+            subject: pickField(subjectObj, ['CN', 'O']),
+          },
+          socket
+        );
+      } catch (err) {
+        finish({ ok: false, error: err instanceof Error ? err.message : 'TLS inspection failed' }, socket);
+      }
+    });
+    socket.once('timeout', () => finish({ ok: false, error: 'TLS handshake timeout' }, socket));
+    socket.once('error', (err) => finish({ ok: false, error: err.message }, socket));
+  });
+}
+
 async function probeDns(fqdn: string, expectedIp?: string): Promise<MonitorCheckSample> {
   const started = Date.now();
   try {
@@ -193,6 +286,9 @@ export async function runMonitorCheck(
   const previousStatus = monitor.status;
   let sample: MonitorCheckSample;
 
+  let tlsWarningTriggered = false;
+  let tlsAlertSummary = '';
+
   if (monitor.type === 'tcp') {
     sample = await probeTcp(monitor.target, monitor.port || 22, monitor.timeoutMs || 5000);
   } else if (monitor.type === 'http') {
@@ -200,6 +296,39 @@ export async function runMonitorCheck(
       httpKeyword: monitor.httpKeyword,
       expectedStatusCodes: monitor.expectedStatusCodes,
     });
+
+    const isHttps = monitor.target.trim().toLowerCase().startsWith('https://');
+    if (isHttps && monitor.checkTlsCert !== false) {
+      const tlsInfo = await probeTlsCertificate(monitor.target, monitor.timeoutMs || 6000);
+      monitor.tlsCertCheckedAt = new Date().toISOString();
+      if (tlsInfo.ok && typeof tlsInfo.daysRemaining === 'number') {
+        monitor.tlsCertExpiry = tlsInfo.expiryIso;
+        monitor.tlsDaysRemaining = tlsInfo.daysRemaining;
+        monitor.tlsCertIssuer = tlsInfo.issuer;
+        monitor.tlsCertSubject = tlsInfo.subject;
+        monitor.tlsCertError = undefined;
+        const warnDays = Math.max(1, Number(monitor.tlsCertWarningDays) || 14);
+        if (tlsInfo.daysRemaining <= 0) {
+          sample = {
+            ...sample,
+            status: 'down',
+            message: `${sample.message} · SSL证书已过期 (${tlsInfo.daysRemaining}天)`,
+          };
+          tlsWarningTriggered = true;
+          tlsAlertSummary = `SSL 证书已过期（到期日: ${tlsInfo.expiryIso?.slice(0, 10)}）`;
+        } else if (tlsInfo.daysRemaining <= warnDays) {
+          sample = {
+            ...sample,
+            status: sample.status === 'down' ? 'down' : 'degraded',
+            message: `${sample.message} · SSL证书剩余 ${tlsInfo.daysRemaining} 天`,
+          };
+          tlsWarningTriggered = true;
+          tlsAlertSummary = `SSL 证书仅剩 ${tlsInfo.daysRemaining} 天到期（到期日: ${tlsInfo.expiryIso?.slice(0, 10)}，阈值 ${warnDays} 天）`;
+        }
+      } else if (tlsInfo.error) {
+        monitor.tlsCertError = tlsInfo.error;
+      }
+    }
   } else {
     sample = await probeDns(monitor.target, monitor.expectedIp);
   }
@@ -270,6 +399,23 @@ export async function runMonitorCheck(
         event: 'monitor_recover',
         title: `🟢 服务上线恢复: ${monitor.name}`,
         message: `监控名称: ${monitor.name}\n目标地址: ${monitor.target}\n探测类型: ${monitor.type.toUpperCase()}\n当前延迟: ${sample.latencyMs}ms\n可用率: ${monitor.uptimePercent}%`,
+        channelIds,
+        actor,
+        ip,
+      });
+    }
+  }
+
+  // Send TLS certificate expiration alert at most once every 24 hours
+  if (tlsWarningTriggered && shouldNotifyDown) {
+    const lastAlertMs = monitor.lastTlsAlertAt ? Date.parse(monitor.lastTlsAlertAt) : 0;
+    if (!Number.isFinite(lastAlertMs) || Date.now() - lastAlertMs >= 86_400_000) {
+      monitor.lastTlsAlertAt = new Date().toISOString();
+      store.save();
+      await dispatchSystemNotification({
+        event: 'monitor_down',
+        title: `⚠️ SSL 证书即将到期: ${monitor.name}`,
+        message: `监控名称: ${monitor.name}\n目标地址: ${monitor.target}\n证书状态: ${tlsAlertSummary}\n签发机构: ${monitor.tlsCertIssuer || 'Unknown'}`,
         channelIds,
         actor,
         ip,

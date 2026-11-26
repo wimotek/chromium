@@ -9,6 +9,8 @@ import type {
   CloudHost,
   CronJob,
   DnsProvider,
+  DnsPullPolicy,
+  DnsPullSnapshot,
   DnsSyncRule,
   ManagedDnsRecord,
   ManagedDomain,
@@ -89,6 +91,8 @@ export interface PersistedState {
   dnsRules: DnsSyncRule[];
   dnsRecords: ManagedDnsRecord[];
   managedDomains: ManagedDomain[];
+  dnsPullPolicy: DnsPullPolicy;
+  dnsPullSnapshots: DnsPullSnapshot[];
   ociProfiles: StoredOciProfile[];
   ociSniperTasks: StoredOciSniperTask[];
   cloudAccounts: StoredCloudAccount[];
@@ -190,6 +194,13 @@ function createDefaultState(): PersistedState {
     dnsRules: [],
     dnsRecords: [],
     managedDomains: [],
+    dnsPullPolicy: {
+      filterMode: 'none',
+      patterns: [],
+      recordTypes: [],
+      updatedAt: now,
+    },
+    dnsPullSnapshots: [],
     ociProfiles: [],
     ociSniperTasks: [],
     cloudAccounts: [],
@@ -205,6 +216,7 @@ function createDefaultState(): PersistedState {
         expression: '*/15 * * * *',
         targetIds: [],
         enabled: true,
+        systemProtected: true,
         nextRunAt: computeNextCronRun('*/15 * * * *'),
         lastStatus: 'success',
         lastSummary: 'Verifies audit.ndjson stays below configured byte cap',
@@ -320,6 +332,8 @@ class DataStore {
         }));
         const mergedMonitors = (Array.isArray(parsed.monitors) ? parsed.monitors : []).map((m) => ({
           ...m,
+          checkTlsCert: m.checkTlsCert !== false,
+          tlsCertWarningDays: typeof m.tlsCertWarningDays === 'number' ? m.tlsCertWarningDays : 14,
           notifyOnDown: m.notifyOnDown !== undefined ? Boolean(m.notifyOnDown) : Boolean(m.notifyOnAlert),
           notifyOnRecover: m.notifyOnRecover !== undefined ? Boolean(m.notifyOnRecover) : Boolean(m.notifyOnAlert),
           notifyChannelIds: Array.isArray(m.notifyChannelIds) ? m.notifyChannelIds : [],
@@ -337,6 +351,24 @@ class DataStore {
               linkedDnsRuleId: ruleIds[0] || undefined,
             };
           });
+        const mergedCronJobs = (Array.isArray(parsed.cronJobs) ? parsed.cronJobs : defaults.cronJobs).map((j) => ({
+          ...j,
+          systemProtected:
+            Boolean(j.systemProtected) ||
+            j.id === 'cron-audit-quota-15m' ||
+            j.type === 'audit_cleanup' ||
+            j.type === 'monitor_sweep',
+        }));
+        const parsedPullPolicy = parsed.dnsPullPolicy ?? defaults.dnsPullPolicy;
+        const mergedPullPolicy: DnsPullPolicy = {
+          filterMode:
+            parsedPullPolicy.filterMode === 'whitelist' || parsedPullPolicy.filterMode === 'blacklist'
+              ? parsedPullPolicy.filterMode
+              : 'none',
+          patterns: Array.isArray(parsedPullPolicy.patterns) ? parsedPullPolicy.patterns.map(String) : [],
+          recordTypes: Array.isArray(parsedPullPolicy.recordTypes) ? parsedPullPolicy.recordTypes : [],
+          updatedAt: parsedPullPolicy.updatedAt,
+        };
         return {
           ...defaults,
           ...parsed,
@@ -346,6 +378,8 @@ class DataStore {
           dnsRules: Array.isArray(parsed.dnsRules) ? parsed.dnsRules : [],
           dnsRecords: Array.isArray(parsed.dnsRecords) ? parsed.dnsRecords : [],
           managedDomains: Array.isArray(parsed.managedDomains) ? parsed.managedDomains : [],
+          dnsPullPolicy: mergedPullPolicy,
+          dnsPullSnapshots: Array.isArray(parsed.dnsPullSnapshots) ? parsed.dnsPullSnapshots.slice(0, 3) : [],
           ociProfiles: Array.isArray(parsed.ociProfiles) ? parsed.ociProfiles : [],
           cloudAccounts: Array.isArray(parsed.cloudAccounts) ? parsed.cloudAccounts : [],
           cloudHosts: cleanedHosts,
@@ -353,7 +387,7 @@ class DataStore {
           managedIps: Array.isArray(parsed.managedIps) ? parsed.managedIps : [],
           monitors: mergedMonitors,
           notificationChannels: Array.isArray(parsed.notificationChannels) ? parsed.notificationChannels : [],
-          cronJobs: Array.isArray(parsed.cronJobs) ? parsed.cronJobs : defaults.cronJobs,
+          cronJobs: mergedCronJobs,
           security: { ...defaults.security, ...(parsed.security ?? {}) },
           auditMeta: { ...defaults.auditMeta, ...(parsed.auditMeta ?? {}) },
         };

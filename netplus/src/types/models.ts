@@ -118,6 +118,29 @@ export interface ManagedDomain {
   updatedAt: string;
 }
 
+export interface DnsPullPolicy {
+  filterMode: 'none' | 'whitelist' | 'blacklist';
+  /** Wildcard/substring patterns matched against domain, fqdn, or host name */
+  patterns: string[];
+  /** Empty means all record types are allowed */
+  recordTypes: DnsRecordType[];
+  updatedAt?: string;
+}
+
+export interface DnsPullSnapshot {
+  id: string;
+  createdAt: string;
+  providerId: string;
+  providerName: string;
+  scope: 'single' | 'all';
+  domain?: string;
+  domains: string[];
+  recordCount: number;
+  filteredOutCount?: number;
+  filterSummary?: string;
+  records: ManagedDnsRecord[];
+}
+
 export interface OciProfile {
   id: string;
   name: string;
@@ -413,6 +436,17 @@ export interface MonitorTarget {
   expectedIp?: string; // used for DNS drift probes
   httpKeyword?: string; // optional body keyword assertion for HTTP(S) probes
   expectedStatusCodes?: string; // e.g. "200-399" or "200,204"
+  /** Inspect SSL/TLS certificate expiration for HTTPS URLs (default true) */
+  checkTlsCert?: boolean;
+  /** Warn/notify when certificate expires within N days (default 14) */
+  tlsCertWarningDays?: number;
+  tlsCertExpiry?: string;
+  tlsDaysRemaining?: number;
+  tlsCertIssuer?: string;
+  tlsCertSubject?: string;
+  tlsCertCheckedAt?: string;
+  tlsCertError?: string;
+  lastTlsAlertAt?: string;
   intervalSeconds: number;
   timeoutMs: number;
   failureThreshold: number;
@@ -535,6 +569,8 @@ export interface CronJob {
   targetIds: string[];
   ipPolicy?: CronIpSyncPolicy;
   enabled: boolean;
+  /** Built-in / system jobs cannot be deleted (can still be disabled/enabled) */
+  systemProtected?: boolean;
   lastRunAt?: string;
   nextRunAt?: string;
   lastStatus?: 'success' | 'partial' | 'failed' | 'running';

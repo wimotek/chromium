@@ -3,8 +3,11 @@ import {
   Download,
   Folder,
   Loader2,
+  Lock,
+  PauseCircle,
   Pencil,
   Play,
+  PlayCircle,
   Plus,
   RefreshCw,
   ShieldAlert,
@@ -338,6 +341,12 @@ export function CronJobsView({ jobs, hosts, dnsRules, lang, onReload }: CronJobs
         </button>
       </div>
 
+      <div className="rounded-xl border border-blue-200/70 dark:border-blue-900/60 bg-blue-50/50 dark:bg-blue-950/20 px-4 py-3 text-xs text-slate-600 dark:text-slate-300 leading-relaxed">
+        {isZh
+          ? '说明：左侧「实时监控」中的 HTTP(S)/TCP/DNS 探针由后台独立监控守护线程按各自心跳间隔自动触发（无需额外创建 Cron 任务）；此处的「定时任务」用于批量巡检、定时 IP 轮换/DNS 同步及审计清理。系统级巡检与清理任务禁止删除，可通过开关随时禁用或启用。'
+          : 'Note: Live Monitors run automatically via a dedicated background probe daemon on each monitor’s own interval. Schedules manages cron-based sweeps, IP/DNS rotation policies, and audit cleanup. System/monitor tasks are delete-protected and can be enabled or disabled anytime.'}
+      </div>
+
       <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 overflow-hidden">
         <div className="overflow-x-auto">
           <table className="w-full text-left border-collapse">
@@ -346,19 +355,39 @@ export function CronJobsView({ jobs, hosts, dnsRules, lang, onReload }: CronJobs
                 <th className="py-3 px-6 font-medium whitespace-nowrap">
                   {isZh ? '任务与同步策略' : 'Task & Policy'}
                 </th>
+                <th className="py-3 px-4 font-medium whitespace-nowrap">{isZh ? '启用状态' : 'Status'}</th>
                 <th className="py-3 px-4 font-medium whitespace-nowrap">{t('cronExpression')}</th>
                 <th className="py-3 px-4 font-medium whitespace-nowrap">{t('nextRun')} / {t('lastRun')}</th>
                 <th className="py-3 px-4 font-medium whitespace-nowrap">{t('runCount')}</th>
-                <th className="py-3 px-6 font-medium text-right whitespace-nowrap">Actions</th>
+                <th className="py-3 px-6 font-medium text-right whitespace-nowrap">
+                  {isZh ? '操作' : 'Actions'}
+                </th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-200/70 dark:divide-slate-800/70 text-xs">
               {jobs.map((job) => {
                 const policySummary = job.type === 'oci_ip_dns_policy' ? formatPolicySummary(job.ipPolicy) : null;
+                const isProtected =
+                  Boolean(job.systemProtected) ||
+                  job.type === 'monitor_sweep' ||
+                  job.type === 'audit_cleanup';
                 return (
-                  <tr key={job.id} className="hover:bg-slate-50 dark:hover:bg-slate-800/40 align-top">
+                  <tr
+                    key={job.id}
+                    className={`hover:bg-slate-50 dark:hover:bg-slate-800/40 align-top transition-opacity ${
+                      job.enabled ? '' : 'opacity-65'
+                    }`}
+                  >
                     <td className="py-3.5 px-6 min-w-[260px]">
-                      <div className="font-semibold text-slate-900 dark:text-white">{job.name}</div>
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="font-semibold text-slate-900 dark:text-white">{job.name}</span>
+                        {isProtected && (
+                          <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-slate-100 dark:bg-slate-800 text-[10px] font-medium text-slate-600 dark:text-slate-300">
+                            <Lock className="w-2.5 h-2.5" />
+                            {isZh ? '系统保护' : 'System'}
+                          </span>
+                        )}
+                      </div>
                       <div className="mt-0.5 text-[11px] text-slate-500 dark:text-slate-400">
                         {jobTypeLabel(job.type)}
                       </div>
@@ -374,25 +403,43 @@ export function CronJobsView({ jobs, hosts, dnsRules, lang, onReload }: CronJobs
                         {job.lastSummary || '—'}
                       </div>
                     </td>
-                    <td className="py-3.5 px-4 font-mono tabular-nums text-slate-800 dark:text-slate-200 whitespace-nowrap">
-                      {job.expression}
-                      <div className="mt-1">
-                        <button
-                          type="button"
-                          disabled={busyJobId === job.id}
-                          onClick={() => void handleToggle(job)}
-                          className={`text-[11px] font-sans font-medium disabled:opacity-50 ${
-                            job.enabled
-                              ? 'text-emerald-600 dark:text-emerald-400'
-                              : 'text-slate-400'
+                    <td className="py-3.5 px-4 whitespace-nowrap">
+                      <button
+                        type="button"
+                        role="switch"
+                        aria-checked={job.enabled}
+                        disabled={busyJobId === job.id}
+                        onClick={() => void handleToggle(job)}
+                        title={job.enabled ? (isZh ? '点击禁用该定时任务' : 'Click to disable') : (isZh ? '点击启用该定时任务' : 'Click to enable')}
+                        className="inline-flex items-center gap-2 disabled:opacity-50"
+                      >
+                        <span
+                          className={`relative inline-flex h-5 w-9 shrink-0 rounded-full transition-colors ${
+                            job.enabled ? 'bg-emerald-600' : 'bg-slate-300 dark:bg-slate-700'
                           }`}
                         >
-                          {job.enabled ? t('enabled') : t('disabled')}
-                        </button>
-                      </div>
+                          <span
+                            className={`inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform mt-0.5 ${
+                              job.enabled ? 'translate-x-4' : 'translate-x-0.5'
+                            }`}
+                          />
+                        </span>
+                        <span
+                          className={`text-[11px] font-medium ${
+                            job.enabled
+                              ? 'text-emerald-700 dark:text-emerald-400'
+                              : 'text-slate-500 dark:text-slate-400'
+                          }`}
+                        >
+                          {job.enabled ? (isZh ? '已启用' : 'Enabled') : isZh ? '已禁用' : 'Disabled'}
+                        </span>
+                      </button>
+                    </td>
+                    <td className="py-3.5 px-4 font-mono tabular-nums text-slate-800 dark:text-slate-200 whitespace-nowrap">
+                      {job.expression}
                     </td>
                     <td className="py-3.5 px-4 font-mono text-[11px] tabular-nums text-slate-600 dark:text-slate-400 whitespace-nowrap">
-                      <div>Next: {formatTimeAgo(job.nextRunAt)}</div>
+                      <div>Next: {job.enabled ? formatTimeAgo(job.nextRunAt) : isZh ? '已暂停' : 'Paused'}</div>
                       <div className="mt-0.5">Last: {formatTimeAgo(job.lastRunAt)}</div>
                     </td>
                     <td className="py-3.5 px-4 font-mono tabular-nums text-slate-800 dark:text-slate-200 whitespace-nowrap">
@@ -400,6 +447,28 @@ export function CronJobsView({ jobs, hosts, dnsRules, lang, onReload }: CronJobs
                     </td>
                     <td className="py-3.5 px-6 text-right whitespace-nowrap">
                       <div className="inline-flex items-center gap-1.5">
+                        <button
+                          type="button"
+                          disabled={busyJobId === job.id}
+                          onClick={() => void handleToggle(job)}
+                          className={`inline-flex items-center gap-1 px-2.5 py-1.5 text-[11px] font-medium rounded-md border disabled:opacity-50 ${
+                            job.enabled
+                              ? 'border-amber-200 dark:border-amber-800 text-amber-700 dark:text-amber-300 hover:bg-amber-50 dark:hover:bg-amber-950/30'
+                              : 'border-emerald-200 dark:border-emerald-800 text-emerald-700 dark:text-emerald-300 hover:bg-emerald-50 dark:hover:bg-emerald-950/30'
+                          }`}
+                        >
+                          {job.enabled ? (
+                            <>
+                              <PauseCircle className="w-3.5 h-3.5" />
+                              {isZh ? '禁用' : 'Disable'}
+                            </>
+                          ) : (
+                            <>
+                              <PlayCircle className="w-3.5 h-3.5" />
+                              {isZh ? '启用' : 'Enable'}
+                            </>
+                          )}
+                        </button>
                         <button
                           type="button"
                           disabled={runningId === job.id}
@@ -421,15 +490,31 @@ export function CronJobsView({ jobs, hosts, dnsRules, lang, onReload }: CronJobs
                         >
                           <Pencil className="w-3.5 h-3.5" />
                         </button>
-                        <button
-                          type="button"
-                          disabled={busyJobId === job.id}
-                          onClick={() => void handleDelete(job)}
-                          aria-label={t('delete')}
-                          className="p-1.5 rounded-md text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-950/40 disabled:opacity-50"
-                        >
-                          <Trash2 className="w-4 h-4" />
-                        </button>
+                        {isProtected ? (
+                          <button
+                            type="button"
+                            disabled
+                            title={
+                              isZh
+                                ? '系统监控/巡检类任务禁止删除，请使用左侧禁用开关'
+                                : 'System/monitor task cannot be deleted; use Disable instead'
+                            }
+                            aria-label={isZh ? '禁止删除' : 'Delete locked'}
+                            className="p-1.5 rounded-md text-slate-300 dark:text-slate-600 cursor-not-allowed"
+                          >
+                            <Lock className="w-3.5 h-3.5" />
+                          </button>
+                        ) : (
+                          <button
+                            type="button"
+                            disabled={busyJobId === job.id}
+                            onClick={() => void handleDelete(job)}
+                            aria-label={t('delete')}
+                            className="p-1.5 rounded-md text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-950/40 disabled:opacity-50"
+                          >
+                            <Trash2 className="w-4 h-4" />
+                          </button>
+                        )}
                       </div>
                     </td>
                   </tr>
@@ -437,7 +522,7 @@ export function CronJobsView({ jobs, hosts, dnsRules, lang, onReload }: CronJobs
               })}
               {jobs.length === 0 && (
                 <tr>
-                  <td colSpan={5} className="py-10 text-center text-slate-400">
+                  <td colSpan={6} className="py-10 text-center text-slate-400">
                     {t('noData')}
                   </td>
                 </tr>

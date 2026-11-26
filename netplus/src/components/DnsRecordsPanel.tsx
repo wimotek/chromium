@@ -5,17 +5,21 @@ import {
   ArrowRight,
   Check,
   CheckCircle2,
+  ChevronDown,
   ChevronRight,
+  ChevronUp,
   CloudDownload,
-  CloudUpload,
   Copy,
+  Filter,
   Folder,
   Globe,
+  History,
   KeyRound,
   Loader2,
   Pencil,
   Plus,
   RefreshCw,
+  RotateCcw,
   Save,
   Search,
   ShieldCheck,
@@ -27,6 +31,8 @@ import { copyText } from '../lib/clipboard';
 import { toast } from '../lib/toast';
 import type {
   DnsProvider,
+  DnsPullPolicy,
+  DnsPullSnapshot,
   DnsRecordType,
   LanguageCode,
   ManagedDnsRecord,
@@ -207,13 +213,171 @@ export function DnsRecordsPanel({
   });
   const [inlineAddBusy, setInlineAddBusy] = useState(false);
   const [inlineError, setInlineError] = useState<string | null>(null);
-  const [pushingRecordId, setPushingRecordId] = useState<string | null>(null);
+
+  // Pull Policy (Filter / Whitelist / Blacklist) & Latest 3 Pull Snapshots
+  const [pullPolicy, setPullPolicy] = useState<DnsPullPolicy>({
+    filterMode: 'none',
+    patterns: [],
+    recordTypes: [],
+  });
+  const [showPolicyModal, setShowPolicyModal] = useState(false);
+  const [policyDraftMode, setPolicyDraftMode] = useState<'none' | 'whitelist' | 'blacklist'>('none');
+  const [policyDraftPatternsText, setPolicyDraftPatternsText] = useState('');
+  const [policyDraftRecordTypes, setPolicyDraftRecordTypes] = useState<DnsRecordType[]>([]);
+  const [policyBusy, setPolicyBusy] = useState(false);
+  const [policyError, setPolicyError] = useState<string | null>(null);
+
+  const [pullSnapshots, setPullSnapshots] = useState<DnsPullSnapshot[]>([]);
+  const [showSnapshotsModal, setShowSnapshotsModal] = useState(false);
+  const [snapshotsLoading, setSnapshotsLoading] = useState(false);
+  const [expandedSnapshotId, setExpandedSnapshotId] = useState<string | null>(null);
+  const [confirmRestoreId, setConfirmRestoreId] = useState<string | null>(null);
+  const [restoringSnapshotId, setRestoringSnapshotId] = useState<string | null>(null);
 
   // Delete confirm modal
   const [deleteTarget, setDeleteTarget] = useState<ManagedDnsRecord | null>(null);
   const [deleteRemoteChecked, setDeleteRemoteChecked] = useState(true);
   const [deleteBusy, setDeleteBusy] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
+
+  const loadPullMeta = useCallback(async () => {
+    setSnapshotsLoading(true);
+    try {
+      const [policyRes, snapsRes] = await Promise.all([
+        apiRequest<DnsPullPolicy>('/api/dns/pull-policy'),
+        apiRequest<DnsPullSnapshot[]>('/api/dns/pull-snapshots'),
+      ]);
+      if (policyRes && typeof policyRes === 'object') {
+        setPullPolicy({
+          filterMode: policyRes.filterMode || 'none',
+          patterns: Array.isArray(policyRes.patterns) ? policyRes.patterns : [],
+          recordTypes: Array.isArray(policyRes.recordTypes) ? policyRes.recordTypes : [],
+          updatedAt: policyRes.updatedAt,
+        });
+      }
+      if (Array.isArray(snapsRes)) {
+        setPullSnapshots(snapsRes.slice(0, 3));
+      }
+    } catch {
+      // Non-blocking background metadata load
+    } finally {
+      setSnapshotsLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadPullMeta();
+  }, [loadPullMeta]);
+
+  const isPullPolicyActive = useMemo(() => {
+    const hasListFilter = pullPolicy.filterMode !== 'none' && pullPolicy.patterns.length > 0;
+    const hasTypeFilter = pullPolicy.recordTypes.length > 0;
+    return hasListFilter || hasTypeFilter;
+  }, [pullPolicy]);
+
+  const pullPolicySummary = useMemo(() => {
+    const parts: string[] = [];
+    if (pullPolicy.recordTypes.length > 0) {
+      parts.push(isZh ? `类型: ${pullPolicy.recordTypes.join('/')}` : `Types: ${pullPolicy.recordTypes.join('/')}`);
+    }
+    if (pullPolicy.filterMode === 'whitelist' && pullPolicy.patterns.length > 0) {
+      parts.push(isZh ? `白名单 ${pullPolicy.patterns.length} 条` : `Whitelist (${pullPolicy.patterns.length})`);
+    } else if (pullPolicy.filterMode === 'blacklist' && pullPolicy.patterns.length > 0) {
+      parts.push(isZh ? `黑名单 ${pullPolicy.patterns.length} 条` : `Blacklist (${pullPolicy.patterns.length})`);
+    }
+    if (parts.length === 0) {
+      return isZh ? '无过滤（全量拉取）' : 'No filter (Pull all)';
+    }
+    return parts.join(' · ');
+  }, [pullPolicy, isZh]);
+
+  const openPolicyModal = () => {
+    setPolicyDraftMode(pullPolicy.filterMode || 'none');
+    setPolicyDraftPatternsText((pullPolicy.patterns || []).join('\n'));
+    setPolicyDraftRecordTypes(pullPolicy.recordTypes || []);
+    setPolicyError(null);
+    setShowPolicyModal(true);
+  };
+
+  const togglePolicyDraftType = (rt: DnsRecordType) => {
+    setPolicyDraftRecordTypes((prev) =>
+      prev.includes(rt) ? prev.filter((item) => item !== rt) : [...prev, rt]
+    );
+  };
+
+  const handleSavePolicy = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const patterns = policyDraftPatternsText
+      .split(/[\n,;]+/)
+      .map((s) => s.trim().toLowerCase())
+      .filter(Boolean);
+
+    if (policyDraftMode !== 'none' && patterns.length === 0) {
+      setPolicyError(
+        isZh
+          ? '选择白名单或黑名单模式时，请至少填写一条匹配规则（如 *.example.com 或 www）'
+          : 'Enter at least one pattern for whitelist/blacklist mode.'
+      );
+      return;
+    }
+
+    setPolicyBusy(true);
+    setPolicyError(null);
+    try {
+      const saved = await apiRequest<DnsPullPolicy>('/api/dns/pull-policy', {
+        method: 'PUT',
+        body: JSON.stringify({
+          filterMode: policyDraftMode,
+          patterns,
+          recordTypes: policyDraftRecordTypes,
+        }),
+      });
+      setPullPolicy(saved);
+      setShowPolicyModal(false);
+      onNotify(
+        isZh ? 'DNS 拉取过滤策略已保存，后续拉取将自动生效' : 'DNS pull filter policy saved',
+        'success'
+      );
+    } catch (err) {
+      setPolicyError(err instanceof Error ? err.message : 'Save pull policy failed');
+    } finally {
+      setPolicyBusy(false);
+    }
+  };
+
+  const openSnapshotsModal = () => {
+    setConfirmRestoreId(null);
+    setShowSnapshotsModal(true);
+    void loadPullMeta();
+  };
+
+  const handleRestoreSnapshot = async (snap: DnsPullSnapshot) => {
+    setRestoringSnapshotId(snap.id);
+    try {
+      const res = await apiRequest<{
+        ok: boolean;
+        restoredCount: number;
+        domains: string[];
+        message: string;
+      }>(`/api/dns/pull-snapshots/${encodeURIComponent(snap.id)}/restore`, {
+        method: 'POST',
+      });
+      setConfirmRestoreId(null);
+      setShowSnapshotsModal(false);
+      await Promise.all([onReload(), loadPullMeta()]);
+      onNotify(
+        res.message ||
+          (isZh
+            ? `已从历史快照恢复 ${res.restoredCount} 条本地 DNS 记录`
+            : `Restored ${res.restoredCount} local DNS record(s) from snapshot`),
+        'success'
+      );
+    } catch (err) {
+      onNotify(err instanceof Error ? err.message : 'Restore snapshot failed', 'error');
+    } finally {
+      setRestoringSnapshotId(null);
+    }
+  };
 
   const providerMap = useMemo(() => new Map(providers.map((p) => [p.id, p])), [providers]);
   const configuredProviders = useMemo(() => providers.filter((p) => isProviderConfigured(p)), [providers]);
@@ -456,6 +620,7 @@ export function DnsRecordsPanel({
         addedCount: number;
         updatedCount: number;
         removedCount: number;
+        filteredOutCount?: number;
       }>('/api/dns/records/pull', {
         method: 'POST',
         body: JSON.stringify({
@@ -464,11 +629,17 @@ export function DnsRecordsPanel({
           zoneId: row.zoneId,
         }),
       });
-      await onReload();
+      await Promise.all([onReload(), loadPullMeta()]);
+      const filteredSuffix =
+        res.filteredOutCount && res.filteredOutCount > 0
+          ? isZh
+            ? `，按策略过滤 ${res.filteredOutCount} 条`
+            : `, ${res.filteredOutCount} filtered out`
+          : '';
       onNotify(
         isZh
-          ? `已从远端拉取 ${row.domain}：共 ${res.total} 条解析（新增 ${res.addedCount}，更新 ${res.updatedCount}，清理 ${res.removedCount}）`
-          : `Pulled ${res.total} records for ${row.domain} (+${res.addedCount}, ~${res.updatedCount}, -${res.removedCount})`,
+          ? `已拉取 ${row.domain}：保留 ${res.total} 条（新增 ${res.addedCount}，更新 ${res.updatedCount}，清理 ${res.removedCount}${filteredSuffix}），已本地归档快照`
+          : `Pulled ${res.total} records for ${row.domain} (+${res.addedCount}, ~${res.updatedCount}, -${res.removedCount}${filteredSuffix}); snapshot saved`,
         'success'
       );
     } catch (err) {
@@ -516,6 +687,7 @@ export function DnsRecordsPanel({
           addedCount: number;
           updatedCount: number;
           removedCount: number;
+          filteredOutCount?: number;
           errors: Array<{ domain: string; error: string }>;
         }>('/api/dns/records/pull-all', {
           method: 'POST',
@@ -526,17 +698,23 @@ export function DnsRecordsPanel({
         });
         setShowPullModal(false);
         setSelectedDomainKey(null);
-        await onReload();
+        await Promise.all([onReload(), loadPullMeta()]);
         const errSuffix =
           res.errors.length > 0
             ? isZh
               ? `（${res.errors.length} 个域名失败）`
               : ` (${res.errors.length} failed)`
             : '';
+        const filteredSuffix =
+          res.filteredOutCount && res.filteredOutCount > 0
+            ? isZh
+              ? `，过滤 ${res.filteredOutCount} 条`
+              : `, ${res.filteredOutCount} filtered`
+            : '';
         onNotify(
           isZh
-            ? `已从远端拉取 ${res.domainCount} 个域名，共 ${res.totalRecords} 条记录（新增 ${res.addedCount}，更新 ${res.updatedCount}，清理 ${res.removedCount}）${errSuffix}`
-            : `Pulled ${res.totalRecords} records across ${res.domainCount} domain(s)${errSuffix}`
+            ? `已拉取 ${res.domainCount} 个域名，保留 ${res.totalRecords} 条记录（新增 ${res.addedCount}，更新 ${res.updatedCount}，清理 ${res.removedCount}${filteredSuffix}）${errSuffix}，已保存历史快照`
+            : `Pulled ${res.totalRecords} records across ${res.domainCount} domain(s)${filteredSuffix}${errSuffix}; snapshot saved`
         );
       } catch (err) {
         setPullError(err instanceof Error ? err.message : 'Pull all domains failed');
@@ -561,6 +739,7 @@ export function DnsRecordsPanel({
         addedCount: number;
         updatedCount: number;
         removedCount: number;
+        filteredOutCount?: number;
       }>('/api/dns/records/pull', {
         method: 'POST',
         body: JSON.stringify({
@@ -571,11 +750,17 @@ export function DnsRecordsPanel({
         }),
       });
       setShowPullModal(false);
-      await onReload();
+      await Promise.all([onReload(), loadPullMeta()]);
+      const filteredSuffix =
+        res.filteredOutCount && res.filteredOutCount > 0
+          ? isZh
+            ? `，按策略过滤 ${res.filteredOutCount} 条`
+            : `, ${res.filteredOutCount} filtered`
+          : '';
       onNotify(
         isZh
-          ? `已拉取 ${cleanDom}：共 ${res.total} 条记录（新增 ${res.addedCount}，更新 ${res.updatedCount}，清理 ${res.removedCount}）`
-          : `Pulled ${res.total} DNS records for ${cleanDom} (+${res.addedCount}, ~${res.updatedCount}, -${res.removedCount})`
+          ? `已拉取 ${cleanDom}：保留 ${res.total} 条记录（新增 ${res.addedCount}，更新 ${res.updatedCount}，清理 ${res.removedCount}${filteredSuffix}），已保存快照`
+          : `Pulled ${res.total} DNS records for ${cleanDom} (+${res.addedCount}, ~${res.updatedCount}, -${res.removedCount}${filteredSuffix}); snapshot saved`
       );
     } catch (err) {
       setPullError(err instanceof Error ? err.message : 'Pull DNS records failed');
@@ -802,25 +987,6 @@ export function DnsRecordsPanel({
     }
   };
 
-  const handlePushSingleRecord = async (rec: ManagedDnsRecord) => {
-    setPushingRecordId(rec.id);
-    setInlineError(null);
-    try {
-      const res = await apiRequest<{ ok: boolean; record: ManagedDnsRecord; message: string }>(
-        `/api/dns/records/${encodeURIComponent(rec.id)}/push`,
-        { method: 'POST' }
-      );
-      await onReload();
-      onNotify(`${res.record.fqdn} (${res.record.type})：${res.message}`, 'success');
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : 'Push record failed';
-      setInlineError(msg);
-      onNotify(msg, 'error');
-    } finally {
-      setPushingRecordId(null);
-    }
-  };
-
   const handleConfirmDelete = async () => {
     if (!deleteTarget) return;
     setDeleteBusy(true);
@@ -945,7 +1111,31 @@ export function DnsRecordsPanel({
                 </span>
               </div>
 
-              <div className="flex items-center gap-2 shrink-0">
+              <div className="flex flex-wrap items-center gap-2 shrink-0">
+                <button
+                  type="button"
+                  onClick={openPolicyModal}
+                  title={pullPolicySummary}
+                  className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg border whitespace-nowrap shrink-0 transition-colors ${
+                    isPullPolicyActive
+                      ? 'border-blue-300 dark:border-blue-700 bg-blue-50/70 dark:bg-blue-950/30 text-blue-700 dark:text-blue-300 hover:bg-blue-100/70 dark:hover:bg-blue-950/50'
+                      : 'border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800'
+                  }`}
+                >
+                  <Filter className="w-3.5 h-3.5" />
+                  {isZh ? '拉取策略' : 'Pull Policy'}
+                  {isPullPolicyActive && (
+                    <span className="w-1.5 h-1.5 rounded-full bg-blue-600 dark:bg-blue-400" />
+                  )}
+                </button>
+                <button
+                  type="button"
+                  onClick={openSnapshotsModal}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 whitespace-nowrap shrink-0 tabular-nums"
+                >
+                  <History className="w-3.5 h-3.5" />
+                  {isZh ? `历史快照 (${pullSnapshots.length}/3)` : `Snapshots (${pullSnapshots.length}/3)`}
+                </button>
                 <button
                   type="button"
                   onClick={openPullModal}
@@ -1246,13 +1436,37 @@ export function DnsRecordsPanel({
                   </div>
                   <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5">
                     {isZh
-                      ? '拉取 (Pull) = 从 DNS 服务商读取最新解析到本地 · 行内编辑保存 / 推送 (Push) = 立即单条推送修改到 DNS 服务器生效。'
-                      : 'Pull = read latest records from remote DNS · Inline Save / Push = immediately push single-record updates to remote DNS.'}
+                      ? '拉取 (Pull) 按过滤策略同步远端解析并自动保留最近 3 份本地快照 · 双击或点击编辑后保存即自动推送到远端 DNS 服务器。'
+                      : 'Pull syncs live records using your Pull Policy and saves up to 3 local recovery snapshots · Saving an edit automatically pushes to remote DNS.'}
                   </p>
                 </div>
               </div>
 
-              <div className="flex items-center gap-2 shrink-0">
+              <div className="flex flex-wrap items-center gap-2 shrink-0">
+                <button
+                  type="button"
+                  onClick={openPolicyModal}
+                  title={pullPolicySummary}
+                  className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium rounded-lg border whitespace-nowrap shrink-0 transition-colors ${
+                    isPullPolicyActive
+                      ? 'border-blue-300 dark:border-blue-700 bg-blue-50/70 dark:bg-blue-950/30 text-blue-700 dark:text-blue-300'
+                      : 'border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800'
+                  }`}
+                >
+                  <Filter className="w-3.5 h-3.5" />
+                  {isZh ? '拉取策略' : 'Policy'}
+                  {isPullPolicyActive && (
+                    <span className="w-1.5 h-1.5 rounded-full bg-blue-600 dark:bg-blue-400" />
+                  )}
+                </button>
+                <button
+                  type="button"
+                  onClick={openSnapshotsModal}
+                  className="inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 whitespace-nowrap shrink-0 tabular-nums"
+                >
+                  <History className="w-3.5 h-3.5" />
+                  {isZh ? `快照 (${pullSnapshots.length}/3)` : `Snapshots (${pullSnapshots.length}/3)`}
+                </button>
                 {activeProvider && activeProviderConfigured && (
                   <button
                     type="button"
@@ -1708,7 +1922,6 @@ export function DnsRecordsPanel({
                       const prov = providerMap.get(rec.providerId);
                       const provConfigured = isProviderConfigured(prov);
                       const isEditing = editingRowId === rec.id && inlineEditDraft !== null;
-                      const isPushing = pushingRecordId === rec.id;
 
                       if (isEditing && inlineEditDraft) {
                         return (
@@ -2007,33 +2220,10 @@ export function DnsRecordsPanel({
                           </td>
                           <td className="py-3 px-4 align-middle text-right whitespace-nowrap">
                             <div className="inline-flex items-center gap-1">
-                              {provConfigured && (
-                                <button
-                                  type="button"
-                                  disabled={isPushing}
-                                  onClick={() => void handlePushSingleRecord(rec)}
-                                  title={
-                                    isZh
-                                      ? 'Push：立即将此单条记录推送到远端 DNS 服务器'
-                                      : 'Push this record immediately to remote DNS server'
-                                  }
-                                  className={`p-1.5 rounded-md border transition-colors disabled:opacity-50 ${
-                                    rec.syncState !== 'synced'
-                                      ? 'border-amber-300 dark:border-amber-800 bg-amber-50 dark:bg-amber-950/30 text-amber-700 dark:text-amber-300 hover:bg-amber-100'
-                                      : 'border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800 hover:text-emerald-600'
-                                  }`}
-                                >
-                                  {isPushing ? (
-                                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                                  ) : (
-                                    <CloudUpload className="w-3.5 h-3.5" />
-                                  )}
-                                </button>
-                              )}
                               <button
                                 type="button"
                                 onClick={() => startInlineEdit(rec)}
-                                title={isZh ? '行内直接编辑（保存后立即推送）' : 'Edit inline (pushes on save)'}
+                                title={isZh ? '行内编辑（修改保存后自动上传到 DNS 服务器）' : 'Edit inline (auto-pushes on save)'}
                                 className="p-1.5 rounded-md border border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800 hover:text-blue-600 dark:hover:text-blue-400"
                               >
                                 <Pencil className="w-3.5 h-3.5" />
@@ -2074,8 +2264,8 @@ export function DnsRecordsPanel({
                 </h3>
                 <p className="text-[11px] text-slate-500 mt-0.5">
                   {isZh
-                    ? 'Pull 仅读取远端 DNS 服务商的最新配置并同步到本地视图，不会覆盖远端服务器。修改推送请使用行内「保存并推送」或单条 Push。'
-                    : 'Pull reads live zones/records from your DNS provider into NetPlus without overwriting remote records.'}
+                    ? 'Pull 按拉取过滤策略同步远端解析到本地，并自动归档最新 3 份历史快照以备随时回滚。记录修改保存后自动上传远端。'
+                    : 'Pull imports live zones/records using your active Pull Policy and keeps the latest 3 local recovery snapshots.'}
                 </p>
               </div>
               <button type="button" onClick={() => setShowPullModal(false)} className="p-1 text-slate-400">
@@ -2237,6 +2427,29 @@ export function DnsRecordsPanel({
                     placeholder={isZh ? '留空则默认按各自域名自动分组' : 'Defaults to each domain name'}
                     className="w-full px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950"
                   />
+                </div>
+
+                {/* Active Pull Filter Policy Summary */}
+                <div className="rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50/80 dark:bg-slate-950/70 px-3 py-2.5 flex items-center justify-between gap-2">
+                  <div className="min-w-0">
+                    <div className="text-[11px] font-medium text-slate-700 dark:text-slate-200 flex items-center gap-1.5">
+                      <Filter className="w-3.5 h-3.5 text-blue-600 dark:text-blue-400 shrink-0" />
+                      {isZh ? '当前拉取过滤策略' : 'Active Pull Filter Policy'}
+                    </div>
+                    <div className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5 truncate">
+                      {pullPolicySummary}
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowPullModal(false);
+                      openPolicyModal();
+                    }}
+                    className="px-2.5 py-1 rounded-md border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-[11px] font-medium text-blue-600 dark:text-blue-400 hover:bg-blue-50 dark:hover:bg-blue-950/30 shrink-0"
+                  >
+                    {isZh ? '调整策略' : 'Edit Policy'}
+                  </button>
                 </div>
 
                 <div className="flex justify-end gap-2 pt-3 border-t border-slate-200 dark:border-slate-800">
@@ -2588,6 +2801,367 @@ export function DnsRecordsPanel({
               >
                 {deleteBusy && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
                 {isZh ? '确认删除' : 'Delete'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ==================== MODAL 5: DNS PULL POLICY (FILTER / WHITELIST / BLACKLIST) ==================== */}
+      {showPolicyModal && (
+        <div className="fixed inset-0 z-50 bg-slate-950/55 flex items-center justify-center p-4">
+          <div className="w-full max-w-lg rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-6">
+            <div className="flex items-start justify-between gap-3 pb-4 border-b border-slate-200 dark:border-slate-800">
+              <div>
+                <h3 className="font-display text-base font-semibold text-slate-900 dark:text-white flex items-center gap-2">
+                  <Filter className="w-4 h-4 text-blue-600 dark:text-blue-400" />
+                  {isZh ? 'DNS 拉取策略（过滤条件与黑白名单）' : 'DNS Pull Policy (Filters & Allow/Blocklist)'}
+                </h3>
+                <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-1">
+                  {isZh
+                    ? '设置从远端 DNS 服务商拉取时的记录类型过滤与域名/主机黑白名单，避免导入无关解析记录。'
+                    : 'Filter pulled DNS records by record type and domain/host whitelist or blacklist.'}
+                </p>
+              </div>
+              <button type="button" onClick={() => setShowPolicyModal(false)} className="p-1 text-slate-400 hover:text-slate-600">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <form onSubmit={handleSavePolicy} className="mt-4 space-y-4 text-xs">
+              {policyError && (
+                <div className="px-3 py-2 rounded-lg border border-red-200 dark:border-red-900 bg-red-50/70 dark:bg-red-950/30 text-red-700 dark:text-red-300">
+                  {policyError}
+                </div>
+              )}
+
+              <div>
+                <label className="block font-medium text-slate-800 dark:text-slate-200 mb-2">
+                  {isZh ? '名单过滤模式' : 'List Filter Mode'}
+                </label>
+                <div className="grid grid-cols-3 gap-2">
+                  {(
+                    [
+                      {
+                        id: 'none',
+                        title: isZh ? '无过滤' : 'No Filter',
+                        desc: isZh ? '全量拉取所有记录' : 'Import all records',
+                      },
+                      {
+                        id: 'whitelist',
+                        title: isZh ? '白名单模式' : 'Whitelist',
+                        desc: isZh ? '仅保留命中规则项' : 'Keep matching only',
+                      },
+                      {
+                        id: 'blacklist',
+                        title: isZh ? '黑名单模式' : 'Blacklist',
+                        desc: isZh ? '排除命中规则项' : 'Exclude matching',
+                      },
+                    ] as const
+                  ).map((opt) => (
+                    <button
+                      key={opt.id}
+                      type="button"
+                      onClick={() => {
+                        setPolicyDraftMode(opt.id);
+                        setPolicyError(null);
+                      }}
+                      className={`px-3 py-2.5 rounded-lg border text-left transition-colors ${
+                        policyDraftMode === opt.id
+                          ? 'border-blue-600 bg-blue-50 dark:bg-blue-950/40 text-blue-700 dark:text-blue-300'
+                          : 'border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800'
+                      }`}
+                    >
+                      <div className="font-semibold">{opt.title}</div>
+                      <div className="text-[10px] opacity-80 mt-0.5">{opt.desc}</div>
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {policyDraftMode !== 'none' && (
+                <div>
+                  <label className="block font-medium text-slate-800 dark:text-slate-200 mb-1">
+                    {policyDraftMode === 'whitelist'
+                      ? isZh
+                        ? '白名单匹配规则（每行一条，支持 * 通配符）'
+                        : 'Whitelist Patterns (one per line, * wildcards supported)'
+                      : isZh
+                        ? '黑名单排除规则（每行一条，支持 * 通配符）'
+                        : 'Blacklist Patterns (one per line, * wildcards supported)'}
+                  </label>
+                  <textarea
+                    rows={4}
+                    value={policyDraftPatternsText}
+                    onChange={(e) => setPolicyDraftPatternsText(e.target.value)}
+                    placeholder={
+                      isZh
+                        ? '示例：\n*.example.com\napi.*\n_acme-challenge*\nmail.test.org'
+                        : 'Examples:\n*.example.com\napi.*\n_acme-challenge*\nmail.test.org'
+                    }
+                    className="w-full px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 font-mono text-xs leading-relaxed focus:outline-none focus:ring-2 focus:ring-blue-600"
+                  />
+                  <p className="mt-1 text-[11px] text-slate-500 dark:text-slate-400">
+                    {isZh
+                      ? '规则可匹配主域名（example.com）、完整主机名（api.example.com）或子域前缀（www / _dmarc*）。'
+                      : 'Matches against root domain (example.com), full FQDN (api.example.com), or host label (www / _dmarc*).'}
+                  </p>
+                </div>
+              )}
+
+              <div>
+                <div className="flex items-center justify-between mb-2">
+                  <label className="font-medium text-slate-800 dark:text-slate-200">
+                    {isZh ? '仅拉取指定记录类型（不选 = 全部类型）' : 'Record Type Filter (None selected = All)'}
+                  </label>
+                  {policyDraftRecordTypes.length > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => setPolicyDraftRecordTypes([])}
+                      className="text-[11px] text-blue-600 dark:text-blue-400 hover:underline"
+                    >
+                      {isZh ? '清空（全部类型）' : 'Clear (All Types)'}
+                    </button>
+                  )}
+                </div>
+                <div className="flex flex-wrap gap-1.5">
+                  {RECORD_TYPES.map((rt) => {
+                    const active = policyDraftRecordTypes.includes(rt);
+                    return (
+                      <button
+                        key={rt}
+                        type="button"
+                        onClick={() => togglePolicyDraftType(rt)}
+                        className={`px-2.5 py-1 rounded-md border font-mono text-xs font-semibold transition-colors ${
+                          active
+                            ? 'border-blue-600 bg-blue-600 text-white'
+                            : 'border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800'
+                        }`}
+                      >
+                        {rt}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              <div className="flex justify-end gap-2 pt-3 border-t border-slate-200 dark:border-slate-800">
+                <button
+                  type="button"
+                  onClick={() => setShowPolicyModal(false)}
+                  className="px-4 py-2 rounded-lg border border-slate-200 dark:border-slate-700"
+                >
+                  {isZh ? '取消' : 'Cancel'}
+                </button>
+                <button
+                  type="submit"
+                  disabled={policyBusy}
+                  className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-blue-600 text-white font-semibold hover:bg-blue-700 disabled:opacity-50"
+                >
+                  {policyBusy ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Save className="w-3.5 h-3.5" />}
+                  {isZh ? '保存拉取策略' : 'Save Pull Policy'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* ==================== MODAL 6: LATEST 3 PULL SNAPSHOTS RECOVERY ==================== */}
+      {showSnapshotsModal && (
+        <div className="fixed inset-0 z-50 bg-slate-950/55 flex items-center justify-center p-4">
+          <div className="w-full max-w-2xl max-h-[85vh] flex flex-col rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900">
+            <div className="flex items-start justify-between gap-3 px-6 py-4 border-b border-slate-200 dark:border-slate-800">
+              <div>
+                <h3 className="font-display text-base font-semibold text-slate-900 dark:text-white flex items-center gap-2">
+                  <History className="w-4 h-4 text-blue-600 dark:text-blue-400" />
+                  {isZh ? '本地 Pull 历史快照（自动保留最新 3 份）' : 'Local Pull Snapshots (Latest 3 Kept)'}
+                </h3>
+                <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-1">
+                  {isZh
+                    ? '每次从远端 Pull 拉取解析记录后都会在本地归档一份快照；若拉取策略误过滤或本地记录需要回退，可一键恢复任意一份快照。'
+                    : 'Every DNS Pull automatically archives a local snapshot (latest 3 retained). Restore any snapshot to roll back local records.'}
+                </p>
+              </div>
+              <button type="button" onClick={() => setShowSnapshotsModal(false)} className="p-1 text-slate-400 hover:text-slate-600">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="flex-1 overflow-y-auto p-6 space-y-3 text-xs">
+              {snapshotsLoading && pullSnapshots.length === 0 ? (
+                <div className="py-12 text-center text-slate-500 flex items-center justify-center gap-2">
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                  {isZh ? '正在读取本地快照...' : 'Loading snapshots...'}
+                </div>
+              ) : pullSnapshots.length === 0 ? (
+                <div className="py-12 text-center space-y-2">
+                  <History className="w-8 h-8 text-slate-300 dark:text-slate-600 mx-auto" />
+                  <p className="text-sm font-medium text-slate-700 dark:text-slate-300">
+                    {isZh ? '暂无 Pull 历史快照' : 'No pull snapshots yet'}
+                  </p>
+                  <p className="text-slate-500 dark:text-slate-400">
+                    {isZh
+                      ? '执行一次「从远端拉取 (Pull)」后，系统会自动在本地保留最近 3 份拉取记录以供随时恢复。'
+                      : 'Run a DNS Pull to automatically archive snapshots here (up to 3 latest snapshots).'}
+                  </p>
+                </div>
+              ) : (
+                pullSnapshots.map((snap, idx) => {
+                  const isExpanded = expandedSnapshotId === snap.id;
+                  const isConfirming = confirmRestoreId === snap.id;
+                  const isRestoring = restoringSnapshotId === snap.id;
+                  return (
+                    <div
+                      key={snap.id}
+                      className="rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50/50 dark:bg-slate-950/60 overflow-hidden"
+                    >
+                      <div className="p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                        <div className="space-y-1 min-w-0">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <span className="font-mono text-[11px] font-semibold px-1.5 py-0.5 rounded bg-blue-50 dark:bg-blue-950/50 text-blue-700 dark:text-blue-300 border border-blue-200/70 dark:border-blue-800/70">
+                              #{idx + 1}
+                            </span>
+                            <span className="font-semibold text-slate-900 dark:text-white">
+                              {snap.providerName}
+                            </span>
+                            <span className="text-slate-400">·</span>
+                            <span className="font-mono text-slate-600 dark:text-slate-300">
+                              {snap.scope === 'all'
+                                ? isZh
+                                  ? `全量拉取 (${snap.domains.length} 个域名)`
+                                  : `All (${snap.domains.length} domains)`
+                                : snap.domain || snap.domains[0] || '-'}
+                            </span>
+                          </div>
+                          <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-slate-500 dark:text-slate-400 font-mono tabular-nums">
+                            <span>{new Date(snap.createdAt).toLocaleString()} ({formatTimeAgo(snap.createdAt)})</span>
+                            <span className="text-slate-700 dark:text-slate-300 font-semibold">
+                              {isZh ? `${snap.recordCount} 条记录` : `${snap.recordCount} records`}
+                            </span>
+                            {snap.filteredOutCount !== undefined && snap.filteredOutCount > 0 && (
+                              <span className="text-amber-600 dark:text-amber-400">
+                                {isZh ? `已过滤 ${snap.filteredOutCount} 条` : `${snap.filteredOutCount} filtered`}
+                              </span>
+                            )}
+                          </div>
+                          {snap.filterSummary && (
+                            <div className="text-[11px] text-slate-500 dark:text-slate-400">
+                              {isZh ? '策略：' : 'Policy: '}
+                              {snap.filterSummary}
+                            </div>
+                          )}
+                        </div>
+
+                        <div className="flex flex-wrap items-center gap-1.5 shrink-0">
+                          <button
+                            type="button"
+                            onClick={() => setExpandedSnapshotId(isExpanded ? null : snap.id)}
+                            className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800"
+                          >
+                            {isExpanded ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
+                            {isZh ? '查看内容' : 'Preview'}
+                          </button>
+
+                          {isConfirming ? (
+                            <div className="inline-flex items-center gap-1">
+                              <button
+                                type="button"
+                                disabled={isRestoring}
+                                onClick={() => void handleRestoreSnapshot(snap)}
+                                className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-amber-600 text-white font-semibold hover:bg-amber-700 disabled:opacity-50"
+                              >
+                                {isRestoring ? (
+                                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                                ) : (
+                                  <RotateCcw className="w-3.5 h-3.5" />
+                                )}
+                                {isZh ? '确认恢复' : 'Confirm'}
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => setConfirmRestoreId(null)}
+                                className="px-2 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 text-slate-500"
+                              >
+                                {isZh ? '取消' : 'Cancel'}
+                              </button>
+                            </div>
+                          ) : (
+                            <button
+                              type="button"
+                              onClick={() => setConfirmRestoreId(snap.id)}
+                              className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg bg-blue-600 text-white font-semibold hover:bg-blue-700"
+                            >
+                              <RotateCcw className="w-3.5 h-3.5" />
+                              {isZh ? '恢复此快照' : 'Restore'}
+                            </button>
+                          )}
+                        </div>
+                      </div>
+
+                      {isExpanded && (
+                        <div className="border-t border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 px-4 py-3 max-h-56 overflow-y-auto">
+                          {snap.records.length === 0 ? (
+                            <div className="text-slate-400 text-center py-3">
+                              {isZh ? '此快照包含 0 条记录' : '0 records in this snapshot'}
+                            </div>
+                          ) : (
+                            <table className="w-full text-left font-mono text-[11px]">
+                              <thead>
+                                <tr className="text-slate-400 border-b border-slate-100 dark:border-slate-800">
+                                  <th className="pb-1.5 pr-3 font-medium">FQDN</th>
+                                  <th className="pb-1.5 pr-3 font-medium">Type</th>
+                                  <th className="pb-1.5 pr-3 font-medium">Value</th>
+                                  <th className="pb-1.5 font-medium text-right">TTL</th>
+                                </tr>
+                              </thead>
+                              <tbody className="divide-y divide-slate-100 dark:divide-slate-800/70">
+                                {snap.records.slice(0, 60).map((r) => (
+                                  <tr key={`${snap.id}-${r.id}`}>
+                                    <td className="py-1.5 pr-3 text-slate-800 dark:text-slate-200 truncate max-w-[180px]" title={r.fqdn}>
+                                      {r.fqdn}
+                                    </td>
+                                    <td className={`py-1.5 pr-3 font-bold ${recordTypeTextColor(r.type)}`}>
+                                      {r.type}
+                                    </td>
+                                    <td className="py-1.5 pr-3 text-slate-600 dark:text-slate-300 truncate max-w-[220px]" title={r.content}>
+                                      {r.content}
+                                    </td>
+                                    <td className="py-1.5 text-right text-slate-400 tabular-nums">
+                                      {r.ttl === 1 ? 'Auto' : `${r.ttl}s`}
+                                    </td>
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          )}
+                          {snap.records.length > 60 && (
+                            <div className="text-[11px] text-slate-400 pt-2 text-center">
+                              {isZh
+                                ? `仅预览前 60 条，共 ${snap.records.length} 条记录`
+                                : `Showing first 60 of ${snap.records.length} records`}
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })
+              )}
+            </div>
+
+            <div className="px-6 py-3.5 border-t border-slate-200 dark:border-slate-800 flex items-center justify-between text-xs">
+              <span className="text-[11px] text-slate-500 dark:text-slate-400">
+                {isZh
+                  ? '恢复操作仅回滚本地记录视图，不会自动改动远端 DNS 服务器。'
+                  : 'Restore rolls back local records only without overwriting remote DNS.'}
+              </span>
+              <button
+                type="button"
+                onClick={() => setShowSnapshotsModal(false)}
+                className="px-4 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 font-medium"
+              >
+                {isZh ? '关闭' : 'Close'}
               </button>
             </div>
           </div>

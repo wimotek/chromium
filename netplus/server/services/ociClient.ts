@@ -975,9 +975,129 @@ export async function ociDeletePublicIpv4(
   return res.ok ? { ok: true } : { ok: false, error: res.error || `HTTP ${res.status}` };
 }
 
+function expandIpv6Groups(addr: string): string[] | null {
+  const clean = addr.trim().split('/')[0].split('%')[0].toLowerCase();
+  if (!net.isIPv6(clean)) return null;
+  const halves = clean.split('::');
+  if (halves.length > 2) return null;
+  const left = halves[0] ? halves[0].split(':').filter(Boolean) : [];
+  const right = halves.length === 2 && halves[1] ? halves[1].split(':').filter(Boolean) : [];
+  const missing = 8 - (left.length + right.length);
+  if (halves.length === 1 && left.length !== 8) return null;
+  if (missing < 0) return null;
+  const full = [...left, ...Array(missing).fill('0'), ...right];
+  if (full.length !== 8) return null;
+  return full.map((g) => g.padStart(4, '0'));
+}
+
+export function extractIpv6Slash64Prefix(addrOrCidr: string): string | null {
+  const groups = expandIpv6Groups(addrOrCidr);
+  if (!groups) return null;
+  const compact = groups.slice(0, 4).map((g) => g.replace(/^0+/, '') || '0');
+  return `${compact.join(':')}::`;
+}
+
+function isIpv6MatchingCidrPrefix(ip: string, cidr: string): boolean {
+  const [netPart, prefixStr] = cidr.split('/');
+  const prefixLen = Math.min(128, Math.max(0, Number(prefixStr) || 64));
+  const ipGroups = expandIpv6Groups(ip);
+  const netGroups = expandIpv6Groups(netPart);
+  if (!ipGroups || !netGroups) return false;
+  const toBits = (groups: string[]) =>
+    groups.map((g) => parseInt(g, 16).toString(2).padStart(16, '0')).join('');
+  return toBits(ipGroups).slice(0, prefixLen) === toBits(netGroups).slice(0, prefixLen);
+}
+
+/**
+ * Queries OCI VNIC -> Subnet to retrieve the authoritative IPv6 CIDR block(s) and /64 prefix.
+ */
+export async function ociGetVnicIpv6SubnetInfo(
+  profile: StoredOciProfile,
+  privateKeyPem: string,
+  vnicId: string
+): Promise<{
+  ok: boolean;
+  vnicId?: string;
+  subnetId?: string;
+  cidrs: string[];
+  primaryCidr?: string;
+  prefix?: string;
+  existingIpv6s: string[];
+  error?: string;
+}> {
+  const built = buildCredsFromProfile(profile, privateKeyPem);
+  if (!built.ok) return { ok: false, cidrs: [], existingIpv6s: [], error: built.error };
+  if (!isValidOcid(vnicId)) return { ok: false, cidrs: [], existingIpv6s: [], error: 'Invalid OCI VNIC OCID' };
+
+  const vnicRes = await ociApiRequest<{
+    id: string;
+    subnetId?: string;
+    ipv6Addresses?: string[];
+    ipv6AddressCidrs?: string[];
+  }>({
+    creds: built.creds,
+    service: 'iaas',
+    method: 'GET',
+    apiPath: `/20160918/vnics/${encodeURIComponent(vnicId)}`,
+  });
+
+  if (!vnicRes.ok || !vnicRes.data) {
+    return {
+      ok: false,
+      cidrs: [],
+      existingIpv6s: [],
+      error: vnicRes.error || `Failed to inspect OCI VNIC (HTTP ${vnicRes.status})`,
+    };
+  }
+
+  const existingIpv6s = (vnicRes.data.ipv6Addresses ?? []).filter((a) => net.isIPv6(a));
+  const subnetId = vnicRes.data.subnetId || profile.subnetOcid;
+  const cidrSet = new Set<string>();
+
+  if (subnetId && isValidOcid(subnetId)) {
+    const subnetRes = await ociApiRequest<{
+      id: string;
+      ipv6CidrBlock?: string;
+      ipv6CidrBlocks?: string[];
+    }>({
+      creds: built.creds,
+      service: 'iaas',
+      method: 'GET',
+      apiPath: `/20160918/subnets/${encodeURIComponent(subnetId)}`,
+    });
+    if (subnetRes.ok && subnetRes.data) {
+      if (subnetRes.data.ipv6CidrBlock) cidrSet.add(subnetRes.data.ipv6CidrBlock.trim());
+      for (const c of subnetRes.data.ipv6CidrBlocks ?? []) {
+        if (c && c.trim()) cidrSet.add(c.trim());
+      }
+    }
+  }
+
+  for (const c of vnicRes.data.ipv6AddressCidrs ?? []) {
+    if (c && c.trim()) cidrSet.add(c.trim());
+  }
+
+  const cidrs = Array.from(cidrSet);
+  const primaryCidr = cidrs[0];
+  const prefix =
+    (primaryCidr ? extractIpv6Slash64Prefix(primaryCidr) : null) ||
+    (existingIpv6s[0] ? extractIpv6Slash64Prefix(existingIpv6s[0]) : null) ||
+    undefined;
+
+  return {
+    ok: true,
+    vnicId: vnicRes.data.id,
+    subnetId,
+    cidrs,
+    primaryCidr,
+    prefix,
+    existingIpv6s,
+  };
+}
+
 /**
  * Allocates a real IPv6 address on an OCI VNIC via `POST /20160918/ipv6s`.
- * Optionally accepts a specific `ipAddress` within the subnet's /64 CIDR, or lets OCI auto-assign.
+ * Validates specific `ipAddress` against the VNIC subnet's actual IPv6 CIDR and passes `ipv6SubnetCidr` when matched.
  */
 export async function ociAddIpv6ToVnic(
   profile: StoredOciProfile,
@@ -989,9 +1109,54 @@ export async function ociAddIpv6ToVnic(
   if (!built.ok) return { ok: false, error: built.error };
   if (!isValidOcid(vnicId)) return { ok: false, error: 'Invalid OCI VNIC OCID' };
 
-  const cleanIp = specificIpAddress?.trim();
-  if (cleanIp && !net.isIPv6(cleanIp)) {
-    return { ok: false, error: 'Specified IPv6 address is invalid' };
+  const subnetInfo = await ociGetVnicIpv6SubnetInfo(profile, privateKeyPem, vnicId);
+  let cleanIp = specificIpAddress?.trim() || '';
+
+  // If user left only the bare /64 network prefix (e.g. "2603:c020:4009:a100::" or ending with ":"), auto-assign instead of failing
+  if (cleanIp) {
+    const barePrefix = subnetInfo.prefix?.toLowerCase();
+    if (
+      (barePrefix && (cleanIp.toLowerCase() === barePrefix || `${cleanIp.toLowerCase()}:` === barePrefix)) ||
+      (cleanIp.endsWith(':') && !cleanIp.endsWith('::'))
+    ) {
+      cleanIp = '';
+    }
+  }
+
+  if (cleanIp) {
+    if (!net.isIPv6(cleanIp)) {
+      return {
+        ok: false,
+        error: subnetInfo.prefix
+          ? `指定的 IPv6 地址格式无效，请在子网前缀 ${subnetInfo.prefix} 后填写后缀（如 ${subnetInfo.prefix}10）或留空自动分配`
+          : 'Specified IPv6 address is invalid',
+      };
+    }
+    const groups = expandIpv6Groups(cleanIp);
+    if (groups && groups.slice(4).every((g) => g === '0000')) {
+      // Bare ::0 network address cannot be assigned on OCI; fall back to auto-assign
+      cleanIp = '';
+    }
+  }
+
+  let matchedCidr: string | undefined = subnetInfo.primaryCidr;
+  if (cleanIp && subnetInfo.cidrs.length > 0) {
+    const found = subnetInfo.cidrs.find((c) => isIpv6MatchingCidrPrefix(cleanIp, c));
+    if (!found) {
+      return {
+        ok: false,
+        error: `指定的 IPv6 (${cleanIp}) 不在当前子网允许的 IPv6 前缀 (${subnetInfo.cidrs.join(', ')}) 内，请修改为该前缀下的地址（例如 ${subnetInfo.prefix || ''}10）`,
+      };
+    }
+    matchedCidr = found;
+  }
+
+  const body: Record<string, unknown> = { vnicId };
+  if (cleanIp) {
+    body.ipAddress = cleanIp;
+  }
+  if (matchedCidr) {
+    body.ipv6SubnetCidr = matchedCidr;
   }
 
   const res = await ociApiRequest<{ id: string; ipAddress: string }>({
@@ -999,14 +1164,18 @@ export async function ociAddIpv6ToVnic(
     service: 'iaas',
     method: 'POST',
     apiPath: '/20160918/ipv6s',
-    body: {
-      vnicId,
-      ...(cleanIp ? { ipAddress: cleanIp } : {}),
-    },
+    body,
   });
 
   if (!res.ok || !res.data) {
-    return { ok: false, error: res.error || `Failed to allocate OCI IPv6 (HTTP ${res.status})` };
+    const baseErr = res.error || `Failed to allocate OCI IPv6 (HTTP ${res.status})`;
+    const hint =
+      res.status === 404
+        ? subnetInfo.cidrs.length === 0
+          ? '（该子网可能尚未开启 IPv6 CIDR，或当前 OCI API 用户缺少管理 ipv6s/vnics 权限）'
+          : `（子网 IPv6 前缀: ${subnetInfo.cidrs.join(', ')}；请确认地址未被占用且 API 用户具备 manage ipv6s 权限）`
+        : '';
+    return { ok: false, error: `${baseErr}${hint}` };
   }
 
   return {
