@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io/fs"
+	"log"
 	"net"
 	"net/http"
 	"net/url"
@@ -341,6 +342,7 @@ func NewRouter(cfgMgr *config.Manager, keys *crypto.KeyManager, certSources ...s
 
 	// Authentication & Passkey Flows
 	mux.HandleFunc("POST /api/auth/login", s.handlePasswordLogin)
+	mux.HandleFunc("POST /api/auth/logout", s.handleAdminLogout)
 	mux.HandleFunc("POST /api/auth/email-otp/send", s.handleSendEmailOTP)
 	mux.HandleFunc("POST /api/auth/email-otp/verify", s.handleVerifyEmailOTP)
 	mux.HandleFunc("POST /api/auth/passkey/challenge", s.handlePasskeyChallenge)
@@ -380,6 +382,10 @@ func NewRouter(cfgMgr *config.Manager, keys *crypto.KeyManager, certSources ...s
 	mux.HandleFunc("POST /api/users", s.requireAdmin(s.handleCreateUser))
 	mux.HandleFunc("PUT /api/users/{id}", s.requireAdmin(s.handleUpdateUser))
 	mux.HandleFunc("POST /api/users/{id}/password", s.requireAdmin(s.handleResetUserPassword))
+	mux.HandleFunc("DELETE /api/users/{id}/password", s.requireAdmin(s.handleDeleteUserPassword))
+	mux.HandleFunc("POST /api/users/{id}/totp/enroll", s.requireAdmin(s.handleAdminTotpEnroll))
+	mux.HandleFunc("POST /api/users/{id}/totp/verify", s.requireAdmin(s.handleAdminTotpVerify))
+	mux.HandleFunc("DELETE /api/users/{id}/totp", s.requireAdmin(s.handleAdminTotpDisable))
 	mux.HandleFunc("DELETE /api/users/{id}", s.requireAdmin(s.handleDeleteUser))
 	mux.HandleFunc("DELETE /api/users/{id}/identities/{identId}", s.requireAdmin(s.handleDeleteUserIdentity))
 	mux.HandleFunc("POST /api/users/jit-simulate", s.requireAdmin(s.handleSimulateJit))
@@ -416,7 +422,20 @@ func NewRouter(cfgMgr *config.Manager, keys *crypto.KeyManager, certSources ...s
 		})
 	}
 
-	return mux, cleanup, nil
+	wrapped := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer func() {
+			if rec := recover(); rec != nil {
+				log.Printf("[PANIC] %s %s: %v", r.Method, r.URL.Path, rec)
+				writeJSON(w, http.StatusInternalServerError, map[string]any{
+					"error":   "internal_server_error",
+					"message": "Internal server error while processing request.",
+				})
+			}
+		}()
+		mux.ServeHTTP(w, r)
+	})
+
+	return wrapped, cleanup, nil
 }
 
 // ============================================================================
@@ -742,12 +761,15 @@ func (s *appServer) issueLiveTraceLocked(r *http.Request, clientID, email, name,
 
 func (s *appServer) requireAdmin(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		hdr := r.Header.Get("Authorization")
-		if !strings.HasPrefix(hdr, "Bearer ") {
-			writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized", "message": "Missing bearer token"})
+		tok, fromCookie := extractSessionToken(r)
+		if tok == "" {
+			writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized", "message": "Authentication required."})
 			return
 		}
-		tok := strings.TrimSpace(strings.TrimPrefix(hdr, "Bearer "))
+		if fromCookie && !verifyCookieCSRF(r) {
+			writeJSON(w, http.StatusForbidden, map[string]any{"error": "csrf_rejected", "message": "Cross-site state-changing request rejected."})
+			return
+		}
 		s.mu.Lock()
 		u, ok := s.resolveSessionLocked(tok)
 		active := true
@@ -761,6 +783,9 @@ func (s *appServer) requireAdmin(next http.HandlerFunc) http.HandlerFunc {
 		}
 		s.mu.Unlock()
 		if !ok {
+			if fromCookie {
+				s.clearSessionCookie(w, r)
+			}
 			writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized", "message": "Session expired. Please sign in again."})
 			return
 		}
@@ -1028,6 +1053,9 @@ func (s *appServer) handleDevicePoll(w http.ResponseWriter, r *http.Request) {
 	delete(s.deviceCodes, body.DeviceCode)
 	delete(s.deviceByUser, sess.UserCode)
 	issued := s.issueLiveTraceLocked(r, sess.ClientID, defaultStr(sess.ApprovedEmail, "admin@wimotek.dev"), strings.Split(defaultStr(sess.ApprovedEmail, "user"), "@")[0], "device_flow", "Device Flow (RFC 8628)", "device_code_qr")
+	if tok, ok := issued["sessionToken"].(string); ok && tok != "" {
+		s.setSessionCookie(w, r, tok)
+	}
 	writeJSON(w, http.StatusOK, issued)
 }
 
@@ -1261,6 +1289,7 @@ func (s *appServer) handleSetupComplete(w http.ResponseWriter, r *http.Request) 
 	}
 	tok := "wm_sess_" + randomHex(18)
 	s.persistSessionLocked(tok, u)
+	s.setSessionCookie(w, r, tok)
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"initialized":  true,
@@ -1368,6 +1397,7 @@ func (s *appServer) handlePasswordLogin(w http.ResponseWriter, r *http.Request) 
 
 	tok := "wm_sess_" + randomHex(18)
 	s.persistSessionLocked(tok, u)
+	s.setSessionCookie(w, r, tok)
 	writeJSON(w, http.StatusOK, map[string]any{"user": u, "sessionToken": tok})
 }
 
@@ -1454,6 +1484,9 @@ func (s *appServer) handleVerifyEmailOTP(w http.ResponseWriter, r *http.Request)
 		method = "magic_link"
 	}
 	issued := s.issueLiveTraceLocked(r, body.ClientID, verifiedEmail, strings.Split(verifiedEmail, "@")[0], "email_otp", label, method)
+	if tok, ok := issued["sessionToken"].(string); ok && tok != "" {
+		s.setSessionCookie(w, r, tok)
+	}
 	writeJSON(w, http.StatusOK, issued)
 }
 
@@ -1610,6 +1643,9 @@ func (s *appServer) handlePasskeyAuth(w http.ResponseWriter, r *http.Request) {
 		"matched_existing_identity",
 	)
 	issued["rpId"] = expectedRP
+	if tok, ok := issued["sessionToken"].(string); ok && tok != "" {
+		s.setSessionCookie(w, r, tok)
+	}
 	writeJSON(w, http.StatusOK, issued)
 }
 
@@ -1698,11 +1734,11 @@ func (s *appServer) handleTotpVerify(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *appServer) handleAuthMe(w http.ResponseWriter, r *http.Request) {
-	tok := strings.TrimSpace(strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "))
+	tok, _ := extractSessionToken(r)
 	s.mu.Lock()
 	u, _ := s.resolveSessionLocked(tok)
 	s.mu.Unlock()
-	writeJSON(w, http.StatusOK, map[string]any{"user": u})
+	writeJSON(w, http.StatusOK, map[string]any{"user": u, "authenticated": true})
 }
 
 // ============================================================================

@@ -102,15 +102,33 @@ export default function App() {
     async (url: string, init?: RequestInit, tokenOverride?: string) => {
       const token = tokenOverride ?? sessionToken;
       if (!token) {
-        throw new Error('Authentication required. Please sign in again.');
+        throw new Error(
+          locale === 'zh-CN' || locale === 'zh-TW'
+            ? '登录状态已失效，请重新登录。'
+            : 'Authentication required. Please sign in again.'
+        );
       }
       const headers = new Headers(init?.headers || {});
-      headers.set('Authorization', `Bearer ${token}`);
-      const res = await fetch(url, {
-        ...init,
-        headers,
-        cache: 'no-store',
-      });
+      headers.set('X-Requested-With', 'XMLHttpRequest');
+      if (token !== 'cookie_session') {
+        headers.set('Authorization', `Bearer ${token}`);
+      }
+      let res: Response;
+      try {
+        res = await fetch(url, {
+          ...init,
+          headers,
+          credentials: 'include',
+          cache: 'no-store',
+        });
+      } catch (networkErr) {
+        const rawMsg = networkErr instanceof Error ? networkErr.message : String(networkErr);
+        throw new Error(
+          locale === 'zh-CN' || locale === 'zh-TW'
+            ? `请求服务失败（${rawMsg}）。请确认后端容器仍在运行、反向代理未超时，或刷新页面重试。`
+            : `Network request failed (${rawMsg}). Ensure the backend container is running and reachable.`
+        );
+      }
       if (res.status === 401) {
         setSessionToken(null);
         setUser(null);
@@ -127,14 +145,18 @@ export default function App() {
     [sessionToken, locale]
   );
 
-  const fetchProtectedData = useCallback(async (token: string) => {
-    const headers = { Authorization: `Bearer ${token}` };
+  const fetchProtectedData = useCallback(async (token?: string) => {
+    const headers: Record<string, string> = { 'X-Requested-With': 'XMLHttpRequest' };
+    if (token && token !== 'cookie_session') {
+      headers.Authorization = `Bearer ${token}`;
+    }
+    const fetchOpts: RequestInit = { headers, credentials: 'include', cache: 'no-store' };
     const [ovRes, appsRes, connRes, usersRes, policyRes] = await Promise.all([
-      fetch('/api/system/overview', { headers, cache: 'no-store' }),
-      fetch('/api/applications', { headers, cache: 'no-store' }),
-      fetch('/api/connectors', { headers, cache: 'no-store' }),
-      fetch('/api/users', { headers, cache: 'no-store' }),
-      fetch('/api/security/policy', { headers, cache: 'no-store' }),
+      fetch('/api/system/overview', fetchOpts),
+      fetch('/api/applications', fetchOpts),
+      fetch('/api/connectors', fetchOpts),
+      fetch('/api/users', fetchOpts),
+      fetch('/api/security/policy', fetchOpts),
     ]);
 
     if ([ovRes, appsRes, connRes, usersRes, policyRes].some((r) => r.status === 401)) {
@@ -227,6 +249,26 @@ export default function App() {
         } catch {
           // keep default login theme if public theme lookup fails
         }
+        if (normalizedConfig.initialized) {
+          // Restore active HttpOnly admin session across browser refreshes
+          try {
+            const meRes = await fetch('/api/auth/me', {
+              credentials: 'include',
+              cache: 'no-store',
+              headers: { 'X-Requested-With': 'XMLHttpRequest' },
+            });
+            if (meRes.ok && mounted) {
+              const meData = await meRes.json();
+              if (meData?.user && meData.user.role === 'super_admin') {
+                setUser(meData.user);
+                setSessionToken('cookie_session');
+                await fetchProtectedData('cookie_session');
+              }
+            }
+          } catch {
+            // Not signed in yet; remain on login screen
+          }
+        }
       } catch (err) {
         if (mounted) {
           setBootError(err instanceof Error ? err.message : 'Unable to reach wimotek/Oauth backend API');
@@ -239,7 +281,7 @@ export default function App() {
     return () => {
       mounted = false;
     };
-  }, []);
+  }, [fetchProtectedData]);
 
   async function handleCompleteSetup(payload: {
     dbDriver: DbDriver;
@@ -252,7 +294,8 @@ export default function App() {
   }) {
     const res = await fetch('/api/setup/complete', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
       body: JSON.stringify(payload),
     });
     const data = await res.json();
@@ -271,7 +314,8 @@ export default function App() {
     try {
       const res = await fetch('/api/auth/login', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
         body: JSON.stringify({ email, password }),
       });
       const data = await res.json();
@@ -295,18 +339,29 @@ export default function App() {
     }
   }
 
+  async function handleSignOut() {
+    try {
+      await fetch('/api/auth/logout', {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'X-Requested-With': 'XMLHttpRequest' },
+      });
+    } catch {
+      // ignore logout network errors
+    }
+    setSessionToken(null);
+    setUser(null);
+  }
+
   async function handleSocialSignIn(provider: string) {
     setAuthError(`Configure the ${provider} connector credentials in Social Connectors to redirect users to the upstream IdP.`);
   }
 
   async function handleSimulateCacheFailover(simulatedDown: boolean) {
     if (!sessionToken) return;
-    const res = await fetch('/api/system/cache-sim', {
+    const res = await authFetch('/api/system/cache-sim', {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${sessionToken}`,
-      },
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ simulatedDown }),
     });
     if (res.ok) {
@@ -318,12 +373,9 @@ export default function App() {
 
   async function handleRotateSigningKey(mode: 'graceful' | 'emergency', graceMinutes = 120) {
     if (!sessionToken) return null;
-    const res = await fetch('/api/security/signing-key/rotate', {
+    const res = await authFetch('/api/security/signing-key/rotate', {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${sessionToken}`,
-      },
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ mode, graceMinutes }),
     });
     const data = await res.json();
@@ -337,11 +389,8 @@ export default function App() {
 
   async function handlePurgeRetiringKeys() {
     if (!sessionToken) return;
-    const res = await fetch('/api/security/signing-key/purge-retiring', {
+    const res = await authFetch('/api/security/signing-key/purge-retiring', {
       method: 'POST',
-      headers: {
-        Authorization: `Bearer ${sessionToken}`,
-      },
     });
     if (res.ok) {
       const data = await res.json();
@@ -599,6 +648,55 @@ export default function App() {
     });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(data.message || 'Failed to reset password');
+    if (Array.isArray(data.users)) {
+      setIdentityUsers(data.users);
+    }
+  }
+
+  async function handleClearUserPassword(userId: string) {
+    const res = await authFetch(`/api/users/${encodeURIComponent(userId)}/password`, {
+      method: 'DELETE',
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.message || 'Failed to clear password');
+    if (Array.isArray(data.users)) {
+      setIdentityUsers(data.users);
+    }
+  }
+
+  async function handleEnrollUserTotp(userId: string): Promise<{
+    secret: string;
+    otpauthUri: string;
+    currentCode: string;
+    recoveryCodes: string[];
+  }> {
+    const res = await authFetch(`/api/users/${encodeURIComponent(userId)}/totp/enroll`, {
+      method: 'POST',
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.message || 'Failed to start TOTP enrollment');
+    return data;
+  }
+
+  async function handleVerifyUserTotp(userId: string, code: string) {
+    const res = await authFetch(`/api/users/${encodeURIComponent(userId)}/totp/verify`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ code }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.message || 'Invalid TOTP verification code');
+    if (Array.isArray(data.users)) {
+      setIdentityUsers(data.users);
+    }
+  }
+
+  async function handleDisableUserTotp(userId: string) {
+    const res = await authFetch(`/api/users/${encodeURIComponent(userId)}/totp`, {
+      method: 'DELETE',
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.message || 'Failed to disable TOTP');
     if (Array.isArray(data.users)) {
       setIdentityUsers(data.users);
     }
@@ -888,10 +986,7 @@ export default function App() {
           </div>
           <button
             type="button"
-            onClick={() => {
-              setSessionToken(null);
-              setUser(null);
-            }}
+            onClick={() => void handleSignOut()}
             className="w-full min-h-[36px] px-3 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 text-xs font-medium text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800 flex items-center justify-center gap-1.5 transition-colors"
           >
             <LogOut className="w-3.5 h-3.5" />
@@ -1049,6 +1144,10 @@ export default function App() {
               onCreateUser={handleCreateUser}
               onUpdateUser={handleUpdateUser}
               onResetUserPassword={handleResetUserPassword}
+              onClearUserPassword={handleClearUserPassword}
+              onEnrollUserTotp={handleEnrollUserTotp}
+              onVerifyUserTotp={handleVerifyUserTotp}
+              onDisableUserTotp={handleDisableUserTotp}
               onDeleteUser={handleDeleteUser}
               onUnlinkIdentity={handleUnlinkIdentity}
               onToggleUserStatus={handleToggleUserStatus}

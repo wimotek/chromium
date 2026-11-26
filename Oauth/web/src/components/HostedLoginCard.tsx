@@ -201,6 +201,7 @@ ${resolvedTheme.customCss || ''}
     try {
       const res = await fetch('/api/auth/email-otp/verify', {
         method: 'POST',
+        credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ email: email.trim(), code: otpInput.trim(), clientId }),
       });
@@ -238,6 +239,7 @@ ${resolvedTheme.customCss || ''}
       const assertion = await authenticateBrowserPasskey(ch);
       const authRes = await fetch('/api/auth/passkey/authenticate', {
         method: 'POST',
+        credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
         cache: 'no-store',
         body: JSON.stringify({
@@ -282,6 +284,7 @@ ${resolvedTheme.customCss || ''}
     try {
       const pollRes = await fetch('/api/oauth/device/poll', {
         method: 'POST',
+        credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
         cache: 'no-store',
         body: JSON.stringify({ deviceCode: deviceSession.device_code }),

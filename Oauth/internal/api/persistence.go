@@ -5,12 +5,15 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
 	"github.com/wimotek/oauth/internal/auth"
 	"github.com/wimotek/oauth/internal/store"
 )
+
+const adminSessionCookieName = "wimotek_admin_session"
 
 type storedPasskey struct {
 	ID            string
@@ -506,11 +509,11 @@ func (s *appServer) persistConnectorOrderLocked() {
 	_ = s.repo.UpdateConnectorOrders(context.Background(), ids)
 }
 
-func (s *appServer) persistUserLocked(u identityUser) {
+func (s *appServer) persistUserLocked(u identityUser) error {
 	if s.repo == nil {
-		return
+		return nil
 	}
-	_ = s.repo.UpsertUser(context.Background(), store.User{
+	return s.repo.UpsertUser(context.Background(), store.User{
 		ID:             u.ID,
 		Email:          u.Email,
 		EmailVerified:  u.EmailVerified,
@@ -637,15 +640,96 @@ func (s *appServer) resolveSessionLocked(tok string) (authUser, bool) {
 	return authUser{}, false
 }
 
-func (s *appServer) currentSessionUser(r *http.Request) (authUser, bool) {
+func isHTTPSRequest(r *http.Request) bool {
+	if r.TLS != nil {
+		return true
+	}
+	proto := strings.ToLower(strings.TrimSpace(r.Header.Get("X-Forwarded-Proto")))
+	return proto == "https"
+}
+
+func (s *appServer) setSessionCookie(w http.ResponseWriter, r *http.Request, tok string) {
+	if isHTTPSRequest(r) {
+		w.Header().Add("Set-Cookie", adminSessionCookieName+"="+tok+"; Path=/; Max-Age=604800; HttpOnly; Secure; SameSite=None; Partitioned")
+		return
+	}
+	w.Header().Add("Set-Cookie", adminSessionCookieName+"="+tok+"; Path=/; Max-Age=604800; HttpOnly; SameSite=Lax")
+}
+
+func (s *appServer) clearSessionCookie(w http.ResponseWriter, r *http.Request) {
+	if isHTTPSRequest(r) {
+		w.Header().Add("Set-Cookie", adminSessionCookieName+"=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=None; Partitioned")
+		return
+	}
+	w.Header().Add("Set-Cookie", adminSessionCookieName+"=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax")
+}
+
+// extractSessionToken checks Authorization: Bearer first, then the HttpOnly session cookie.
+// Returns (token, fromCookie).
+func extractSessionToken(r *http.Request) (string, bool) {
 	hdr := r.Header.Get("Authorization")
-	if !strings.HasPrefix(hdr, "Bearer ") {
+	if strings.HasPrefix(hdr, "Bearer ") {
+		tok := strings.TrimSpace(strings.TrimPrefix(hdr, "Bearer "))
+		if tok != "" && tok != "cookie_session" {
+			return tok, false
+		}
+	}
+	if c, err := r.Cookie(adminSessionCookieName); err == nil {
+		tok := strings.TrimSpace(c.Value)
+		if tok != "" {
+			return tok, true
+		}
+	}
+	return "", false
+}
+
+// verifyCookieCSRF protects cookie-authenticated state-changing requests against CSRF
+// by requiring either X-Requested-With or a same-host Origin header.
+func verifyCookieCSRF(r *http.Request) bool {
+	switch r.Method {
+	case http.MethodGet, http.MethodHead, http.MethodOptions:
+		return true
+	}
+	if strings.TrimSpace(r.Header.Get("X-Requested-With")) != "" {
+		return true
+	}
+	origin := strings.TrimSpace(r.Header.Get("Origin"))
+	if origin == "" {
+		return false
+	}
+	parsed, err := url.Parse(origin)
+	if err != nil || parsed.Host == "" {
+		return false
+	}
+	expectedHost := defaultStr(r.Header.Get("X-Forwarded-Host"), r.Host)
+	if idx := strings.Index(expectedHost, ","); idx != -1 {
+		expectedHost = strings.TrimSpace(expectedHost[:idx])
+	}
+	return strings.EqualFold(parsed.Host, expectedHost)
+}
+
+func (s *appServer) currentSessionUser(r *http.Request) (authUser, bool) {
+	tok, _ := extractSessionToken(r)
+	if tok == "" {
 		return authUser{}, false
 	}
-	tok := strings.TrimSpace(strings.TrimPrefix(hdr, "Bearer "))
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.resolveSessionLocked(tok)
+}
+
+func (s *appServer) handleAdminLogout(w http.ResponseWriter, r *http.Request) {
+	tok, _ := extractSessionToken(r)
+	if tok != "" {
+		s.mu.Lock()
+		delete(s.sessions, tok)
+		if s.repo != nil {
+			_ = s.repo.DeleteSession(context.Background(), tok)
+		}
+		s.mu.Unlock()
+	}
+	s.clearSessionCookie(w, r)
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
 func (s *appServer) serializePasskeysLocked(filterUserID string) []passkeyDTO {
@@ -799,8 +883,11 @@ func (s *appServer) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 		CreatedAt:     nowISO,
 		LastLoginAt:   "",
 	}
+	if err := s.persistUserLocked(created); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "db_write_error", "message": "Failed to save user to database: " + err.Error()})
+		return
+	}
 	s.users = append([]identityUser{created}, s.users...)
-	s.persistUserLocked(created)
 	writeJSON(w, http.StatusCreated, map[string]any{"user": created, "users": s.users})
 }
 
@@ -904,12 +991,150 @@ func (s *appServer) handleResetUserPassword(w http.ResponseWriter, r *http.Reque
 		if s.users[i].ID == id {
 			s.users[i].PasswordHash = hash
 			s.users[i].PasswordAlgo = "argon2id"
-			s.persistUserLocked(s.users[i])
+			if err := s.persistUserLocked(s.users[i]); err != nil {
+				writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "db_write_error", "message": "Failed to persist password: " + err.Error()})
+				return
+			}
 
 			cfg := s.cfgMgr.Get()
 			if s.users[i].ID == "usr_super_admin" || strings.EqualFold(s.users[i].Email, cfg.AdminEmail) {
 				cfg.AdminPasswordHash = hash
 				_ = s.cfgMgr.Update(cfg)
+			}
+			writeJSON(w, http.StatusOK, map[string]any{"ok": true, "user": s.users[i], "users": s.users})
+			return
+		}
+	}
+	writeJSON(w, http.StatusNotFound, map[string]any{"error": "not_found", "message": "User not found"})
+}
+
+func (s *appServer) handleDeleteUserPassword(w http.ResponseWriter, r *http.Request) {
+	id := strings.TrimSpace(r.PathValue("id"))
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i := range s.users {
+		if s.users[i].ID == id {
+			if s.users[i].Role == "super_admin" && s.countActiveAdminsLocked() <= 1 && s.users[i].PasskeyCount == 0 {
+				writeJSON(w, http.StatusBadRequest, map[string]any{
+					"error":   "last_admin_factor",
+					"message": "Register at least one Passkey before clearing the password on the last active administrator.",
+				})
+				return
+			}
+			s.users[i].PasswordHash = ""
+			s.users[i].PasswordAlgo = "none"
+			if err := s.persistUserLocked(s.users[i]); err != nil {
+				writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "db_write_error", "message": err.Error()})
+				return
+			}
+			writeJSON(w, http.StatusOK, map[string]any{"ok": true, "user": s.users[i], "users": s.users})
+			return
+		}
+	}
+	writeJSON(w, http.StatusNotFound, map[string]any{"error": "not_found", "message": "User not found"})
+}
+
+func (s *appServer) handleAdminTotpEnroll(w http.ResponseWriter, r *http.Request) {
+	id := strings.TrimSpace(r.PathValue("id"))
+	s.mu.Lock()
+	var target *identityUser
+	for i := range s.users {
+		if s.users[i].ID == id {
+			target = &s.users[i]
+			break
+		}
+	}
+	if target == nil {
+		s.mu.Unlock()
+		writeJSON(w, http.StatusNotFound, map[string]any{"error": "not_found", "message": "User not found"})
+		return
+	}
+	email := target.Email
+	s.mu.Unlock()
+
+	secret, err := auth.GenerateTOTPSecret()
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	uri := auth.BuildOTPAuthURI("wimotek/Oauth", email, secret)
+	code, _ := auth.GenerateTOTP(secret, time.Now())
+	codes := make([]string, 8)
+	for i := range codes {
+		h := strings.ToUpper(randomHex(4))
+		codes[i] = h[:4] + "-" + h[4:8]
+	}
+	enc, _ := s.keys.EncryptSecret(secret)
+
+	s.mu.Lock()
+	s.totpPending[id] = totpRecord{SecretEnc: enc, RecoveryCodes: codes}
+	s.mu.Unlock()
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"userId":        id,
+		"email":         email,
+		"secret":        secret,
+		"otpauthUri":    uri,
+		"currentCode":   code,
+		"recoveryCodes": codes,
+	})
+}
+
+func (s *appServer) handleAdminTotpVerify(w http.ResponseWriter, r *http.Request) {
+	id := strings.TrimSpace(r.PathValue("id"))
+	var body struct {
+		Code string `json:"code"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&body)
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	pending, ok := s.totpPending[id]
+	if !ok {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "no_pending_totp", "message": "Start TOTP enrollment first before verifying a code."})
+		return
+	}
+	plain, _ := s.keys.DecryptSecret(pending.SecretEnc)
+	if !auth.VerifyTOTP(plain, strings.TrimSpace(body.Code), time.Now()) {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid_totp", "message": "Invalid 6-digit TOTP code."})
+		return
+	}
+
+	s.totpEnrolled[id] = pending
+	delete(s.totpPending, id)
+	recBytes, _ := json.Marshal(pending.RecoveryCodes)
+	for i := range s.users {
+		if s.users[i].ID == id {
+			s.users[i].TotpEnabled = true
+			s.users[i].TotpSecretEnc = pending.SecretEnc
+			s.users[i].RecoveryHashes = string(recBytes)
+			if err := s.persistUserLocked(s.users[i]); err != nil {
+				writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "db_write_error", "message": err.Error()})
+				return
+			}
+			writeJSON(w, http.StatusOK, map[string]any{"ok": true, "user": s.users[i], "users": s.users})
+			return
+		}
+	}
+	writeJSON(w, http.StatusNotFound, map[string]any{"error": "not_found", "message": "User not found"})
+}
+
+func (s *appServer) handleAdminTotpDisable(w http.ResponseWriter, r *http.Request) {
+	id := strings.TrimSpace(r.PathValue("id"))
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	delete(s.totpPending, id)
+	delete(s.totpEnrolled, id)
+	for i := range s.users {
+		if s.users[i].ID == id {
+			s.users[i].TotpEnabled = false
+			s.users[i].TotpSecretEnc = ""
+			s.users[i].RecoveryHashes = ""
+			if err := s.persistUserLocked(s.users[i]); err != nil {
+				writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "db_write_error", "message": err.Error()})
+				return
 			}
 			writeJSON(w, http.StatusOK, map[string]any{"ok": true, "user": s.users[i], "users": s.users})
 			return

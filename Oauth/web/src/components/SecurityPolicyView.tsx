@@ -126,11 +126,20 @@ export function SecurityPolicyView({
     }
   }
 
+  function buildAuthHeaders(extra: Record<string, string> = {}): Record<string, string> {
+    const h: Record<string, string> = { 'X-Requested-With': 'XMLHttpRequest', ...extra };
+    if (sessionToken && sessionToken !== 'cookie_session') {
+      h.Authorization = `Bearer ${sessionToken}`;
+    }
+    return h;
+  }
+
   async function handleStartTotpEnroll() {
     setTotpVerifyMsg(null);
     const res = await fetch('/api/auth/totp/enroll', {
       method: 'POST',
-      headers: { Authorization: `Bearer ${sessionToken}` },
+      credentials: 'include',
+      headers: buildAuthHeaders(),
     });
     if (res.ok) {
       const data = await res.json();
@@ -144,10 +153,8 @@ export function SecurityPolicyView({
     setTotpVerifyMsg(null);
     const res = await fetch('/api/auth/totp/verify', {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${sessionToken}`,
-      },
+      credentials: 'include',
+      headers: buildAuthHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify({ code: totpInput }),
     });
     const data = await res.json();
@@ -157,10 +164,8 @@ export function SecurityPolicyView({
   async function handleSimulateBruteForce() {
     const res = await fetch('/api/security/risk/test-bruteforce', {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${sessionToken}`,
-      },
+      credentials: 'include',
+      headers: buildAuthHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify({ email: 'bruteforce-probe@acme-corp.com' }),
     });
     if (res.ok) {

@@ -11,11 +11,13 @@ import (
 	"golang.org/x/crypto/argon2"
 )
 
-// OWASP recommended Argon2id parameters (resistant to GPU & ASIC cracking)
+// OWASP recommended Argon2id minimum parameters (19 MiB, t=2, p=1) — resistant to GPU/ASIC
+// cracking while remaining safe for low-memory Docker containers (VerifyPasswordArgon2id reads
+// m, t, p dynamically from each stored PHC string so existing 64 MiB hashes remain fully valid).
 const (
-	argonMemory  uint32 = 64 * 1024 // 64 MiB
-	argonTime    uint32 = 3
-	argonThreads uint8  = 2
+	argonMemory  uint32 = 19 * 1024 // 19 MiB
+	argonTime    uint32 = 2
+	argonThreads uint8  = 1
 	argonKeyLen  uint32 = 32
 )
 
