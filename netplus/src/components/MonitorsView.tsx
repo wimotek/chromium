@@ -5,8 +5,11 @@ import {
   Bell,
   BellOff,
   CheckCircle2,
+  ChevronDown,
+  ChevronRight,
   Clock,
   ExternalLink,
+  FolderOpen,
   Loader2,
   Pause,
   Pencil,
@@ -41,7 +44,7 @@ interface MonitorsViewProps {
 }
 
 const HEARTBEAT_BARS_DETAIL = 40;
-const HEARTBEAT_BARS_MINI = 20;
+const HEARTBEAT_BARS_TREE = 14;
 
 function statusBadgeStyle(status: MonitorStatus, enabled: boolean): string {
   if (!enabled) {
@@ -59,18 +62,20 @@ function statusBadgeStyle(status: MonitorStatus, enabled: boolean): string {
   }
 }
 
-function statusDotColor(status: MonitorStatus, enabled: boolean): string {
-  if (!enabled) return 'bg-slate-400';
-  switch (status) {
-    case 'up':
-      return 'bg-emerald-500';
-    case 'degraded':
-      return 'bg-amber-500';
-    case 'down':
-      return 'bg-red-500';
-    default:
-      return 'bg-slate-400';
+function uptimePillStyle(uptime: number | null, status: MonitorStatus | 'paused', enabled: boolean): string {
+  if (!enabled || status === 'paused') {
+    return 'bg-slate-300 text-slate-700 dark:bg-slate-700 dark:text-slate-300';
   }
+  if (status === 'down' || (uptime !== null && uptime < 50)) {
+    return 'bg-amber-500 text-white';
+  }
+  if (status === 'degraded' || (uptime !== null && uptime < 99)) {
+    return 'bg-amber-500 text-white';
+  }
+  if (status === 'up' || (uptime !== null && uptime >= 99)) {
+    return 'bg-emerald-500 text-white';
+  }
+  return 'bg-slate-200 text-slate-600 dark:bg-slate-800 dark:text-slate-400';
 }
 
 function barColor(sample?: MonitorCheckSample): string {
@@ -79,6 +84,13 @@ function barColor(sample?: MonitorCheckSample): string {
   if (sample.status === 'degraded') return 'bg-amber-500 hover:bg-amber-400';
   if (sample.status === 'down') return 'bg-red-500 hover:bg-red-400';
   return 'bg-slate-400';
+}
+
+function treeBarColor(state: 'up' | 'degraded' | 'down' | 'none'): string {
+  if (state === 'up') return 'bg-emerald-500';
+  if (state === 'degraded') return 'bg-amber-500';
+  if (state === 'down') return 'bg-red-500';
+  return 'bg-slate-200 dark:bg-slate-800';
 }
 
 function computeUptimePct(history: MonitorCheckSample[]): number | null {
@@ -131,6 +143,7 @@ export function MonitorsView({
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState<'all' | 'up' | 'down' | 'paused'>('all');
+  const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set());
   const [checkingAll, setCheckingAll] = useState(false);
   const [checkingId, setCheckingId] = useState<string | null>(null);
   const [togglingId, setTogglingId] = useState<string | null>(null);
@@ -166,6 +179,15 @@ export function MonitorsView({
     () => new Map(notificationChannels.map((c) => [c.id, c])),
     [notificationChannels]
   );
+
+  const existingGroupNames = useMemo(() => {
+    const set = new Set<string>();
+    for (const m of liveMonitors) {
+      const g = (m.groupName || '').trim();
+      if (g) set.add(g);
+    }
+    return Array.from(set).sort((a, b) => a.localeCompare(b));
+  }, [liveMonitors]);
 
   const stats = useMemo(() => {
     let up = 0;
@@ -209,6 +231,98 @@ export function MonitorsView({
       return `${m.name} ${m.target} ${m.type} ${m.groupName || ''}`.toLowerCase().includes(q);
     });
   }, [liveMonitors, searchQuery, statusFilter]);
+
+  const monitorTree = useMemo(() => {
+    const groupMap = new Map<string, MonitorTarget[]>();
+    const ungrouped: MonitorTarget[] = [];
+    for (const m of filteredMonitors) {
+      const g = (m.groupName || '').trim();
+      if (!g) {
+        ungrouped.push(m);
+      } else {
+        const list = groupMap.get(g) ?? [];
+        list.push(m);
+        groupMap.set(g, list);
+      }
+    }
+
+    const groups = Array.from(groupMap.entries())
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([name, items]) => {
+        const enabledItems = items.filter((i) => i.enabled);
+        const uptimes = items
+          .map((i) => computeUptimePct(i.history))
+          .filter((v): v is number => v !== null);
+        const avgUptime =
+          uptimes.length > 0
+            ? Math.round((uptimes.reduce((s, v) => s + v, 0) / uptimes.length) * 100) / 100
+            : null;
+
+        let status: MonitorStatus | 'paused' = 'pending';
+        if (enabledItems.length === 0) {
+          status = 'paused';
+        } else if (enabledItems.some((i) => i.status === 'down')) {
+          status = 'down';
+        } else if (enabledItems.some((i) => i.status === 'degraded')) {
+          status = 'degraded';
+        } else if (enabledItems.some((i) => i.status === 'up')) {
+          status = 'up';
+        }
+
+        // Aggregate last HEARTBEAT_BARS_TREE slots across group monitors
+        const bars: Array<'up' | 'degraded' | 'down' | 'none'> = [];
+        for (let slot = 0; slot < HEARTBEAT_BARS_TREE; slot++) {
+          let sawUp = false;
+          let sawDegraded = false;
+          let sawDown = false;
+          for (const child of items) {
+            const hist = (child.history || []).slice(-HEARTBEAT_BARS_TREE);
+            const pad = Math.max(0, HEARTBEAT_BARS_TREE - hist.length);
+            const sample = slot >= pad ? hist[slot - pad] : undefined;
+            if (!sample) continue;
+            if (sample.status === 'down') sawDown = true;
+            else if (sample.status === 'degraded') sawDegraded = true;
+            else if (sample.status === 'up') sawUp = true;
+          }
+          if (sawDown && !sawUp) bars.push('down');
+          else if (sawDown || sawDegraded) bars.push('degraded');
+          else if (sawUp) bars.push('up');
+          else bars.push('none');
+        }
+
+        return {
+          name,
+          items,
+          avgUptime,
+          status,
+          bars,
+          hasActiveChild: items.some((i) => i.id === selectedId),
+        };
+      });
+
+    return { groups, ungrouped };
+  }, [filteredMonitors, selectedId]);
+
+  const toggleGroupExpand = (groupName: string) => {
+    setCollapsedGroups((prev) => {
+      const next = new Set(prev);
+      if (next.has(groupName)) next.delete(groupName);
+      else next.add(groupName);
+      return next;
+    });
+  };
+
+  const allGroupsCollapsed =
+    monitorTree.groups.length > 0 &&
+    monitorTree.groups.every((g) => collapsedGroups.has(g.name));
+
+  const toggleAllGroups = () => {
+    if (allGroupsCollapsed) {
+      setCollapsedGroups(new Set());
+    } else {
+      setCollapsedGroups(new Set(monitorTree.groups.map((g) => g.name)));
+    }
+  };
 
   const selectedMonitor = useMemo(() => {
     if (selectedId) {
@@ -543,29 +657,49 @@ export function MonitorsView({
         </div>
       ) : (
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 items-start">
-          {/* Left Monitor List */}
+          {/* Left Monitor Group Tree */}
           <div className="lg:col-span-4 rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 overflow-hidden">
             <div className="p-3 border-b border-slate-200 dark:border-slate-800 space-y-2.5">
-              <div className="relative">
-                <Search className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
-                <input
-                  type="text"
-                  value={searchQuery}
-                  onChange={(e) => setSearchQuery(e.target.value)}
-                  placeholder={isZh ? '搜索监控名称、URL、分组...' : 'Search monitor, target, group...'}
-                  className="w-full pl-8 pr-7 py-1.5 text-xs rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 focus:outline-none focus:ring-2 focus:ring-emerald-600"
-                />
-                {searchQuery && (
+              <div className="flex items-center gap-2">
+                <div className="relative flex-1 min-w-0">
+                  <Search className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+                  <input
+                    type="text"
+                    value={searchQuery}
+                    onChange={(e) => setSearchQuery(e.target.value)}
+                    placeholder={isZh ? '搜索监控名称、URL、分组...' : 'Search monitor, target, group...'}
+                    className="w-full pl-8 pr-7 py-1.5 text-xs rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 focus:outline-none focus:ring-2 focus:ring-emerald-600"
+                  />
+                  {searchQuery && (
+                    <button
+                      type="button"
+                      onClick={() => setSearchQuery('')}
+                      className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600"
+                    >
+                      <X className="w-3.5 h-3.5" />
+                    </button>
+                  )}
+                </div>
+                {monitorTree.groups.length > 0 && (
                   <button
                     type="button"
-                    onClick={() => setSearchQuery('')}
-                    className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600"
+                    onClick={toggleAllGroups}
+                    title={
+                      allGroupsCollapsed
+                        ? isZh
+                          ? '展开全部分组'
+                          : 'Expand all groups'
+                        : isZh
+                          ? '折叠全部分组'
+                          : 'Collapse all groups'
+                    }
+                    className="px-2 py-1.5 text-[11px] font-medium rounded-lg border border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800 whitespace-nowrap shrink-0"
                   >
-                    <X className="w-3.5 h-3.5" />
+                    {allGroupsCollapsed ? (isZh ? '展开' : 'Expand') : isZh ? '折叠' : 'Collapse'}
                   </button>
                 )}
               </div>
-              <div className="flex items-center gap-1 text-[11px]">
+              <div className="flex flex-wrap items-center gap-1 text-[11px]">
                 {(
                   [
                     ['all', isZh ? `全部 (${stats.total})` : `All (${stats.total})`],
@@ -590,10 +724,158 @@ export function MonitorsView({
               </div>
             </div>
 
-            <div className="divide-y divide-slate-100 dark:divide-slate-800/80 max-h-[680px] overflow-y-auto">
-              {filteredMonitors.map((m) => {
+            <div className="p-2 space-y-1 max-h-[680px] overflow-y-auto">
+              {/* Grouped Monitor Tree */}
+              {monitorTree.groups.map((grp) => {
+                const isExpanded = searchQuery.trim().length > 0 || !collapsedGroups.has(grp.name);
+                return (
+                  <div key={grp.name} className="space-y-1">
+                    {/* Parent Group Row */}
+                    <button
+                      type="button"
+                      onClick={() => toggleGroupExpand(grp.name)}
+                      className={`w-full text-left px-2.5 py-2.5 rounded-lg transition-colors flex items-center justify-between gap-2 ${
+                        grp.hasActiveChild && !isExpanded
+                          ? 'bg-emerald-50/90 dark:bg-emerald-950/30 ring-1 ring-emerald-200 dark:ring-emerald-800/60'
+                          : 'hover:bg-slate-50 dark:hover:bg-slate-800/60'
+                      }`}
+                    >
+                      <div className="flex items-center gap-2 min-w-0">
+                        <span
+                          className={`inline-flex items-center justify-center min-w-[52px] px-2 py-0.5 rounded-full font-mono text-[11px] font-bold tabular-nums shrink-0 ${uptimePillStyle(
+                            grp.avgUptime,
+                            grp.status,
+                            grp.status !== 'paused'
+                          )}`}
+                        >
+                          {grp.avgUptime !== null ? `${grp.avgUptime}%` : grp.status === 'paused' ? 'OFF' : '—'}
+                        </span>
+                        <span className="text-slate-400 shrink-0">
+                          {isExpanded ? (
+                            <ChevronDown className="w-3.5 h-3.5" />
+                          ) : (
+                            <ChevronRight className="w-3.5 h-3.5" />
+                          )}
+                        </span>
+                        <span className="text-xs font-semibold text-slate-900 dark:text-white truncate">
+                          {grp.name}
+                        </span>
+                        <span className="text-[10px] font-mono text-slate-400 tabular-nums shrink-0">
+                          ({grp.items.length})
+                        </span>
+                      </div>
+
+                      {/* Aggregated Mini Heartbeat Bars */}
+                      <div className="flex items-center gap-[2.5px] shrink-0">
+                        {grp.bars.map((st, idx) => (
+                          <span
+                            key={idx}
+                            className={`w-[4px] h-4 rounded-full ${treeBarColor(st)}`}
+                          />
+                        ))}
+                      </div>
+                    </button>
+
+                    {/* Indented Child Monitors */}
+                    {isExpanded && (
+                      <div className="ml-4 pl-2.5 border-l border-slate-200 dark:border-slate-800 space-y-1">
+                        {grp.items.map((m) => {
+                          const active = selectedMonitor?.id === m.id;
+                          const uptime = computeUptimePct(m.history);
+                          const hist = (m.history || []).slice(-HEARTBEAT_BARS_TREE);
+                          const pad = Math.max(0, HEARTBEAT_BARS_TREE - hist.length);
+                          const miniSlots: Array<MonitorCheckSample | undefined> = [
+                            ...Array.from({ length: pad }, () => undefined),
+                            ...hist,
+                          ];
+                          const tlsWarn =
+                            m.type === 'http' &&
+                            typeof m.tlsDaysRemaining === 'number' &&
+                            m.tlsDaysRemaining <= (m.tlsCertWarningDays ?? 14);
+                          return (
+                            <button
+                              key={m.id}
+                              type="button"
+                              onClick={() => {
+                                setSelectedId(m.id);
+                                setConfirmDeleteId(null);
+                                setHoveredSampleIdx(null);
+                              }}
+                              className={`w-full text-left px-2.5 py-2 rounded-lg transition-colors flex items-center justify-between gap-2 ${
+                                active
+                                  ? 'bg-emerald-50/90 dark:bg-emerald-950/35 ring-1 ring-emerald-200 dark:ring-emerald-800/70'
+                                  : 'hover:bg-slate-50 dark:hover:bg-slate-800/45'
+                              }`}
+                            >
+                              <div className="flex items-start gap-2 min-w-0">
+                                <span
+                                  className={`inline-flex items-center justify-center min-w-[50px] px-1.5 py-0.5 rounded-full font-mono text-[10px] font-bold tabular-nums shrink-0 mt-0.5 ${uptimePillStyle(
+                                    uptime,
+                                    m.status,
+                                    m.enabled
+                                  )}`}
+                                >
+                                  {!m.enabled ? 'OFF' : uptime !== null ? `${uptime}%` : '—'}
+                                </span>
+                                <div className="min-w-0">
+                                  <div className="text-xs font-medium text-slate-900 dark:text-white truncate">
+                                    {m.name}
+                                  </div>
+                                  <div className="flex flex-wrap items-center gap-1.5 mt-0.5">
+                                    <span className="px-1.5 py-[1px] rounded bg-blue-600/10 dark:bg-blue-500/20 text-blue-700 dark:text-blue-300 font-mono text-[10px] font-semibold uppercase">
+                                      {m.type === 'http' && m.target.toLowerCase().startsWith('https://')
+                                        ? 'HTTPS'
+                                        : m.type.toUpperCase()}
+                                    </span>
+                                    {m.enabled && typeof m.lastLatencyMs === 'number' && (
+                                      <span className="font-mono text-[10px] text-slate-400 tabular-nums">
+                                        {m.lastLatencyMs}ms
+                                      </span>
+                                    )}
+                                    {tlsWarn && (
+                                      <span className="font-mono text-[10px] font-semibold text-amber-600 dark:text-amber-400">
+                                        SSL {m.tlsDaysRemaining}d
+                                      </span>
+                                    )}
+                                  </div>
+                                </div>
+                              </div>
+
+                              <div className="flex items-center gap-[2.5px] shrink-0">
+                                {miniSlots.map((sample, idx) => (
+                                  <span
+                                    key={idx}
+                                    className={`w-[4px] h-3.5 rounded-full ${
+                                      !sample
+                                        ? 'bg-slate-200 dark:bg-slate-800'
+                                        : sample.status === 'up'
+                                          ? 'bg-emerald-500'
+                                          : sample.status === 'degraded'
+                                            ? 'bg-amber-500'
+                                            : 'bg-red-500'
+                                    }`}
+                                  />
+                                ))}
+                              </div>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+
+              {/* Ungrouped Root-Level Monitors */}
+              {monitorTree.ungrouped.map((m) => {
                 const active = selectedMonitor?.id === m.id;
                 const uptime = computeUptimePct(m.history);
+                const hist = (m.history || []).slice(-HEARTBEAT_BARS_TREE);
+                const pad = Math.max(0, HEARTBEAT_BARS_TREE - hist.length);
+                const miniSlots: Array<MonitorCheckSample | undefined> = [
+                  ...Array.from({ length: pad }, () => undefined),
+                  ...hist,
+                ];
                 return (
                   <button
                     key={m.id}
@@ -603,43 +885,61 @@ export function MonitorsView({
                       setConfirmDeleteId(null);
                       setHoveredSampleIdx(null);
                     }}
-                    className={`w-full text-left p-3.5 transition-colors space-y-2 ${
+                    className={`w-full text-left px-2.5 py-2.5 rounded-lg transition-colors flex items-center justify-between gap-2 ${
                       active
-                        ? 'bg-emerald-50/70 dark:bg-emerald-950/25 border-l-2 border-l-emerald-600'
-                        : 'hover:bg-slate-50 dark:hover:bg-slate-800/40'
+                        ? 'bg-emerald-50/90 dark:bg-emerald-950/35 ring-1 ring-emerald-200 dark:ring-emerald-800/70'
+                        : 'hover:bg-slate-50 dark:hover:bg-slate-800/45'
                     }`}
                   >
-                    <div className="flex items-center justify-between gap-2">
-                      <div className="flex items-center gap-2 min-w-0">
-                        <span
-                          className={`w-2.5 h-2.5 rounded-full shrink-0 ${statusDotColor(m.status, m.enabled)}`}
-                        />
-                        <span className="text-xs font-semibold text-slate-900 dark:text-white truncate">
+                    <div className="flex items-start gap-2 min-w-0">
+                      <span
+                        className={`inline-flex items-center justify-center min-w-[52px] px-2 py-0.5 rounded-full font-mono text-[11px] font-bold tabular-nums shrink-0 mt-0.5 ${uptimePillStyle(
+                          uptime,
+                          m.status,
+                          m.enabled
+                        )}`}
+                      >
+                        {!m.enabled ? 'OFF' : uptime !== null ? `${uptime}%` : '—'}
+                      </span>
+                      <div className="min-w-0">
+                        <div className="text-xs font-semibold text-slate-900 dark:text-white truncate">
                           {m.name}
-                        </span>
+                        </div>
+                        <div className="flex items-center gap-1.5 mt-0.5">
+                          <span className="px-1.5 py-[1px] rounded bg-blue-600/10 dark:bg-blue-500/20 text-blue-700 dark:text-blue-300 font-mono text-[10px] font-semibold uppercase">
+                            {m.type === 'http' && m.target.toLowerCase().startsWith('https://')
+                              ? 'HTTPS'
+                              : m.type.toUpperCase()}
+                          </span>
+                          {m.enabled && typeof m.lastLatencyMs === 'number' && (
+                            <span className="font-mono text-[10px] text-slate-400 tabular-nums">
+                              {m.lastLatencyMs}ms
+                            </span>
+                          )}
+                        </div>
                       </div>
-                      <span className="font-mono text-[11px] font-semibold tabular-nums text-slate-600 dark:text-slate-300 shrink-0">
-                        {uptime !== null ? `${uptime}%` : '—'}
-                      </span>
                     </div>
 
-                    <div className="flex items-center justify-between gap-2 text-[11px] text-slate-500 dark:text-slate-400 font-mono">
-                      <span className="truncate">{m.target}</span>
-                      <span className="shrink-0 tabular-nums">
-                        {!m.enabled
-                          ? isZh
-                            ? '已暂停'
-                            : 'PAUSED'
-                          : typeof m.lastLatencyMs === 'number'
-                          ? `${m.lastLatencyMs}ms`
-                          : '—'}
-                      </span>
+                    <div className="flex items-center gap-[2.5px] shrink-0">
+                      {miniSlots.map((sample, idx) => (
+                        <span
+                          key={idx}
+                          className={`w-[4px] h-4 rounded-full ${
+                            !sample
+                              ? 'bg-slate-200 dark:bg-slate-800'
+                              : sample.status === 'up'
+                                ? 'bg-emerald-500'
+                                : sample.status === 'degraded'
+                                  ? 'bg-amber-500'
+                                  : 'bg-red-500'
+                          }`}
+                        />
+                      ))}
                     </div>
-
-                    {renderHeartbeatStrip(m.history, HEARTBEAT_BARS_MINI, false)}
                   </button>
                 );
               })}
+
               {filteredMonitors.length === 0 && (
                 <div className="p-8 text-center text-xs text-slate-400">
                   {isZh ? '没有匹配的监控项' : 'No matching monitors'}
@@ -675,11 +975,6 @@ export function MonitorsView({
                         <span className="px-1.5 py-0.5 rounded bg-slate-100 dark:bg-slate-800 font-mono text-[11px] uppercase text-slate-600 dark:text-slate-300">
                           {selectedMonitor.type}
                         </span>
-                        {selectedMonitor.groupName && (
-                          <span className="text-xs text-slate-500 dark:text-slate-400">
-                            · {selectedMonitor.groupName}
-                          </span>
-                        )}
                       </div>
 
                       <div className="flex flex-wrap items-center gap-2 text-xs font-mono text-slate-500 dark:text-slate-400">
@@ -1068,13 +1363,22 @@ export function MonitorsView({
                   />
                 </div>
                 <div>
-                  <label className="block font-medium mb-1">{isZh ? '分组（可选）' : 'Group (Optional)'}</label>
+                  <label className="block font-medium mb-1 flex items-center gap-1.5">
+                    <FolderOpen className="w-3.5 h-3.5 text-slate-400" />
+                    {isZh ? '所属分组（左侧树形归类）' : 'Group (Left Tree Folder)'}
+                  </label>
                   <input
+                    list="monitor-group-options"
                     value={form.groupName}
                     onChange={(e) => setForm({ ...form, groupName: e.target.value })}
-                    placeholder={isZh ? '例如：生产业务 / 边缘节点' : 'e.g. Production / Edge'}
+                    placeholder={isZh ? '选择已有分组或输入新分组名，如：服务器 / Wimotek' : 'Select or type a group name'}
                     className="w-full px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950"
                   />
+                  <datalist id="monitor-group-options">
+                    {existingGroupNames.map((g) => (
+                      <option key={g} value={g} />
+                    ))}
+                  </datalist>
                 </div>
               </div>
 

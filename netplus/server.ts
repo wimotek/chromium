@@ -95,6 +95,7 @@ import {
   getOciInstanceDetail,
   inspectOciVnicIps,
   isValidOcid,
+  isValidOciRegion,
   listOciImages,
   listOciInstancesDetailed,
   normalizeOciPem,
@@ -104,9 +105,11 @@ import {
   ociAllocatePublicIpv4,
   ociDeleteIpv6,
   ociDeletePublicIpv4,
+  ociFindIpv6ResourceId,
   ociGetVnicIpv6SubnetInfo,
   ociInstancePowerAction,
   ociSwapPublicIpv4,
+  sameIpv6,
 } from './server/services/ociClient.ts';
 import {
   autoResolveSniperParams,
@@ -2030,23 +2033,110 @@ export async function createServer(options: CreateServerOptions = {}) {
   ];
   const MAX_DNS_PULL_SNAPSHOTS = 3;
 
-  function sanitizeDnsPullPolicy(raw: unknown, fallback?: DnsPullPolicy): DnsPullPolicy {
-    const obj = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>;
-    const modeRaw = String(obj.filterMode ?? fallback?.filterMode ?? 'none').trim().toLowerCase();
-    const filterMode: DnsPullPolicy['filterMode'] =
-      modeRaw === 'whitelist' || modeRaw === 'blacklist' ? modeRaw : 'none';
-    const rawPatterns = Array.isArray(obj.patterns)
-      ? obj.patterns
-      : typeof obj.patterns === 'string'
-        ? obj.patterns.split(/[\n,;]+/)
-        : fallback?.patterns ?? [];
-    const patterns = Array.from(
+  function parsePatternList(input: unknown): string[] {
+    const rawList = Array.isArray(input)
+      ? input
+      : typeof input === 'string'
+        ? input.split(/[\n,;]+/)
+        : [];
+    return Array.from(
       new Set(
-        rawPatterns
+        rawList
           .map((p) => String(p || '').trim().toLowerCase())
           .filter((p) => p.length > 0 && p.length <= 253)
       )
     ).slice(0, 200);
+  }
+
+  function resolvePolicyLists(policy: DnsPullPolicy): { whitelist: string[]; blacklist: string[] } {
+    if (policy.filterMode === 'whitelist') {
+      const wl = (
+        Array.isArray(policy.whitelistPatterns) && policy.whitelistPatterns.length > 0
+          ? policy.whitelistPatterns
+          : policy.patterns ?? []
+      ).filter(Boolean);
+      return { whitelist: wl, blacklist: [] };
+    }
+    if (policy.filterMode === 'blacklist') {
+      const bl = (
+        Array.isArray(policy.blacklistPatterns) && policy.blacklistPatterns.length > 0
+          ? policy.blacklistPatterns
+          : policy.patterns ?? []
+      ).filter(Boolean);
+      return { whitelist: [], blacklist: bl };
+    }
+    const wl = (policy.whitelistPatterns ?? []).filter(Boolean);
+    if (wl.length > 0) {
+      return { whitelist: wl, blacklist: [] };
+    }
+    const bl = (policy.blacklistPatterns ?? []).filter(Boolean);
+    if (bl.length > 0) {
+      return { whitelist: [], blacklist: bl };
+    }
+    return { whitelist: [], blacklist: [] };
+  }
+
+  function sanitizeDnsPullPolicy(raw: unknown, fallback?: DnsPullPolicy): DnsPullPolicy {
+    const obj = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>;
+    const fallbackLists = fallback
+      ? resolvePolicyLists(fallback)
+      : { whitelist: [] as string[], blacklist: [] as string[] };
+
+    const hasNewFields = 'whitelistPatterns' in obj || 'blacklistPatterns' in obj;
+    const modeRaw = String(obj.filterMode ?? fallback?.filterMode ?? 'none').trim().toLowerCase();
+    const explicitMode: DnsPullPolicy['filterMode'] | null =
+      'filterMode' in obj
+        ? modeRaw === 'whitelist' || modeRaw === 'blacklist'
+          ? modeRaw
+          : 'none'
+        : null;
+
+    let whitelistPatterns: string[] = [];
+    let blacklistPatterns: string[] = [];
+    let filterMode: DnsPullPolicy['filterMode'] = 'none';
+    let patterns: string[] = [];
+
+    if (hasNewFields) {
+      const wl = 'whitelistPatterns' in obj ? parsePatternList(obj.whitelistPatterns) : fallbackLists.whitelist;
+      const bl = 'blacklistPatterns' in obj ? parsePatternList(obj.blacklistPatterns) : fallbackLists.blacklist;
+
+      if (explicitMode === 'whitelist') {
+        whitelistPatterns = wl;
+        blacklistPatterns = [];
+      } else if (explicitMode === 'blacklist') {
+        whitelistPatterns = [];
+        blacklistPatterns = bl;
+      } else if (explicitMode === 'none') {
+        whitelistPatterns = [];
+        blacklistPatterns = [];
+      } else if (wl.length > 0) {
+        whitelistPatterns = wl;
+        blacklistPatterns = [];
+      } else if (bl.length > 0) {
+        whitelistPatterns = [];
+        blacklistPatterns = bl;
+      }
+
+      if (whitelistPatterns.length > 0) {
+        filterMode = 'whitelist';
+        patterns = whitelistPatterns;
+      } else if (blacklistPatterns.length > 0) {
+        filterMode = 'blacklist';
+        patterns = blacklistPatterns;
+      } else {
+        filterMode = 'none';
+        patterns = [];
+      }
+    } else {
+      filterMode = modeRaw === 'whitelist' || modeRaw === 'blacklist' ? modeRaw : 'none';
+      patterns = 'patterns' in obj ? parsePatternList(obj.patterns) : fallback?.patterns ?? [];
+      if (patterns.length === 0) {
+        filterMode = 'none';
+      }
+      whitelistPatterns = filterMode === 'whitelist' ? patterns : [];
+      blacklistPatterns = filterMode === 'blacklist' ? patterns : [];
+    }
+
     const rawTypes = Array.isArray(obj.recordTypes) ? obj.recordTypes : fallback?.recordTypes ?? [];
     const recordTypes = Array.from(
       new Set(
@@ -2058,6 +2148,8 @@ export async function createServer(options: CreateServerOptions = {}) {
     return {
       filterMode,
       patterns,
+      whitelistPatterns,
+      blacklistPatterns,
       recordTypes,
       updatedAt: new Date().toISOString(),
     };
@@ -2086,41 +2178,57 @@ export async function createServer(options: CreateServerOptions = {}) {
     if (policy.recordTypes.length > 0 && !policy.recordTypes.includes(item.type)) {
       return false;
     }
-    if (policy.filterMode === 'none' || policy.patterns.length === 0) {
-      return true;
-    }
+    const { whitelist, blacklist } = resolvePolicyLists(policy);
     const candidates = [item.domain, item.fqdn, item.name].filter(Boolean);
-    const matched = policy.patterns.some((pat) =>
-      candidates.some((cand) => matchesWildcardPattern(cand, pat))
-    );
-    return policy.filterMode === 'whitelist' ? matched : !matched;
+
+    if (whitelist.length > 0) {
+      return whitelist.some((pat) =>
+        candidates.some((cand) => matchesWildcardPattern(cand, pat))
+      );
+    }
+
+    if (blacklist.length > 0) {
+      return !blacklist.some((pat) =>
+        candidates.some((cand) => matchesWildcardPattern(cand, pat))
+      );
+    }
+
+    return true;
   }
 
   function domainShouldBeFetched(domain: string, policy: DnsPullPolicy): boolean {
-    if (policy.filterMode === 'none' || policy.patterns.length === 0) return true;
+    const { whitelist, blacklist } = resolvePolicyLists(policy);
     const d = domain.trim().toLowerCase();
-    if (policy.filterMode === 'blacklist') {
-      // Skip entire domain only if an exact/wildcard pattern blocks the root domain itself
-      return !policy.patterns.some((pat) => matchesWildcardPattern(d, pat));
+
+    if (whitelist.length > 0) {
+      // Fetch if any whitelist pattern matches the domain, a subdomain of it, or is a bare host label (e.g. "www", "api*")
+      return whitelist.some((pat) => {
+        if (matchesWildcardPattern(d, pat)) return true;
+        if (pat.endsWith(`.${d}`)) return true;
+        if (!pat.includes('.')) return true;
+        return false;
+      });
     }
-    // Whitelist: fetch if any pattern matches the domain, matches a subdomain of the domain, or is a bare host pattern without dots (like "www" or "api*")
-    return policy.patterns.some((pat) => {
-      if (matchesWildcardPattern(d, pat)) return true;
-      if (pat.endsWith(`.${d}`)) return true;
-      if (!pat.includes('.')) return true;
-      return false;
-    });
+
+    if (blacklist.length > 0) {
+      // Skip entire domain only if a blacklist pattern directly blocks the root domain itself
+      const rootBlocked = blacklist.some((pat) => matchesWildcardPattern(d, pat));
+      if (rootBlocked) return false;
+    }
+
+    return true;
   }
 
   function summarizePullPolicy(policy: DnsPullPolicy): string {
     const parts: string[] = [];
+    const { whitelist, blacklist } = resolvePolicyLists(policy);
     if (policy.recordTypes.length > 0) {
       parts.push(`类型: ${policy.recordTypes.join('/')}`);
     }
-    if (policy.filterMode === 'whitelist' && policy.patterns.length > 0) {
-      parts.push(`白名单 (${policy.patterns.length} 项)`);
-    } else if (policy.filterMode === 'blacklist' && policy.patterns.length > 0) {
-      parts.push(`黑名单 (${policy.patterns.length} 项)`);
+    if (whitelist.length > 0) {
+      parts.push(`白名单 (${whitelist.length} 项)`);
+    } else if (blacklist.length > 0) {
+      parts.push(`黑名单 (${blacklist.length} 项)`);
     }
     return parts.length > 0 ? parts.join(' · ') : '无过滤（全量拉取）';
   }
@@ -2135,6 +2243,15 @@ export async function createServer(options: CreateServerOptions = {}) {
   });
 
   app.put('/api/dns/pull-policy', requireAuth, (req: AuthedRequest, res) => {
+    const body = (req.body && typeof req.body === 'object' ? req.body : {}) as Record<string, unknown>;
+    const reqWhitelist = 'whitelistPatterns' in body ? parsePatternList(body.whitelistPatterns) : [];
+    const reqBlacklist = 'blacklistPatterns' in body ? parsePatternList(body.blacklistPatterns) : [];
+    if (reqWhitelist.length > 0 && reqBlacklist.length > 0) {
+      res.status(400).json({
+        error: '黑白名单只能二选一：已设置白名单时不能同时设置黑名单，请先清空其中一项。',
+      });
+      return;
+    }
     const state = store.getState();
     state.dnsPullPolicy = sanitizeDnsPullPolicy(req.body, state.dnsPullPolicy);
     store.save();
@@ -3357,11 +3474,16 @@ export async function createServer(options: CreateServerOptions = {}) {
       return;
     }
 
-    // Resolve ociIpv6Id from live VNIC if not cached yet
+    // Resolve ociIpv6Id from live VNIC if not cached yet (using canonical 128-bit IPv6 comparison)
     let ociIpv6Id = target.ociIpv6Id;
     if (!ociIpv6Id) {
-      const inspect = await inspectOciVnicIps(profile, pem, rule.ociVnicId);
-      ociIpv6Id = inspect.vnic?.ipv6s.find((v) => v.ipAddress === target.address)?.id;
+      const found = await ociFindIpv6ResourceId(profile, pem, rule.ociVnicId, target.address);
+      if (found.ok && found.ipv6Id) {
+        ociIpv6Id = found.ipv6Id;
+      } else {
+        const inspect = await inspectOciVnicIps(profile, pem, rule.ociVnicId);
+        ociIpv6Id = inspect.vnic?.ipv6s.find((v) => sameIpv6(v.ipAddress, target.address))?.id;
+      }
     }
     if (!ociIpv6Id) {
       res.status(400).json({ error: 'Could not locate matching OCI IPv6 resource ID on VNIC. Sync live OCI IPs first.' });
@@ -5534,11 +5656,15 @@ export async function createServer(options: CreateServerOptions = {}) {
         error: '该 Oracle 主机未关联有效的 OCI 凭据与实例 OCID，请先通过「从 OCI 导入实例」导入',
       };
     }
-    const profile = store.getState().ociProfiles.find((p) => p.id === host.ociProfileId);
-    const pem = profile ? store.getOciPrivateKey(profile.id) : '';
-    if (!profile || !pem) {
+    const rawProfile = store.getState().ociProfiles.find((p) => p.id === host.ociProfileId);
+    const pem = rawProfile ? store.getOciPrivateKey(rawProfile.id) : '';
+    if (!rawProfile || !pem) {
       return { ok: false, status: 400, error: '关联的 OCI 凭据不存在或未配置私钥 PEM' };
     }
+    const profile: StoredOciProfile =
+      host.region && isValidOciRegion(host.region) && host.region.trim().toLowerCase() !== rawProfile.region.trim().toLowerCase()
+        ? { ...rawProfile, region: host.region.trim().toLowerCase() }
+        : rawProfile;
 
     if (!host.ociVnicId || !host.ociPrimaryPrivateIpId) {
       const detail = await getOciInstanceDetail(profile, pem, host.instanceId, host.ociVnicId);
@@ -5886,24 +6012,62 @@ export async function createServer(options: CreateServerOptions = {}) {
       }
 
       const oldAddress = String(req.body?.address || '').trim();
+      let activeVnicId = ctx.vnicId;
       let oldIpv6Id =
         String(req.body?.ociResourceId || '').trim() ||
-        host.ociIpv6Entries?.find((e) => e.ipAddress.toLowerCase() === oldAddress.toLowerCase())?.id ||
+        host.ociIpv6Entries?.find((e) => sameIpv6(e.ipAddress, oldAddress))?.id ||
         '';
+      let lookupError: string | undefined;
+      let isPrefixOnly = false;
 
       if (!oldIpv6Id) {
-        const refreshed = await inspectOciVnicIps(ctx.profile, ctx.pem, ctx.vnicId);
-        if (refreshed.ok && refreshed.vnic) {
-          host.ociIpv6Entries = refreshed.vnic.ipv6s;
-          oldIpv6Id = refreshed.vnic.ipv6s.find((e) => e.ipAddress.toLowerCase() === oldAddress.toLowerCase())?.id || '';
+        const found = await ociFindIpv6ResourceId(ctx.profile, ctx.pem, activeVnicId, oldAddress);
+        if (found.allEntries.length > 0) {
+          host.ociIpv6Entries = found.allEntries;
+        }
+        if (found.ok && found.ipv6Id) {
+          oldIpv6Id = found.ipv6Id;
+        } else {
+          lookupError = found.error;
+          isPrefixOnly = Boolean(found.isPrefixOnly);
         }
       }
+
+      // If still missing and host has an instanceId, refresh VNIC OCID from OCI once and retry
+      if (!oldIpv6Id && host.instanceId) {
+        const detail = await getOciInstanceDetail(ctx.profile, ctx.pem, host.instanceId);
+        if (detail.ok && detail.vnicId) {
+          activeVnicId = detail.vnicId;
+          host.ociVnicId = detail.vnicId;
+          if (detail.primaryPrivateIpId) host.ociPrimaryPrivateIpId = detail.primaryPrivateIpId;
+          if (detail.ipv6Entries) {
+            host.ociIpv6Entries = detail.ipv6Entries;
+            oldIpv6Id = detail.ipv6Entries.find((e) => sameIpv6(e.ipAddress, oldAddress))?.id || '';
+          }
+          if (!oldIpv6Id) {
+            const retryFound = await ociFindIpv6ResourceId(ctx.profile, ctx.pem, activeVnicId, oldAddress);
+            if (retryFound.ok && retryFound.ipv6Id) {
+              oldIpv6Id = retryFound.ipv6Id;
+            } else if (retryFound.error) {
+              lookupError = retryFound.error;
+            }
+            if (retryFound.isPrefixOnly) isPrefixOnly = true;
+          }
+          store.save();
+        }
+      }
+
       if (!oldIpv6Id) {
-        res.status(404).json({ error: '未在 OCI VNIC 上找到该 IPv6 的资源 ID，请先点击检测刷新状态' });
+        const reason = isPrefixOnly
+          ? `地址 ${oldAddress} 属于 VNIC 绑定的 IPv6 前缀网段（Prefix CIDR），不是单独分配的 IPv6 资源，无法单独切换`
+          : lookupError
+            ? `查询 OCI VNIC IPv6 资源列表失败（${lookupError}），请检查 API 用户所在组是否具有 "manage virtual-network-family" 权限`
+            : `未在 OCI VNIC 上找到 ${oldAddress} 对应的 IPv6 资源 ID，请先点击「检测」同步最新实例状态`;
+        res.status(404).json({ error: reason });
         return;
       }
 
-      const added = await ociAddIpv6ToVnic(ctx.profile, ctx.pem, ctx.vnicId);
+      const added = await ociAddIpv6ToVnic(ctx.profile, ctx.pem, activeVnicId);
       if (!added.ok || !added.ipAddress) {
         res.status(502).json({ error: added.error || 'OCI 分配新 IPv6 失败' });
         return;
@@ -5914,10 +6078,10 @@ export async function createServer(options: CreateServerOptions = {}) {
         return;
       }
 
-      host.ipv6List = host.ipv6List.map((a) => (a.toLowerCase() === oldAddress.toLowerCase() ? added.ipAddress! : a));
-      if (!host.ipv6List.includes(added.ipAddress)) host.ipv6List.push(added.ipAddress);
+      host.ipv6List = host.ipv6List.map((a) => (sameIpv6(a, oldAddress) ? added.ipAddress! : a));
+      if (!host.ipv6List.some((a) => sameIpv6(a, added.ipAddress))) host.ipv6List.push(added.ipAddress);
       host.ociIpv6Entries = [
-        ...(host.ociIpv6Entries ?? []).filter((e) => e.id !== oldIpv6Id && e.ipAddress.toLowerCase() !== oldAddress.toLowerCase()),
+        ...(host.ociIpv6Entries ?? []).filter((e) => e.id !== oldIpv6Id && !sameIpv6(e.ipAddress, oldAddress)),
         { id: added.ipv6Id || '', ipAddress: added.ipAddress },
       ];
       host.updatedAt = new Date().toISOString();
@@ -6125,19 +6289,54 @@ export async function createServer(options: CreateServerOptions = {}) {
         return;
       }
 
+      let activeVnicId = ctx.vnicId;
       let ipv6Id =
         String(req.body?.ociResourceId || '').trim() ||
-        host.ociIpv6Entries?.find((e) => e.ipAddress.toLowerCase() === address.toLowerCase())?.id ||
+        host.ociIpv6Entries?.find((e) => sameIpv6(e.ipAddress, address))?.id ||
         '';
+      let lookupError: string | undefined;
+      let isPrefixOnly = false;
+
       if (!ipv6Id) {
-        const refreshed = await inspectOciVnicIps(ctx.profile, ctx.pem, ctx.vnicId);
-        if (refreshed.ok && refreshed.vnic) {
-          host.ociIpv6Entries = refreshed.vnic.ipv6s;
-          ipv6Id = refreshed.vnic.ipv6s.find((e) => e.ipAddress.toLowerCase() === address.toLowerCase())?.id || '';
+        const found = await ociFindIpv6ResourceId(ctx.profile, ctx.pem, activeVnicId, address);
+        if (found.allEntries.length > 0) {
+          host.ociIpv6Entries = found.allEntries;
+        }
+        if (found.ok && found.ipv6Id) {
+          ipv6Id = found.ipv6Id;
+        } else {
+          lookupError = found.error;
+          isPrefixOnly = Boolean(found.isPrefixOnly);
+        }
+      }
+      if (!ipv6Id && host.instanceId) {
+        const detail = await getOciInstanceDetail(ctx.profile, ctx.pem, host.instanceId);
+        if (detail.ok && detail.vnicId) {
+          activeVnicId = detail.vnicId;
+          host.ociVnicId = detail.vnicId;
+          if (detail.ipv6Entries) {
+            host.ociIpv6Entries = detail.ipv6Entries;
+            ipv6Id = detail.ipv6Entries.find((e) => sameIpv6(e.ipAddress, address))?.id || '';
+          }
+          if (!ipv6Id) {
+            const retryFound = await ociFindIpv6ResourceId(ctx.profile, ctx.pem, activeVnicId, address);
+            if (retryFound.ok && retryFound.ipv6Id) {
+              ipv6Id = retryFound.ipv6Id;
+            } else if (retryFound.error) {
+              lookupError = retryFound.error;
+            }
+            if (retryFound.isPrefixOnly) isPrefixOnly = true;
+          }
+          store.save();
         }
       }
       if (!ipv6Id) {
-        res.status(404).json({ error: '未在 OCI VNIC 上找到该 IPv6 的资源 ID，请先点击检测刷新状态' });
+        const reason = isPrefixOnly
+          ? `地址 ${address} 属于 VNIC 绑定的 IPv6 前缀网段（Prefix CIDR），无法按单个 IPv6 删除`
+          : lookupError
+            ? `查询 OCI VNIC IPv6 资源列表失败（${lookupError}），请检查 API 用户 IAM 权限`
+            : `未在 OCI VNIC 上找到 ${address} 对应的 IPv6 资源 ID，请先点击「检测」同步最新状态`;
+        res.status(404).json({ error: reason });
         return;
       }
       const del = await ociDeleteIpv6(ctx.profile, ctx.pem, ipv6Id);
@@ -6145,9 +6344,9 @@ export async function createServer(options: CreateServerOptions = {}) {
         res.status(502).json({ error: del.error || 'OCI 删除 IPv6 失败' });
         return;
       }
-      host.ipv6List = host.ipv6List.filter((a) => a.toLowerCase() !== address.toLowerCase());
+      host.ipv6List = host.ipv6List.filter((a) => !sameIpv6(a, address));
       host.ociIpv6Entries = (host.ociIpv6Entries ?? []).filter(
-        (e) => e.id !== ipv6Id && e.ipAddress.toLowerCase() !== address.toLowerCase()
+        (e) => e.id !== ipv6Id && !sameIpv6(e.ipAddress, address)
       );
       host.updatedAt = new Date().toISOString();
       store.save();

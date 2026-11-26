@@ -214,15 +214,17 @@ export function DnsRecordsPanel({
   const [inlineAddBusy, setInlineAddBusy] = useState(false);
   const [inlineError, setInlineError] = useState<string | null>(null);
 
-  // Pull Policy (Filter / Whitelist / Blacklist) & Latest 3 Pull Snapshots
+  // Pull Policy (Filter / Simultaneous Whitelist & Blacklist) & Latest 3 Pull Snapshots
   const [pullPolicy, setPullPolicy] = useState<DnsPullPolicy>({
     filterMode: 'none',
     patterns: [],
+    whitelistPatterns: [],
+    blacklistPatterns: [],
     recordTypes: [],
   });
   const [showPolicyModal, setShowPolicyModal] = useState(false);
-  const [policyDraftMode, setPolicyDraftMode] = useState<'none' | 'whitelist' | 'blacklist'>('none');
-  const [policyDraftPatternsText, setPolicyDraftPatternsText] = useState('');
+  const [policyDraftWhitelistText, setPolicyDraftWhitelistText] = useState('');
+  const [policyDraftBlacklistText, setPolicyDraftBlacklistText] = useState('');
   const [policyDraftRecordTypes, setPolicyDraftRecordTypes] = useState<DnsRecordType[]>([]);
   const [policyBusy, setPolicyBusy] = useState(false);
   const [policyError, setPolicyError] = useState<string | null>(null);
@@ -248,9 +250,22 @@ export function DnsRecordsPanel({
         apiRequest<DnsPullSnapshot[]>('/api/dns/pull-snapshots'),
       ]);
       if (policyRes && typeof policyRes === 'object') {
+        const legacyPatterns = Array.isArray(policyRes.patterns) ? policyRes.patterns : [];
+        const whitelistPatterns = Array.isArray(policyRes.whitelistPatterns)
+          ? policyRes.whitelistPatterns
+          : policyRes.filterMode === 'whitelist'
+            ? legacyPatterns
+            : [];
+        const blacklistPatterns = Array.isArray(policyRes.blacklistPatterns)
+          ? policyRes.blacklistPatterns
+          : policyRes.filterMode === 'blacklist'
+            ? legacyPatterns
+            : [];
         setPullPolicy({
           filterMode: policyRes.filterMode || 'none',
-          patterns: Array.isArray(policyRes.patterns) ? policyRes.patterns : [],
+          patterns: legacyPatterns,
+          whitelistPatterns,
+          blacklistPatterns,
           recordTypes: Array.isArray(policyRes.recordTypes) ? policyRes.recordTypes : [],
           updatedAt: policyRes.updatedAt,
         });
@@ -269,31 +284,65 @@ export function DnsRecordsPanel({
     void loadPullMeta();
   }, [loadPullMeta]);
 
-  const isPullPolicyActive = useMemo(() => {
-    const hasListFilter = pullPolicy.filterMode !== 'none' && pullPolicy.patterns.length > 0;
-    const hasTypeFilter = pullPolicy.recordTypes.length > 0;
-    return hasListFilter || hasTypeFilter;
+  const effectiveWhitelist = useMemo(() => {
+    if (pullPolicy.filterMode === 'blacklist') return [];
+    const wl = Array.isArray(pullPolicy.whitelistPatterns)
+      ? pullPolicy.whitelistPatterns
+      : pullPolicy.filterMode === 'whitelist'
+        ? pullPolicy.patterns
+        : [];
+    return wl;
   }, [pullPolicy]);
+
+  const effectiveBlacklist = useMemo(() => {
+    if (pullPolicy.filterMode === 'whitelist') return [];
+    if (effectiveWhitelist.length > 0) return [];
+    const bl = Array.isArray(pullPolicy.blacklistPatterns)
+      ? pullPolicy.blacklistPatterns
+      : pullPolicy.filterMode === 'blacklist'
+        ? pullPolicy.patterns
+        : [];
+    return bl;
+  }, [pullPolicy, effectiveWhitelist.length]);
+
+  const isPullPolicyActive = useMemo(() => {
+    return (
+      effectiveWhitelist.length > 0 ||
+      effectiveBlacklist.length > 0 ||
+      pullPolicy.recordTypes.length > 0
+    );
+  }, [effectiveWhitelist, effectiveBlacklist, pullPolicy.recordTypes]);
 
   const pullPolicySummary = useMemo(() => {
     const parts: string[] = [];
     if (pullPolicy.recordTypes.length > 0) {
       parts.push(isZh ? `类型: ${pullPolicy.recordTypes.join('/')}` : `Types: ${pullPolicy.recordTypes.join('/')}`);
     }
-    if (pullPolicy.filterMode === 'whitelist' && pullPolicy.patterns.length > 0) {
-      parts.push(isZh ? `白名单 ${pullPolicy.patterns.length} 条` : `Whitelist (${pullPolicy.patterns.length})`);
-    } else if (pullPolicy.filterMode === 'blacklist' && pullPolicy.patterns.length > 0) {
-      parts.push(isZh ? `黑名单 ${pullPolicy.patterns.length} 条` : `Blacklist (${pullPolicy.patterns.length})`);
+    if (effectiveWhitelist.length > 0) {
+      parts.push(isZh ? `白名单 ${effectiveWhitelist.length} 条` : `Whitelist (${effectiveWhitelist.length})`);
+    } else if (effectiveBlacklist.length > 0) {
+      parts.push(isZh ? `黑名单 ${effectiveBlacklist.length} 条` : `Blacklist (${effectiveBlacklist.length})`);
     }
     if (parts.length === 0) {
       return isZh ? '无过滤（全量拉取）' : 'No filter (Pull all)';
     }
     return parts.join(' · ');
-  }, [pullPolicy, isZh]);
+  }, [pullPolicy.recordTypes, effectiveWhitelist, effectiveBlacklist, isZh]);
+
+  const hasDraftWhitelist = policyDraftWhitelistText.trim().length > 0;
+  const hasDraftBlacklist = policyDraftBlacklistText.trim().length > 0;
 
   const openPolicyModal = () => {
-    setPolicyDraftMode(pullPolicy.filterMode || 'none');
-    setPolicyDraftPatternsText((pullPolicy.patterns || []).join('\n'));
+    if (effectiveWhitelist.length > 0) {
+      setPolicyDraftWhitelistText(effectiveWhitelist.join('\n'));
+      setPolicyDraftBlacklistText('');
+    } else if (effectiveBlacklist.length > 0) {
+      setPolicyDraftWhitelistText('');
+      setPolicyDraftBlacklistText(effectiveBlacklist.join('\n'));
+    } else {
+      setPolicyDraftWhitelistText('');
+      setPolicyDraftBlacklistText('');
+    }
     setPolicyDraftRecordTypes(pullPolicy.recordTypes || []);
     setPolicyError(null);
     setShowPolicyModal(true);
@@ -307,19 +356,34 @@ export function DnsRecordsPanel({
 
   const handleSavePolicy = async (e: React.FormEvent) => {
     e.preventDefault();
-    const patterns = policyDraftPatternsText
-      .split(/[\n,;]+/)
-      .map((s) => s.trim().toLowerCase())
-      .filter(Boolean);
+    const parseLines = (txt: string) =>
+      Array.from(
+        new Set(
+          txt
+            .split(/[\n,;]+/)
+            .map((s) => s.trim().toLowerCase())
+            .filter(Boolean)
+        )
+      );
+    const whitelistPatterns = parseLines(policyDraftWhitelistText);
+    const blacklistPatterns = parseLines(policyDraftBlacklistText);
 
-    if (policyDraftMode !== 'none' && patterns.length === 0) {
+    if (whitelistPatterns.length > 0 && blacklistPatterns.length > 0) {
       setPolicyError(
         isZh
-          ? '选择白名单或黑名单模式时，请至少填写一条匹配规则（如 *.example.com 或 www）'
-          : 'Enter at least one pattern for whitelist/blacklist mode.'
+          ? '黑白名单只能二选一，请先清空其中一项后再保存'
+          : 'Whitelist and blacklist are mutually exclusive. Clear one before saving.'
       );
       return;
     }
+
+    const filterMode: DnsPullPolicy['filterMode'] =
+      whitelistPatterns.length > 0
+        ? 'whitelist'
+        : blacklistPatterns.length > 0
+          ? 'blacklist'
+          : 'none';
+    const patterns = filterMode === 'whitelist' ? whitelistPatterns : filterMode === 'blacklist' ? blacklistPatterns : [];
 
     setPolicyBusy(true);
     setPolicyError(null);
@@ -327,8 +391,10 @@ export function DnsRecordsPanel({
       const saved = await apiRequest<DnsPullPolicy>('/api/dns/pull-policy', {
         method: 'PUT',
         body: JSON.stringify({
-          filterMode: policyDraftMode,
+          filterMode,
           patterns,
+          whitelistPatterns,
+          blacklistPatterns,
           recordTypes: policyDraftRecordTypes,
         }),
       });
@@ -2807,20 +2873,20 @@ export function DnsRecordsPanel({
         </div>
       )}
 
-      {/* ==================== MODAL 5: DNS PULL POLICY (FILTER / WHITELIST / BLACKLIST) ==================== */}
+      {/* ==================== MODAL 5: DNS PULL POLICY (MUTUALLY EXCLUSIVE WHITELIST / BLACKLIST) ==================== */}
       {showPolicyModal && (
         <div className="fixed inset-0 z-50 bg-slate-950/55 flex items-center justify-center p-4">
-          <div className="w-full max-w-lg rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-6">
+          <div className="w-full max-w-2xl rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-6 max-h-[90vh] overflow-y-auto">
             <div className="flex items-start justify-between gap-3 pb-4 border-b border-slate-200 dark:border-slate-800">
               <div>
                 <h3 className="font-display text-base font-semibold text-slate-900 dark:text-white flex items-center gap-2">
                   <Filter className="w-4 h-4 text-blue-600 dark:text-blue-400" />
-                  {isZh ? 'DNS 拉取策略（过滤条件与黑白名单）' : 'DNS Pull Policy (Filters & Allow/Blocklist)'}
+                  {isZh ? 'DNS 拉取策略（黑白名单二选一）' : 'DNS Pull Policy (Whitelist or Blacklist)'}
                 </h3>
                 <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-1">
                   {isZh
-                    ? '设置从远端 DNS 服务商拉取时的记录类型过滤与域名/主机黑白名单，避免导入无关解析记录。'
-                    : 'Filter pulled DNS records by record type and domain/host whitelist or blacklist.'}
+                    ? '白名单与黑名单互斥（二选一）：设置白名单后黑名单将自动禁用，设置黑名单后白名单将自动禁用；清空当前列表即可切换。'
+                    : 'Whitelist and blacklist are mutually exclusive: filling one automatically disables the other. Clear the active list to switch.'}
                 </p>
               </div>
               <button type="button" onClick={() => setShowPolicyModal(false)} className="p-1 text-slate-400 hover:text-slate-600">
@@ -2835,79 +2901,125 @@ export function DnsRecordsPanel({
                 </div>
               )}
 
-              <div>
-                <label className="block font-medium text-slate-800 dark:text-slate-200 mb-2">
-                  {isZh ? '名单过滤模式' : 'List Filter Mode'}
-                </label>
-                <div className="grid grid-cols-3 gap-2">
-                  {(
-                    [
-                      {
-                        id: 'none',
-                        title: isZh ? '无过滤' : 'No Filter',
-                        desc: isZh ? '全量拉取所有记录' : 'Import all records',
-                      },
-                      {
-                        id: 'whitelist',
-                        title: isZh ? '白名单模式' : 'Whitelist',
-                        desc: isZh ? '仅保留命中规则项' : 'Keep matching only',
-                      },
-                      {
-                        id: 'blacklist',
-                        title: isZh ? '黑名单模式' : 'Blacklist',
-                        desc: isZh ? '排除命中规则项' : 'Exclude matching',
-                      },
-                    ] as const
-                  ).map((opt) => (
-                    <button
-                      key={opt.id}
-                      type="button"
-                      onClick={() => {
-                        setPolicyDraftMode(opt.id);
-                        setPolicyError(null);
-                      }}
-                      className={`px-3 py-2.5 rounded-lg border text-left transition-colors ${
-                        policyDraftMode === opt.id
-                          ? 'border-blue-600 bg-blue-50 dark:bg-blue-950/40 text-blue-700 dark:text-blue-300'
-                          : 'border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800'
-                      }`}
-                    >
-                      <div className="font-semibold">{opt.title}</div>
-                      <div className="text-[10px] opacity-80 mt-0.5">{opt.desc}</div>
-                    </button>
-                  ))}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div className={`space-y-1.5 transition-opacity ${hasDraftBlacklist ? 'opacity-55' : ''}`}>
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="flex items-center gap-1.5 min-w-0">
+                      <label className="font-semibold text-emerald-700 dark:text-emerald-400 truncate">
+                        {isZh ? '白名单（仅拉取命中项）' : 'Whitelist (Keep matching)'}
+                      </label>
+                      {hasDraftWhitelist ? (
+                        <span className="px-1.5 py-0.5 rounded bg-emerald-100 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-300 text-[10px] font-semibold shrink-0">
+                          {isZh ? '生效中' : 'Active'}
+                        </span>
+                      ) : hasDraftBlacklist ? (
+                        <span className="px-1.5 py-0.5 rounded bg-slate-200 dark:bg-slate-800 text-slate-500 dark:text-slate-400 text-[10px] font-medium shrink-0">
+                          {isZh ? '已禁用' : 'Disabled'}
+                        </span>
+                      ) : null}
+                    </div>
+                    {hasDraftWhitelist && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setPolicyDraftWhitelistText('');
+                          setPolicyError(null);
+                        }}
+                        className="text-[11px] text-slate-500 hover:text-slate-800 dark:hover:text-slate-200 shrink-0"
+                      >
+                        {isZh ? '清空以切换' : 'Clear'}
+                      </button>
+                    )}
+                  </div>
+                  <textarea
+                    rows={5}
+                    disabled={hasDraftBlacklist}
+                    value={policyDraftWhitelistText}
+                    onChange={(e) => {
+                      const val = e.target.value;
+                      setPolicyDraftWhitelistText(val);
+                      if (val.trim()) setPolicyDraftBlacklistText('');
+                      setPolicyError(null);
+                    }}
+                    placeholder={
+                      hasDraftBlacklist
+                        ? isZh
+                          ? '已设置黑名单，白名单已禁用（清空黑名单后可启用）'
+                          : 'Disabled while blacklist is set (clear blacklist to enable)'
+                        : isZh
+                          ? '每行一条，支持 * 通配符：\n*.example.com\nexample.com\napi.*'
+                          : 'One per line, * wildcards:\n*.example.com\nexample.com\napi.*'
+                    }
+                    className={`w-full px-3 py-2 rounded-lg border font-mono text-xs leading-relaxed focus:outline-none ${
+                      hasDraftBlacklist
+                        ? 'border-slate-200 dark:border-slate-800 bg-slate-100 dark:bg-slate-900/80 text-slate-400 dark:text-slate-500 cursor-not-allowed'
+                        : 'border-emerald-200 dark:border-emerald-900/70 bg-slate-50 dark:bg-slate-950 focus:ring-2 focus:ring-emerald-600'
+                    }`}
+                  />
+                </div>
+
+                <div className={`space-y-1.5 transition-opacity ${hasDraftWhitelist ? 'opacity-55' : ''}`}>
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="flex items-center gap-1.5 min-w-0">
+                      <label className="font-semibold text-red-700 dark:text-red-400 truncate">
+                        {isZh ? '黑名单（排除命中项）' : 'Blacklist (Exclude matching)'}
+                      </label>
+                      {hasDraftBlacklist ? (
+                        <span className="px-1.5 py-0.5 rounded bg-red-100 dark:bg-red-950/60 text-red-700 dark:text-red-300 text-[10px] font-semibold shrink-0">
+                          {isZh ? '生效中' : 'Active'}
+                        </span>
+                      ) : hasDraftWhitelist ? (
+                        <span className="px-1.5 py-0.5 rounded bg-slate-200 dark:bg-slate-800 text-slate-500 dark:text-slate-400 text-[10px] font-medium shrink-0">
+                          {isZh ? '已禁用' : 'Disabled'}
+                        </span>
+                      ) : null}
+                    </div>
+                    {hasDraftBlacklist && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setPolicyDraftBlacklistText('');
+                          setPolicyError(null);
+                        }}
+                        className="text-[11px] text-slate-500 hover:text-slate-800 dark:hover:text-slate-200 shrink-0"
+                      >
+                        {isZh ? '清空以切换' : 'Clear'}
+                      </button>
+                    )}
+                  </div>
+                  <textarea
+                    rows={5}
+                    disabled={hasDraftWhitelist}
+                    value={policyDraftBlacklistText}
+                    onChange={(e) => {
+                      const val = e.target.value;
+                      setPolicyDraftBlacklistText(val);
+                      if (val.trim()) setPolicyDraftWhitelistText('');
+                      setPolicyError(null);
+                    }}
+                    placeholder={
+                      hasDraftWhitelist
+                        ? isZh
+                          ? '已设置白名单，黑名单已禁用（清空白名单后可启用）'
+                          : 'Disabled while whitelist is set (clear whitelist to enable)'
+                        : isZh
+                          ? '每行一条，支持 * 通配符：\n_acme-challenge*\n_dmarc*\ntest.example.com'
+                          : 'One per line, * wildcards:\n_acme-challenge*\n_dmarc*\ntest.example.com'
+                    }
+                    className={`w-full px-3 py-2 rounded-lg border font-mono text-xs leading-relaxed focus:outline-none ${
+                      hasDraftWhitelist
+                        ? 'border-slate-200 dark:border-slate-800 bg-slate-100 dark:bg-slate-900/80 text-slate-400 dark:text-slate-500 cursor-not-allowed'
+                        : 'border-red-200 dark:border-red-900/70 bg-slate-50 dark:bg-slate-950 focus:ring-2 focus:ring-red-600'
+                    }`}
+                  />
                 </div>
               </div>
 
-              {policyDraftMode !== 'none' && (
-                <div>
-                  <label className="block font-medium text-slate-800 dark:text-slate-200 mb-1">
-                    {policyDraftMode === 'whitelist'
-                      ? isZh
-                        ? '白名单匹配规则（每行一条，支持 * 通配符）'
-                        : 'Whitelist Patterns (one per line, * wildcards supported)'
-                      : isZh
-                        ? '黑名单排除规则（每行一条，支持 * 通配符）'
-                        : 'Blacklist Patterns (one per line, * wildcards supported)'}
-                  </label>
-                  <textarea
-                    rows={4}
-                    value={policyDraftPatternsText}
-                    onChange={(e) => setPolicyDraftPatternsText(e.target.value)}
-                    placeholder={
-                      isZh
-                        ? '示例：\n*.example.com\napi.*\n_acme-challenge*\nmail.test.org'
-                        : 'Examples:\n*.example.com\napi.*\n_acme-challenge*\nmail.test.org'
-                    }
-                    className="w-full px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 font-mono text-xs leading-relaxed focus:outline-none focus:ring-2 focus:ring-blue-600"
-                  />
-                  <p className="mt-1 text-[11px] text-slate-500 dark:text-slate-400">
-                    {isZh
-                      ? '规则可匹配主域名（example.com）、完整主机名（api.example.com）或子域前缀（www / _dmarc*）。'
-                      : 'Matches against root domain (example.com), full FQDN (api.example.com), or host label (www / _dmarc*).'}
-                  </p>
-                </div>
-              )}
+              <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                {isZh
+                  ? '规则可匹配主域名（example.com）、完整主机名（api.example.com）或子域前缀（www / _acme*）；黑白名单均留空时默认全量拉取。'
+                  : 'Patterns match root domain (example.com), full FQDN (api.example.com), or host label (www / _acme*). Leave both empty to pull everything.'}
+              </p>
 
               <div>
                 <div className="flex items-center justify-between mb-2">
@@ -2945,22 +3057,36 @@ export function DnsRecordsPanel({
                 </div>
               </div>
 
-              <div className="flex justify-end gap-2 pt-3 border-t border-slate-200 dark:border-slate-800">
+              <div className="flex items-center justify-between gap-2 pt-3 border-t border-slate-200 dark:border-slate-800">
                 <button
                   type="button"
-                  onClick={() => setShowPolicyModal(false)}
-                  className="px-4 py-2 rounded-lg border border-slate-200 dark:border-slate-700"
+                  onClick={() => {
+                    setPolicyDraftWhitelistText('');
+                    setPolicyDraftBlacklistText('');
+                    setPolicyDraftRecordTypes([]);
+                    setPolicyError(null);
+                  }}
+                  className="text-xs text-slate-500 hover:text-slate-800 dark:hover:text-slate-200"
                 >
-                  {isZh ? '取消' : 'Cancel'}
+                  {isZh ? '重置为全量拉取' : 'Reset All Filters'}
                 </button>
-                <button
-                  type="submit"
-                  disabled={policyBusy}
-                  className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-blue-600 text-white font-semibold hover:bg-blue-700 disabled:opacity-50"
-                >
-                  {policyBusy ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Save className="w-3.5 h-3.5" />}
-                  {isZh ? '保存拉取策略' : 'Save Pull Policy'}
-                </button>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setShowPolicyModal(false)}
+                    className="px-4 py-2 rounded-lg border border-slate-200 dark:border-slate-700"
+                  >
+                    {isZh ? '取消' : 'Cancel'}
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={policyBusy}
+                    className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-blue-600 text-white font-semibold hover:bg-blue-700 disabled:opacity-50"
+                  >
+                    {policyBusy ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Save className="w-3.5 h-3.5" />}
+                    {isZh ? '保存拉取策略' : 'Save Pull Policy'}
+                  </button>
+                </div>
               </div>
             </form>
           </div>

@@ -197,6 +197,8 @@ function createDefaultState(): PersistedState {
     dnsPullPolicy: {
       filterMode: 'none',
       patterns: [],
+      whitelistPatterns: [],
+      blacklistPatterns: [],
       recordTypes: [],
       updatedAt: now,
     },
@@ -360,12 +362,42 @@ class DataStore {
             j.type === 'monitor_sweep',
         }));
         const parsedPullPolicy = parsed.dnsPullPolicy ?? defaults.dnsPullPolicy;
+        const legacyMode =
+          parsedPullPolicy.filterMode === 'whitelist' || parsedPullPolicy.filterMode === 'blacklist'
+            ? parsedPullPolicy.filterMode
+            : 'none';
+        const legacyPatterns = Array.isArray(parsedPullPolicy.patterns)
+          ? parsedPullPolicy.patterns.map(String).filter(Boolean)
+          : [];
+        const rawWhitelist = Array.isArray(parsedPullPolicy.whitelistPatterns)
+          ? parsedPullPolicy.whitelistPatterns.map(String).filter(Boolean)
+          : legacyMode === 'whitelist'
+            ? legacyPatterns
+            : [];
+        const rawBlacklist = Array.isArray(parsedPullPolicy.blacklistPatterns)
+          ? parsedPullPolicy.blacklistPatterns.map(String).filter(Boolean)
+          : legacyMode === 'blacklist'
+            ? legacyPatterns
+            : [];
+        // Enforce strict mutual exclusion: whitelist and blacklist cannot both be active
+        let finalMode: DnsPullPolicy['filterMode'] = 'none';
+        let whitelistPatterns: string[] = [];
+        let blacklistPatterns: string[] = [];
+        if (legacyMode === 'blacklist' && rawBlacklist.length > 0) {
+          finalMode = 'blacklist';
+          blacklistPatterns = rawBlacklist;
+        } else if (rawWhitelist.length > 0) {
+          finalMode = 'whitelist';
+          whitelistPatterns = rawWhitelist;
+        } else if (rawBlacklist.length > 0) {
+          finalMode = 'blacklist';
+          blacklistPatterns = rawBlacklist;
+        }
         const mergedPullPolicy: DnsPullPolicy = {
-          filterMode:
-            parsedPullPolicy.filterMode === 'whitelist' || parsedPullPolicy.filterMode === 'blacklist'
-              ? parsedPullPolicy.filterMode
-              : 'none',
-          patterns: Array.isArray(parsedPullPolicy.patterns) ? parsedPullPolicy.patterns.map(String) : [],
+          filterMode: finalMode,
+          patterns: finalMode === 'whitelist' ? whitelistPatterns : finalMode === 'blacklist' ? blacklistPatterns : [],
+          whitelistPatterns,
+          blacklistPatterns,
           recordTypes: Array.isArray(parsedPullPolicy.recordTypes) ? parsedPullPolicy.recordTypes : [],
           updatedAt: parsedPullPolicy.updatedAt,
         };

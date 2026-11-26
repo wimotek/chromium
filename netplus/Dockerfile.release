@@ -10,8 +10,9 @@
 #   docker buildx build -f Dockerfile.release --platform linux/amd64,linux/arm64 --push -t <image>:<tag> .
 # ==============================================================================
 
-# Stage 1: Production Runtime Dependencies Only (dotenv, express, nodemailer)
-FROM node:22-alpine AS prod-deps
+# Stage 1: Production Runtime Dependencies Only (pure JS: dotenv, express, nodemailer)
+# Runs on native $BUILDPLATFORM to avoid QEMU SIGILL (exit 132) during linux/arm64 multi-arch builds
+FROM --platform=$BUILDPLATFORM node:22-alpine AS prod-deps
 WORKDIR /app
 COPY package.json package-lock.json* ./
 RUN if [ -f package-lock.json ]; then npm ci --omit=dev; else npm install --omit=dev; fi \

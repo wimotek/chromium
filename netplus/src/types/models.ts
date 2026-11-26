@@ -119,9 +119,14 @@ export interface ManagedDomain {
 }
 
 export interface DnsPullPolicy {
+  /** Active filter mode: mutually exclusive whitelist or blacklist, or none */
   filterMode: 'none' | 'whitelist' | 'blacklist';
-  /** Wildcard/substring patterns matched against domain, fqdn, or host name */
+  /** Active pattern list matching filterMode */
   patterns: string[];
+  /** Whitelist patterns (mutually exclusive with blacklistPatterns) */
+  whitelistPatterns?: string[];
+  /** Blacklist patterns (mutually exclusive with whitelistPatterns) */
+  blacklistPatterns?: string[];
   /** Empty means all record types are allowed */
   recordTypes: DnsRecordType[];
   updatedAt?: string;
