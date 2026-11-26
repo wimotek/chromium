@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   ShieldCheck,
   QrCode,
@@ -62,8 +62,38 @@ export function SecurityPolicyView({
 }: SecurityPolicyViewProps) {
   const t = TRANSLATIONS[locale];
   const [draft, setDraft] = useState<AuthPolicyConfig>(policy);
+  const draftRef = useRef<AuthPolicyConfig>(policy);
+  const pendingSavesRef = useRef(0);
   const [saving, setSaving] = useState(false);
   const [savedOk, setSavedOk] = useState(false);
+
+  useEffect(() => {
+    if (pendingSavesRef.current === 0) {
+      draftRef.current = policy;
+      setDraft(policy);
+    }
+  }, [policy]);
+
+  async function handleToggleSwitch(key: keyof AuthPolicyConfig, nextValue: boolean) {
+    const nextPolicy: AuthPolicyConfig = { ...draftRef.current, [key]: nextValue };
+    draftRef.current = nextPolicy;
+    setDraft(nextPolicy);
+    pendingSavesRef.current += 1;
+    setSaving(true);
+    setSavedOk(false);
+    try {
+      await onSavePolicy(nextPolicy);
+      if (pendingSavesRef.current === 1) {
+        setSavedOk(true);
+        window.setTimeout(() => setSavedOk(false), 1800);
+      }
+    } finally {
+      pendingSavesRef.current = Math.max(0, pendingSavesRef.current - 1);
+      if (pendingSavesRef.current === 0) {
+        setSaving(false);
+      }
+    }
+  }
 
   // Live TOTP 2FA Enrollment State
   const [totpEnroll, setTotpEnroll] = useState<{
@@ -203,7 +233,18 @@ export function SecurityPolicyView({
                 Authentication Methods &amp; Rollout Priority
               </h2>
             </div>
-            <span className="text-xs text-slate-500">Immediate effect on Hosted Login</span>
+            <span className="text-xs text-slate-500 flex items-center gap-1.5">
+              {savedOk ? (
+                <span className="text-emerald-600 dark:text-emerald-400 inline-flex items-center gap-1 font-medium">
+                  <CheckCircle2 className="w-3.5 h-3.5" />
+                  {locale === 'zh-CN' || locale === 'zh-TW' ? '已实时生效' : 'Applied live'}
+                </span>
+              ) : (
+                <span>
+                  {locale === 'zh-CN' || locale === 'zh-TW' ? '开关切换即时生效于托管登录页' : 'Immediate effect on Hosted Login'}
+                </span>
+              )}
+            </span>
           </div>
 
           {toggleItems.map((item) => {
@@ -223,7 +264,7 @@ export function SecurityPolicyView({
                   role="switch"
                   aria-checked={checked}
                   aria-label={item.title}
-                  onClick={() => setDraft((prev) => ({ ...prev, [item.key]: !checked }))}
+                  onClick={() => void handleToggleSwitch(item.key, !checked)}
                   className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors ${
                     checked ? 'bg-indigo-600' : 'bg-slate-300 dark:bg-slate-700'
                   }`}

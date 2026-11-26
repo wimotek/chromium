@@ -493,6 +493,8 @@ func NewRouter(cfgMgr *config.Manager, keys *crypto.KeyManager, certSources ...s
 	mux.HandleFunc("GET /api/public/theme", s.handlePublicTheme)
 	mux.HandleFunc("GET /api/applications", s.requireAdmin(s.handleListApps))
 	mux.HandleFunc("POST /api/applications", s.requireAdmin(s.handleCreateApp))
+	mux.HandleFunc("PUT /api/applications/{id}", s.requireAdmin(s.handleUpdateApp))
+	mux.HandleFunc("POST /api/applications/{id}/reset-secret", s.requireAdmin(s.handleResetAppSecret))
 	mux.HandleFunc("DELETE /api/applications/{id}", s.requireAdmin(s.handleDeleteApp))
 	mux.HandleFunc("GET /api/applications/{clientId}/theme", s.requireAdmin(s.handleGetAppTheme))
 	mux.HandleFunc("PUT /api/applications/{clientId}/theme", s.requireAdmin(s.handleUpdateAppTheme))
@@ -1052,6 +1054,10 @@ func (s *appServer) handleDeviceAuth(w http.ResponseWriter, r *http.Request) {
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if !s.policy.EnableDeviceFlowRfc8628 {
+		writeJSON(w, http.StatusForbidden, map[string]any{"error": "auth_method_disabled", "message": "Device Flow (RFC 8628) is disabled by Auth Policy."})
+		return
+	}
 	if body.ClientID == "" && len(s.apps) > 0 {
 		body.ClientID = s.apps[0].ClientID
 	}
@@ -1369,6 +1375,13 @@ func (s *appServer) handlePasswordLogin(w http.ResponseWriter, r *http.Request) 
 }
 
 func (s *appServer) handleSendEmailOTP(w http.ResponseWriter, r *http.Request) {
+	s.mu.RLock()
+	enabled := s.policy.EnableEmailOtpMagicLink
+	s.mu.RUnlock()
+	if !enabled {
+		writeJSON(w, http.StatusForbidden, map[string]any{"error": "auth_method_disabled", "message": "Email OTP / Magic Link is disabled by Auth Policy."})
+		return
+	}
 	var body struct {
 		Email string `json:"email"`
 	}
@@ -1448,6 +1461,13 @@ func (s *appServer) handleVerifyEmailOTP(w http.ResponseWriter, r *http.Request)
 }
 
 func (s *appServer) handlePasskeyChallenge(w http.ResponseWriter, r *http.Request) {
+	s.mu.RLock()
+	enabled := s.policy.EnablePasskeysWebAuthn
+	s.mu.RUnlock()
+	if !enabled {
+		writeJSON(w, http.StatusForbidden, map[string]any{"error": "auth_method_disabled", "message": "Passkeys (WebAuthn) are disabled by Auth Policy."})
+		return
+	}
 	ch := randomHex(20)
 	host := strings.Split(defaultStr(r.Header.Get("X-Forwarded-Host"), r.Host), ":")[0]
 	if host == "" {
@@ -1710,6 +1730,74 @@ func (s *appServer) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 	s.apps = append([]oauthApplication{created}, s.apps...)
 	s.mu.Unlock()
 	writeJSON(w, http.StatusCreated, map[string]any{"application": created})
+}
+
+func (s *appServer) handleUpdateApp(w http.ResponseWriter, r *http.Request) {
+	key := strings.TrimSpace(r.PathValue("id"))
+	var body struct {
+		Name         string   `json:"name"`
+		Description  string   `json:"description"`
+		RedirectUris string   `json:"redirectUris"`
+		Scopes       []string `json:"scopes"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid_json", "message": "Invalid JSON payload"})
+		return
+	}
+	if strings.TrimSpace(body.Name) == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid_name", "message": "Application name is required"})
+		return
+	}
+	var uris []string
+	for _, line := range strings.Split(body.RedirectUris, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+		if u, err := url.Parse(trimmed); err != nil || (u.Scheme != "http" && u.Scheme != "https") {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid_uri", "message": "Invalid redirect URI: " + trimmed})
+			return
+		}
+		uris = append(uris, trimmed)
+	}
+	if len(uris) == 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid_uris", "message": "At least one http(s) redirect URI is required"})
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i := range s.apps {
+		if s.apps[i].ID == key || s.apps[i].ClientID == key {
+			s.apps[i].Name = strings.TrimSpace(body.Name)
+			s.apps[i].Description = strings.TrimSpace(body.Description)
+			s.apps[i].RedirectUris = uris
+			if len(body.Scopes) > 0 {
+				s.apps[i].Scopes = body.Scopes
+			}
+			writeJSON(w, http.StatusOK, map[string]any{"application": s.apps[i]})
+			return
+		}
+	}
+	writeJSON(w, http.StatusNotFound, map[string]any{"error": "not_found", "message": "Application not found"})
+}
+
+func (s *appServer) handleResetAppSecret(w http.ResponseWriter, r *http.Request) {
+	key := strings.TrimSpace(r.PathValue("id"))
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i := range s.apps {
+		if s.apps[i].ID == key || s.apps[i].ClientID == key {
+			s.apps[i].ClientSecret = "wms_" + randomHex(14)
+			writeJSON(w, http.StatusOK, map[string]any{
+				"ok":           true,
+				"clientId":     s.apps[i].ClientID,
+				"clientSecret": s.apps[i].ClientSecret,
+				"application":  s.apps[i],
+			})
+			return
+		}
+	}
+	writeJSON(w, http.StatusNotFound, map[string]any{"error": "not_found", "message": "Application not found"})
 }
 
 func (s *appServer) handleDeleteApp(w http.ResponseWriter, r *http.Request) {

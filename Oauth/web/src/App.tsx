@@ -319,6 +319,43 @@ export default function App() {
     await fetchProtectedData(sessionToken);
   }
 
+  async function handleUpdateApp(id: string, payload: { name: string; description: string; redirectUris: string }) {
+    if (!sessionToken) return;
+    const res = await fetch(`/api/applications/${encodeURIComponent(id)}`, {
+      method: 'PUT',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${sessionToken}`,
+      },
+      body: JSON.stringify(payload),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      throw new Error(data.message || 'Failed to update application');
+    }
+    if (data.application) {
+      setApplications((prev) => prev.map((a) => (a.id === id ? data.application : a)));
+    } else {
+      await fetchProtectedData(sessionToken);
+    }
+  }
+
+  async function handleResetAppSecret(id: string): Promise<string | null> {
+    if (!sessionToken) return null;
+    const res = await fetch(`/api/applications/${encodeURIComponent(id)}/reset-secret`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${sessionToken}` },
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      throw new Error(data.message || 'Failed to reset client secret');
+    }
+    if (data.application) {
+      setApplications((prev) => prev.map((a) => (a.id === id ? data.application : a)));
+    }
+    return data.clientSecret || null;
+  }
+
   async function handleDeleteApp(id: string) {
     if (!sessionToken) return;
     await fetch(`/api/applications/${id}`, {
@@ -797,6 +834,8 @@ export default function App() {
               locale={locale}
               applications={applications}
               onCreateApp={handleCreateApp}
+              onUpdateApp={handleUpdateApp}
+              onResetSecret={handleResetAppSecret}
               onDeleteApp={handleDeleteApp}
               onTestAppFlow={(clientId) => {
                 setSelectedLabClientId(clientId);

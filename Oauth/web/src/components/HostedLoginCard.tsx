@@ -18,9 +18,8 @@ import {
   getRadiusClasses,
   normalizeLoginTheme,
 } from '../lib/loginTheme';
+import { type AuthModeTab, resolveActiveAuthMode } from '../lib/authPolicy';
 import { BrandMark, ProviderIcon } from './ProviderIcons';
-
-type AuthModeTab = 'password' | 'email_otp' | 'passkey' | 'device';
 
 interface HostedLoginCardProps {
   locale: Locale;
@@ -101,6 +100,7 @@ export function HostedLoginCard({
     ...(policy.enablePasskeysWebAuthn ? [{ id: 'passkey' as const, label: t.tabPasskey }] : []),
     ...(policy.enableDeviceFlowRfc8628 ? [{ id: 'device' as const, label: t.tabDeviceFlow }] : []),
   ];
+  const activeMode = resolveActiveAuthMode(policy, mode);
 
   const isSplit = !compact && (resolvedTheme.layout === 'split_left' || resolvedTheme.layout === 'split_right');
   const isMinimal = resolvedTheme.layout === 'minimal';
@@ -380,13 +380,13 @@ ${resolvedTheme.customCss || ''}
               key={tab.id}
               type="button"
               role="tab"
-              aria-selected={mode === tab.id}
+              aria-selected={activeMode === tab.id}
               onClick={() => {
                 setMode(tab.id);
                 setLocalError(null);
               }}
               className={`px-2 py-1.5 text-[11px] font-medium ${radius.control} transition-colors truncate ${
-                mode === tab.id
+                activeMode === tab.id
                   ? isDarkSurface
                     ? 'bg-slate-900 text-white shadow-xs'
                     : 'bg-white dark:bg-[#111827] text-slate-900 dark:text-white shadow-xs'
@@ -402,7 +402,7 @@ ${resolvedTheme.customCss || ''}
       )}
 
       {/* Mode 1: Argon2id Email + Password */}
-      {mode === 'password' && (
+      {activeMode === 'password' && policy.enablePasswordArgon2id && (
         <form onSubmit={handleSubmitPassword} className="mt-4 space-y-3">
           <div>
             <label htmlFor={`hosted-login-email-${scopeUid}`} className={`block text-xs font-medium ${labelTextClass} mb-1 i18n-safe`}>
@@ -469,7 +469,7 @@ ${resolvedTheme.customCss || ''}
       )}
 
       {/* Mode 2: Passwordless Email OTP */}
-      {mode === 'email_otp' && (
+      {activeMode === 'email_otp' && policy.enableEmailOtpMagicLink && (
         <div className="mt-4 space-y-3">
           <form onSubmit={handleSendOtp} className="space-y-2.5">
             <div>
@@ -525,7 +525,7 @@ ${resolvedTheme.customCss || ''}
       )}
 
       {/* Mode 3: Passkeys (WebAuthn / FIDO2) */}
-      {mode === 'passkey' && (
+      {activeMode === 'passkey' && policy.enablePasskeysWebAuthn && (
         <div className="mt-4 space-y-3 text-center">
           <div
             className={`p-4 ${radius.control} border space-y-2 ${
@@ -555,7 +555,7 @@ ${resolvedTheme.customCss || ''}
       )}
 
       {/* Mode 4: OAuth 2.0 Device Flow (RFC 8628) */}
-      {mode === 'device' && (
+      {activeMode === 'device' && policy.enableDeviceFlowRfc8628 && (
         <div className="mt-4 space-y-3">
           {!deviceSession ? (
             <button
@@ -609,23 +609,38 @@ ${resolvedTheme.customCss || ''}
         </div>
       )}
 
-      {/* Divider */}
-      <div className="relative my-5">
-        <div className="absolute inset-0 flex items-center" aria-hidden="true">
-          <div className={`w-full border-t ${isDarkSurface ? 'border-slate-800' : 'border-slate-200 dark:border-slate-800'}`} />
+      {/* Notice when all first-party auth methods and social connectors are disabled */}
+      {activeMode === null && enabledCount === 0 && (
+        <div
+          className={`mt-4 p-3.5 ${radius.control} border border-amber-200 dark:border-amber-900/60 bg-amber-50 dark:bg-amber-950/30 text-xs text-amber-800 dark:text-amber-300 text-center leading-relaxed`}
+        >
+          {locale === 'zh-CN' || locale === 'zh-TW'
+            ? '所有第一方登录方式与社交连接器均已关闭。请在「认证与风控策略」或「社交连接器」中至少开启一种登录方式。'
+            : 'All first-party authentication methods and social connectors are disabled. Enable at least one method in Auth & Risk Policy or Social Connectors.'}
         </div>
-        <div className="relative flex justify-center">
-          <span className="wm-divider-chip bg-white dark:bg-[#111827] px-3 text-xs text-slate-500 dark:text-slate-400 i18n-safe">
-            {t.orContinueWith}
-          </span>
+      )}
+
+      {/* Divider (only when both first-party auth and social connectors are active) */}
+      {activeMode !== null && enabledCount > 0 && (
+        <div className="relative my-5">
+          <div className="absolute inset-0 flex items-center" aria-hidden="true">
+            <div className={`w-full border-t ${isDarkSurface ? 'border-slate-800' : 'border-slate-200 dark:border-slate-800'}`} />
+          </div>
+          <div className="relative flex justify-center">
+            <span className="wm-divider-chip bg-white dark:bg-[#111827] px-3 text-xs text-slate-500 dark:text-slate-400 i18n-safe">
+              {t.orContinueWith}
+            </span>
+          </div>
         </div>
-      </div>
+      )}
 
       {/* Adaptive Social Connectors Zone */}
       {enabledCount === 0 ? (
-        <p className={`text-xs text-center ${mutedTextClass} py-2 i18n-safe leading-relaxed`}>
-          {t.noConnectorsEnabled}
-        </p>
+        activeMode !== null ? (
+          <p className={`text-xs text-center ${mutedTextClass} mt-4 py-2 i18n-safe leading-relaxed`}>
+            {t.noConnectorsEnabled}
+          </p>
+        ) : null
       ) : (
         <div className="space-y-2">
           <div className={`grid ${resolvedTheme.socialLayout === 'grid' ? 'grid-cols-2' : 'grid-cols-1'} gap-2`}>
