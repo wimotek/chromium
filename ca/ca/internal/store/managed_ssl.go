@@ -141,7 +141,7 @@ func (s *Store) ListManagedUpstreams(ctx context.Context) ([]ManagedUpstreamReco
 		return nil, err
 	}
 	defer rows.Close()
-	var out []ManagedUpstreamRecord
+	out := make([]ManagedUpstreamRecord, 0)
 	for rows.Next() {
 		var r ManagedUpstreamRecord
 		var reqEab, en, probeOk int
@@ -224,7 +224,7 @@ func (s *Store) ListManagedDnsCredentials(ctx context.Context, owner string) ([]
 		return nil, err
 	}
 	defer rows.Close()
-	var out []ManagedDnsCredentialRecord
+	out := make([]ManagedDnsCredentialRecord, 0)
 	for rows.Next() {
 		var r ManagedDnsCredentialRecord
 		if err := rows.Scan(&r.ID, &r.OwnerUsername, &r.Name, &r.Provider, &r.ZoneHint, &r.SecretEnc, &r.SecretPrefix, &r.CreatedAt, &r.UpdatedAt); err != nil {
@@ -334,7 +334,7 @@ func (s *Store) ListManagedCertificates(ctx context.Context, owner string) ([]Ma
 		return nil, err
 	}
 	defer rows.Close()
-	var out []ManagedCertificateRecord
+	out := make([]ManagedCertificateRecord, 0)
 	for rows.Next() {
 		var r ManagedCertificateRecord
 		var autoRenew int
@@ -402,7 +402,7 @@ func (s *Store) ListManagedDeployLogs(ctx context.Context, owner string, limit i
 		return nil, err
 	}
 	defer rows.Close()
-	var out []ManagedDeployLogRecord
+	out := make([]ManagedDeployLogRecord, 0)
 	for rows.Next() {
 		var r ManagedDeployLogRecord
 		if err := rows.Scan(&r.ID, &r.CertID, &r.OwnerUsername, &r.CommonName, &r.Action, &r.Target, &r.Status, &r.Detail, &r.CreatedAt); err != nil {

@@ -12,11 +12,8 @@ import {
   Check,
   Fingerprint,
   Mail,
-  ChevronDown,
-  ChevronUp,
   Layers,
   Webhook,
-  Info,
 } from 'lucide-react';
 import {
   api,
@@ -31,6 +28,7 @@ import { solvePowChallenge, type PowChallenge } from '../lib/pow';
 import { parseAdvanceDays } from '../lib/pki-utils';
 import { downloadProjectBundle } from '../lib/download';
 import { LOCALE_OPTIONS, type LocaleCode, type LocaleDict } from '../lib/i18n';
+import { FloatingToast } from './Toast';
 
 function base64UrlToUint8Array(b64url: string): Uint8Array {
   const pad = '='.repeat((4 - (b64url.length % 4)) % 4);
@@ -122,9 +120,13 @@ export const AuthGate: React.FC<AuthGateProps> = ({
     }
   };
 
-  // Auth mode: unified wimotek/OAuth primary + collapsible local login/register
+  // Auth mode: separated OAuth SSO vs local login/register with explicit fallback switch
   const [authTab, setAuthTab] = useState<'login' | 'register'>('login');
-  const [showLocalAuth, setShowLocalAuth] = useState(false);
+  const [useLocalFallback, setUseLocalFallback] = useState<boolean>(() => {
+    if (typeof window === 'undefined') return false;
+    const params = new URLSearchParams(window.location.search);
+    return params.get('auth') === 'local' || params.get('mode') === 'local';
+  });
   const [oauthProviders, setOauthProviders] = useState<OAuthProviderInfo[]>([]);
 
   // Registration + Email verification state
@@ -156,6 +158,18 @@ export const AuthGate: React.FC<AuthGateProps> = ({
   };
 
   useEffect(() => {
+    if (typeof window !== 'undefined') {
+      const params = new URLSearchParams(window.location.search);
+      const oauthErr = params.get('oauth_error');
+      if (oauthErr) {
+        setError(oauthErr);
+        params.delete('oauth_error');
+        const nextQuery = params.toString();
+        const nextUrl = `${window.location.pathname}${nextQuery ? `?${nextQuery}` : ''}${window.location.hash}`;
+        window.history.replaceState(null, '', nextUrl);
+      }
+    }
+
     let active = true;
     (async () => {
       try {
@@ -165,10 +179,6 @@ export const AuthGate: React.FC<AuthGateProps> = ({
         setPreviewMode(Boolean(st.preview_mode));
         if (st.oauth_providers) {
           setOauthProviders(st.oauth_providers);
-          const wMeta = st.oauth_providers.find((p) => p.provider === 'wimotek');
-          if (!st.preview_mode && !wMeta?.configured) {
-            setShowLocalAuth(true);
-          }
         }
         if (st.org_name) setOrgName(st.org_name);
         if (st.base_url) setBaseUrl(st.base_url);
@@ -410,8 +420,20 @@ export const AuthGate: React.FC<AuthGateProps> = ({
   const handleSocialLogin = async (provider: OAuthProvider) => {
     setError('');
     try {
+      const inIframe = typeof window !== 'undefined' && window.self !== window.top;
+      if (provider === 'wimotek' && !inIframe) {
+        const wMeta = oauthProviders.find((p) => p.provider === 'wimotek');
+        if (wMeta?.configured) {
+          window.location.href = '/login';
+          return;
+        }
+      }
       const info = await api.getOAuthUrl(provider, 'login');
       if (info.configured && info.url) {
+        if (!inIframe) {
+          window.location.href = info.url;
+          return;
+        }
         const popup = window.open(info.url, `oauth_${provider}`, 'width=560,height=680');
         if (!popup) {
           setError('Popup was blocked. Please allow popups for OAuth login.');
@@ -519,126 +541,137 @@ export const AuthGate: React.FC<AuthGateProps> = ({
     }
   };
 
+  const wimotekMeta = oauthProviders.find((p) => p.provider === 'wimotek');
+  const wimotekConfigured = Boolean(wimotekMeta?.configured);
+  const showOAuthPrimary = wimotekConfigured && !useLocalFallback;
+  const issuerHost = (() => {
+    if (!wimotekMeta?.issuer) return '';
+    try {
+      return new URL(wimotekMeta.issuer).host;
+    } catch {
+      return wimotekMeta.issuer;
+    }
+  })();
+  const configuredDirect = oauthProviders.filter((p) => p.provider !== 'wimotek' && p.configured);
+
   return (
-    <div className="min-h-screen bg-[#F1F5F9] text-slate-900 flex flex-col">
-      {/* Unified Minimal Top Bar */}
-      <header className="w-full max-w-[1040px] mx-auto px-5 sm:px-8 pt-6 pb-2 flex items-center justify-between gap-4">
-        <div className="flex items-center gap-2.5 min-w-0">
-          <img
-            src="/favicon.svg"
-            alt=""
-            aria-hidden="true"
-            className="w-7 h-7 rounded-md shrink-0"
-          />
-          <div className="flex items-baseline gap-2 min-w-0">
-            <span className="font-display text-base font-bold tracking-tight text-slate-900 whitespace-nowrap">
-              {t.app.name}
-            </span>
-            <span className="hidden sm:inline text-xs text-slate-500 font-medium truncate">
-              Enterprise PKI Console
-            </span>
+    <div className="min-h-screen grid grid-cols-1 lg:grid-cols-12 bg-[#F8FAFC] text-slate-900">
+      <FloatingToast error={error} onDismissError={() => setError('')} />
+
+      {/* Classic Dark Slate Left Brand & Architecture Column */}
+      <aside className="lg:col-span-5 bg-[#0F172A] text-slate-100 p-7 sm:p-10 lg:p-12 flex flex-col justify-between gap-10 border-b lg:border-b-0 lg:border-e border-slate-800">
+        <div className="space-y-10">
+          {/* Top Brand Bar + Dark Language Selector */}
+          <div className="flex items-center justify-between gap-4">
+            <div className="flex items-center gap-2.5 min-w-0">
+              <img
+                src="/favicon.svg"
+                alt=""
+                aria-hidden="true"
+                className="w-7 h-7 rounded-md shrink-0"
+              />
+              <span className="font-display text-lg font-bold tracking-tight text-white whitespace-nowrap">
+                {t.app.name}
+              </span>
+            </div>
+
+            <div className="flex items-center gap-1.5 shrink-0">
+              <Globe className="w-4 h-4 text-slate-400 shrink-0" aria-hidden="true" />
+              <label htmlFor="auth-lang" className="sr-only">
+                Language
+              </label>
+              <select
+                id="auth-lang"
+                value={locale}
+                onChange={(e) => onLocaleChange(e.target.value as LocaleCode)}
+                className="bg-slate-800 text-slate-100 text-xs font-medium rounded-lg px-2.5 py-1.5 border border-slate-700 hover:border-slate-600 focus:outline-none focus:border-teal-400 cursor-pointer"
+              >
+                {LOCALE_OPTIONS.map((opt) => (
+                  <option key={opt.code} value={opt.code}>
+                    {opt.label}
+                  </option>
+                ))}
+              </select>
+            </div>
+          </div>
+
+          {/* Editorial Dark Hero */}
+          <div className="space-y-4">
+            <h1 className="font-display text-3xl lg:text-[34px] font-bold tracking-tight text-white leading-[1.18] text-balance">
+              {t.app.tagline}
+            </h1>
+            <p className="text-sm text-slate-300 leading-relaxed max-w-md">
+              {t.app.subtitle}
+            </p>
+          </div>
+
+          {/* Architectural Capability Grid */}
+          <div className="pt-8 border-t border-slate-800 grid grid-cols-1 sm:grid-cols-2 gap-6">
+            <div className="space-y-1.5">
+              <div className="flex items-center gap-2 text-xs font-semibold text-white">
+                <ShieldCheck className="w-4 h-4 text-teal-400 shrink-0" aria-hidden="true" />
+                <span>Two-Tier ECDSA P-256 CA</span>
+              </div>
+              <p className="text-xs text-slate-400 leading-relaxed">
+                Offline-style Root CA signing an operational Intermediate CA with CRL &amp; OCSP.
+              </p>
+            </div>
+
+            <div className="space-y-1.5">
+              <div className="flex items-center gap-2 text-xs font-semibold text-white">
+                <Layers className="w-4 h-4 text-teal-400 shrink-0" aria-hidden="true" />
+                <span>8 Enterprise Templates</span>
+              </div>
+              <p className="text-xs text-slate-400 leading-relaxed">
+                TLS Server, PDF Signing, Entra ID CBA, Code Signing, S/MIME, Wi-Fi EAP &amp; IoT.
+              </p>
+            </div>
+
+            <div className="space-y-1.5">
+              <div className="flex items-center gap-2 text-xs font-semibold text-white">
+                <KeyRound className="w-4 h-4 text-teal-400 shrink-0" aria-hidden="true" />
+                <span>Vault, ACME v2 &amp; MCP</span>
+              </div>
+              <p className="text-xs text-slate-400 leading-relaxed">
+                Scoped user tokens, ACME EAB proxy, OpenBao/Vault PKI routes, and MCP server.
+              </p>
+            </div>
+
+            <div className="space-y-1.5">
+              <div className="flex items-center gap-2 text-xs font-semibold text-white">
+                <Webhook className="w-4 h-4 text-teal-400 shrink-0" aria-hidden="true" />
+                <span>Expiry Alerts &amp; Webhook</span>
+              </div>
+              <p className="text-xs text-slate-400 leading-relaxed">
+                Automated expiration scans &amp; personal ServerChan-compatible webhook relay.
+              </p>
+            </div>
           </div>
         </div>
 
-        <div className="flex items-center gap-2 shrink-0">
-          <Globe className="w-4 h-4 text-slate-400 shrink-0" aria-hidden="true" />
-          <label htmlFor="auth-lang" className="sr-only">
-            Language
-          </label>
-          <select
-            id="auth-lang"
-            value={locale}
-            onChange={(e) => onLocaleChange(e.target.value as LocaleCode)}
-            className="bg-white text-slate-700 text-xs font-medium rounded-lg px-2.5 py-1.5 border border-slate-200 hover:border-slate-300 focus:outline-none focus:border-teal-600 cursor-pointer"
-          >
-            {LOCALE_OPTIONS.map((opt) => (
-              <option key={opt.code} value={opt.code}>
-                {opt.label}
-              </option>
-            ))}
-          </select>
+        <div className="pt-6 border-t border-slate-800 text-[11px] font-mono text-slate-400 flex flex-wrap items-center gap-x-2.5 gap-y-1">
+          <span>Go 1.24 · CGO_ENABLED=0</span>
+          <span aria-hidden="true">·</span>
+          <span>RFC 5280 / 6960 / 8555</span>
+          <span aria-hidden="true">·</span>
+          <span>SQLite &amp; MySQL</span>
         </div>
-      </header>
+      </aside>
 
-      {/* Cohesive Centered Architectural Console Sheet */}
-      <main className="flex-1 flex items-center justify-center px-4 sm:px-8 py-6 lg:py-10">
+      {/* Right Authentication / First-Run Wizard Column */}
+      <main className="lg:col-span-7 flex items-center justify-center p-6 sm:p-10 lg:p-12">
         <div
           className={`w-full ${
-            needsSetup ? 'max-w-[1020px]' : 'max-w-[940px]'
-          } bg-white border border-slate-200/90 rounded-2xl shadow-[0_1px_3px_rgba(15,23,42,0.04),0_12px_32px_-12px_rgba(15,23,42,0.08)] overflow-hidden grid grid-cols-1 lg:grid-cols-12`}
+            needsSetup ? 'max-w-xl' : 'max-w-md'
+          } rounded-2xl border border-slate-200 bg-white p-7 sm:p-8 shadow-sm space-y-6`}
         >
-          {/* Harmonized Light-Slate Left / Start Architectural Summary */}
-          <aside className="lg:col-span-5 bg-[#F8FAFC] border-b lg:border-b-0 lg:border-e border-slate-200/80 p-7 sm:p-9 lg:p-10 flex flex-col justify-between gap-8">
-            <div className="space-y-6">
-              <div className="space-y-2.5">
-                <div className="inline-flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider text-teal-700">
-                  <ShieldCheck className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
-                  <span>Two-Tier ECDSA P-256 CA</span>
-                </div>
-                <h1 className="font-display text-2xl lg:text-[26px] font-bold tracking-tight text-slate-900 leading-[1.22] text-balance">
-                  {t.app.tagline}
-                </h1>
-                <p className="text-sm text-slate-600 leading-relaxed">
-                  {t.app.subtitle}
-                </p>
-              </div>
-
-              <div className="pt-5 border-t border-slate-200/80 space-y-4">
-                <div className="flex items-start gap-3">
-                  <div className="w-8 h-8 rounded-lg bg-white border border-slate-200 text-teal-700 flex items-center justify-center shrink-0 mt-0.5">
-                    <Layers className="w-4 h-4" aria-hidden="true" />
-                  </div>
-                  <div className="space-y-0.5 min-w-0">
-                    <div className="text-xs font-semibold text-slate-900">8 Enterprise Templates</div>
-                    <p className="text-xs text-slate-500 leading-relaxed">
-                      TLS Server, PDF Signing, Entra ID CBA, Code Signing, S/MIME, Wi-Fi EAP &amp; IoT.
-                    </p>
-                  </div>
-                </div>
-
-                <div className="flex items-start gap-3">
-                  <div className="w-8 h-8 rounded-lg bg-white border border-slate-200 text-teal-700 flex items-center justify-center shrink-0 mt-0.5">
-                    <KeyRound className="w-4 h-4" aria-hidden="true" />
-                  </div>
-                  <div className="space-y-0.5 min-w-0">
-                    <div className="text-xs font-semibold text-slate-900">Scoped Tokens, Vault &amp; MCP</div>
-                    <p className="text-xs text-slate-500 leading-relaxed">
-                      Role-based active quotas, OpenBao/Vault PKI routes, ACME discovery, and MCP agent server.
-                    </p>
-                  </div>
-                </div>
-
-                <div className="flex items-start gap-3">
-                  <div className="w-8 h-8 rounded-lg bg-white border border-slate-200 text-teal-700 flex items-center justify-center shrink-0 mt-0.5">
-                    <Webhook className="w-4 h-4" aria-hidden="true" />
-                  </div>
-                  <div className="space-y-0.5 min-w-0">
-                    <div className="text-xs font-semibold text-slate-900">Expiry Alerts &amp; Webhook Relay</div>
-                    <p className="text-xs text-slate-500 leading-relaxed">
-                      Automated reminders &amp; personal ServerChan-compatible webhook forwarding.
-                    </p>
-                  </div>
-                </div>
-              </div>
+          {loadingStatus ? (
+            <div className="space-y-4 py-6" aria-busy="true">
+              <div className="h-6 w-2/3 bg-slate-100 rounded animate-pulse" />
+              <div className="h-4 w-full bg-slate-100 rounded animate-pulse" />
+              <div className="h-10 w-full bg-slate-100 rounded animate-pulse" />
+              <div className="h-10 w-full bg-slate-100 rounded animate-pulse" />
             </div>
-
-            <div className="pt-4 border-t border-slate-200/80 text-[11px] font-mono text-slate-500 flex flex-wrap items-center gap-x-2 gap-y-1">
-              <span>Go 1.24 · CGO_ENABLED=0</span>
-              <span aria-hidden="true">·</span>
-              <span>RFC 5280 / 6960 / 8555</span>
-            </div>
-          </aside>
-
-          {/* Right / End Authentication & Wizard Column */}
-          <section className="lg:col-span-7 bg-white p-7 sm:p-9 lg:p-10 flex flex-col justify-center">
-            <div className="w-full max-w-md mx-auto space-y-6">
-              {loadingStatus ? (
-                <div className="space-y-4 py-6" aria-busy="true">
-                  <div className="h-6 w-2/3 bg-slate-100 rounded animate-pulse" />
-                  <div className="h-4 w-full bg-slate-100 rounded animate-pulse" />
-                  <div className="h-10 w-full bg-slate-100 rounded animate-pulse" />
-                  <div className="h-10 w-full bg-slate-100 rounded animate-pulse" />
-                </div>
           ) : needsSetup ? (
             <>
               <div className="space-y-2">
@@ -1079,12 +1112,6 @@ export const AuthGate: React.FC<AuthGateProps> = ({
                   </div>
                 )}
 
-                {error && (
-                  <div role="alert" className="text-sm text-red-700 bg-red-50 border border-red-200 rounded-lg px-3.5 py-2.5 wrap-anywhere">
-                    {error}
-                  </div>
-                )}
-
                 <div className="flex items-center justify-between gap-3 pt-2 border-t border-slate-100">
                   {wizardStep > 1 ? (
                     <button
@@ -1184,12 +1211,6 @@ export const AuthGate: React.FC<AuthGateProps> = ({
                 </form>
               )}
 
-              {error && (
-                <div role="alert" className="text-sm text-red-700 bg-red-50 border border-red-200 rounded-lg px-3.5 py-2.5 wrap-anywhere">
-                  {error}
-                </div>
-              )}
-
               <button
                 type="button"
                 onClick={() => {
@@ -1201,8 +1222,9 @@ export const AuthGate: React.FC<AuthGateProps> = ({
                 ← {t.auth.mfaBack}
               </button>
             </div>
-          ) : (
-            <>
+          ) : showOAuthPrimary ? (
+            /* Separated OAuth-First View when wimotek/OAuth is enabled */
+            <div className="space-y-5">
               <div className="space-y-2">
                 <h2 className="font-display text-2xl font-bold text-slate-900 wrap-anywhere">
                   {t.auth.signInTitle}
@@ -1212,301 +1234,301 @@ export const AuthGate: React.FC<AuthGateProps> = ({
                 </p>
               </div>
 
-              {/* Primary Unified SSO / IdP Gateway: wimotek/OAuth (PKCE S256) */}
-              {(() => {
-                const wimotekMeta = oauthProviders.find((p) => p.provider === 'wimotek');
-                const issuerHost = (() => {
-                  if (!wimotekMeta?.issuer) return '';
-                  try {
-                    return new URL(wimotekMeta.issuer).host;
-                  } catch {
-                    return wimotekMeta.issuer;
-                  }
-                })();
-                const configuredDirect = oauthProviders.filter(
-                  (p) => p.provider !== 'wimotek' && p.configured
-                );
-                return (
-                  <div className="space-y-3">
-                    <button
-                      type="button"
-                      disabled={solving}
-                      onClick={() => handleSocialLogin('wimotek')}
-                      className="w-full inline-flex items-center justify-center gap-2.5 rounded-lg bg-[#0F766E] hover:bg-[#115E59] disabled:opacity-60 text-white font-semibold text-sm px-4 py-3 transition-colors cursor-pointer"
-                    >
-                      <ShieldCheck className="w-4 h-4 shrink-0" aria-hidden="true" />
-                      <span>{t.auth.signInWithWimotekOAuth}</span>
-                      <ArrowRight className="w-4 h-4 shrink-0" aria-hidden="true" />
-                    </button>
-
-                    {issuerHost ? (
-                      <div className="flex items-center justify-between gap-2 text-[11px] text-slate-500 font-mono px-0.5">
-                        <span className="truncate" title={wimotekMeta?.issuer}>
-                          IdP: {issuerHost}
-                        </span>
-                        <span className="shrink-0 text-teal-700 font-sans font-medium">
-                          PKCE S256
-                        </span>
-                      </div>
-                    ) : (
-                      <div className="flex items-start gap-2 rounded-lg bg-slate-50 border border-slate-200/80 px-3 py-2 text-[11px] text-slate-600 leading-relaxed">
-                        <Info className="w-3.5 h-3.5 text-slate-400 shrink-0 mt-0.5" aria-hidden="true" />
-                        <span>{t.auth.gatewayNotConfiguredHint}</span>
-                      </div>
-                    )}
-
-                    <button
-                      type="button"
-                      disabled={solving}
-                      onClick={() => handlePasskeyAuth()}
-                      className="w-full inline-flex items-center justify-center gap-2 border border-slate-300 bg-white hover:bg-slate-50 text-slate-800 font-medium text-xs rounded-lg px-4 py-2.5 transition-colors cursor-pointer"
-                    >
-                      <Fingerprint className="w-4 h-4 text-teal-700 shrink-0" aria-hidden="true" />
-                      <span>{t.auth.signInWithPasskey}</span>
-                    </button>
-
-                    {configuredDirect.length > 0 && (
-                      <div className="grid grid-cols-3 gap-2 pt-1">
-                        {configuredDirect.map((p) => (
-                          <button
-                            key={p.provider}
-                            type="button"
-                            onClick={() => handleSocialLogin(p.provider)}
-                            className="inline-flex items-center justify-center rounded-lg border border-slate-300 bg-white hover:bg-slate-50 px-2.5 py-2 text-xs font-medium text-slate-800 transition-colors cursor-pointer truncate"
-                          >
-                            <span className="truncate">{p.label}</span>
-                          </button>
-                        ))}
-                      </div>
-                    )}
-
-                    {!showLocalAuth && error && (
-                      <div role="alert" className="text-sm text-red-700 bg-red-50 border border-red-200 rounded-lg px-3.5 py-2.5 wrap-anywhere">
-                        {error}
-                      </div>
-                    )}
-                  </div>
-                );
-              })()}
-
-              {/* Collapsible Local Account (PoW Password / Email-Verified Registration) */}
-              <div className="pt-4 border-t border-slate-200 space-y-4">
+              <div className="space-y-3">
                 <button
                   type="button"
-                  onClick={() => {
-                    setShowLocalAuth((prev) => !prev);
-                    setError('');
-                  }}
-                  aria-expanded={showLocalAuth}
-                  className="w-full flex items-center justify-between gap-2 text-xs font-medium text-slate-600 hover:text-slate-900 cursor-pointer"
+                  disabled={solving}
+                  onClick={() => handleSocialLogin('wimotek')}
+                  className="w-full inline-flex items-center justify-center gap-2.5 rounded-lg bg-[#0F766E] hover:bg-[#115E59] disabled:opacity-60 text-white font-semibold text-sm px-4 py-3 transition-colors cursor-pointer"
                 >
-                  <span className="inline-flex items-center gap-1.5">
-                    <Lock className="w-3.5 h-3.5 text-slate-500 shrink-0" aria-hidden="true" />
-                    <span>{showLocalAuth ? t.auth.hideLocalLogin : t.auth.showLocalLogin}</span>
-                  </span>
-                  {showLocalAuth ? (
-                    <ChevronUp className="w-4 h-4 text-slate-400 shrink-0" aria-hidden="true" />
-                  ) : (
-                    <ChevronDown className="w-4 h-4 text-slate-400 shrink-0" aria-hidden="true" />
-                  )}
+                  <ShieldCheck className="w-4 h-4 shrink-0" aria-hidden="true" />
+                  <span>{t.auth.signInWithWimotekOAuth}</span>
+                  <ArrowRight className="w-4 h-4 shrink-0" aria-hidden="true" />
                 </button>
 
-                {showLocalAuth && (
-                  <div className="space-y-4">
-                    <div className="grid grid-cols-2 gap-1 p-1 bg-slate-100 rounded-lg">
+                {issuerHost && (
+                  <div className="flex items-center justify-between gap-2 text-[11px] text-slate-500 font-mono px-0.5">
+                    <span className="truncate" title={wimotekMeta?.issuer}>
+                      IdP: {issuerHost}
+                    </span>
+                    <span className="shrink-0 text-teal-700 font-sans font-medium">
+                      OIDC · PKCE S256
+                    </span>
+                  </div>
+                )}
+
+                <button
+                  type="button"
+                  disabled={solving}
+                  onClick={() => handlePasskeyAuth()}
+                  className="w-full inline-flex items-center justify-center gap-2 border border-slate-300 bg-white hover:bg-slate-50 text-slate-800 font-medium text-xs rounded-lg px-4 py-2.5 transition-colors cursor-pointer"
+                >
+                  <Fingerprint className="w-4 h-4 text-teal-700 shrink-0" aria-hidden="true" />
+                  <span>{t.auth.signInWithPasskey}</span>
+                </button>
+
+                {configuredDirect.length > 0 && (
+                  <div className="grid grid-cols-3 gap-2 pt-1">
+                    {configuredDirect.map((p) => (
                       <button
+                        key={p.provider}
                         type="button"
-                        onClick={() => {
-                          setAuthTab('login');
-                          setError('');
-                        }}
-                        className={`py-1.5 text-xs font-semibold rounded-md transition-colors cursor-pointer ${
-                          authTab === 'login' ? 'bg-white text-slate-900 shadow-xs' : 'text-slate-600 hover:text-slate-900'
-                        }`}
+                        onClick={() => handleSocialLogin(p.provider)}
+                        className="inline-flex items-center justify-center rounded-lg border border-slate-300 bg-white hover:bg-slate-50 px-2.5 py-2 text-xs font-medium text-slate-800 transition-colors cursor-pointer truncate"
                       >
-                        {t.auth.signInTab}
+                        <span className="truncate">{p.label}</span>
                       </button>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setAuthTab('register');
-                          setError('');
-                        }}
-                        className={`py-1.5 text-xs font-semibold rounded-md transition-colors cursor-pointer ${
-                          authTab === 'register' ? 'bg-white text-slate-900 shadow-xs' : 'text-slate-600 hover:text-slate-900'
-                        }`}
-                      >
-                        {t.auth.registerTab}
-                      </button>
-                    </div>
-
-                    {authTab === 'login' ? (
-                      <form onSubmit={handleLogin} className="space-y-3.5">
-                        <div>
-                          <label htmlFor="login-user" className="block text-xs font-medium text-slate-700 mb-1">
-                            {t.auth.username}
-                          </label>
-                          <input
-                            id="login-user"
-                            type="text"
-                            required
-                            value={username}
-                            onChange={(e) => setUsername(e.target.value)}
-                            autoComplete="username"
-                            className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-900 focus:border-teal-600 focus:outline-none"
-                          />
-                        </div>
-
-                        <div>
-                          <label htmlFor="login-pass" className="block text-xs font-medium text-slate-700 mb-1">
-                            {t.auth.password}
-                          </label>
-                          <input
-                            id="login-pass"
-                            type="password"
-                            required
-                            value={password}
-                            onChange={(e) => setPassword(e.target.value)}
-                            autoComplete="current-password"
-                            className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-900 focus:border-teal-600 focus:outline-none"
-                          />
-                        </div>
-
-                        {challenge && (
-                          <div className="text-[11px] font-mono text-slate-500">
-                            HMAC SHA-256 PoW · {challenge.difficulty} {t.auth.powBits}
-                          </div>
-                        )}
-
-                        {powNote && (
-                          <div className="text-xs font-mono text-slate-600 wrap-anywhere">{powNote}</div>
-                        )}
-
-                        {error && (
-                          <div role="alert" className="text-sm text-red-700 bg-red-50 border border-red-200 rounded-lg px-3.5 py-2.5 wrap-anywhere">
-                            {error}
-                          </div>
-                        )}
-
-                        <button
-                          type="submit"
-                          disabled={solving}
-                          className="w-full bg-slate-900 hover:bg-slate-800 disabled:opacity-60 text-white font-medium text-xs rounded-lg px-4 py-2.5 transition-colors cursor-pointer"
-                        >
-                          {solving ? t.auth.solvingPow : t.auth.signInButton}
-                        </button>
-                      </form>
-                    ) : (
-                      <form onSubmit={handleRegister} className="space-y-3.5">
-                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                          <div>
-                            <label htmlFor="reg-user" className="block text-xs font-medium text-slate-700 mb-1">
-                              {t.auth.username}
-                            </label>
-                            <input
-                              id="reg-user"
-                              type="text"
-                              required
-                              value={regUsername}
-                              onChange={(e) => setRegUsername(e.target.value)}
-                              placeholder="jdoe"
-                              className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-900 focus:border-teal-600 focus:outline-none"
-                            />
-                          </div>
-                          <div>
-                            <label htmlFor="reg-name" className="block text-xs font-medium text-slate-700 mb-1">
-                              {t.wizard.fullName}
-                            </label>
-                            <input
-                              id="reg-name"
-                              type="text"
-                              value={regFullName}
-                              onChange={(e) => setRegFullName(e.target.value)}
-                              placeholder="Jane Doe"
-                              className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-900 focus:border-teal-600 focus:outline-none"
-                            />
-                          </div>
-                        </div>
-
-                        <div>
-                          <label htmlFor="reg-email" className="block text-xs font-medium text-slate-700 mb-1">
-                            {t.auth.email}
-                          </label>
-                          <div className="flex gap-2">
-                            <input
-                              id="reg-email"
-                              type="email"
-                              required
-                              value={regEmail}
-                              onChange={(e) => setRegEmail(e.target.value)}
-                              placeholder="jane@company.com"
-                              className="flex-1 min-w-0 rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-900 focus:border-teal-600 focus:outline-none"
-                            />
-                            <button
-                              type="button"
-                              disabled={sendingRegCode}
-                              onClick={handleSendRegCode}
-                              className="px-3 py-2 rounded-lg border border-teal-700 text-teal-700 hover:bg-teal-50 text-xs font-semibold whitespace-nowrap cursor-pointer disabled:opacity-50"
-                            >
-                              {t.auth.sendEmailCode}
-                            </button>
-                          </div>
-                          {regCodeSentNote && (
-                            <div className="mt-1 text-xs font-mono text-teal-700 wrap-anywhere">{regCodeSentNote}</div>
-                          )}
-                        </div>
-
-                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                          <div>
-                            <label htmlFor="reg-code" className="block text-xs font-medium text-slate-700 mb-1">
-                              {t.auth.emailCode}
-                            </label>
-                            <input
-                              id="reg-code"
-                              type="text"
-                              required
-                              maxLength={6}
-                              value={regEmailCode}
-                              onChange={(e) => setRegEmailCode(e.target.value)}
-                              placeholder="123456"
-                              className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm font-mono tracking-widest text-slate-900 focus:border-teal-600 focus:outline-none"
-                            />
-                          </div>
-                          <div>
-                            <label htmlFor="reg-pass" className="block text-xs font-medium text-slate-700 mb-1">
-                              {t.auth.password}
-                            </label>
-                            <input
-                              id="reg-pass"
-                              type="password"
-                              required
-                              minLength={8}
-                              value={regPassword}
-                              onChange={(e) => setRegPassword(e.target.value)}
-                              className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-900 focus:border-teal-600 focus:outline-none"
-                            />
-                          </div>
-                        </div>
-
-                        {error && (
-                          <div role="alert" className="text-sm text-red-700 bg-red-50 border border-red-200 rounded-lg px-3.5 py-2.5 wrap-anywhere">
-                            {error}
-                          </div>
-                        )}
-
-                        <button
-                          type="submit"
-                          disabled={solving}
-                          className="w-full bg-slate-900 hover:bg-slate-800 disabled:opacity-60 text-white font-medium text-xs rounded-lg px-4 py-2.5 transition-colors cursor-pointer"
-                        >
-                          {solving ? t.auth.solvingPow : t.auth.registerButton}
-                        </button>
-                      </form>
-                    )}
+                    ))}
                   </div>
                 )}
               </div>
-            </>
+
+              <div className="pt-4 border-t border-slate-200 text-center">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setUseLocalFallback(true);
+                    setError('');
+                  }}
+                  className="inline-flex items-center gap-1.5 text-xs font-medium text-slate-600 hover:text-teal-700 transition-colors cursor-pointer"
+                >
+                  <Lock className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
+                  <span>{t.auth.oauthUnavailableSwitchLocal}</span>
+                </button>
+              </div>
+            </div>
+          ) : (
+            /* Classic Local Sign-In / Register View (default when OAuth is off, or fallback when OAuth is unavailable) */
+            <div className="space-y-5">
+              <div className="space-y-2">
+                {wimotekConfigured && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setUseLocalFallback(false);
+                      setError('');
+                    }}
+                    className="inline-flex items-center gap-1.5 text-xs font-medium text-teal-700 hover:text-teal-800 transition-colors cursor-pointer"
+                  >
+                    <ArrowLeft className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
+                    <span>{t.auth.backToOAuthLogin}</span>
+                  </button>
+                )}
+                <h2 className="font-display text-2xl font-bold text-slate-900 wrap-anywhere">
+                  {t.auth.signInTitle}
+                </h2>
+                <p className="text-sm text-slate-600 leading-relaxed wrap-anywhere">
+                  {wimotekConfigured ? t.auth.localFallbackNotice : t.auth.signInDesc}
+                </p>
+              </div>
+
+              <div className="grid grid-cols-2 gap-1 p-1 bg-slate-100 rounded-lg">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setAuthTab('login');
+                    setError('');
+                  }}
+                  className={`py-2 text-xs font-semibold rounded-md transition-colors cursor-pointer ${
+                    authTab === 'login' ? 'bg-white text-slate-900 shadow-xs' : 'text-slate-600 hover:text-slate-900'
+                  }`}
+                >
+                  {t.auth.signInTab}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setAuthTab('register');
+                    setError('');
+                  }}
+                  className={`py-2 text-xs font-semibold rounded-md transition-colors cursor-pointer ${
+                    authTab === 'register' ? 'bg-white text-slate-900 shadow-xs' : 'text-slate-600 hover:text-slate-900'
+                  }`}
+                >
+                  {t.auth.registerTab}
+                </button>
+              </div>
+
+              {authTab === 'login' ? (
+                <form onSubmit={handleLogin} className="space-y-4">
+                  <div>
+                    <label htmlFor="login-user" className="block text-xs font-medium text-slate-700 mb-1.5">
+                      {t.auth.username}
+                    </label>
+                    <input
+                      id="login-user"
+                      type="text"
+                      required
+                      value={username}
+                      onChange={(e) => setUsername(e.target.value)}
+                      autoComplete="username"
+                      className="w-full rounded-lg border border-slate-300 px-3.5 py-2.5 text-sm text-slate-900 focus:border-teal-600 focus:outline-none"
+                    />
+                  </div>
+
+                  <div>
+                    <label htmlFor="login-pass" className="block text-xs font-medium text-slate-700 mb-1.5">
+                      {t.auth.password}
+                    </label>
+                    <input
+                      id="login-pass"
+                      type="password"
+                      required
+                      value={password}
+                      onChange={(e) => setPassword(e.target.value)}
+                      autoComplete="current-password"
+                      className="w-full rounded-lg border border-slate-300 px-3.5 py-2.5 text-sm text-slate-900 focus:border-teal-600 focus:outline-none"
+                    />
+                  </div>
+
+                  {challenge && (
+                    <div className="flex items-center justify-between text-[11px] font-mono text-slate-500">
+                      <span>HMAC SHA-256 PoW</span>
+                      <span>
+                        {challenge.difficulty} {t.auth.powBits}
+                      </span>
+                    </div>
+                  )}
+
+                  {powNote && (
+                    <div className="text-xs font-mono text-slate-600 wrap-anywhere">{powNote}</div>
+                  )}
+
+                  <button
+                    type="submit"
+                    disabled={solving}
+                    className="w-full bg-[#0F766E] hover:bg-[#115E59] disabled:opacity-60 text-white font-semibold text-sm rounded-lg px-4 py-2.5 transition-colors cursor-pointer"
+                  >
+                    {solving ? t.auth.solvingPow : t.auth.signInButton}
+                  </button>
+
+                  <button
+                    type="button"
+                    disabled={solving}
+                    onClick={() => handlePasskeyAuth()}
+                    className="w-full inline-flex items-center justify-center gap-2 border border-slate-300 bg-white hover:bg-slate-50 text-slate-800 font-medium text-xs rounded-lg px-4 py-2.5 transition-colors cursor-pointer"
+                  >
+                    <Fingerprint className="w-4 h-4 text-teal-700 shrink-0" aria-hidden="true" />
+                    <span>{t.auth.signInWithPasskey}</span>
+                  </button>
+                </form>
+              ) : (
+                <form onSubmit={handleRegister} className="space-y-3.5">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div>
+                      <label htmlFor="reg-user" className="block text-xs font-medium text-slate-700 mb-1">
+                        {t.auth.username}
+                      </label>
+                      <input
+                        id="reg-user"
+                        type="text"
+                        required
+                        value={regUsername}
+                        onChange={(e) => setRegUsername(e.target.value)}
+                        placeholder="jdoe"
+                        className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-900 focus:border-teal-600 focus:outline-none"
+                      />
+                    </div>
+                    <div>
+                      <label htmlFor="reg-name" className="block text-xs font-medium text-slate-700 mb-1">
+                        {t.wizard.fullName}
+                      </label>
+                      <input
+                        id="reg-name"
+                        type="text"
+                        value={regFullName}
+                        onChange={(e) => setRegFullName(e.target.value)}
+                        placeholder="Jane Doe"
+                        className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-900 focus:border-teal-600 focus:outline-none"
+                      />
+                    </div>
+                  </div>
+
+                  <div>
+                    <label htmlFor="reg-email" className="block text-xs font-medium text-slate-700 mb-1">
+                      {t.auth.email}
+                    </label>
+                    <div className="flex gap-2">
+                      <input
+                        id="reg-email"
+                        type="email"
+                        required
+                        value={regEmail}
+                        onChange={(e) => setRegEmail(e.target.value)}
+                        placeholder="jane@company.com"
+                        className="flex-1 min-w-0 rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-900 focus:border-teal-600 focus:outline-none"
+                      />
+                      <button
+                        type="button"
+                        disabled={sendingRegCode}
+                        onClick={handleSendRegCode}
+                        className="px-3 py-2 rounded-lg border border-teal-700 text-teal-700 hover:bg-teal-50 text-xs font-semibold whitespace-nowrap cursor-pointer disabled:opacity-50"
+                      >
+                        {t.auth.sendEmailCode}
+                      </button>
+                    </div>
+                    {regCodeSentNote && (
+                      <div className="mt-1 text-xs font-mono text-teal-700 wrap-anywhere">{regCodeSentNote}</div>
+                    )}
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div>
+                      <label htmlFor="reg-code" className="block text-xs font-medium text-slate-700 mb-1">
+                        {t.auth.emailCode}
+                      </label>
+                      <input
+                        id="reg-code"
+                        type="text"
+                        required
+                        maxLength={6}
+                        value={regEmailCode}
+                        onChange={(e) => setRegEmailCode(e.target.value)}
+                        placeholder="123456"
+                        className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm font-mono tracking-widest text-slate-900 focus:border-teal-600 focus:outline-none"
+                      />
+                    </div>
+                    <div>
+                      <label htmlFor="reg-pass" className="block text-xs font-medium text-slate-700 mb-1">
+                        {t.auth.password}
+                      </label>
+                      <input
+                        id="reg-pass"
+                        type="password"
+                        required
+                        minLength={8}
+                        value={regPassword}
+                        onChange={(e) => setRegPassword(e.target.value)}
+                        className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-900 focus:border-teal-600 focus:outline-none"
+                      />
+                    </div>
+                  </div>
+
+                  <button
+                    type="submit"
+                    disabled={solving}
+                    className="w-full bg-[#0F766E] hover:bg-[#115E59] disabled:opacity-60 text-white font-semibold text-sm rounded-lg px-4 py-2.5 transition-colors cursor-pointer"
+                  >
+                    {solving ? t.auth.solvingPow : t.auth.registerButton}
+                  </button>
+                </form>
+              )}
+
+              {configuredDirect.length > 0 && (
+                <div className="pt-3 border-t border-slate-100 grid grid-cols-3 gap-2">
+                  {configuredDirect.map((p) => (
+                    <button
+                      key={p.provider}
+                      type="button"
+                      onClick={() => handleSocialLogin(p.provider)}
+                      className="inline-flex items-center justify-center rounded-lg border border-slate-300 bg-white hover:bg-slate-50 px-2.5 py-2 text-xs font-medium text-slate-800 transition-colors cursor-pointer truncate"
+                    >
+                      <span className="truncate">{p.label}</span>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
           )}
 
           {/* Rendered ONLY when hosted inside the live interactive preview harness */}
@@ -1544,8 +1566,6 @@ export const AuthGate: React.FC<AuthGateProps> = ({
               </button>
             </div>
           )}
-            </div>
-          </section>
         </div>
       </main>
     </div>

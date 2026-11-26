@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -67,8 +68,10 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("GET /api/health", s.handleHealth)
 	s.mux.HandleFunc("GET /api/i18n/{lang}", s.handleI18n)
 
-	// Auth & First-Run Setup Wizard (Offline PoW + Rate Limit + Lockout)
+	// Auth & First-Run Setup Wizard (Offline PoW + Rate Limit + Lockout + HttpOnly Cookie Session)
 	s.mux.HandleFunc("GET /api/auth/status", s.handleAuthStatus)
+	s.mux.HandleFunc("GET /api/auth/session", s.handleAuthSession)
+	s.mux.HandleFunc("POST /api/auth/logout", s.handleAuthLogout)
 	s.mux.HandleFunc("POST /api/auth/setup", s.handleAuthSetup)
 	s.mux.HandleFunc("GET /api/auth/challenge", s.handleAuthChallenge)
 	s.mux.HandleFunc("POST /api/auth/login", s.handleAuthLogin)
@@ -238,6 +241,7 @@ func (s *Server) handleAuthSetup(w http.ResponseWriter, r *http.Request) {
 		_, _ = s.notifier.SaveChannel(r.Context(), "", chName, body.NotifyType, *body.NotifyConfig, body.AdvanceDays, true)
 	}
 
+	s.setSessionCookie(w, r, token)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"token":    token,
 		"username": userRec.Username,
@@ -270,12 +274,59 @@ func (s *Server) handleAuthLogin(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, status, err.Error())
 		return
 	}
+	s.setSessionCookie(w, r, token)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"token":    token,
 		"username": userRec.Username,
 		"role":     userRec.Role,
 		"user":     userRec,
 	})
+}
+
+func (s *Server) handleAuthSession(w http.ResponseWriter, r *http.Request) {
+	token, _ := extractSessionToken(r)
+	if token == "" {
+		writeJSON(w, http.StatusOK, map[string]any{"authenticated": false})
+		return
+	}
+	sess, err := s.auth.VerifySession(token)
+	if err != nil {
+		s.clearSessionCookie(w, r)
+		writeJSON(w, http.StatusOK, map[string]any{"authenticated": false})
+		return
+	}
+	u, _ := s.store.GetUser(r.Context(), sess.Username)
+	if u != nil && !u.Enabled {
+		s.clearSessionCookie(w, r)
+		writeJSON(w, http.StatusOK, map[string]any{"authenticated": false})
+		return
+	}
+	if u == nil {
+		active, _ := s.store.CountActiveCertificatesByUser(r.Context(), sess.Username)
+		u = &store.UserRecord{
+			Username:    sess.Username,
+			Role:        sess.Role,
+			CertQuota:   store.DefaultQuotaForRole(sess.Role),
+			ActiveCerts: active,
+			Enabled:     true,
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"authenticated": true,
+		"token":         token,
+		"username":      sess.Username,
+		"role":          sess.Role,
+		"user":          u,
+	})
+}
+
+func (s *Server) handleAuthLogout(w http.ResponseWriter, r *http.Request) {
+	if !verifyCookieCSRF(r) {
+		writeErr(w, http.StatusForbidden, "cross-site request blocked")
+		return
+	}
+	s.clearSessionCookie(w, r)
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
 func (s *Server) handleGetProfile(w http.ResponseWriter, r *http.Request, sess *auth.SessionInfo) {
@@ -941,9 +992,79 @@ func (s *Server) handleVaultRevoke(w http.ResponseWriter, r *http.Request, actor
 	})
 }
 
+const sessionCookieName = "wimotek_ca_session"
+
+func isRequestHTTPS(r *http.Request) bool {
+	if r.TLS != nil {
+		return true
+	}
+	proto := strings.ToLower(strings.TrimSpace(r.Header.Get("X-Forwarded-Proto")))
+	return strings.HasPrefix(proto, "https")
+}
+
+func (s *Server) setSessionCookie(w http.ResponseWriter, r *http.Request, token string) {
+	secure := isRequestHTTPS(r)
+	sameSite := http.SameSiteLaxMode
+	if secure {
+		sameSite = http.SameSiteNoneMode
+	}
+	http.SetCookie(w, &http.Cookie{
+		Name:     sessionCookieName,
+		Value:    token,
+		Path:     "/",
+		HttpOnly: true,
+		Secure:   secure,
+		SameSite: sameSite,
+		MaxAge:   86400,
+	})
+}
+
+func (s *Server) clearSessionCookie(w http.ResponseWriter, r *http.Request) {
+	secure := isRequestHTTPS(r)
+	sameSite := http.SameSiteLaxMode
+	if secure {
+		sameSite = http.SameSiteNoneMode
+	}
+	http.SetCookie(w, &http.Cookie{
+		Name:     sessionCookieName,
+		Value:    "",
+		Path:     "/",
+		HttpOnly: true,
+		Secure:   secure,
+		SameSite: sameSite,
+		MaxAge:   -1,
+	})
+}
+
+func verifyCookieCSRF(r *http.Request) bool {
+	if r.Method == http.MethodGet || r.Method == http.MethodHead || r.Method == http.MethodOptions {
+		return true
+	}
+	if strings.TrimSpace(r.Header.Get("X-Requested-With")) != "" {
+		return true
+	}
+	origin := strings.TrimSpace(r.Header.Get("Origin"))
+	if origin == "" {
+		return true
+	}
+	u, err := url.Parse(origin)
+	if err != nil || u.Host == "" {
+		return false
+	}
+	expectedHost := strings.TrimSpace(r.Header.Get("X-Forwarded-Host"))
+	if expectedHost == "" {
+		expectedHost = r.Host
+	}
+	return strings.EqualFold(u.Host, expectedHost)
+}
+
 func (s *Server) requireSession(next func(http.ResponseWriter, *http.Request, *auth.SessionInfo)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		token := extractBearer(r)
+		token, fromCookie := extractSessionToken(r)
+		if fromCookie && !verifyCookieCSRF(r) {
+			writeErr(w, http.StatusForbidden, "cross-site request blocked")
+			return
+		}
 		sess, err := s.auth.VerifySession(token)
 		if err != nil {
 			writeErr(w, http.StatusUnauthorized, "unauthorized")
@@ -965,9 +1086,13 @@ func (s *Server) requireAdmin(next func(http.ResponseWriter, *http.Request, *aut
 
 func (s *Server) requireAuthOrProvisioner(next func(http.ResponseWriter, *http.Request, string)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		token := extractBearer(r)
+		token, fromCookie := extractSessionToken(r)
 		if token == "" {
 			token = strings.TrimSpace(r.Header.Get("X-Vault-Token"))
+		}
+		if fromCookie && !verifyCookieCSRF(r) {
+			writeErr(w, http.StatusForbidden, "cross-site request blocked")
+			return
 		}
 		if sess, err := s.auth.VerifySession(token); err == nil {
 			next(w, r, sess.Username)
@@ -1012,6 +1137,16 @@ func extractBearer(r *http.Request) string {
 		return strings.TrimSpace(h[7:])
 	}
 	return ""
+}
+
+func extractSessionToken(r *http.Request) (string, bool) {
+	if bearer := extractBearer(r); bearer != "" {
+		return bearer, false
+	}
+	if c, err := r.Cookie(sessionCookieName); err == nil && strings.TrimSpace(c.Value) != "" {
+		return strings.TrimSpace(c.Value), true
+	}
+	return "", false
 }
 
 func clientIP(r *http.Request) string {

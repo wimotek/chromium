@@ -507,10 +507,13 @@ class ApiClient {
     if (!headers.has('Content-Type') && init.body) {
       headers.set('Content-Type', 'application/json');
     }
+    if (!headers.has('X-Requested-With')) {
+      headers.set('X-Requested-With', 'XMLHttpRequest');
+    }
     if (this.token) {
       headers.set('Authorization', `Bearer ${this.token}`);
     }
-    const res = await fetch(path, { ...init, headers });
+    const res = await fetch(path, { credentials: 'same-origin', ...init, headers });
     const text = await res.text();
     let parsed: any = null;
     try {
@@ -535,6 +538,23 @@ class ApiClient {
       languages: string[];
       oauth_providers?: OAuthProviderInfo[];
     }>('/api/auth/status');
+  }
+
+  getSession() {
+    return this.request<{
+      authenticated: boolean;
+      token?: string;
+      username?: string;
+      role?: UserRole;
+      user?: UserProfile;
+      preview_mode?: boolean;
+    }>('/api/auth/session');
+  }
+
+  logout() {
+    return this.request<{ logged_out: boolean }>('/api/auth/logout', {
+      method: 'POST',
+    });
   }
 
   demoQuickLogin(username?: string) {

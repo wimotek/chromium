@@ -6,7 +6,6 @@ import {
   Send,
   KeyRound,
   Activity,
-  CheckCircle2,
   X,
   Download,
   Globe,
@@ -28,6 +27,7 @@ import type { LocaleDict } from '../lib/i18n';
 import { formatUnixUtc } from '../lib/pki-utils';
 import { triggerBlobDownload } from '../lib/download';
 import { CodeBlock, CopyButton } from './CopyButton';
+import { FloatingToast } from './Toast';
 
 type SubTab = 'certs' | 'upstreams' | 'dns' | 'logs';
 
@@ -100,7 +100,8 @@ export const ManagedSSLView: React.FC<{
     private_key_pem: string;
   } | null>(null);
 
-  // Upstream CA form (admin)
+  // Upstream CA modal & form (admin)
+  const [upstreamModalOpen, setUpstreamModalOpen] = useState(false);
   const [upEditId, setUpEditId] = useState('');
   const [upProvider, setUpProvider] = useState<UpstreamProviderType>('google_trust');
   const [upName, setUpName] = useState(UPSTREAM_PRESETS.google_trust.name);
@@ -288,6 +289,32 @@ export const ManagedSSLView: React.FC<{
     }
   };
 
+  useEffect(() => {
+    if (!upstreamModalOpen) return;
+    const onKeyDown = (ev: KeyboardEvent) => {
+      if (ev.key === 'Escape') {
+        setUpstreamModalOpen(false);
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [upstreamModalOpen]);
+
+  const openAddUpstreamModal = () => {
+    const nextPriority = (data?.upstreams?.length || 0) + 1;
+    setUpEditId('');
+    setUpProvider('google_trust');
+    setUpName(UPSTREAM_PRESETS.google_trust.name);
+    setUpDirUrl(UPSTREAM_PRESETS.google_trust.directory_url);
+    setUpPriority(nextPriority);
+    setUpEmail('');
+    setUpRequiresEab(UPSTREAM_PRESETS.google_trust.requires_eab);
+    setUpEabKid('');
+    setUpEabHmac('');
+    setUpEnabled(true);
+    setUpstreamModalOpen(true);
+  };
+
   const handleEditUpstream = (up: ManagedUpstreamRecord) => {
     setUpEditId(up.id);
     setUpProvider(up.provider);
@@ -299,6 +326,7 @@ export const ManagedSSLView: React.FC<{
     setUpEabKid(up.eab_kid);
     setUpEabHmac('');
     setUpEnabled(up.enabled);
+    setUpstreamModalOpen(true);
   };
 
   const handleSaveUpstream = async (e: React.FormEvent) => {
@@ -321,6 +349,7 @@ export const ManagedSSLView: React.FC<{
       });
       setUpEditId('');
       setUpEabHmac('');
+      setUpstreamModalOpen(false);
       setNotice(`${upName.trim()} saved`);
       load();
     } catch (err) {
@@ -406,6 +435,10 @@ export const ManagedSSLView: React.FC<{
     due_renewal: 0,
     enabled_upstreams: 0,
   };
+  const managedCerts = data?.certificates ?? [];
+  const upstreams = data?.upstreams ?? [];
+  const dnsCredentials = data?.dns_credentials ?? [];
+  const deployLogs = data?.deploy_logs ?? [];
 
   return (
     <div className="space-y-6">
@@ -482,17 +515,12 @@ export const ManagedSSLView: React.FC<{
         ))}
       </div>
 
-      {error && (
-        <div className="bg-rose-50 border border-rose-200 text-rose-800 rounded-xl px-4 py-3 text-sm">
-          {error}
-        </div>
-      )}
-      {notice && (
-        <div className="bg-teal-50 border border-teal-200 text-teal-900 rounded-xl px-4 py-3 text-sm flex items-center gap-2">
-          <CheckCircle2 className="w-4 h-4 text-teal-600 shrink-0" />
-          <span>{notice}</span>
-        </div>
-      )}
+      <FloatingToast
+        error={error}
+        notice={notice}
+        onDismissError={() => setError('')}
+        onDismissNotice={() => setNotice('')}
+      />
 
       {/* TAB 1: Managed Certificates */}
       {subTab === 'certs' && (
@@ -651,10 +679,10 @@ export const ManagedSSLView: React.FC<{
           <div className="bg-white border border-slate-200 rounded-xl divide-y divide-slate-200">
             {loading && !data ? (
               <div className="p-8 text-center text-sm text-slate-500">Loading...</div>
-            ) : !data?.certificates.length ? (
+            ) : managedCerts.length === 0 ? (
               <div className="p-10 text-center text-sm text-slate-500">{m.emptyCerts}</div>
             ) : (
-              data.certificates.map((cert) => {
+              managedCerts.map((cert) => {
                 const dnsResult = dnsCheckMap[cert.id];
                 const daysLeft =
                   cert.not_after > 0
@@ -862,13 +890,25 @@ export const ManagedSSLView: React.FC<{
       {subTab === 'upstreams' && (
         <div className="space-y-6">
           <div className="bg-white border border-slate-200 rounded-xl p-6 space-y-4">
-            <div>
-              <h3 className="font-display text-base font-bold text-slate-900">{m.upstreamsTitle}</h3>
-              <p className="text-sm text-slate-600 mt-1">{m.upstreamsDesc}</p>
+            <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-4">
+              <div>
+                <h3 className="font-display text-base font-bold text-slate-900">{m.upstreamsTitle}</h3>
+                <p className="text-sm text-slate-600 mt-1">{m.upstreamsDesc}</p>
+              </div>
+              {isAdmin && (
+                <button
+                  type="button"
+                  onClick={openAddUpstreamModal}
+                  className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-[#0F766E] hover:bg-[#115E59] text-white text-sm font-medium transition-colors cursor-pointer shrink-0 self-start"
+                >
+                  <Plus className="w-4 h-4" />
+                  <span>{m.addUpstreamBtn}</span>
+                </button>
+              )}
             </div>
 
             <div className="divide-y divide-slate-200 border-t border-slate-200">
-              {(data?.upstreams || []).map((u) => {
+              {upstreams.map((u) => {
                 const proxyUrl = `${data?.proxy_base_url || ''}/${u.id}/directory`;
                 return (
                   <div key={u.id} className="py-4 flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4">
@@ -939,28 +979,43 @@ export const ManagedSSLView: React.FC<{
               })}
             </div>
           </div>
+        </div>
+      )}
 
-          {/* Admin Add / Edit Upstream Form */}
-          {isAdmin && (
-            <form
-              onSubmit={handleSaveUpstream}
-              className="bg-white border border-slate-200 rounded-xl p-6 space-y-4"
-            >
-              <div className="flex items-center justify-between">
-                <h3 className="font-display text-base font-bold text-slate-900">
-                  {m.addUpstreamTitle} {upEditId ? `(${upEditId})` : ''}
+      {/* Upstream Public CA Add / Edit Modal (Admin) */}
+      {isAdmin && upstreamModalOpen && (
+        <div
+          className="fixed inset-0 z-50 bg-slate-900/50 backdrop-blur-[1px] flex items-center justify-center p-4"
+          onClick={(ev) => {
+            if (ev.target === ev.currentTarget) setUpstreamModalOpen(false);
+          }}
+        >
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="upstream-modal-title"
+            className="bg-white border border-slate-200 rounded-2xl max-w-2xl w-full max-h-[90vh] flex flex-col overflow-hidden shadow-xl"
+          >
+            <div className="px-6 py-4 border-b border-slate-200 flex items-center justify-between gap-4">
+              <div>
+                <h3 id="upstream-modal-title" className="font-display text-base font-bold text-slate-900">
+                  {upEditId ? m.editUpstreamTitle : m.addUpstreamTitle}
                 </h3>
                 {upEditId && (
-                  <button
-                    type="button"
-                    onClick={() => setUpEditId('')}
-                    className="text-xs text-slate-500 hover:text-slate-900 cursor-pointer"
-                  >
-                    Reset
-                  </button>
+                  <div className="text-xs text-slate-500 font-mono mt-0.5">{upEditId}</div>
                 )}
               </div>
+              <button
+                type="button"
+                onClick={() => setUpstreamModalOpen(false)}
+                aria-label="Close modal"
+                className="p-1.5 rounded-lg text-slate-400 hover:text-slate-700 hover:bg-slate-100 cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
 
+            <form onSubmit={handleSaveUpstream} className="p-6 space-y-5 overflow-y-auto">
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 <div>
                   <label className="block text-xs font-medium text-slate-700 mb-1.5">
@@ -977,7 +1032,7 @@ export const ManagedSSLView: React.FC<{
                         setUpRequiresEab(UPSTREAM_PRESETS[p].requires_eab);
                       }
                     }}
-                    className="w-full px-3.5 py-2.5 rounded-lg border border-slate-300 text-sm bg-white"
+                    className="w-full px-3.5 py-2.5 rounded-lg border border-slate-300 text-sm bg-white focus:border-teal-600 focus:outline-none"
                   >
                     <option value="letsencrypt_prod">Let&apos;s Encrypt (Production)</option>
                     <option value="google_trust">Google Trust Services (GTS)</option>
@@ -996,7 +1051,7 @@ export const ManagedSSLView: React.FC<{
                     required
                     value={upName}
                     onChange={(e) => setUpName(e.target.value)}
-                    className="w-full px-3.5 py-2.5 rounded-lg border border-slate-300 text-sm"
+                    className="w-full px-3.5 py-2.5 rounded-lg border border-slate-300 text-sm focus:border-teal-600 focus:outline-none"
                   />
                 </div>
 
@@ -1010,7 +1065,7 @@ export const ManagedSSLView: React.FC<{
                     value={upDirUrl}
                     onChange={(e) => setUpDirUrl(e.target.value)}
                     placeholder="https://dv.acme-v02.api.pki.goog/directory"
-                    className="w-full px-3.5 py-2.5 rounded-lg border border-slate-300 text-sm font-mono"
+                    className="w-full px-3.5 py-2.5 rounded-lg border border-slate-300 text-sm font-mono focus:border-teal-600 focus:outline-none"
                   />
                 </div>
 
@@ -1024,7 +1079,7 @@ export const ManagedSSLView: React.FC<{
                     max={99}
                     value={upPriority}
                     onChange={(e) => setUpPriority(Number(e.target.value) || 1)}
-                    className="w-full px-3.5 py-2.5 rounded-lg border border-slate-300 text-sm font-mono tabular-nums"
+                    className="w-full px-3.5 py-2.5 rounded-lg border border-slate-300 text-sm font-mono tabular-nums focus:border-teal-600 focus:outline-none"
                   />
                 </div>
 
@@ -1037,7 +1092,7 @@ export const ManagedSSLView: React.FC<{
                     value={upEmail}
                     onChange={(e) => setUpEmail(e.target.value)}
                     placeholder="pki-ops@example.com"
-                    className="w-full px-3.5 py-2.5 rounded-lg border border-slate-300 text-sm"
+                    className="w-full px-3.5 py-2.5 rounded-lg border border-slate-300 text-sm focus:border-teal-600 focus:outline-none"
                   />
                 </div>
 
@@ -1072,7 +1127,7 @@ export const ManagedSSLView: React.FC<{
                         type="text"
                         value={upEabKid}
                         onChange={(e) => setUpEabKid(e.target.value)}
-                        className="w-full px-3.5 py-2.5 rounded-lg border border-slate-300 text-sm font-mono"
+                        className="w-full px-3.5 py-2.5 rounded-lg border border-slate-300 text-sm font-mono focus:border-teal-600 focus:outline-none"
                       />
                     </div>
                     <div>
@@ -1084,24 +1139,31 @@ export const ManagedSSLView: React.FC<{
                         value={upEabHmac}
                         onChange={(e) => setUpEabHmac(e.target.value)}
                         placeholder={upEditId ? 'Leave blank to keep existing key' : ''}
-                        className="w-full px-3.5 py-2.5 rounded-lg border border-slate-300 text-sm font-mono"
+                        className="w-full px-3.5 py-2.5 rounded-lg border border-slate-300 text-sm font-mono focus:border-teal-600 focus:outline-none"
                       />
                     </div>
                   </>
                 )}
               </div>
 
-              <div className="flex justify-end">
+              <div className="flex items-center justify-end gap-2.5 pt-4 border-t border-slate-100">
+                <button
+                  type="button"
+                  onClick={() => setUpstreamModalOpen(false)}
+                  className="px-4 py-2.5 rounded-lg border border-slate-300 text-slate-700 text-sm font-medium hover:bg-slate-50 cursor-pointer"
+                >
+                  {m.cancelBtn}
+                </button>
                 <button
                   type="submit"
                   disabled={savingUp}
-                  className="px-5 py-2.5 rounded-lg bg-slate-900 text-white text-sm font-medium hover:bg-slate-800 disabled:opacity-60 cursor-pointer"
+                  className="px-5 py-2.5 rounded-lg bg-[#0F766E] hover:bg-[#115E59] text-white text-sm font-medium disabled:opacity-60 cursor-pointer"
                 >
                   {m.saveUpstreamBtn}
                 </button>
               </div>
             </form>
-          )}
+          </div>
         </div>
       )}
 
@@ -1184,10 +1246,10 @@ export const ManagedSSLView: React.FC<{
             </form>
 
             <div className="divide-y divide-slate-100 border-t border-slate-100 pt-2">
-              {!data?.dns_credentials.length ? (
+              {dnsCredentials.length === 0 ? (
                 <div className="py-4 text-xs text-slate-500">{m.emptyDns}</div>
               ) : (
-                data.dns_credentials.map((c) => (
+                dnsCredentials.map((c) => (
                   <div key={c.id} className="py-3 flex items-center justify-between gap-3">
                     <div className="min-w-0">
                       <div className="text-sm font-medium text-slate-900">{c.name}</div>
@@ -1308,7 +1370,7 @@ export const ManagedSSLView: React.FC<{
       {/* TAB 4: Deploy & Renewal Logs */}
       {subTab === 'logs' && (
         <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
-          {!data?.deploy_logs.length ? (
+          {deployLogs.length === 0 ? (
             <div className="p-10 text-center text-sm text-slate-500">{m.emptyLogs}</div>
           ) : (
             <div className="overflow-x-auto">
@@ -1324,7 +1386,7 @@ export const ManagedSSLView: React.FC<{
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100 text-xs">
-                  {data.deploy_logs.map((log) => (
+                  {deployLogs.map((log) => (
                     <tr key={log.id}>
                       <td className="px-4 py-3 font-mono tabular-nums text-slate-500 whitespace-nowrap">
                         {formatUnixUtc(log.created_at)}

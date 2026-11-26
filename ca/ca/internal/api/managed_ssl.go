@@ -387,6 +387,13 @@ func (s *Server) handleManagedOverview(w http.ResponseWriter, r *http.Request, s
 		outCerts = append(outCerts, s.formatManagedCertJSON(c))
 	}
 
+	if dnsCreds == nil {
+		dnsCreds = make([]store.ManagedDnsCredentialRecord, 0)
+	}
+	if logs == nil {
+		logs = make([]store.ManagedDeployLogRecord, 0)
+	}
+
 	writeJSON(w, http.StatusOK, map[string]any{
 		"proxy_policy":    pol,
 		"proxy_base_url":  base + "/acme/proxy",

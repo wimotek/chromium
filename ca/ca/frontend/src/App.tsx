@@ -51,14 +51,45 @@ export type TabKey =
   | 'help'
   | 'audit';
 
+const VALID_TABS: readonly TabKey[] = [
+  'overview',
+  'issue',
+  'certificates',
+  'managed',
+  'trust',
+  'notifications',
+  'users',
+  'profile',
+  'automation',
+  'help',
+  'audit',
+];
+
+function readTabFromHash(): TabKey {
+  if (typeof window === 'undefined') return 'overview';
+  const raw = window.location.hash.replace(/^#/, '').trim() as TabKey;
+  return VALID_TABS.includes(raw) ? raw : 'overview';
+}
+
 export default function App() {
   const [locale, setLocale] = useState<LocaleCode>('en');
   const [token, setToken] = useState<string | null>(null);
+  const [checkingSession, setCheckingSession] = useState(true);
   const [username, setUsername] = useState<string>('admin');
   const [currentUser, setCurrentUser] = useState<UserProfile | null>(null);
   const [previewMode, setPreviewMode] = useState(false);
-  const [activeTab, setActiveTab] = useState<TabKey>('overview');
+  const [activeTab, setActiveTabState] = useState<TabKey>(() => readTabFromHash());
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
+
+  const setActiveTab = useCallback((next: TabKey) => {
+    setActiveTabState(next);
+    if (typeof window !== 'undefined') {
+      const targetHash = `#${next}`;
+      if (window.location.hash !== targetHash) {
+        window.history.replaceState(null, '', targetHash);
+      }
+    }
+  }, []);
 
   const [overview, setOverview] = useState<OverviewData | null>(null);
   const [cacheStatus, setCacheStatus] = useState<CacheStatus | null>(null);
@@ -86,6 +117,40 @@ export default function App() {
     document.documentElement.lang = locale;
     document.documentElement.dir = isRtlLocale(locale) ? 'rtl' : 'ltr';
   }, [locale]);
+
+  // Restore authenticated session from HttpOnly cookie on initial load / page refresh
+  useEffect(() => {
+    let active = true;
+    (async () => {
+      try {
+        const res = await api.getSession();
+        if (!active) return;
+        if (res.authenticated && res.token && res.username) {
+          api.setToken(res.token);
+          setToken(res.token);
+          setUsername(res.username);
+          setPreviewMode(Boolean(res.preview_mode));
+          if (res.user) {
+            setCurrentUser(res.user);
+          }
+        }
+      } catch {
+        // Not authenticated or server unreachable; show AuthGate
+      } finally {
+        if (active) setCheckingSession(false);
+      }
+    })();
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  // Sync active tab when user navigates browser hash
+  useEffect(() => {
+    const onHashChange = () => setActiveTabState(readTabFromHash());
+    window.addEventListener('hashchange', onHashChange);
+    return () => window.removeEventListener('hashchange', onHashChange);
+  }, []);
 
   const refreshData = useCallback(async () => {
     if (!api.getToken()) return;
@@ -128,16 +193,29 @@ export default function App() {
     if (profile) {
       setCurrentUser(profile);
     }
-    setActiveTab('overview');
+    const desired = readTabFromHash();
+    setActiveTab(desired);
   };
 
   const handleSignOut = () => {
+    api.logout().catch(() => {});
     api.setToken(null);
     setToken(null);
     setCurrentUser(null);
     setOverview(null);
     setCertificates([]);
   };
+
+  if (checkingSession) {
+    return (
+      <div className="min-h-screen bg-[#F8FAFC] flex items-center justify-center p-6">
+        <div className="flex items-center gap-3 text-slate-600 text-sm font-medium">
+          <ShieldCheck className="w-5 h-5 text-teal-700 animate-pulse" aria-hidden="true" />
+          <span>{t.app.name}</span>
+        </div>
+      </div>
+    );
+  }
 
   if (!token) {
     return (

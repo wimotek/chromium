@@ -28,6 +28,7 @@ type Client struct {
 	AuthorizationEndpoint string
 	TokenEndpoint         string
 	UserinfoEndpoint      string
+	EndSessionEndpoint    string
 	HTTPClient            *http.Client
 
 	mu        sync.RWMutex
@@ -48,6 +49,8 @@ type oidcEndpoints struct {
 	AuthorizationEndpoint string `json:"authorization_endpoint"`
 	TokenEndpoint         string `json:"token_endpoint"`
 	UserinfoEndpoint      string `json:"userinfo_endpoint"`
+	JWKSURI               string `json:"jwks_uri"`
+	EndSessionEndpoint    string `json:"end_session_endpoint"`
 }
 
 // NormalizeIssuer trims whitespace and trailing slashes and validates http/https scheme.
@@ -91,13 +94,11 @@ func (c *Client) resolveEndpoints(ctx context.Context) oidcEndpoints {
 		AuthorizationEndpoint: issuer + "/oauth/authorize",
 		TokenEndpoint:         issuer + "/oauth/token",
 		UserinfoEndpoint:      issuer + "/oauth/userinfo",
+		JWKSURI:               issuer + "/.well-known/jwks.json",
+		EndSessionEndpoint:    issuer + "/oauth/logout",
 	}
 	if c.AuthorizationEndpoint != "" && c.TokenEndpoint != "" && c.UserinfoEndpoint != "" {
-		return oidcEndpoints{
-			AuthorizationEndpoint: c.AuthorizationEndpoint,
-			TokenEndpoint:         c.TokenEndpoint,
-			UserinfoEndpoint:      c.UserinfoEndpoint,
-		}
+		return c.applyOverrides(fallback)
 	}
 
 	c.mu.RLock()
@@ -125,6 +126,12 @@ func (c *Client) resolveEndpoints(ctx context.Context) oidcEndpoints {
 					if doc.UserinfoEndpoint != "" {
 						fallback.UserinfoEndpoint = doc.UserinfoEndpoint
 					}
+					if doc.JWKSURI != "" {
+						fallback.JWKSURI = doc.JWKSURI
+					}
+					if doc.EndSessionEndpoint != "" {
+						fallback.EndSessionEndpoint = doc.EndSessionEndpoint
+					}
 				}
 			}
 		}
@@ -146,7 +153,34 @@ func (c *Client) applyOverrides(ep oidcEndpoints) oidcEndpoints {
 	if c.UserinfoEndpoint != "" {
 		ep.UserinfoEndpoint = c.UserinfoEndpoint
 	}
+	if c.EndSessionEndpoint != "" {
+		ep.EndSessionEndpoint = c.EndSessionEndpoint
+	}
 	return ep
+}
+
+// BuildLogoutURL constructs the OIDC RP-Initiated Logout URL for the provider.
+func (c *Client) BuildLogoutURL(ctx context.Context, postLogoutRedirectURI string) string {
+	ep := c.resolveEndpoints(ctx)
+	base := ep.EndSessionEndpoint
+	if base == "" {
+		return postLogoutRedirectURI
+	}
+	q := url.Values{}
+	if c.ClientID != "" {
+		q.Set("client_id", c.ClientID)
+	}
+	if postLogoutRedirectURI != "" {
+		q.Set("post_logout_redirect_uri", postLogoutRedirectURI)
+	}
+	if len(q) == 0 {
+		return base
+	}
+	sep := "?"
+	if strings.Contains(base, "?") {
+		sep = "&"
+	}
+	return base + sep + q.Encode()
 }
 
 // BuildLoginURL generates a PKCE S256 authorization URL along with CSRF state and verifier.

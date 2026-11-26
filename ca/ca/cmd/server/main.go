@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -45,7 +46,7 @@ func main() {
 	dbDriver := strings.ToLower(envOrDefault("CA_DB_DRIVER", "sqlite"))
 	dbDSN := envOrDefault("CA_DB_DSN", filepath.Join(dataDir, "wimotek-ca.db"))
 	orgName := envOrDefault("CA_ORG_NAME", "Wimotek Enterprise")
-	baseURL := envOrDefault("CA_BASE_URL", fmt.Sprintf("%s://localhost%s", defaultScheme, listenAddr))
+	baseURL := envOrDefault("CA_BASE_URL", buildDefaultBaseURL(defaultScheme, listenAddr))
 	adminUser := envOrDefault("CA_ADMIN_USER", "admin")
 	adminPass := strings.TrimSpace(os.Getenv("CA_ADMIN_PASSWORD"))
 	powDiff := parseIntDefault("CA_POW_DIFFICULTY", 16)
@@ -160,6 +161,20 @@ func envOrDefault(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+func buildDefaultBaseURL(scheme, listenAddr string) string {
+	host, port, err := net.SplitHostPort(listenAddr)
+	if err != nil {
+		if strings.HasPrefix(listenAddr, ":") {
+			return fmt.Sprintf("%s://localhost%s", scheme, listenAddr)
+		}
+		return fmt.Sprintf("%s://%s", scheme, listenAddr)
+	}
+	if host == "" || host == "0.0.0.0" || host == "::" {
+		host = "localhost"
+	}
+	return fmt.Sprintf("%s://%s", scheme, net.JoinHostPort(host, port))
 }
 
 func parseIntDefault(key string, fallback int) int {

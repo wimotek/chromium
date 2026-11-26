@@ -31,8 +31,10 @@ services:
     restart: unless-stopped
     user: "10001:10001"
     ports:
-      # 默认内置 HTTPS 监听端口；若设置 CA_TLS_ENABLED=false 改为纯 HTTP（前置反代），请同步改为 "8080:8080"
+      # 模式 A（默认，直接 HTTPS 访问）：保持 CA_TLS_ENABLED=true，映射 8443
       - "8443:8443"
+      # 模式 B（前置 Nginx/Caddy/Traefik/Cloudflare 反向代理终止 HTTPS）：设 CA_TLS_ENABLED=false 时容器自动监听纯 HTTP :8080，可改用下方映射：
+      # - "8080:8080"
     volumes:
       # 持久化数据目录：存放 SQLite 数据库、自动生成的 .master.key、未挂载外部证书时的自签 /data/tls 证书
       - ./ca-data:/data
@@ -45,8 +47,8 @@ services:
       # ========================================================================
       # CA_ORG_NAME: "Wimotek Enterprise"        # 可选：自动初始化 Root CA / Issuing CA 的组织名称 (Subject O)，也可在首次 3 步安装向导中修改
       # CA_BASE_URL: "https://ca.example.com"    # 可选（公网/生产强烈建议填写）：对外访问根 URL，写入 CRL CDP、OCSP AIA、ACME 目录及 OAuth 回调地址
-      # CA_TLS_ENABLED: "true"                   # 可选：是否启用内置 HTTPS（默认 true）；前置 Nginx/Caddy/Traefik 终止 TLS 时设为 false
-      # CA_LISTEN_ADDR: ":8443"                  # 可选：监听地址（CA_TLS_ENABLED=true 默认 :8443；false 默认 :8080）
+      # CA_TLS_ENABLED: "true"                   # 可选：是否启用容器内置 HTTPS（默认 true 监听 :8443）；仅当前置 Nginx/Caddy/Traefik/SLB 反代时设为 false（自动切为纯 HTTP :8080，免去双层 TLS 握手）
+      # CA_LISTEN_ADDR: ""                       # 可选：显式覆盖监听地址；留空时按 CA_TLS_ENABLED 自动选择（true -> :8443，false -> :8080）
       # CA_DATA_DIR: "/data"                     # 可选：容器内持久化数据目录（默认 /data）
       # CA_CERTS_DIR: "/certs"                   # 可选：容器内外部证书只读挂载目录（默认 /certs）
       # CA_TLS_HOSTS: "localhost,127.0.0.1"      # 可选：自动签发内置 HTTPS 证书时额外附加的 SAN 域名或 IP（逗号分隔，如 "ca.corp.local,10.0.0.10"）
@@ -113,7 +115,7 @@ services:
       # 时区设置（可选，默认 UTC）
       TZ: "Asia/Shanghai"
     healthcheck:
-      test: ["CMD-SHELL", "wget --no-check-certificate -qO- https://127.0.0.1:8443/api/health || wget -qO- http://127.0.0.1:8080/api/health || exit 1"]
+      test: ["CMD-SHELL", "wget --no-check-certificate -qO- https://127.0.0.1:8443/api/health || wget -qO- http://127.0.0.1:8080/api/health || wget -qO- http://127.0.0.1:8443/api/health || exit 1"]
       interval: 30s
       timeout: 5s
       retries: 3

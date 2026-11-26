@@ -11,6 +11,7 @@ import {
 } from '../lib/pki-utils';
 import { CopyButton } from './CopyButton';
 import { triggerBlobDownload } from '../lib/download';
+import { FloatingToast } from './Toast';
 
 interface CertificatesViewProps {
   t: LocaleDict;
@@ -141,14 +142,7 @@ export const CertificatesView: React.FC<CertificatesViewProps> = ({
         </div>
       </div>
 
-      {notice && (
-        <div className="rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-2.5 text-xs font-medium text-emerald-800 flex items-center justify-between gap-2">
-          <span>{notice}</span>
-          <button type="button" onClick={() => setNotice('')} className="text-emerald-700 hover:underline cursor-pointer">
-            {t.common.close}
-          </button>
-        </div>
-      )}
+      <FloatingToast notice={notice} onDismissNotice={() => setNotice('')} />
 
       {/* Dense Data Table */}
       <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
