@@ -1,4 +1,6 @@
 import dns from 'node:dns/promises';
+import http from 'node:http';
+import https from 'node:https';
 import net from 'node:net';
 import tls from 'node:tls';
 import type { MonitorCheckSample, MonitorTarget } from '../../src/types/models.ts';
@@ -81,37 +83,221 @@ function matchesExpectedHttpStatus(status: number, expectedSpec?: string): boole
   return false;
 }
 
+const safeExternalLookup: net.LookupFunction = (hostname, opts, cb) => {
+  const optionsObj = typeof opts === 'number' ? { family: opts } : opts || {};
+  dns
+    .lookup(hostname, { ...optionsObj, all: true })
+    .then((results) => {
+      const blocked = results.find((r) => isBlockedPrivateHost(r.address));
+      if (blocked) {
+        cb(new Error('Resolved private/loopback address is blocked by security policy'), '', 4);
+        return;
+      }
+      if ((optionsObj as { all?: boolean }).all) {
+        (cb as unknown as (err: NodeJS.ErrnoException | null, addresses: { address: string; family: number }[]) => void)(
+          null,
+          results
+        );
+      } else {
+        const first = results[0];
+        if (!first) {
+          cb(new Error(`No DNS records found for ${hostname}`), '', 4);
+          return;
+        }
+        cb(null, first.address, first.family);
+      }
+    })
+    .catch((err) => {
+      cb(err instanceof Error ? err : new Error('DNS lookup failed'), '', 4);
+    });
+};
+
+interface SingleHttpFetchResult {
+  status: number;
+  location?: string;
+  bodyText: string;
+  finalProtocol: 'http:' | 'https:';
+}
+
+function executeSingleHttpRequest(
+  parsed: URL,
+  method: 'GET' | 'HEAD',
+  readBody: boolean,
+  remainingMs: number,
+  ignoreTlsErrors: boolean
+): Promise<SingleHttpFetchResult> {
+  return new Promise((resolve, reject) => {
+    const isHttps = parsed.protocol === 'https:';
+    const transport = isHttps ? https : http;
+    const hostname = parsed.hostname.replace(/^\[|\]$/g, '');
+    const reqOptions: https.RequestOptions = {
+      protocol: parsed.protocol,
+      hostname,
+      port: parsed.port || (isHttps ? 443 : 80),
+      path: `${parsed.pathname || '/'}${parsed.search || ''}`,
+      method,
+      agent: false,
+      timeout: Math.max(500, remainingMs),
+      lookup: safeExternalLookup,
+      headers: {
+        'User-Agent': 'NetPlus-Monitor/1.0',
+        Accept: '*/*',
+        Connection: 'close',
+      },
+    };
+    if (isHttps) {
+      reqOptions.rejectUnauthorized = !ignoreTlsErrors;
+      if (!net.isIP(hostname)) {
+        reqOptions.servername = hostname;
+      }
+    }
+
+    let settled = false;
+    const done = (err: Error | null, result?: SingleHttpFetchResult) => {
+      if (settled) return;
+      settled = true;
+      if (err) reject(err);
+      else resolve(result!);
+    };
+
+    const req = transport.request(reqOptions, (res) => {
+      const status = res.statusCode ?? 0;
+      const location = typeof res.headers.location === 'string' ? res.headers.location : undefined;
+      const isRedirect = Boolean(location && [301, 302, 303, 307, 308].includes(status));
+
+      if (!readBody || isRedirect || method === 'HEAD') {
+        res.resume();
+        req.destroy();
+        done(null, {
+          status,
+          location,
+          bodyText: '',
+          finalProtocol: isHttps ? 'https:' : 'http:',
+        });
+        return;
+      }
+
+      const chunks: Buffer[] = [];
+      let totalBytes = 0;
+      const MAX_BODY_BYTES = 65_536;
+
+      res.on('data', (chunk: Buffer | string) => {
+        const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+        if (totalBytes < MAX_BODY_BYTES) {
+          const remaining = MAX_BODY_BYTES - totalBytes;
+          chunks.push(buf.length > remaining ? buf.subarray(0, remaining) : buf);
+          totalBytes += buf.length;
+        }
+        if (totalBytes >= MAX_BODY_BYTES) {
+          res.destroy();
+          done(null, {
+            status,
+            location,
+            bodyText: Buffer.concat(chunks).toString('utf8'),
+            finalProtocol: isHttps ? 'https:' : 'http:',
+          });
+        }
+      });
+
+      res.once('end', () => {
+        done(null, {
+          status,
+          location,
+          bodyText: Buffer.concat(chunks).toString('utf8'),
+          finalProtocol: isHttps ? 'https:' : 'http:',
+        });
+      });
+
+      res.once('error', (err) => {
+        done(err);
+      });
+    });
+
+    req.once('timeout', () => {
+      req.destroy(new Error(`Request timed out after ${Math.round(remainingMs)}ms`));
+    });
+    req.once('error', (err) => {
+      done(err);
+    });
+    req.end();
+  });
+}
+
 async function probeHttp(
   url: string,
   timeoutMs: number,
-  options?: { httpKeyword?: string; expectedStatusCodes?: string }
+  options?: {
+    httpKeyword?: string;
+    expectedStatusCodes?: string;
+    ignoreTlsErrors?: boolean;
+    httpMethod?: 'GET' | 'HEAD';
+  }
 ): Promise<MonitorCheckSample> {
-  const check = validateSafeExternalUrl(url);
-  if (!check.valid) {
+  const initialCheck = validateSafeExternalUrl(url);
+  if (!initialCheck.valid || !initialCheck.parsed) {
     return {
       timestamp: new Date().toISOString(),
       status: 'down',
       latencyMs: 0,
-      message: `Blocked URL: ${check.reason}`,
+      message: `Blocked URL: ${initialCheck.reason || 'Invalid URL'}`,
     };
   }
 
   const started = Date.now();
+  const maxTimeout = Math.min(12_000, Math.max(1000, timeoutMs));
+  const keyword = (options?.httpKeyword || '').trim();
+  const method: 'GET' | 'HEAD' = options?.httpMethod === 'HEAD' && !keyword ? 'HEAD' : 'GET';
+  const ignoreTlsErrors = Boolean(options?.ignoreTlsErrors);
+  const MAX_REDIRECTS = 5;
+
   try {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), Math.min(12_000, Math.max(1000, timeoutMs)));
-    const res = await fetch(url, {
-      method: 'GET',
-      redirect: 'follow',
-      signal: controller.signal,
-    });
-    const keyword = (options?.httpKeyword || '').trim();
-    let bodyText = '';
-    if (keyword) {
-      bodyText = (await res.text()).slice(0, 65536);
+    let currentParsed = initialCheck.parsed;
+    let res: SingleHttpFetchResult | null = null;
+
+    for (let hop = 0; hop <= MAX_REDIRECTS; hop += 1) {
+      const elapsed = Date.now() - started;
+      const remaining = maxTimeout - elapsed;
+      if (remaining <= 100) {
+        throw new Error(`Request timed out after ${maxTimeout}ms`);
+      }
+
+      const hopResult = await executeSingleHttpRequest(
+        currentParsed,
+        method,
+        Boolean(keyword),
+        remaining,
+        ignoreTlsErrors
+      );
+
+      if (hopResult.location && [301, 302, 303, 307, 308].includes(hopResult.status)) {
+        if (hop === MAX_REDIRECTS) {
+          throw new Error(`Too many redirects (>${MAX_REDIRECTS})`);
+        }
+        const nextUrl = new URL(hopResult.location, currentParsed).toString();
+        const redirectCheck = validateSafeExternalUrl(nextUrl);
+        if (!redirectCheck.valid || !redirectCheck.parsed) {
+          return {
+            timestamp: new Date().toISOString(),
+            status: 'down',
+            latencyMs: Date.now() - started,
+            message: `Blocked redirect target: ${redirectCheck.reason || 'Unsafe URL'}`,
+          };
+        }
+        currentParsed = redirectCheck.parsed;
+        continue;
+      }
+
+      res = hopResult;
+      break;
     }
-    clearTimeout(timer);
+
+    if (!res) {
+      throw new Error('HTTP probe did not receive a response');
+    }
+
     const rtt = Date.now() - started;
+    const protoLabel = res.finalProtocol === 'https:' ? 'HTTPS' : 'HTTP';
+    const tlsTag = res.finalProtocol === 'https:' && ignoreTlsErrors ? ' · TLS ignored' : '';
 
     const statusOk = matchesExpectedHttpStatus(res.status, options?.expectedStatusCodes);
     if (!statusOk) {
@@ -119,16 +305,16 @@ async function probeHttp(
         timestamp: new Date().toISOString(),
         status: 'down',
         latencyMs: rtt,
-        message: `HTTP ${res.status} unexpected status`,
+        message: `${protoLabel} ${res.status} unexpected status${tlsTag}`,
       };
     }
 
-    if (keyword && !bodyText.includes(keyword)) {
+    if (keyword && !res.bodyText.includes(keyword)) {
       return {
         timestamp: new Date().toISOString(),
         status: 'down',
         latencyMs: rtt,
-        message: `HTTP ${res.status} missing keyword "${keyword}"`,
+        message: `${protoLabel} ${res.status} missing keyword "${keyword}"${tlsTag}`,
       };
     }
 
@@ -136,14 +322,17 @@ async function probeHttp(
       timestamp: new Date().toISOString(),
       status: rtt > 1500 ? 'degraded' : 'up',
       latencyMs: rtt,
-      message: keyword ? `HTTP ${res.status} · keyword matched (${rtt}ms)` : `HTTP ${res.status} (${rtt}ms)`,
+      message: keyword
+        ? `${protoLabel} ${res.status} · keyword matched (${rtt}ms)${tlsTag}`
+        : `${protoLabel} ${res.status} (${rtt}ms)${tlsTag}`,
     };
   } catch (err) {
+    const rawMsg = err instanceof Error ? err.message : 'HTTP probe failed';
     return {
       timestamp: new Date().toISOString(),
       status: 'down',
       latencyMs: Date.now() - started,
-      message: err instanceof Error ? err.message : 'HTTP probe failed',
+      message: rawMsg,
     };
   }
 }
@@ -291,15 +480,23 @@ export async function runMonitorCheck(
 
   if (monitor.type === 'tcp') {
     sample = await probeTcp(monitor.target, monitor.port || 22, monitor.timeoutMs || 5000);
-  } else if (monitor.type === 'http') {
-    sample = await probeHttp(monitor.target, monitor.timeoutMs || 6000, {
+  } else if (monitor.type === 'http' || monitor.type === 'https') {
+    const trimmedTarget = monitor.target.trim();
+    const probeUrl = /^https?:\/\//i.test(trimmedTarget)
+      ? trimmedTarget
+      : `${monitor.type}://${trimmedTarget}`;
+    const isHttps = monitor.type === 'https' || probeUrl.toLowerCase().startsWith('https://');
+    const ignoreTlsErrors = isHttps && Boolean(monitor.ignoreTlsErrors);
+
+    sample = await probeHttp(probeUrl, monitor.timeoutMs || 6000, {
       httpKeyword: monitor.httpKeyword,
       expectedStatusCodes: monitor.expectedStatusCodes,
+      ignoreTlsErrors,
+      httpMethod: monitor.httpMethod,
     });
 
-    const isHttps = monitor.target.trim().toLowerCase().startsWith('https://');
     if (isHttps && monitor.checkTlsCert !== false) {
-      const tlsInfo = await probeTlsCertificate(monitor.target, monitor.timeoutMs || 6000);
+      const tlsInfo = await probeTlsCertificate(probeUrl, monitor.timeoutMs || 6000);
       monitor.tlsCertCheckedAt = new Date().toISOString();
       if (tlsInfo.ok && typeof tlsInfo.daysRemaining === 'number') {
         monitor.tlsCertExpiry = tlsInfo.expiryIso;
@@ -307,23 +504,26 @@ export async function runMonitorCheck(
         monitor.tlsCertIssuer = tlsInfo.issuer;
         monitor.tlsCertSubject = tlsInfo.subject;
         monitor.tlsCertError = undefined;
-        const warnDays = Math.max(1, Number(monitor.tlsCertWarningDays) || 14);
-        if (tlsInfo.daysRemaining <= 0) {
-          sample = {
-            ...sample,
-            status: 'down',
-            message: `${sample.message} · SSL证书已过期 (${tlsInfo.daysRemaining}天)`,
-          };
-          tlsWarningTriggered = true;
-          tlsAlertSummary = `SSL 证书已过期（到期日: ${tlsInfo.expiryIso?.slice(0, 10)}）`;
-        } else if (tlsInfo.daysRemaining <= warnDays) {
-          sample = {
-            ...sample,
-            status: sample.status === 'down' ? 'down' : 'degraded',
-            message: `${sample.message} · SSL证书剩余 ${tlsInfo.daysRemaining} 天`,
-          };
-          tlsWarningTriggered = true;
-          tlsAlertSummary = `SSL 证书仅剩 ${tlsInfo.daysRemaining} 天到期（到期日: ${tlsInfo.expiryIso?.slice(0, 10)}，阈值 ${warnDays} 天）`;
+        // When Ignore TLS/SSL errors is enabled, keep cert metadata for visibility but do not mark probe down/degraded
+        if (!ignoreTlsErrors) {
+          const warnDays = Math.max(1, Number(monitor.tlsCertWarningDays) || 14);
+          if (tlsInfo.daysRemaining <= 0) {
+            sample = {
+              ...sample,
+              status: 'down',
+              message: `${sample.message} · SSL证书已过期 (${tlsInfo.daysRemaining}天)`,
+            };
+            tlsWarningTriggered = true;
+            tlsAlertSummary = `SSL 证书已过期（到期日: ${tlsInfo.expiryIso?.slice(0, 10)}）`;
+          } else if (tlsInfo.daysRemaining <= warnDays) {
+            sample = {
+              ...sample,
+              status: sample.status === 'down' ? 'down' : 'degraded',
+              message: `${sample.message} · SSL证书剩余 ${tlsInfo.daysRemaining} 天`,
+            };
+            tlsWarningTriggered = true;
+            tlsAlertSummary = `SSL 证书仅剩 ${tlsInfo.daysRemaining} 天到期（到期日: ${tlsInfo.expiryIso?.slice(0, 10)}，阈值 ${warnDays} 天）`;
+          }
         }
       } else if (tlsInfo.error) {
         monitor.tlsCertError = tlsInfo.error;

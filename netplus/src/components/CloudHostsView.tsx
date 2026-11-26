@@ -414,6 +414,7 @@ export function CloudHostsView({
     target: '',
     port: 22,
     expectedIp: '',
+    ignoreTlsErrors: false,
     intervalSeconds: 60,
     linkedHostId: '',
     notifyOnAlert: true,
@@ -1664,12 +1665,16 @@ export function CloudHostsView({
   const handleCreateMonitor = async (e: React.FormEvent) => {
     e.preventDefault();
     try {
+      const isHttps =
+        monitorForm.type === 'https' ||
+        (monitorForm.type === 'http' && monitorForm.target.trim().toLowerCase().startsWith('https://'));
       await apiRequest('/api/monitors', {
         method: 'POST',
         body: JSON.stringify({
           ...monitorForm,
           port: monitorForm.type === 'tcp' ? Number(monitorForm.port) || 22 : undefined,
           expectedIp: monitorForm.type === 'dns' ? monitorForm.expectedIp.trim() || undefined : undefined,
+          ignoreTlsErrors: isHttps ? Boolean(monitorForm.ignoreTlsErrors) : false,
           linkedHostId: monitorForm.linkedHostId || undefined,
         }),
       });
@@ -1832,6 +1837,7 @@ export function CloudHostsView({
                     target: '',
                     port: 22,
                     expectedIp: '',
+                    ignoreTlsErrors: false,
                     intervalSeconds: 60,
                     linkedHostId: '',
                     notifyOnAlert: true,
@@ -4604,7 +4610,8 @@ export function CloudHostsView({
                     className="w-full px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950"
                   >
                     <option value="tcp">TCP</option>
-                    <option value="http">HTTP / HTTPS</option>
+                    <option value="http">HTTP</option>
+                    <option value="https">HTTPS</option>
                     <option value="dns">DNS</option>
                   </select>
                 </div>
@@ -4628,10 +4635,32 @@ export function CloudHostsView({
                   required
                   value={monitorForm.target}
                   onChange={(e) => setMonitorForm({ ...monitorForm, target: e.target.value })}
-                  placeholder={monitorForm.type === 'http' ? 'https://example.com' : '1.2.3.4'}
+                  placeholder={
+                    monitorForm.type === 'http'
+                      ? 'http://example.com'
+                      : monitorForm.type === 'https'
+                      ? 'https://example.com'
+                      : '1.2.3.4'
+                  }
                   className="w-full px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 font-mono"
                 />
               </div>
+              {(monitorForm.type === 'https' ||
+                (monitorForm.type === 'http' && monitorForm.target.trim().toLowerCase().startsWith('https://'))) && (
+                <label className="inline-flex items-center gap-2 font-medium text-slate-700 dark:text-slate-200 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={monitorForm.ignoreTlsErrors}
+                    onChange={(e) => setMonitorForm({ ...monitorForm, ignoreTlsErrors: e.target.checked })}
+                    className="rounded accent-amber-600"
+                  />
+                  <span>
+                    {isZh
+                      ? '忽略 HTTPS 网站的 TLS/SSL 证书错误 (Ignore TLS/SSL error for HTTPS websites)'
+                      : 'Ignore TLS/SSL error for HTTPS websites'}
+                  </span>
+                </label>
+              )}
               <div className="flex justify-end gap-2 pt-2">
                 <button
                   type="button"

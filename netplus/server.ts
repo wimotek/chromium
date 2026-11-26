@@ -1376,19 +1376,32 @@ export async function createServer(options: CreateServerOptions = {}) {
     res.json(store.getState().monitors);
   });
 
+  const normalizeWebMonitorTarget = (raw: string, probeType: 'http' | 'https'): string => {
+    const trimmed = raw.trim();
+    if (/^https?:\/\//i.test(trimmed)) return trimmed;
+    return `${probeType}://${trimmed}`;
+  };
+
   app.post('/api/monitors', requireAuth, (req: AuthedRequest, res) => {
     const b = req.body ?? {};
     if (!b.name || !b.type || !b.target) {
       res.status(400).json({ error: 'Name, probe type, and target are required' });
       return;
     }
-    if (b.type === 'http') {
-      const check = validateSafeExternalUrl(String(b.target));
+    const resolvedType: MonitorTarget['type'] =
+      b.type === 'http' || b.type === 'https' || b.type === 'dns' ? b.type : 'tcp';
+    const isWebProbe = resolvedType === 'http' || resolvedType === 'https';
+    const normalizedTarget = isWebProbe
+      ? normalizeWebMonitorTarget(String(b.target), resolvedType)
+      : String(b.target).trim();
+    if (isWebProbe) {
+      const check = validateSafeExternalUrl(normalizedTarget);
       if (!check.valid) {
         res.status(400).json({ error: check.reason });
         return;
       }
     }
+    const isHttpsTarget = resolvedType === 'https' || normalizedTarget.toLowerCase().startsWith('https://');
     const now = new Date().toISOString();
     const notifyOnDown = b.notifyOnDown !== undefined ? Boolean(b.notifyOnDown) : b.notifyOnAlert !== false;
     const notifyOnRecover = b.notifyOnRecover !== undefined ? Boolean(b.notifyOnRecover) : b.notifyOnAlert !== false;
@@ -1396,13 +1409,15 @@ export async function createServer(options: CreateServerOptions = {}) {
       id: `mon-${crypto.randomBytes(5).toString('hex')}`,
       name: String(b.name).trim(),
       groupName: b.groupName ? String(b.groupName).trim() : undefined,
-      type: b.type === 'http' || b.type === 'dns' ? b.type : 'tcp',
-      target: String(b.target).trim(),
-      port: b.type === 'tcp' ? Math.min(65535, Math.max(1, Number(b.port) || 443)) : undefined,
+      type: resolvedType,
+      target: normalizedTarget,
+      port: resolvedType === 'tcp' ? Math.min(65535, Math.max(1, Number(b.port) || 443)) : undefined,
       expectedIp: b.expectedIp ? String(b.expectedIp).trim() : undefined,
-      httpKeyword: b.httpKeyword ? String(b.httpKeyword).trim() : undefined,
-      expectedStatusCodes: b.expectedStatusCodes ? String(b.expectedStatusCodes).trim() : undefined,
-      checkTlsCert: b.checkTlsCert !== false,
+      httpMethod: isWebProbe ? (b.httpMethod === 'HEAD' ? 'HEAD' : 'GET') : undefined,
+      httpKeyword: isWebProbe && b.httpKeyword ? String(b.httpKeyword).trim() : undefined,
+      expectedStatusCodes: isWebProbe && b.expectedStatusCodes ? String(b.expectedStatusCodes).trim() : undefined,
+      ignoreTlsErrors: isHttpsTarget ? Boolean(b.ignoreTlsErrors) : false,
+      checkTlsCert: isHttpsTarget ? b.checkTlsCert !== false : false,
       tlsCertWarningDays: Math.min(365, Math.max(1, Number(b.tlsCertWarningDays) || 14)),
       intervalSeconds: Math.max(15, Number(b.intervalSeconds) || 60),
       timeoutMs: Math.min(12_000, Math.max(1000, Number(b.timeoutMs) || 5000)),
@@ -1443,8 +1458,15 @@ export async function createServer(options: CreateServerOptions = {}) {
       return;
     }
     const b = req.body ?? {};
-    if ((b.type || mon.type) === 'http' && b.target) {
-      const check = validateSafeExternalUrl(String(b.target));
+    const nextType: MonitorTarget['type'] =
+      b.type === 'http' || b.type === 'https' || b.type === 'tcp' || b.type === 'dns'
+        ? b.type
+        : mon.type;
+    const isWebProbe = nextType === 'http' || nextType === 'https';
+    let nextTarget = b.target !== undefined ? String(b.target).trim() : mon.target;
+    if (isWebProbe && b.target !== undefined) {
+      nextTarget = normalizeWebMonitorTarget(nextTarget, nextType);
+      const check = validateSafeExternalUrl(nextTarget);
       if (!check.valid) {
         res.status(400).json({ error: check.reason });
         return;
@@ -1452,12 +1474,14 @@ export async function createServer(options: CreateServerOptions = {}) {
     }
     if (b.name !== undefined) mon.name = String(b.name).trim();
     if (b.groupName !== undefined) mon.groupName = String(b.groupName).trim() || undefined;
-    if (b.type !== undefined) mon.type = b.type;
-    if (b.target !== undefined) mon.target = String(b.target).trim();
+    if (b.type !== undefined) mon.type = nextType;
+    if (b.target !== undefined) mon.target = nextTarget;
     if (b.port !== undefined) mon.port = Math.min(65535, Math.max(1, Number(b.port) || 443));
     if (b.expectedIp !== undefined) mon.expectedIp = String(b.expectedIp).trim() || undefined;
+    if (b.httpMethod !== undefined) mon.httpMethod = b.httpMethod === 'HEAD' ? 'HEAD' : 'GET';
     if (b.httpKeyword !== undefined) mon.httpKeyword = String(b.httpKeyword).trim() || undefined;
     if (b.expectedStatusCodes !== undefined) mon.expectedStatusCodes = String(b.expectedStatusCodes).trim() || undefined;
+    if (b.ignoreTlsErrors !== undefined) mon.ignoreTlsErrors = Boolean(b.ignoreTlsErrors);
     if (b.checkTlsCert !== undefined) mon.checkTlsCert = Boolean(b.checkTlsCert);
     if (b.tlsCertWarningDays !== undefined) {
       mon.tlsCertWarningDays = Math.min(365, Math.max(1, Number(b.tlsCertWarningDays) || 14));

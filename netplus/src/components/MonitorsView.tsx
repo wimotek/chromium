@@ -158,12 +158,14 @@ export function MonitorsView({
   const [form, setForm] = useState({
     name: '',
     groupName: '',
-    type: 'http' as MonitorProbeType,
+    type: 'https' as MonitorProbeType,
     target: '',
     port: '443',
     expectedIp: '',
+    httpMethod: 'GET' as 'GET' | 'HEAD',
     expectedStatusCodes: '200-399',
     httpKeyword: '',
+    ignoreTlsErrors: false,
     checkTlsCert: true,
     tlsCertWarningDays: '14',
     intervalSeconds: '60',
@@ -174,6 +176,14 @@ export function MonitorsView({
     notifyOnRecover: true,
     notifyChannelIds: [] as string[],
   });
+
+  const isWebType = (t: MonitorProbeType) => t === 'http' || t === 'https';
+  const isHttpsMonitor = (m: Pick<MonitorTarget, 'type' | 'target'>) =>
+    m.type === 'https' || (m.type === 'http' && m.target.trim().toLowerCase().startsWith('https://'));
+  const getMonitorTypeBadge = (m: Pick<MonitorTarget, 'type' | 'target'>) => {
+    if (isHttpsMonitor(m)) return 'HTTPS';
+    return m.type.toUpperCase();
+  };
 
   const channelMap = useMemo(
     () => new Map(notificationChannels.map((c) => [c.id, c])),
@@ -337,12 +347,14 @@ export function MonitorsView({
     setForm({
       name: '',
       groupName: isZh ? '核心服务' : 'Core Services',
-      type: 'http',
+      type: 'https',
       target: 'https://',
       port: '443',
       expectedIp: '',
+      httpMethod: 'GET',
       expectedStatusCodes: '200-399',
       httpKeyword: '',
+      ignoreTlsErrors: false,
       checkTlsCert: true,
       tlsCertWarningDays: '14',
       intervalSeconds: '60',
@@ -358,15 +370,19 @@ export function MonitorsView({
 
   const openEditModal = (m: MonitorTarget) => {
     setEditingMonitor(m);
+    const normalizedType: MonitorProbeType =
+      m.type === 'http' && m.target.trim().toLowerCase().startsWith('https://') ? 'https' : m.type;
     setForm({
       name: m.name,
       groupName: m.groupName || '',
-      type: m.type,
+      type: normalizedType,
       target: m.target,
       port: String(m.port ?? 443),
       expectedIp: m.expectedIp || '',
+      httpMethod: m.httpMethod === 'HEAD' ? 'HEAD' : 'GET',
       expectedStatusCodes: m.expectedStatusCodes || '200-399',
       httpKeyword: m.httpKeyword || '',
+      ignoreTlsErrors: Boolean(m.ignoreTlsErrors),
       checkTlsCert: m.checkTlsCert !== false,
       tlsCertWarningDays: String(m.tlsCertWarningDays ?? 14),
       intervalSeconds: String(m.intervalSeconds || 60),
@@ -384,21 +400,29 @@ export function MonitorsView({
     e.preventDefault();
     setSaving(true);
     try {
+      const webProbe = isWebType(form.type);
+      const rawTarget = form.target.trim();
+      const normalizedTarget = webProbe
+        ? /^https?:\/\//i.test(rawTarget)
+          ? rawTarget
+          : `${form.type}://${rawTarget}`
+        : rawTarget;
+      const httpsMode = form.type === 'https' || normalizedTarget.toLowerCase().startsWith('https://');
       const payload = {
         name: form.name.trim(),
         groupName: form.groupName.trim() || undefined,
         type: form.type,
-        target: form.target.trim(),
+        target: normalizedTarget,
         port: form.type === 'tcp' ? Math.max(1, Math.min(65535, Number(form.port) || 443)) : undefined,
         expectedIp: form.type === 'dns' ? form.expectedIp.trim() || undefined : undefined,
-        expectedStatusCodes:
-          form.type === 'http' ? form.expectedStatusCodes.trim() || '200-399' : undefined,
-        httpKeyword: form.type === 'http' ? form.httpKeyword.trim() || undefined : undefined,
-        checkTlsCert: form.type === 'http' ? form.checkTlsCert : undefined,
-        tlsCertWarningDays:
-          form.type === 'http'
-            ? Math.max(1, Math.min(365, Number(form.tlsCertWarningDays) || 14))
-            : undefined,
+        httpMethod: webProbe ? form.httpMethod : undefined,
+        expectedStatusCodes: webProbe ? form.expectedStatusCodes.trim() || '200-399' : undefined,
+        httpKeyword: webProbe ? form.httpKeyword.trim() || undefined : undefined,
+        ignoreTlsErrors: httpsMode ? form.ignoreTlsErrors : false,
+        checkTlsCert: httpsMode ? form.checkTlsCert : false,
+        tlsCertWarningDays: httpsMode
+          ? Math.max(1, Math.min(365, Number(form.tlsCertWarningDays) || 14))
+          : undefined,
         intervalSeconds: Math.max(15, Number(form.intervalSeconds) || 60),
         timeoutMs: Math.max(1000, Math.min(30000, Number(form.timeoutMs) || 5000)),
         failureThreshold: Math.max(1, Math.min(10, Number(form.failureThreshold) || 2)),
@@ -448,17 +472,21 @@ export function MonitorsView({
   const handleCheckOne = async (m: MonitorTarget) => {
     setCheckingId(m.id);
     try {
-      const res = await apiRequest<{ monitor?: MonitorTarget; sample?: MonitorCheckSample }>(
+      const res = await apiRequest<MonitorTarget | { monitor?: MonitorTarget; sample?: MonitorCheckSample }>(
         `/api/monitors/${m.id}/check`,
         { method: 'POST' }
       );
-      if (res.monitor) {
-        setLiveMonitors((prev) => prev.map((x) => (x.id === m.id ? res.monitor! : x)));
+      const updatedMon = 'monitor' in res && res.monitor ? res.monitor : 'id' in res ? res : undefined;
+      if (updatedMon) {
+        setLiveMonitors((prev) => prev.map((x) => (x.id === m.id ? updatedMon : x)));
       }
       await onReload();
-      const s = res.sample;
+      const s =
+        'sample' in res && res.sample
+          ? res.sample
+          : updatedMon?.history?.[updatedMon.history.length - 1];
       toast.show(
-        `${m.name}: ${s?.status.toUpperCase() ?? ''} (${s?.latencyMs ?? 0}ms) ${s?.message ?? ''}`,
+        `${m.name}: ${s?.status.toUpperCase() ?? updatedMon?.status.toUpperCase() ?? ''} (${s?.latencyMs ?? updatedMon?.lastLatencyMs ?? 0}ms) ${s?.message ?? updatedMon?.lastMessage ?? ''}`,
         s?.status === 'down' ? 'error' : s?.status === 'degraded' ? 'warning' : 'success'
       );
     } catch (err) {
@@ -789,9 +817,11 @@ export function MonitorsView({
                             ...hist,
                           ];
                           const tlsWarn =
-                            m.type === 'http' &&
+                            isHttpsMonitor(m) &&
+                            !m.ignoreTlsErrors &&
                             typeof m.tlsDaysRemaining === 'number' &&
                             m.tlsDaysRemaining <= (m.tlsCertWarningDays ?? 14);
+                          const typeBadge = getMonitorTypeBadge(m);
                           return (
                             <button
                               key={m.id}
@@ -822,10 +852,14 @@ export function MonitorsView({
                                     {m.name}
                                   </div>
                                   <div className="flex flex-wrap items-center gap-1.5 mt-0.5">
-                                    <span className="px-1.5 py-[1px] rounded bg-blue-600/10 dark:bg-blue-500/20 text-blue-700 dark:text-blue-300 font-mono text-[10px] font-semibold uppercase">
-                                      {m.type === 'http' && m.target.toLowerCase().startsWith('https://')
-                                        ? 'HTTPS'
-                                        : m.type.toUpperCase()}
+                                    <span
+                                      className={`px-1.5 py-[1px] rounded font-mono text-[10px] font-semibold uppercase ${
+                                        typeBadge === 'HTTP'
+                                          ? 'bg-sky-600/10 dark:bg-sky-500/20 text-sky-700 dark:text-sky-300'
+                                          : 'bg-blue-600/10 dark:bg-blue-500/20 text-blue-700 dark:text-blue-300'
+                                      }`}
+                                    >
+                                      {typeBadge}
                                     </span>
                                     {m.enabled && typeof m.lastLatencyMs === 'number' && (
                                       <span className="font-mono text-[10px] text-slate-400 tabular-nums">
@@ -906,10 +940,14 @@ export function MonitorsView({
                           {m.name}
                         </div>
                         <div className="flex items-center gap-1.5 mt-0.5">
-                          <span className="px-1.5 py-[1px] rounded bg-blue-600/10 dark:bg-blue-500/20 text-blue-700 dark:text-blue-300 font-mono text-[10px] font-semibold uppercase">
-                            {m.type === 'http' && m.target.toLowerCase().startsWith('https://')
-                              ? 'HTTPS'
-                              : m.type.toUpperCase()}
+                          <span
+                            className={`px-1.5 py-[1px] rounded font-mono text-[10px] font-semibold uppercase ${
+                              getMonitorTypeBadge(m) === 'HTTP'
+                                ? 'bg-sky-600/10 dark:bg-sky-500/20 text-sky-700 dark:text-sky-300'
+                                : 'bg-blue-600/10 dark:bg-blue-500/20 text-blue-700 dark:text-blue-300'
+                            }`}
+                          >
+                            {getMonitorTypeBadge(m)}
                           </span>
                           {m.enabled && typeof m.lastLatencyMs === 'number' && (
                             <span className="font-mono text-[10px] text-slate-400 tabular-nums">
@@ -973,14 +1011,23 @@ export function MonitorsView({
                             : selectedMonitor.status}
                         </span>
                         <span className="px-1.5 py-0.5 rounded bg-slate-100 dark:bg-slate-800 font-mono text-[11px] uppercase text-slate-600 dark:text-slate-300">
-                          {selectedMonitor.type}
+                          {getMonitorTypeBadge(selectedMonitor)}
                         </span>
+                        {isHttpsMonitor(selectedMonitor) && selectedMonitor.ignoreTlsErrors && (
+                          <span className="px-2 py-0.5 rounded bg-amber-100 dark:bg-amber-950/60 text-amber-700 dark:text-amber-300 font-mono text-[10px] font-semibold">
+                            {isZh ? '忽略 TLS/SSL 错误' : 'Ignore TLS/SSL'}
+                          </span>
+                        )}
                       </div>
 
                       <div className="flex flex-wrap items-center gap-2 text-xs font-mono text-slate-500 dark:text-slate-400">
-                        {selectedMonitor.type === 'http' ? (
+                        {isWebType(selectedMonitor.type) ? (
                           <a
-                            href={selectedMonitor.target}
+                            href={
+                              /^https?:\/\//i.test(selectedMonitor.target)
+                                ? selectedMonitor.target
+                                : `${selectedMonitor.type}://${selectedMonitor.target}`
+                            }
                             target="_blank"
                             rel="noopener noreferrer"
                             className="inline-flex items-center gap-1 text-blue-600 dark:text-blue-400 hover:underline break-all"
@@ -1132,10 +1179,10 @@ export function MonitorsView({
                     <div className="p-3.5 rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50/40 dark:bg-slate-950/40">
                       <div className="text-slate-500 dark:text-slate-400">{isZh ? '校验规则' : 'Assertions'}</div>
                       <div className="mt-1 font-mono text-xs text-slate-700 dark:text-slate-300 truncate">
-                        {selectedMonitor.type === 'http'
-                          ? `HTTP ${selectedMonitor.expectedStatusCodes || '200-399'}${
+                        {isWebType(selectedMonitor.type)
+                          ? `${getMonitorTypeBadge(selectedMonitor)} ${selectedMonitor.httpMethod || 'GET'} ${selectedMonitor.expectedStatusCodes || '200-399'}${
                               selectedMonitor.httpKeyword ? ` · "${selectedMonitor.httpKeyword}"` : ''
-                            }`
+                            }${isHttpsMonitor(selectedMonitor) && selectedMonitor.ignoreTlsErrors ? ' · Ignore TLS' : ''}`
                           : selectedMonitor.type === 'tcp'
                           ? `TCP :${selectedMonitor.port || 443}`
                           : selectedMonitor.expectedIp
@@ -1146,14 +1193,15 @@ export function MonitorsView({
                   </div>
 
                   {/* SSL / TLS Certificate Expiry Strip for HTTPS Monitors */}
-                  {selectedMonitor.type === 'http' &&
-                    selectedMonitor.target.trim().toLowerCase().startsWith('https://') &&
-                    selectedMonitor.checkTlsCert !== false && (
+                  {isHttpsMonitor(selectedMonitor) &&
+                    (selectedMonitor.checkTlsCert !== false || selectedMonitor.ignoreTlsErrors) && (
                       <div className="p-3.5 rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50/50 dark:bg-slate-950/50 flex flex-wrap items-center justify-between gap-3 text-xs">
                         <div className="flex flex-wrap items-center gap-2.5">
                           <ShieldCheck
                             className={`w-4 h-4 shrink-0 ${
-                              typeof selectedMonitor.tlsDaysRemaining !== 'number'
+                              selectedMonitor.ignoreTlsErrors
+                                ? 'text-amber-500'
+                                : typeof selectedMonitor.tlsDaysRemaining !== 'number'
                                 ? 'text-slate-400'
                                 : selectedMonitor.tlsDaysRemaining <= 0
                                 ? 'text-red-600 dark:text-red-400'
@@ -1163,53 +1211,61 @@ export function MonitorsView({
                             }`}
                           />
                           <span className="font-semibold text-slate-800 dark:text-slate-200">
-                            {isZh ? 'SSL/TLS 证书有效期：' : 'SSL/TLS Certificate:'}
+                            {isZh ? 'SSL/TLS 证书：' : 'SSL/TLS:'}
                           </span>
-                          {typeof selectedMonitor.tlsDaysRemaining === 'number' ? (
-                            <>
-                              <span
-                                className={`font-mono font-bold tabular-nums ${
-                                  selectedMonitor.tlsDaysRemaining <= 0
-                                    ? 'text-red-600 dark:text-red-400'
-                                    : selectedMonitor.tlsDaysRemaining <= (selectedMonitor.tlsCertWarningDays ?? 14)
-                                    ? 'text-amber-600 dark:text-amber-400'
-                                    : 'text-emerald-600 dark:text-emerald-400'
-                                }`}
-                              >
-                                {selectedMonitor.tlsDaysRemaining <= 0
-                                  ? isZh
-                                    ? `已过期 (${selectedMonitor.tlsDaysRemaining} 天)`
-                                    : `Expired (${selectedMonitor.tlsDaysRemaining}d)`
-                                  : isZh
-                                  ? `剩余 ${selectedMonitor.tlsDaysRemaining} 天`
-                                  : `${selectedMonitor.tlsDaysRemaining} days left`}
-                              </span>
-                              {selectedMonitor.tlsCertExpiry && (
-                                <span className="font-mono text-[11px] text-slate-500 dark:text-slate-400">
-                                  ({isZh ? '到期' : 'Expires'}: {selectedMonitor.tlsCertExpiry.slice(0, 10)})
-                                </span>
-                              )}
-                              {selectedMonitor.tlsCertIssuer && (
-                                <span className="text-[11px] text-slate-500 dark:text-slate-400">
-                                  · {selectedMonitor.tlsCertIssuer}
-                                </span>
-                              )}
-                            </>
-                          ) : selectedMonitor.tlsCertError ? (
-                            <span className="font-mono text-[11px] text-red-600 dark:text-red-400">
-                              {selectedMonitor.tlsCertError}
-                            </span>
-                          ) : (
-                            <span className="text-slate-400">
-                              {isZh ? '点击「立即探测」获取证书到期时间' : 'Click Probe to inspect certificate'}
+                          {selectedMonitor.ignoreTlsErrors && (
+                            <span className="px-2 py-0.5 rounded bg-amber-100 dark:bg-amber-950/60 text-amber-700 dark:text-amber-300 font-mono text-[11px] font-semibold">
+                              {isZh ? '已开启忽略 TLS/SSL 错误' : 'Ignore TLS/SSL errors ON'}
                             </span>
                           )}
+                          {selectedMonitor.checkTlsCert !== false &&
+                            (typeof selectedMonitor.tlsDaysRemaining === 'number' ? (
+                              <>
+                                <span
+                                  className={`font-mono font-bold tabular-nums ${
+                                    selectedMonitor.tlsDaysRemaining <= 0
+                                      ? 'text-red-600 dark:text-red-400'
+                                      : selectedMonitor.tlsDaysRemaining <= (selectedMonitor.tlsCertWarningDays ?? 14)
+                                      ? 'text-amber-600 dark:text-amber-400'
+                                      : 'text-emerald-600 dark:text-emerald-400'
+                                  }`}
+                                >
+                                  {selectedMonitor.tlsDaysRemaining <= 0
+                                    ? isZh
+                                      ? `已过期 (${selectedMonitor.tlsDaysRemaining} 天)`
+                                      : `Expired (${selectedMonitor.tlsDaysRemaining}d)`
+                                    : isZh
+                                    ? `剩余 ${selectedMonitor.tlsDaysRemaining} 天`
+                                    : `${selectedMonitor.tlsDaysRemaining} days left`}
+                                </span>
+                                {selectedMonitor.tlsCertExpiry && (
+                                  <span className="font-mono text-[11px] text-slate-500 dark:text-slate-400">
+                                    ({isZh ? '到期' : 'Expires'}: {selectedMonitor.tlsCertExpiry.slice(0, 10)})
+                                  </span>
+                                )}
+                                {selectedMonitor.tlsCertIssuer && (
+                                  <span className="text-[11px] text-slate-500 dark:text-slate-400">
+                                    · {selectedMonitor.tlsCertIssuer}
+                                  </span>
+                                )}
+                              </>
+                            ) : selectedMonitor.tlsCertError ? (
+                              <span className="font-mono text-[11px] text-red-600 dark:text-red-400">
+                                {selectedMonitor.tlsCertError}
+                              </span>
+                            ) : (
+                              <span className="text-slate-400">
+                                {isZh ? '点击「立即探测」获取证书到期时间' : 'Click Probe to inspect certificate'}
+                              </span>
+                            ))}
                         </div>
-                        <span className="font-mono text-[11px] text-slate-400">
-                          {isZh
-                            ? `到期前 ${selectedMonitor.tlsCertWarningDays ?? 14} 天告警`
-                            : `Warn <= ${selectedMonitor.tlsCertWarningDays ?? 14}d`}
-                        </span>
+                        {selectedMonitor.checkTlsCert !== false && !selectedMonitor.ignoreTlsErrors && (
+                          <span className="font-mono text-[11px] text-slate-400">
+                            {isZh
+                              ? `到期前 ${selectedMonitor.tlsCertWarningDays ?? 14} 天告警`
+                              : `Warn <= ${selectedMonitor.tlsCertWarningDays ?? 14}d`}
+                          </span>
+                        )}
                       </div>
                     )}
 
@@ -1389,20 +1445,34 @@ export function MonitorsView({
                     value={form.type}
                     onChange={(e) => {
                       const nextType = e.target.value as MonitorProbeType;
-                      setForm((prev) => ({
-                        ...prev,
-                        type: nextType,
-                        target:
-                          nextType === 'http' && !prev.target
-                            ? 'https://'
-                            : nextType !== 'http' && prev.target === 'https://'
-                            ? ''
-                            : prev.target,
-                      }));
+                      setForm((prev) => {
+                        let nextTarget = prev.target;
+                        if (nextType === 'http') {
+                          if (!prev.target || prev.target === 'https://') {
+                            nextTarget = 'http://';
+                          } else if (/^https:\/\//i.test(prev.target)) {
+                            nextTarget = prev.target.replace(/^https:\/\//i, 'http://');
+                          }
+                        } else if (nextType === 'https') {
+                          if (!prev.target || prev.target === 'http://') {
+                            nextTarget = 'https://';
+                          } else if (/^http:\/\//i.test(prev.target)) {
+                            nextTarget = prev.target.replace(/^http:\/\//i, 'https://');
+                          }
+                        } else if (prev.target === 'http://' || prev.target === 'https://') {
+                          nextTarget = '';
+                        }
+                        return {
+                          ...prev,
+                          type: nextType,
+                          target: nextTarget,
+                        };
+                      });
                     }}
                     className="w-full px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 font-mono"
                   >
-                    <option value="http">HTTP(S) / Keyword</option>
+                    <option value="http">HTTP</option>
+                    <option value="https">HTTPS</option>
                     <option value="tcp">TCP Port</option>
                     <option value="dns">DNS Resolve</option>
                   </select>
@@ -1411,8 +1481,12 @@ export function MonitorsView({
                   <label className="block font-medium mb-1">
                     {form.type === 'http'
                       ? isZh
-                        ? '监控 URL *'
-                        : 'Target URL *'
+                        ? 'HTTP 监控 URL *'
+                        : 'HTTP Target URL *'
+                      : form.type === 'https'
+                      ? isZh
+                        ? 'HTTPS 监控 URL *'
+                        : 'HTTPS Target URL *'
                       : form.type === 'tcp'
                       ? isZh
                         ? '主机 IP 或域名 *'
@@ -1427,6 +1501,8 @@ export function MonitorsView({
                     onChange={(e) => setForm({ ...form, target: e.target.value })}
                     placeholder={
                       form.type === 'http'
+                        ? 'http://example.com:8080/health'
+                        : form.type === 'https'
                         ? 'https://example.com/health'
                         : form.type === 'tcp'
                         ? '138.2.45.109 or db.example.com'
@@ -1437,9 +1513,24 @@ export function MonitorsView({
                 </div>
               </div>
 
-              {form.type === 'http' && (
+              {isWebType(form.type) && (
                 <div className="space-y-3">
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3.5">
+                    <div>
+                      <label className="block font-medium mb-1">
+                        {isZh ? '请求方式' : 'HTTP Method'}
+                      </label>
+                      <select
+                        value={form.httpMethod}
+                        onChange={(e) =>
+                          setForm({ ...form, httpMethod: e.target.value === 'HEAD' ? 'HEAD' : 'GET' })
+                        }
+                        className="w-full px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 font-mono"
+                      >
+                        <option value="GET">GET</option>
+                        <option value="HEAD">HEAD</option>
+                      </select>
+                    </div>
                     <div>
                       <label className="block font-medium mb-1">
                         {isZh ? '允许的状态码范围' : 'Accepted Status Codes'}
@@ -1453,40 +1544,66 @@ export function MonitorsView({
                     </div>
                     <div>
                       <label className="block font-medium mb-1">
-                        {isZh ? '响应关键词校验（留空 = 纯 HTTP(S) 状态监测）' : 'Response Keyword (Blank = HTTP(S) Status Only)'}
+                        {isZh ? '响应关键词（可选）' : 'Response Keyword (Optional)'}
                       </label>
                       <input
                         value={form.httpKeyword}
                         onChange={(e) => setForm({ ...form, httpKeyword: e.target.value })}
-                        placeholder={isZh ? '如：ok / healthy（留空仅校验状态码）' : 'e.g. ok (blank = status only)'}
+                        placeholder={isZh ? '留空仅校验状态码' : 'Blank = status only'}
                         className="w-full px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 font-mono"
                       />
                     </div>
                   </div>
-                  <div className="p-3 rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-950/60 flex flex-wrap items-center justify-between gap-3">
-                    <label className="inline-flex items-center gap-2 font-medium text-slate-700 dark:text-slate-200">
-                      <input
-                        type="checkbox"
-                        checked={form.checkTlsCert}
-                        onChange={(e) => setForm({ ...form, checkTlsCert: e.target.checked })}
-                        className="rounded accent-emerald-600"
-                      />
-                      {isZh ? '监测 HTTPS SSL/TLS 证书到期时间' : 'Monitor HTTPS SSL/TLS Certificate Expiry'}
-                    </label>
-                    {form.checkTlsCert && (
-                      <div className="inline-flex items-center gap-2">
-                        <span className="text-slate-500">{isZh ? '提前告警天数：' : 'Warn Days:'}</span>
-                        <input
-                          type="number"
-                          min={1}
-                          max={365}
-                          value={form.tlsCertWarningDays}
-                          onChange={(e) => setForm({ ...form, tlsCertWarningDays: e.target.value })}
-                          className="w-20 px-2.5 py-1 rounded-md border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 font-mono"
-                        />
+
+                  {(form.type === 'https' || form.target.trim().toLowerCase().startsWith('https://')) && (
+                    <div className="p-3.5 rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-950/60 space-y-3">
+                      <div className="space-y-1">
+                        <label className="inline-flex items-center gap-2 font-medium text-slate-800 dark:text-slate-100 cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={form.ignoreTlsErrors}
+                            onChange={(e) => setForm({ ...form, ignoreTlsErrors: e.target.checked })}
+                            className="rounded accent-amber-600"
+                          />
+                          <span>
+                            {isZh
+                              ? '忽略 HTTPS 网站的 TLS/SSL 证书错误 (Ignore TLS/SSL error for HTTPS websites)'
+                              : 'Ignore TLS/SSL error for HTTPS websites'}
+                          </span>
+                        </label>
+                        <p className="pl-6 text-[11px] text-slate-500 dark:text-slate-400">
+                          {isZh
+                            ? '开启后将忽略自签名证书、过期证书或主机名不匹配等 TLS/SSL 校验错误，仅按 HTTP 状态码与关键词判定站点可用性。'
+                            : 'Allows HTTPS websites with self-signed, expired, or hostname-mismatched certificates to pass probes.'}
+                        </p>
                       </div>
-                    )}
-                  </div>
+
+                      <div className="pt-2.5 border-t border-slate-200/80 dark:border-slate-800 flex flex-wrap items-center justify-between gap-3">
+                        <label className="inline-flex items-center gap-2 font-medium text-slate-700 dark:text-slate-200 cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={form.checkTlsCert}
+                            onChange={(e) => setForm({ ...form, checkTlsCert: e.target.checked })}
+                            className="rounded accent-emerald-600"
+                          />
+                          {isZh ? '监测 HTTPS SSL/TLS 证书到期时间' : 'Monitor HTTPS SSL/TLS Certificate Expiry'}
+                        </label>
+                        {form.checkTlsCert && (
+                          <div className="inline-flex items-center gap-2">
+                            <span className="text-slate-500">{isZh ? '提前告警天数：' : 'Warn Days:'}</span>
+                            <input
+                              type="number"
+                              min={1}
+                              max={365}
+                              value={form.tlsCertWarningDays}
+                              onChange={(e) => setForm({ ...form, tlsCertWarningDays: e.target.value })}
+                              className="w-20 px-2.5 py-1 rounded-md border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 font-mono"
+                            />
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  )}
                 </div>
               )}
 

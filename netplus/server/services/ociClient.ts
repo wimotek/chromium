@@ -199,7 +199,7 @@ export async function ociApiRequest<T = unknown>(params: {
   body?: unknown;
   timeoutMs?: number;
   noRetryOn429?: boolean;
-}): Promise<{ ok: boolean; status: number; data?: T; error?: string }> {
+}): Promise<{ ok: boolean; status: number; data?: T; error?: string; errorCode?: string; opcRequestId?: string }> {
   const region = params.creds.region.trim().toLowerCase();
   if (!isValidOciRegion(region)) {
     return { ok: false, status: 400, error: `Invalid OCI region: ${params.creds.region}` };
@@ -235,6 +235,8 @@ export async function ociApiRequest<T = unknown>(params: {
         ok: false as const,
         status: 400,
         error: err instanceof Error ? `OCI request signing failed: ${err.message}` : 'OCI request signing failed',
+        errorCode: undefined as string | undefined,
+        opcRequestId: undefined as string | undefined,
         serverDateHeader: null as string | null,
       };
     }
@@ -258,19 +260,23 @@ export async function ociApiRequest<T = unknown>(params: {
         }
       }
       const serverDateHeader = res.headers.get('date');
+      const opcRequestId = res.headers.get('opc-request-id') || undefined;
 
       if (!res.ok) {
         const obj = (parsed ?? {}) as Record<string, unknown>;
+        const errorCode = typeof obj.code === 'string' ? obj.code : undefined;
         const msg = String(obj.message || obj.code || `OCI HTTP ${res.status}`);
-        return { ok: false as const, status: res.status, error: msg, serverDateHeader };
+        return { ok: false as const, status: res.status, error: msg, errorCode, opcRequestId, serverDateHeader };
       }
 
-      return { ok: true as const, status: res.status, data: parsed as T, serverDateHeader };
+      return { ok: true as const, status: res.status, data: parsed as T, opcRequestId, serverDateHeader };
     } catch (err) {
       return {
         ok: false as const,
         status: 0,
         error: err instanceof Error ? err.message : 'OCI network request failed',
+        errorCode: undefined as string | undefined,
+        opcRequestId: undefined as string | undefined,
         serverDateHeader: null as string | null,
       };
     } finally {
@@ -306,17 +312,19 @@ export async function ociApiRequest<T = unknown>(params: {
   if (!attempt.ok) {
     if (attempt.status === 401 || attempt.status === 403 || attempt.status === 404) {
       console.warn(
-        `[NetPlus][OCI] API error HTTP ${attempt.status} on ${host}${params.apiPath} (fp=${cleanFp}, tenancy=${maskOcid(cleanTenancy)}, user=${maskOcid(cleanUser)}): ${attempt.error}`
+        `[NetPlus][OCI] API error HTTP ${attempt.status} (${attempt.errorCode || 'unknown'}) on ${params.method} ${host}${params.apiPath} (fp=${cleanFp}, tenancy=${maskOcid(cleanTenancy)}, user=${maskOcid(cleanUser)}, opc-request-id=${attempt.opcRequestId || 'none'}): ${attempt.error}`
       );
     }
     return {
       ok: false,
       status: attempt.status,
       error: formatOciAuthFailureMessage(attempt.status, attempt.error, params.creds, host),
+      errorCode: attempt.errorCode,
+      opcRequestId: attempt.opcRequestId,
     };
   }
 
-  return { ok: true, status: attempt.status, data: attempt.data };
+  return { ok: true, status: attempt.status, data: attempt.data, opcRequestId: attempt.opcRequestId };
 }
 
 export function buildCredsFromProfile(
@@ -1050,7 +1058,9 @@ export async function ociGetVnicIpv6SubnetInfo(
 ): Promise<{
   ok: boolean;
   vnicId?: string;
+  vnicCompartmentId?: string;
   subnetId?: string;
+  subnetCompartmentId?: string;
   cidrs: string[];
   rawSubnetCidrs: string[];
   primaryCidr?: string;
@@ -1069,6 +1079,7 @@ export async function ociGetVnicIpv6SubnetInfo(
 
   const vnicRes = await ociApiRequest<{
     id: string;
+    compartmentId?: string;
     subnetId?: string;
     ipv6Addresses?: string[];
     ipv6AddressCidrs?: string[];
@@ -1093,6 +1104,7 @@ export async function ociGetVnicIpv6SubnetInfo(
   const existingIpv6s = (vnicRes.data.ipv6Addresses ?? []).filter((a) => net.isIPv6(a));
   const vnicAddressCidrs = (vnicRes.data.ipv6AddressCidrs ?? []).map((c) => c.trim()).filter(Boolean);
   const subnetId = vnicRes.data.subnetId || profile.subnetOcid;
+  let subnetCompartmentId: string | undefined;
   const dedupCidrMap = new Map<string, string>();
   const rawSubnetCidrList: string[] = [];
 
@@ -1113,6 +1125,7 @@ export async function ociGetVnicIpv6SubnetInfo(
   if (subnetId && isValidOcid(subnetId)) {
     const subnetRes = await ociApiRequest<{
       id: string;
+      compartmentId?: string;
       ipv6CidrBlock?: string;
       ipv6CidrBlocks?: string[];
     }>({
@@ -1122,6 +1135,7 @@ export async function ociGetVnicIpv6SubnetInfo(
       apiPath: `/20160918/subnets/${encodeURIComponent(subnetId)}`,
     });
     if (subnetRes.ok && subnetRes.data) {
+      subnetCompartmentId = subnetRes.data.compartmentId;
       if (subnetRes.data.ipv6CidrBlock) registerCidr(subnetRes.data.ipv6CidrBlock, true);
       for (const c of subnetRes.data.ipv6CidrBlocks ?? []) {
         registerCidr(c, true);
@@ -1143,7 +1157,9 @@ export async function ociGetVnicIpv6SubnetInfo(
   return {
     ok: true,
     vnicId: vnicRes.data.id,
+    vnicCompartmentId: vnicRes.data.compartmentId,
     subnetId,
+    subnetCompartmentId,
     cidrs,
     rawSubnetCidrs: rawSubnetCidrList,
     primaryCidr,
@@ -1356,7 +1372,6 @@ export async function ociAddIpv6ToVnic(
   }
 
   // Attempt 1: Standard minimal OCI CreateIpv6Details payload (NO ipv6SubnetCidr)
-  // Passing ipv6SubnetCidr unnecessarily on single-CIDR subnets or alongside ipAddress causes OCI 400/404 errors.
   const baseBody: Record<string, unknown> = { vnicId };
   if (cleanIp) {
     baseBody.ipAddress = cleanIp;
@@ -1370,16 +1385,32 @@ export async function ociAddIpv6ToVnic(
     body: baseBody,
   });
 
-  // Attempt 2: If Attempt 1 failed with 400/404 and subnet exposes explicit raw IPv6 CIDRs, retry with matching ipv6SubnetCidr
+  // Attempt 2: Retry with explicit ipv6SubnetCidr (both raw subnet string and expanded OCI Console form)
+  // plus lifetime='EPHEMERAL' fallback if OCI rejects minimal payload with 400/404.
   if ((!res.ok || !res.data) && (res.status === 400 || res.status === 404)) {
+    const rawPool = subnetInfo.rawSubnetCidrs.length > 0 ? subnetInfo.rawSubnetCidrs : subnetInfo.cidrs;
     const matchingRawCidrs = cleanIp
-      ? subnetInfo.rawSubnetCidrs.filter((c) => isIpv6MatchingCidrPrefix(cleanIp, c))
-      : subnetInfo.rawSubnetCidrs;
-    for (const rawCidr of matchingRawCidrs.slice(0, 2)) {
-      const retryBody: Record<string, unknown> = {
-        ...baseBody,
-        ipv6SubnetCidr: rawCidr,
-      };
+      ? rawPool.filter((c) => isIpv6MatchingCidrPrefix(cleanIp, c))
+      : rawPool;
+
+    const cidrCandidates: string[] = [];
+    for (const c of matchingRawCidrs) {
+      if (!cidrCandidates.includes(c)) cidrCandidates.push(c);
+      const expanded = canonicalCidrKey(c);
+      if (expanded && !cidrCandidates.includes(expanded)) cidrCandidates.push(expanded);
+    }
+
+    const fallbackBodies: Array<Record<string, unknown>> = [];
+    for (const candidateCidr of cidrCandidates.slice(0, 3)) {
+      fallbackBodies.push({ ...baseBody, ipv6SubnetCidr: candidateCidr });
+    }
+    if (cidrCandidates[0]) {
+      fallbackBodies.push({ ...baseBody, ipv6SubnetCidr: cidrCandidates[0], lifetime: 'EPHEMERAL' });
+    } else {
+      fallbackBodies.push({ ...baseBody, lifetime: 'EPHEMERAL' });
+    }
+
+    for (const retryBody of fallbackBodies) {
       const retryRes = await ociApiRequest<{ id: string; ipAddress: string }>({
         creds: built.creds,
         service: 'iaas',
@@ -1391,19 +1422,37 @@ export async function ociAddIpv6ToVnic(
         res = retryRes;
         break;
       }
+      // If a fallback surfaces a more specific non-404 error (e.g. 400 LimitExceeded / 409 Conflict), preserve it
+      if (res.status === 404 && retryRes.status !== 404 && retryRes.status !== 0) {
+        res = retryRes;
+      }
     }
   }
 
   if (!res.ok || !res.data) {
     console.warn(
-      `[NetPlus][OCI] CreateIpv6 failed (HTTP ${res.status}) region=${built.creds.region} vnic=${maskOcid(vnicId)} ip=${cleanIp || 'auto'}: ${res.error || 'unknown'}`
+      `[NetPlus][OCI] CreateIpv6 failed (HTTP ${res.status} ${res.errorCode || ''}) region=${built.creds.region} vnic=${maskOcid(vnicId)} ip=${cleanIp || 'auto'} opc-request-id=${res.opcRequestId || 'none'}: ${res.error || 'unknown'}`
     );
     const baseErr = res.error || `Failed to allocate OCI IPv6 (HTTP ${res.status})`;
+    const diagParts = [
+      `区域: ${built.creds.region}`,
+      `VNIC: ${maskOcid(vnicId)}`,
+      `API用户: ${maskOcid(built.creds.userOcid)}`,
+      subnetInfo.cidrs.length > 0 ? `子网前缀: ${subnetInfo.cidrs.join(', ')}` : '',
+      subnetInfo.vnicCompartmentId &&
+      subnetInfo.subnetCompartmentId &&
+      subnetInfo.vnicCompartmentId !== subnetInfo.subnetCompartmentId
+        ? `注意: VNIC(${maskOcid(subnetInfo.vnicCompartmentId)}) 与子网(${maskOcid(subnetInfo.subnetCompartmentId)}) 位于不同区隔`
+        : '',
+      res.opcRequestId ? `opc-request-id: ${res.opcRequestId}` : '',
+    ].filter(Boolean);
     const hint =
       res.status === 404
         ? subnetInfo.cidrs.length === 0
-          ? '（该子网可能尚未开启 IPv6 CIDR，或当前 OCI API 用户缺少管理 virtual-network-family / ipv6s 权限）'
-          : `（区域: ${built.creds.region}，子网 IPv6 前缀: ${subnetInfo.cidrs.join(', ')}；OCI 返回 404 通常表示该 API 用户所在 IAM 组缺少 "Allow group ... to manage virtual-network-family in tenancy/compartment" 权限，或该 VNIC 已达 IPv6 配额/所在区隔无权写入）`
+          ? `（${diagParts.join('，')}；该子网可能尚未开启 IPv6 CIDR，或 API 用户缺少 manage virtual-network-family 权限）`
+          : `（${diagParts.join('，')}；提示：请核对 NetPlus 中该 API 用户的 User OCID 是否真实加入了 Tenancy 的 Administrators 组 [注意：Identity Domain 管理员 ≠ Tenancy Administrators 组]，且在根区隔拥有 "Allow group ... to manage virtual-network-family in tenancy"；也可凭 opc-request-id 在 OCI 控制台「可观测性与管理 → 审计 (Audit)」中查看精确拒绝原因）`
+        : diagParts.length > 0
+        ? `（${diagParts.join('，')}）`
         : '';
     return { ok: false, error: `${baseErr}${hint}` };
   }

@@ -422,7 +422,7 @@ export interface ManagedIpRecord {
   updatedAt: string;
 }
 
-export type MonitorProbeType = 'tcp' | 'http' | 'dns';
+export type MonitorProbeType = 'http' | 'https' | 'tcp' | 'dns';
 
 export interface MonitorCheckSample {
   timestamp: string;
@@ -439,8 +439,11 @@ export interface MonitorTarget {
   target: string; // IP, host:port, URL, or FQDN
   port?: number; // used for TCP probes
   expectedIp?: string; // used for DNS drift probes
+  httpMethod?: 'GET' | 'HEAD'; // HTTP/HTTPS request method (default GET)
   httpKeyword?: string; // optional body keyword assertion for HTTP(S) probes
   expectedStatusCodes?: string; // e.g. "200-399" or "200,204"
+  /** Ignore TLS/SSL certificate errors (self-signed, expired, hostname mismatch) for HTTPS websites */
+  ignoreTlsErrors?: boolean;
   /** Inspect SSL/TLS certificate expiration for HTTPS URLs (default true) */
   checkTlsCert?: boolean;
   /** Warn/notify when certificate expires within N days (default 14) */

@@ -334,6 +334,8 @@ class DataStore {
         }));
         const mergedMonitors = (Array.isArray(parsed.monitors) ? parsed.monitors : []).map((m) => ({
           ...m,
+          httpMethod: (m.httpMethod === 'HEAD' ? 'HEAD' : 'GET') as 'GET' | 'HEAD',
+          ignoreTlsErrors: Boolean(m.ignoreTlsErrors),
           checkTlsCert: m.checkTlsCert !== false,
           tlsCertWarningDays: typeof m.tlsCertWarningDays === 'number' ? m.tlsCertWarningDays : 14,
           notifyOnDown: m.notifyOnDown !== undefined ? Boolean(m.notifyOnDown) : Boolean(m.notifyOnAlert),
