@@ -54,7 +54,9 @@ export function ApplicationsView({
 
   const [confirmResetApp, setConfirmResetApp] = useState<OAuthApplication | null>(null);
   const [resettingId, setResettingId] = useState<string | null>(null);
-  const [actionNotice, setActionNotice] = useState<{ text: string; secret?: string } | null>(null);
+  const [confirmDeleteApp, setConfirmDeleteApp] = useState<OAuthApplication | null>(null);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [actionNotice, setActionNotice] = useState<{ text: string; secret?: string; isError?: boolean } | null>(null);
 
   const [revealedSecrets, setRevealedSecrets] = useState<Record<string, boolean>>({});
   const [copiedId, setCopiedId] = useState<string | null>(null);
@@ -83,6 +85,7 @@ export function ApplicationsView({
   function startEdit(app: OAuthApplication) {
     setShowCreate(false);
     setConfirmResetApp(null);
+    setConfirmDeleteApp(null);
     setEditError(null);
     setEditingApp(app);
     setEditName(app.name);
@@ -135,8 +138,34 @@ export function ApplicationsView({
         });
       }
       setConfirmResetApp(null);
+    } catch (err) {
+      setActionNotice({
+        text: err instanceof Error ? err.message : isZh ? '重置密钥失败' : 'Failed to reset secret',
+        isError: true,
+      });
     } finally {
       setResettingId(null);
+    }
+  }
+
+  async function handleConfirmDelete() {
+    if (!confirmDeleteApp) return;
+    const target = confirmDeleteApp;
+    setDeletingId(target.id);
+    setActionNotice(null);
+    try {
+      await onDeleteApp(target.id);
+      setConfirmDeleteApp(null);
+      setActionNotice({
+        text: isZh ? `已删除应用「${target.name}」。` : `Deleted application ${target.name}.`,
+      });
+    } catch (err) {
+      setActionNotice({
+        text: err instanceof Error ? err.message : isZh ? '删除应用失败' : 'Failed to delete application',
+        isError: true,
+      });
+    } finally {
+      setDeletingId(null);
     }
   }
 
@@ -167,6 +196,7 @@ export function ApplicationsView({
           onClick={() => {
             setEditingApp(null);
             setConfirmResetApp(null);
+            setConfirmDeleteApp(null);
             setShowCreate((v) => !v);
           }}
           className="min-h-[40px] px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-medium flex items-center gap-1.5 whitespace-nowrap shrink-0 transition-colors"
@@ -178,11 +208,19 @@ export function ApplicationsView({
 
       {actionNotice && (
         <div
-          role="status"
-          className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 px-4 py-3 rounded-xl bg-emerald-50 dark:bg-emerald-950/30 border border-emerald-200 dark:border-emerald-900/60 text-xs text-emerald-800 dark:text-emerald-300"
+          role={actionNotice.isError ? 'alert' : 'status'}
+          className={`flex flex-col sm:flex-row sm:items-center justify-between gap-3 px-4 py-3 rounded-xl border text-xs ${
+            actionNotice.isError
+              ? 'bg-red-50 dark:bg-red-950/30 border-red-200 dark:border-red-900/60 text-red-800 dark:text-red-300'
+              : 'bg-emerald-50 dark:bg-emerald-950/30 border-emerald-200 dark:border-emerald-900/60 text-emerald-800 dark:text-emerald-300'
+          }`}
         >
           <div className="flex items-start gap-2 min-w-0">
-            <CheckCircle2 className="w-4 h-4 shrink-0 mt-0.5" />
+            {actionNotice.isError ? (
+              <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+            ) : (
+              <CheckCircle2 className="w-4 h-4 shrink-0 mt-0.5" />
+            )}
             <div className="space-y-1 min-w-0">
               <p className="leading-relaxed">{actionNotice.text}</p>
               {actionNotice.secret && (
@@ -204,10 +242,60 @@ export function ApplicationsView({
             type="button"
             aria-label="Dismiss notice"
             onClick={() => setActionNotice(null)}
-            className="p-1 text-emerald-700/70 hover:text-emerald-900 dark:text-emerald-400 self-end sm:self-center"
+            className="p-1 opacity-70 hover:opacity-100 self-end sm:self-center"
           >
             <X className="w-4 h-4" />
           </button>
+        </div>
+      )}
+
+      {confirmDeleteApp && (
+        <div
+          role="alertdialog"
+          aria-label="Confirm delete application"
+          className="bg-red-50 dark:bg-red-950/30 border border-red-200 dark:border-red-900/60 rounded-xl p-5 flex flex-col sm:flex-row sm:items-center justify-between gap-4"
+        >
+          <div className="space-y-1 text-xs">
+            <div className="font-semibold text-red-900 dark:text-red-200 text-sm flex items-center gap-1.5">
+              <Trash2 className="w-4 h-4 shrink-0" />
+              <span>
+                {isZh
+                  ? `确认删除业务应用「${confirmDeleteApp.name}」？`
+                  : `Delete application ${confirmDeleteApp.name}?`}
+              </span>
+            </div>
+            <p className="text-red-800/90 dark:text-red-300/90 leading-relaxed">
+              {isZh
+                ? `删除后 Client ID (${confirmDeleteApp.clientId}) 将立即从系统中移除，使用该应用的登录回调将失效。`
+                : `Client ID (${confirmDeleteApp.clientId}) will be permanently removed and OAuth callbacks for this app will fail.`}
+            </p>
+          </div>
+          <div className="flex items-center gap-2 shrink-0">
+            <button
+              type="button"
+              onClick={() => setConfirmDeleteApp(null)}
+              className="px-3.5 py-2 rounded-lg border border-red-200 dark:border-red-800 bg-white dark:bg-slate-900 text-xs font-medium text-slate-700 dark:text-slate-200 hover:bg-red-100/50"
+            >
+              {isZh ? '取消' : 'Cancel'}
+            </button>
+            <button
+              type="button"
+              disabled={deletingId === confirmDeleteApp.id}
+              onClick={() => void handleConfirmDelete()}
+              className="px-4 py-2 rounded-lg bg-red-600 hover:bg-red-700 disabled:opacity-60 text-white text-xs font-medium flex items-center gap-1.5"
+            >
+              <Trash2 className="w-3.5 h-3.5" />
+              <span>
+                {deletingId === confirmDeleteApp.id
+                  ? isZh
+                    ? '删除中...'
+                    : 'Deleting...'
+                  : isZh
+                    ? '确认删除'
+                    : 'Confirm Delete'}
+              </span>
+            </button>
+          </div>
         </div>
       )}
 
@@ -564,7 +652,12 @@ export function ApplicationsView({
                             type="button"
                             aria-label={`Delete ${app.name}`}
                             title={isZh ? '删除应用' : 'Delete Application'}
-                            onClick={() => onDeleteApp(app.id)}
+                            onClick={() => {
+                              setEditingApp(null);
+                              setShowCreate(false);
+                              setConfirmResetApp(null);
+                              setConfirmDeleteApp(app);
+                            }}
                             className="p-1.5 rounded-md text-slate-400 hover:text-red-600 hover:bg-red-50 dark:hover:bg-red-950/40 transition-colors"
                           >
                             <Trash2 className="w-3.5 h-3.5" />

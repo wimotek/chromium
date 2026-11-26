@@ -97,6 +97,7 @@ export interface IdentityUser {
   email: string;
   emailVerified: boolean;
   displayName: string;
+  role: 'super_admin' | 'member';
   passwordAlgo: 'argon2id' | 'none';
   totpEnabled: boolean;
   passkeyCount: number;
@@ -104,6 +105,19 @@ export interface IdentityUser {
   identities: UserIdentityLink[];
   createdAt: string;
   lastLoginAt: string;
+}
+
+export interface PasskeyCredential {
+  id: string;
+  userId: string;
+  userEmail?: string;
+  credentialId: string;
+  label: string;
+  rpId: string;
+  algorithm: number;
+  signCount: number;
+  createdAt: string;
+  lastUsedAt: string;
 }
 
 export type CaptchaProvider = 'none' | 'turnstile' | 'hcaptcha';

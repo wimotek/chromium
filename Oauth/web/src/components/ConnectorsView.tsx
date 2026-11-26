@@ -1,5 +1,16 @@
-import React, { useState } from 'react';
-import { Plus, Check, Lock, GripVertical, ArrowUp, ArrowDown } from 'lucide-react';
+import React, { useEffect, useState } from 'react';
+import {
+  Plus,
+  Check,
+  Lock,
+  GripVertical,
+  ArrowUp,
+  ArrowDown,
+  Trash2,
+  AlertCircle,
+  CheckCircle2,
+  X,
+} from 'lucide-react';
 import type { Locale, SocialConnector } from '../types';
 import { TRANSLATIONS, moveConnectorByIndex } from '../lib/i18n';
 import { ProviderIcon } from './ProviderIcons';
@@ -11,6 +22,7 @@ interface ConnectorsViewProps {
     id: string,
     payload: {
       enabled?: boolean;
+      displayName?: string;
       clientId?: string;
       clientSecret?: string;
       extra?: Record<string, string>;
@@ -22,6 +34,7 @@ interface ConnectorsViewProps {
     clientSecret: string;
     issuerUrl: string;
   }) => Promise<void>;
+  onDeleteConnector: (id: string) => Promise<void>;
   onReorderConnectors: (orderedIds: string[]) => Promise<void>;
 }
 
@@ -30,6 +43,7 @@ export function ConnectorsView({
   connectors,
   onUpdateConnector,
   onAddCustomConnector,
+  onDeleteConnector,
   onReorderConnectors,
 }: ConnectorsViewProps) {
   const t = TRANSLATIONS[locale];
@@ -37,11 +51,16 @@ export function ConnectorsView({
   const [selectedId, setSelectedId] = useState<string>(connectors[0]?.id || '');
   const selected = connectors.find((c) => c.id === selectedId) || connectors[0];
 
+  const [draftDisplayName, setDraftDisplayName] = useState(selected?.displayName || '');
   const [draftClientId, setDraftClientId] = useState(selected?.clientId || '');
   const [draftSecret, setDraftSecret] = useState('');
   const [draftExtra, setDraftExtra] = useState<Record<string, string>>(selected?.extra || {});
   const [saving, setSaving] = useState(false);
   const [savedNotice, setSavedNotice] = useState(false);
+
+  const [confirmDeleteConn, setConfirmDeleteConn] = useState<SocialConnector | null>(null);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [actionNotice, setActionNotice] = useState<{ text: string; isError?: boolean } | null>(null);
 
   const [draggingId, setDraggingId] = useState<string | null>(null);
   const [dragOverId, setDragOverId] = useState<string | null>(null);
@@ -51,6 +70,20 @@ export function ConnectorsView({
   const [customIssuer, setCustomIssuer] = useState('https://idp.partner.com');
   const [customClientId, setCustomClientId] = useState('');
   const [customSecret, setCustomSecret] = useState('');
+  const [addingCustom, setAddingCustom] = useState(false);
+
+  useEffect(() => {
+    if (connectors.length === 0) return;
+    const match = connectors.find((c) => c.id === selectedId);
+    if (!match) {
+      const first = connectors[0];
+      setSelectedId(first.id);
+      setDraftDisplayName(first.displayName);
+      setDraftClientId(first.clientId);
+      setDraftSecret('');
+      setDraftExtra({ ...first.extra });
+    }
+  }, [connectors, selectedId]);
 
   // Map enabled connectors to their 1-based display rank on the Hosted Login page
   const enabledRankMap = new Map<string, number>();
@@ -87,6 +120,7 @@ export function ConnectorsView({
 
   function selectConnector(c: SocialConnector) {
     setSelectedId(c.id);
+    setDraftDisplayName(c.displayName);
     setDraftClientId(c.clientId);
     setDraftSecret('');
     setDraftExtra({ ...c.extra });
@@ -94,15 +128,25 @@ export function ConnectorsView({
   }
 
   async function handleToggle(c: SocialConnector) {
-    await onUpdateConnector(c.id, { enabled: !c.enabled });
+    setActionNotice(null);
+    try {
+      await onUpdateConnector(c.id, { enabled: !c.enabled });
+    } catch (err) {
+      setActionNotice({
+        text: err instanceof Error ? err.message : isZh ? '切换连接器状态失败' : 'Failed to toggle connector',
+        isError: true,
+      });
+    }
   }
 
   async function handleSave(e: React.FormEvent) {
     e.preventDefault();
     if (!selected) return;
     setSaving(true);
+    setActionNotice(null);
     try {
       await onUpdateConnector(selected.id, {
+        displayName: selected.provider === 'custom_oidc' ? draftDisplayName.trim() || selected.displayName : undefined,
         clientId: draftClientId,
         clientSecret: draftSecret || undefined,
         extra: draftExtra,
@@ -110,6 +154,11 @@ export function ConnectorsView({
       setDraftSecret('');
       setSavedNotice(true);
       setTimeout(() => setSavedNotice(false), 2000);
+    } catch (err) {
+      setActionNotice({
+        text: err instanceof Error ? err.message : isZh ? '保存连接器失败' : 'Failed to save connector',
+        isError: true,
+      });
     } finally {
       setSaving(false);
     }
@@ -118,16 +167,55 @@ export function ConnectorsView({
   async function handleCreateCustom(e: React.FormEvent) {
     e.preventDefault();
     if (!customName.trim()) return;
-    await onAddCustomConnector({
-      displayName: customName.trim(),
-      clientId: customClientId.trim(),
-      clientSecret: customSecret.trim(),
-      issuerUrl: customIssuer.trim(),
-    });
-    setCustomName('');
-    setCustomClientId('');
-    setCustomSecret('');
-    setShowAddCustom(false);
+    setAddingCustom(true);
+    setActionNotice(null);
+    try {
+      await onAddCustomConnector({
+        displayName: customName.trim(),
+        clientId: customClientId.trim(),
+        clientSecret: customSecret.trim(),
+        issuerUrl: customIssuer.trim(),
+      });
+      setActionNotice({
+        text: isZh
+          ? `已添加自定义 OIDC 连接器「${customName.trim()}」。`
+          : `Added custom OIDC connector "${customName.trim()}".`,
+      });
+      setCustomName('');
+      setCustomClientId('');
+      setCustomSecret('');
+      setShowAddCustom(false);
+    } catch (err) {
+      setActionNotice({
+        text: err instanceof Error ? err.message : isZh ? '添加自定义连接器失败' : 'Failed to add custom connector',
+        isError: true,
+      });
+    } finally {
+      setAddingCustom(false);
+    }
+  }
+
+  async function handleConfirmDelete() {
+    if (!confirmDeleteConn) return;
+    const target = confirmDeleteConn;
+    setDeletingId(target.id);
+    setActionNotice(null);
+    try {
+      await onDeleteConnector(target.id);
+      setConfirmDeleteConn(null);
+      setActionNotice({
+        text: isZh
+          ? `已删除自定义 OIDC 连接器「${target.displayName}」。`
+          : `Deleted custom OIDC connector "${target.displayName}".`,
+      });
+    } catch (err) {
+      setActionNotice({
+        text: err instanceof Error ? err.message : isZh ? '删除连接器失败' : 'Failed to delete connector',
+        isError: true,
+      });
+    } finally {
+      setDeletingId(null);
+    }
   }
 
   return (
@@ -144,7 +232,10 @@ export function ConnectorsView({
 
         <button
           type="button"
-          onClick={() => setShowAddCustom((v) => !v)}
+          onClick={() => {
+            setConfirmDeleteConn(null);
+            setShowAddCustom((v) => !v);
+          }}
           className="min-h-[40px] px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-medium flex items-center gap-1.5 whitespace-nowrap shrink-0 transition-colors"
         >
           <Plus className="w-4 h-4" />
@@ -152,18 +243,100 @@ export function ConnectorsView({
         </button>
       </div>
 
+      {/* Feedback Notice */}
+      {actionNotice && (
+        <div
+          role={actionNotice.isError ? 'alert' : 'status'}
+          className={`flex items-center justify-between gap-3 px-4 py-3 rounded-xl border text-xs ${
+            actionNotice.isError
+              ? 'bg-red-50 dark:bg-red-950/30 border-red-200 dark:border-red-900/60 text-red-800 dark:text-red-300'
+              : 'bg-emerald-50 dark:bg-emerald-950/30 border-emerald-200 dark:border-emerald-900/60 text-emerald-800 dark:text-emerald-300'
+          }`}
+        >
+          <div className="flex items-center gap-2 min-w-0">
+            {actionNotice.isError ? (
+              <AlertCircle className="w-4 h-4 shrink-0" />
+            ) : (
+              <CheckCircle2 className="w-4 h-4 shrink-0" />
+            )}
+            <span className="leading-relaxed">{actionNotice.text}</span>
+          </div>
+          <button
+            type="button"
+            aria-label="Dismiss notice"
+            onClick={() => setActionNotice(null)}
+            className="p-1 opacity-70 hover:opacity-100 shrink-0"
+          >
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+      )}
+
+      {/* Inline Delete Custom OIDC Confirmation Banner */}
+      {confirmDeleteConn && (
+        <div
+          role="alertdialog"
+          aria-label="Confirm delete custom OIDC connector"
+          className="bg-red-50 dark:bg-red-950/30 border border-red-200 dark:border-red-900/60 rounded-xl p-5 flex flex-col sm:flex-row sm:items-center justify-between gap-4"
+        >
+          <div className="space-y-1 text-xs">
+            <div className="font-semibold text-red-900 dark:text-red-200 text-sm flex items-center gap-1.5">
+              <Trash2 className="w-4 h-4 shrink-0" />
+              <span>
+                {isZh
+                  ? `确认删除自定义 OIDC 连接器「${confirmDeleteConn.displayName}」？`
+                  : `Delete custom OIDC connector "${confirmDeleteConn.displayName}"?`}
+              </span>
+            </div>
+            <p className="text-red-800/90 dark:text-red-300/90 leading-relaxed">
+              {isZh
+                ? '删除后该第三方 OIDC 登录入口将从登录页与数据库中永久移除。'
+                : 'This custom OIDC provider will be permanently removed from the hosted login page and database.'}
+            </p>
+          </div>
+          <div className="flex items-center gap-2 shrink-0">
+            <button
+              type="button"
+              onClick={() => setConfirmDeleteConn(null)}
+              className="px-3.5 py-2 rounded-lg border border-red-200 dark:border-red-800 bg-white dark:bg-slate-900 text-xs font-medium text-slate-700 dark:text-slate-200 hover:bg-red-100/50"
+            >
+              {isZh ? '取消' : 'Cancel'}
+            </button>
+            <button
+              type="button"
+              disabled={deletingId === confirmDeleteConn.id}
+              onClick={() => void handleConfirmDelete()}
+              className="px-4 py-2 rounded-lg bg-red-600 hover:bg-red-700 disabled:opacity-60 text-white text-xs font-medium flex items-center gap-1.5"
+            >
+              <Trash2 className="w-3.5 h-3.5" />
+              <span>
+                {deletingId === confirmDeleteConn.id
+                  ? isZh
+                    ? '删除中...'
+                    : 'Deleting...'
+                  : isZh
+                    ? '确认删除'
+                    : 'Confirm Delete'}
+              </span>
+            </button>
+          </div>
+        </div>
+      )}
+
       {showAddCustom && (
         <form
           onSubmit={handleCreateCustom}
           className="bg-white dark:bg-[#111827] border border-slate-200 dark:border-slate-800 rounded-xl p-6 space-y-4"
         >
           <div className="text-sm font-semibold text-slate-900 dark:text-white">
-            Register Extensible ProviderAdapter (Generic OIDC / Feishu / DingTalk / Discord)
+            {isZh
+              ? '添加自定义 OIDC 连接器（通用 OIDC / 飞书 / 钉钉 / Discord）'
+              : 'Register Extensible ProviderAdapter (Generic OIDC / Feishu / DingTalk / Discord)'}
           </div>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <div>
               <label htmlFor="custom-conn-name" className="block text-xs font-medium text-slate-700 dark:text-slate-300 mb-1">
-                Display Name
+                {isZh ? '显示名称' : 'Display Name'}
               </label>
               <input
                 id="custom-conn-name"
@@ -218,13 +391,14 @@ export function ConnectorsView({
               onClick={() => setShowAddCustom(false)}
               className="px-3.5 py-2 text-xs font-medium rounded-lg border border-slate-200 dark:border-slate-700"
             >
-              Cancel
+              {isZh ? '取消' : 'Cancel'}
             </button>
             <button
               type="submit"
-              className="px-4 py-2 text-xs font-medium rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white"
+              disabled={addingCustom}
+              className="px-4 py-2 text-xs font-medium rounded-lg bg-indigo-600 hover:bg-indigo-700 disabled:opacity-60 text-white"
             >
-              Add Provider
+              {addingCustom ? '...' : isZh ? '添加连接器' : 'Add Provider'}
             </button>
           </div>
         </form>
@@ -248,6 +422,7 @@ export function ConnectorsView({
             const isDragging = draggingId === c.id;
             const isDragOver = dragOverId === c.id && draggingId !== c.id;
             const rank = enabledRankMap.get(c.id);
+            const isCustom = c.provider === 'custom_oidc';
 
             return (
               <div
@@ -323,6 +498,22 @@ export function ConnectorsView({
                 </div>
 
                 <div className="flex items-center gap-1.5 shrink-0">
+                  {isCustom && (
+                    <button
+                      type="button"
+                      aria-label={`Delete ${c.displayName}`}
+                      title={isZh ? '删除自定义 OIDC' : 'Delete custom OIDC'}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setShowAddCustom(false);
+                        setConfirmDeleteConn(c);
+                      }}
+                      className="p-1.5 rounded-md text-slate-400 hover:text-red-600 hover:bg-red-50 dark:hover:bg-red-950/40 transition-colors"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                    </button>
+                  )}
+
                   <div className="flex flex-col">
                     <button
                       type="button"
@@ -349,7 +540,7 @@ export function ConnectorsView({
                     role="switch"
                     aria-checked={c.enabled}
                     aria-label={`Toggle ${c.displayName}`}
-                    onClick={() => handleToggle(c)}
+                    onClick={() => void handleToggle(c)}
                     className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 ${
                       c.enabled ? 'bg-indigo-600' : 'bg-slate-300 dark:bg-slate-700'
                     }`}
@@ -373,10 +564,10 @@ export function ConnectorsView({
             className="lg:col-span-7 bg-white dark:bg-[#111827] border border-slate-200 dark:border-slate-800 rounded-xl p-6 space-y-5"
           >
             <div className="flex items-center justify-between gap-4 pb-4 border-b border-slate-100 dark:border-slate-800">
-              <div className="flex items-center gap-3">
-                <ProviderIcon provider={selected.provider} className="w-5 h-5" />
-                <div>
-                  <h2 className="text-base font-semibold text-slate-900 dark:text-white">
+              <div className="flex items-center gap-3 min-w-0">
+                <ProviderIcon provider={selected.provider} className="w-5 h-5 shrink-0" />
+                <div className="min-w-0">
+                  <h2 className="text-base font-semibold text-slate-900 dark:text-white truncate">
                     {selected.displayName}
                   </h2>
                   <p className="text-xs text-slate-500 dark:text-slate-400">
@@ -384,13 +575,43 @@ export function ConnectorsView({
                   </p>
                 </div>
               </div>
-              <span className="text-xs font-medium text-slate-500 dark:text-slate-400 flex items-center gap-1">
+              <span className="text-xs font-medium text-slate-500 dark:text-slate-400 flex items-center gap-1 shrink-0">
                 <Lock className="w-3.5 h-3.5" />
                 AES-256-GCM
               </span>
             </div>
 
             <div className="space-y-4">
+              {selected.provider === 'custom_oidc' && (
+                <>
+                  <div>
+                    <label htmlFor="conn-display-name" className="block text-xs font-medium text-slate-700 dark:text-slate-300 mb-1.5">
+                      {isZh ? '显示名称' : 'Display Name'}
+                    </label>
+                    <input
+                      id="conn-display-name"
+                      type="text"
+                      value={draftDisplayName}
+                      onChange={(e) => setDraftDisplayName(e.target.value)}
+                      className="w-full min-h-[40px] px-3 py-2 text-sm rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100"
+                    />
+                  </div>
+                  <div>
+                    <label htmlFor="conn-discovery-url" className="block text-xs font-medium text-slate-700 dark:text-slate-300 mb-1.5">
+                      Discovery / Issuer URL
+                    </label>
+                    <input
+                      id="conn-discovery-url"
+                      type="url"
+                      value={draftExtra.discovery_url || ''}
+                      onChange={(e) => setDraftExtra((prev) => ({ ...prev, discovery_url: e.target.value }))}
+                      placeholder="https://idp.partner.com"
+                      className="w-full min-h-[40px] px-3 py-2 text-sm font-mono rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100"
+                    />
+                  </div>
+                </>
+              )}
+
               <div>
                 <label htmlFor="conn-client-id" className="block text-xs font-medium text-slate-700 dark:text-slate-300 mb-1.5">
                   {selected.provider === 'wechat' ? 'AppID' : selected.provider === 'apple' ? 'Service ID (client_id)' : 'Client ID'}
@@ -492,13 +713,27 @@ export function ConnectorsView({
               )}
             </div>
 
-            <div className="pt-4 border-t border-slate-100 dark:border-slate-800 flex items-center justify-between gap-4">
-              <div className="text-xs text-emerald-700 dark:text-emerald-400 flex items-center gap-1.5">
+            <div className="pt-4 border-t border-slate-100 dark:border-slate-800 flex items-center justify-between gap-4 flex-wrap">
+              <div className="flex items-center gap-3">
+                {selected.provider === 'custom_oidc' && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowAddCustom(false);
+                      setConfirmDeleteConn(selected);
+                    }}
+                    className="min-h-[38px] px-3 py-2 rounded-lg border border-red-200 dark:border-red-900/60 text-red-700 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-950/40 text-xs font-medium inline-flex items-center gap-1.5 transition-colors"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                    <span>{isZh ? '删除此自定义连接器' : 'Delete Custom OIDC'}</span>
+                  </button>
+                )}
+
                 {savedNotice && (
-                  <>
+                  <div className="text-xs text-emerald-700 dark:text-emerald-400 flex items-center gap-1.5">
                     <Check className="w-4 h-4" />
-                    <span>Saved &amp; active immediately on Hosted Login</span>
-                  </>
+                    <span>{isZh ? '已保存并即时生效' : 'Saved & active immediately on Hosted Login'}</span>
+                  </div>
                 )}
               </div>
 

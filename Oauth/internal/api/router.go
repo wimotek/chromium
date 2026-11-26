@@ -131,17 +131,21 @@ type userIdentityLink struct {
 }
 
 type identityUser struct {
-	ID            string             `json:"id"`
-	Email         string             `json:"email"`
-	EmailVerified bool               `json:"emailVerified"`
-	DisplayName   string             `json:"displayName"`
-	Status        string             `json:"status"`
-	PasswordAlgo  string             `json:"passwordAlgo"`
-	TotpEnabled   bool               `json:"totpEnabled"`
-	PasskeyCount  int                `json:"passkeyCount"`
-	Identities    []userIdentityLink `json:"identities"`
-	CreatedAt     string             `json:"createdAt"`
-	LastLoginAt   string             `json:"lastLoginAt"`
+	ID             string             `json:"id"`
+	Email          string             `json:"email"`
+	EmailVerified  bool               `json:"emailVerified"`
+	DisplayName    string             `json:"displayName"`
+	Role           string             `json:"role"`
+	Status         string             `json:"status"`
+	PasswordAlgo   string             `json:"passwordAlgo"`
+	PasswordHash   string             `json:"-"`
+	TotpEnabled    bool               `json:"totpEnabled"`
+	TotpSecretEnc  string             `json:"-"`
+	RecoveryHashes string             `json:"-"`
+	PasskeyCount   int                `json:"passkeyCount"`
+	Identities     []userIdentityLink `json:"identities"`
+	CreatedAt      string             `json:"createdAt"`
+	LastLoginAt    string             `json:"lastLoginAt"`
 }
 
 type storedWebhook struct {
@@ -222,6 +226,7 @@ type appServer struct {
 	apps         []oauthApplication
 	connectors   []storedConnector
 	users        []identityUser
+	passkeys     []storedPasskey
 	webhooks     []storedWebhook
 	webhookLogs  []webhookDeliveryLog
 	sessions     map[string]authUser
@@ -241,14 +246,6 @@ func NewRouter(cfgMgr *config.Manager, keys *crypto.KeyManager, certSources ...s
 	if len(certSources) > 0 && certSources[0] != "" {
 		certSource = certSources[0]
 	}
-	nowISO := time.Now().UTC().Format(time.RFC3339)
-
-	encMs, _ := keys.EncryptSecret("ms_demo_entra_secret")
-	encApple, _ := keys.EncryptSecret("-----BEGIN PRIVATE KEY-----\nDEMO_APPLE_P8\n-----END PRIVATE KEY-----")
-	encGoogle, _ := keys.EncryptSecret("GOCSPX-demo-google-secret")
-	encWeChat, _ := keys.EncryptSecret("wx_demo_secret_890123")
-	encGithub, _ := keys.EncryptSecret("ghs_demo_github_secret")
-	encWh, _ := keys.EncryptSecret("whsec_demo_erp_revoker_2736")
 
 	s := &appServer{
 		cfgMgr:     cfgMgr,
@@ -262,151 +259,16 @@ func NewRouter(cfgMgr *config.Manager, keys *crypto.KeyManager, certSources ...s
 			EnableDeviceFlowRfc8628:  true,
 			JitVerifiedEmailAutoLink: true,
 			IpRateLimitPerMin:        60,
-			LockoutThreshold:         3,
-			CaptchaProvider:          "turnstile",
-			CaptchaSiteKey:           "0x4AAAAAA_demo_turnstile_slot",
+			LockoutThreshold:         5,
+			CaptchaProvider:          "none",
+			CaptchaSiteKey:           "",
 		},
-		apps: []oauthApplication{
-			{
-				ID:           "app_erp_01",
-				Name:         "Enterprise ERP Portal",
-				Description:  "Internal finance, HR & supply-chain OIDC client",
-				ClientID:     "wimotek_erp_portal",
-				ClientSecret: "wms_" + randomHex(12),
-				RedirectUris: []string{"http://localhost:4000/callback", "https://erp.wimotek.dev/auth/callback"},
-				Scopes:       []string{"openid", "profile", "email", "offline_access"},
-				CreatedAt:    nowISO,
-				LoginTheme: func() *loginThemeConfig {
-					t := defaultLoginTheme("Enterprise ERP Portal")
-					return &t
-				}(),
-			},
-			{
-				ID:           "app_wiki_02",
-				Name:         "Engineering Docs & Wiki",
-				Description:  "Knowledge base with PKCE S256 SSO",
-				ClientID:     "wimotek_docs_wiki",
-				ClientSecret: "wms_" + randomHex(12),
-				RedirectUris: []string{"http://localhost:4100/oauth/callback"},
-				Scopes:       []string{"openid", "profile", "email"},
-				CreatedAt:    nowISO,
-				LoginTheme: func() *loginThemeConfig {
-					t := defaultLoginTheme("Engineering Docs & Wiki")
-					t.SurfaceMode = "dark"
-					t.PrimaryColor = "#6366F1"
-					t.BackgroundColor = "#090D16"
-					t.CardColor = "#111827"
-					t.TextColor = "#F8FAFC"
-					t.FontFamily = "mono"
-					t.SocialLayout = "grid"
-					return &t
-				}(),
-			},
-		},
-		connectors: []storedConnector{
-			{
-				ID:              "conn_microsoft",
-				Provider:        "microsoft",
-				DisplayName:     "Microsoft (Entra ID)",
-				Enabled:         true,
-				ClientID:        "ms-entra-tenant-app-id",
-				EncryptedSecret: encMs,
-				SecretPreview:   maskSecret("ms_demo_entra_secret"),
-				Extra:           map[string]string{"tenant_id": "common"},
-				UpdatedAt:       nowISO,
-			},
-			{
-				ID:              "conn_apple",
-				Provider:        "apple",
-				DisplayName:     "Apple",
-				Enabled:         true,
-				ClientID:        "com.wimotek.oauth.service",
-				EncryptedSecret: encApple,
-				SecretPreview:   "-----BEG••••••••KEY-----",
-				Extra:           map[string]string{"team_id": "A1B2C3D4E5", "key_id": "K9X8Y7Z6W5"},
-				UpdatedAt:       nowISO,
-			},
-			{
-				ID:              "conn_google",
-				Provider:        "google",
-				DisplayName:     "Google",
-				Enabled:         true,
-				ClientID:        "492018472910-demo.apps.googleusercontent.com",
-				EncryptedSecret: encGoogle,
-				SecretPreview:   maskSecret("GOCSPX-demo-google-secret"),
-				Extra:           map[string]string{},
-				UpdatedAt:       nowISO,
-			},
-			{
-				ID:              "conn_wechat",
-				Provider:        "wechat",
-				DisplayName:     "微信 WeChat",
-				Enabled:         true,
-				ClientID:        "wx9f8e7d6c5b4a3210",
-				EncryptedSecret: encWeChat,
-				SecretPreview:   maskSecret("wx_demo_secret_890123"),
-				Extra:           map[string]string{"wechat_mode": "qr"},
-				UpdatedAt:       nowISO,
-			},
-			{
-				ID:              "conn_github",
-				Provider:        "github",
-				DisplayName:     "GitHub",
-				Enabled:         true,
-				ClientID:        "Ov23liDemoGitHubClient",
-				EncryptedSecret: encGithub,
-				SecretPreview:   maskSecret("ghs_demo_github_secret"),
-				Extra:           map[string]string{},
-				UpdatedAt:       nowISO,
-			},
-		},
-		users: []identityUser{
-			{
-				ID:            "usr_super_admin",
-				Email:         cfgMgr.Get().AdminEmail,
-				EmailVerified: true,
-				DisplayName:   "Wimotek Admin",
-				Status:        "active",
-				PasswordAlgo:  "argon2id",
-				TotpEnabled:   false,
-				PasskeyCount:  1,
-				Identities: []userIdentityLink{
-					{ID: "ident_ms_1", Provider: "microsoft", ProviderLabel: "Microsoft (Entra ID)", ProviderSub: "ms_oid_8821a", Email: cfgMgr.Get().AdminEmail, LinkedAt: nowISO},
-					{ID: "ident_pk_1", Provider: "passkey", ProviderLabel: "Passkey (TouchID / FIDO2)", ProviderSub: "cred_fido2_a91f", Email: cfgMgr.Get().AdminEmail, LinkedAt: nowISO},
-				},
-				CreatedAt:   nowISO,
-				LastLoginAt: nowISO,
-			},
-			{
-				ID:            "usr_alice_ops",
-				Email:         "alice.chen@acme-corp.com",
-				EmailVerified: true,
-				DisplayName:   "Alice Chen",
-				Status:        "active",
-				PasswordAlgo:  "argon2id",
-				TotpEnabled:   false,
-				PasskeyCount:  0,
-				Identities: []userIdentityLink{
-					{ID: "ident_wx_2", Provider: "wechat", ProviderLabel: "微信 WeChat", ProviderSub: "wx_union_9042c", Email: "alice.chen@acme-corp.com", LinkedAt: nowISO},
-					{ID: "ident_gh_2", Provider: "github", ProviderLabel: "GitHub", ProviderSub: "gh_448192", Email: "alice.chen@acme-corp.com", LinkedAt: nowISO},
-				},
-				CreatedAt:   nowISO,
-				LastLoginAt: nowISO,
-			},
-		},
-		webhooks: []storedWebhook{
-			{
-				ID:           "wh_erp_01",
-				Name:         "ERP Portal Session Revoker",
-				TargetURL:    "https://erp.wimotek.dev/api/webhooks/oauth-events",
-				Events:       []string{"user.banned", "session.revoked"},
-				Enabled:      true,
-				SecretEnc:    encWh,
-				SecretMasked: maskSecret("whsec_demo_erp_revoker_2736"),
-				CreatedAt:    nowISO,
-			},
-		},
-		webhookLogs:  []webhookDeliveryLog{},
+		apps:         make([]oauthApplication, 0),
+		connectors:   make([]storedConnector, 0),
+		users:        make([]identityUser, 0),
+		passkeys:     make([]storedPasskey, 0),
+		webhooks:     make([]storedWebhook, 0),
+		webhookLogs:  make([]webhookDeliveryLog, 0),
 		sessions:     make(map[string]authUser),
 		memCache:     make(map[string]memEntry),
 		authCodes:    make(map[string]authCodeRecord),
@@ -418,8 +280,9 @@ func NewRouter(cfgMgr *config.Manager, keys *crypto.KeyManager, certSources ...s
 		loginFails:   make(map[string]int),
 		lockUntil:    make(map[string]time.Time),
 	}
+	s.connectors = s.defaultBuiltinConnectorsLocked()
 
-	// Open SQLite/MySQL & ResilientCache if already initialized
+	// Open SQLite/MySQL & ResilientCache if already initialized and restore all persisted data
 	cfg := cfgMgr.Get()
 	if cfg.Initialized {
 		if repo, err := store.Open(cfg.Database.Driver, cfg.Database.DSN); err == nil {
@@ -434,6 +297,7 @@ func NewRouter(cfgMgr *config.Manager, keys *crypto.KeyManager, certSources ...s
 				})
 			}
 			s.resilient = cache.NewResilientCache(rdb, repo.DB(), repo.Driver())
+			s.seedAndLoadDBLocked(context.Background())
 		}
 	}
 	s.oidcProvider = oidc.NewProvider(cfg.IssuerURL, keys, s.resilient)
@@ -464,8 +328,8 @@ func NewRouter(cfgMgr *config.Manager, keys *crypto.KeyManager, certSources ...s
 	mux.HandleFunc("GET /oauth/userinfo", s.handleUserInfo)
 	mux.HandleFunc("GET /oauth/logout", s.handleLogout)
 
-	// Device Flow Sandbox Helpers
-	mux.HandleFunc("POST /api/oauth/device/approve", s.handleDeviceApprove)
+	// Device Flow Approval (authenticated) & Poll
+	mux.HandleFunc("POST /api/oauth/device/approve", s.requireAdmin(s.handleDeviceApprove))
 	mux.HandleFunc("POST /api/oauth/device/poll", s.handleDevicePoll)
 
 	// Setup Wizard
@@ -475,12 +339,16 @@ func NewRouter(cfgMgr *config.Manager, keys *crypto.KeyManager, certSources ...s
 	mux.HandleFunc("POST /api/setup/complete", s.handleSetupComplete)
 	mux.HandleFunc("POST /api/setup/reset", s.requireAdmin(s.handleSetupReset))
 
-	// Authentication Flows
+	// Authentication & Passkey Flows
 	mux.HandleFunc("POST /api/auth/login", s.handlePasswordLogin)
 	mux.HandleFunc("POST /api/auth/email-otp/send", s.handleSendEmailOTP)
 	mux.HandleFunc("POST /api/auth/email-otp/verify", s.handleVerifyEmailOTP)
 	mux.HandleFunc("POST /api/auth/passkey/challenge", s.handlePasskeyChallenge)
 	mux.HandleFunc("POST /api/auth/passkey/authenticate", s.handlePasskeyAuth)
+	mux.HandleFunc("GET /api/auth/passkey/credentials", s.requireAdmin(s.handleListPasskeys))
+	mux.HandleFunc("POST /api/auth/passkey/register/options", s.requireAdmin(s.handlePasskeyRegisterOptions))
+	mux.HandleFunc("POST /api/auth/passkey/register/verify", s.requireAdmin(s.handlePasskeyRegisterVerify))
+	mux.HandleFunc("DELETE /api/auth/passkey/credentials/{id}", s.requireAdmin(s.handleDeletePasskey))
 	mux.HandleFunc("POST /api/auth/totp/enroll", s.requireAdmin(s.handleTotpEnroll))
 	mux.HandleFunc("POST /api/auth/totp/verify", s.requireAdmin(s.handleTotpVerify))
 	mux.HandleFunc("GET /api/auth/me", s.requireAdmin(s.handleAuthMe))
@@ -504,10 +372,16 @@ func NewRouter(cfgMgr *config.Manager, keys *crypto.KeyManager, certSources ...s
 	mux.HandleFunc("GET /api/connectors", s.requireAdmin(s.handleListConnectors))
 	mux.HandleFunc("PUT /api/connectors/reorder", s.requireAdmin(s.handleReorderConnectors))
 	mux.HandleFunc("PUT /api/connectors/{id}", s.requireAdmin(s.handleUpdateConnector))
+	mux.HandleFunc("DELETE /api/connectors/{id}", s.requireAdmin(s.handleDeleteConnector))
 	mux.HandleFunc("POST /api/connectors", s.requireAdmin(s.handleCreateConnector))
 
-	// Identity Directory, JIT Linking & Account Ban Webhooks
+	// Identity Directory, User CRUD, JIT Linking & Account Ban Webhooks
 	mux.HandleFunc("GET /api/users", s.requireAdmin(s.handleListUsers))
+	mux.HandleFunc("POST /api/users", s.requireAdmin(s.handleCreateUser))
+	mux.HandleFunc("PUT /api/users/{id}", s.requireAdmin(s.handleUpdateUser))
+	mux.HandleFunc("POST /api/users/{id}/password", s.requireAdmin(s.handleResetUserPassword))
+	mux.HandleFunc("DELETE /api/users/{id}", s.requireAdmin(s.handleDeleteUser))
+	mux.HandleFunc("DELETE /api/users/{id}/identities/{identId}", s.requireAdmin(s.handleDeleteUserIdentity))
 	mux.HandleFunc("POST /api/users/jit-simulate", s.requireAdmin(s.handleSimulateJit))
 	mux.HandleFunc("POST /api/users/{id}/status", s.requireAdmin(s.handleUserStatus))
 	mux.HandleFunc("POST /api/webhooks", s.requireAdmin(s.handleCreateWebhook))
@@ -708,6 +582,7 @@ func (s *appServer) resolveOrLinkIdentityLocked(provider, providerLabel, provide
 		for _, ident := range s.users[i].Identities {
 			if ident.Provider == provider && ident.ProviderSub == providerSub {
 				s.users[i].LastLoginAt = nowISO
+				s.persistUserLocked(s.users[i])
 				return "matched_existing_identity", s.users[i]
 			}
 		}
@@ -717,63 +592,61 @@ func (s *appServer) resolveOrLinkIdentityLocked(provider, providerLabel, provide
 	if s.policy.JitVerifiedEmailAutoLink && emailVerified && normEmail != "" {
 		for i := range s.users {
 			if strings.ToLower(s.users[i].Email) == normEmail && s.users[i].EmailVerified {
-				s.users[i].Identities = append(s.users[i].Identities, userIdentityLink{
+				newIdent := userIdentityLink{
 					ID:            "ident_" + randomHex(4),
 					Provider:      provider,
 					ProviderLabel: providerLabel,
 					ProviderSub:   providerSub,
 					Email:         normEmail,
 					LinkedAt:      nowISO,
-				})
-				if provider == "passkey" {
-					s.users[i].PasskeyCount++
 				}
+				s.users[i].Identities = append(s.users[i].Identities, newIdent)
 				s.users[i].LastLoginAt = nowISO
+				s.persistUserLocked(s.users[i])
+				s.persistIdentityLocked(s.users[i].ID, newIdent)
 				return "linked_existing_verified_email", s.users[i]
 			}
 		}
 	}
 
-	// 3. JIT provision new lightweight identity
+	// 3. JIT provision new lightweight identity (never escalates to super_admin)
 	if displayName == "" {
 		displayName = strings.Split(normEmail, "@")[0]
+	}
+	newIdent := userIdentityLink{
+		ID:            "ident_" + randomHex(4),
+		Provider:      provider,
+		ProviderLabel: providerLabel,
+		ProviderSub:   providerSub,
+		Email:         normEmail,
+		LinkedAt:      nowISO,
 	}
 	newUser := identityUser{
 		ID:            "usr_" + randomHex(4),
 		Email:         normEmail,
 		EmailVerified: emailVerified,
 		DisplayName:   displayName,
+		Role:          "member",
 		Status:        "active",
 		PasswordAlgo:  "none",
 		TotpEnabled:   false,
 		PasskeyCount:  0,
-		Identities: []userIdentityLink{
-			{
-				ID:            "ident_" + randomHex(4),
-				Provider:      provider,
-				ProviderLabel: providerLabel,
-				ProviderSub:   providerSub,
-				Email:         normEmail,
-				LinkedAt:      nowISO,
-			},
-		},
-		CreatedAt:   nowISO,
-		LastLoginAt: nowISO,
-	}
-	if provider == "passkey" {
-		newUser.PasskeyCount = 1
+		Identities:    []userIdentityLink{newIdent},
+		CreatedAt:     nowISO,
+		LastLoginAt:   nowISO,
 	}
 	s.users = append([]identityUser{newUser}, s.users...)
+	s.persistUserLocked(newUser)
+	s.persistIdentityLocked(newUser.ID, newIdent)
 	return "provisioned_new_user", newUser
 }
 
-func (s *appServer) issueLiveTraceLocked(r *http.Request, clientID, email, name, providerKey, providerLabel, authMethod string) map[string]any {
+func (s *appServer) issueSessionForUserLocked(r *http.Request, matched identityUser, clientID, providerLabel, authMethod, jitAction string) map[string]any {
 	started := time.Now()
 	issuer := s.getIssuer(r)
 	if clientID == "" && len(s.apps) > 0 {
 		clientID = s.apps[0].ClientID
 	}
-	jitAction, matched := s.resolveOrLinkIdentityLocked(providerKey, providerLabel, providerKey+"_"+randomHex(4), email, name, true)
 
 	verifier := randomHex(24)
 	sum := sha256.Sum256([]byte(verifier))
@@ -782,14 +655,20 @@ func (s *appServer) issueLiveTraceLocked(r *http.Request, clientID, email, name,
 	nonce := randomHex(8)
 	now := time.Now()
 
+	role := matched.Role
+	if role != "super_admin" {
+		role = "member"
+	}
+
 	idClaims := jwt.MapClaims{
 		"iss":            issuer,
 		"sub":            matched.ID,
 		"aud":            clientID,
 		"nonce":          nonce,
 		"email":          matched.Email,
-		"email_verified": true,
+		"email_verified": matched.EmailVerified,
 		"name":           matched.DisplayName,
+		"role":           role,
 		"provider":       providerLabel,
 		"amr":            []string{authMethod},
 		"iat":            now.Unix(),
@@ -803,6 +682,7 @@ func (s *appServer) issueLiveTraceLocked(r *http.Request, clientID, email, name,
 		"scope":    "openid profile email",
 		"email":    matched.Email,
 		"name":     matched.DisplayName,
+		"role":     role,
 		"provider": providerLabel,
 		"iat":      now.Unix(),
 		"exp":      now.Add(1 * time.Hour).Unix(),
@@ -812,11 +692,11 @@ func (s *appServer) issueLiveTraceLocked(r *http.Request, clientID, email, name,
 		Sub:      matched.ID,
 		Email:    matched.Email,
 		Name:     matched.DisplayName,
-		Role:     "super_admin",
+		Role:     role,
 		Provider: providerLabel,
 	}
 	sessionTok := "wm_sess_" + randomHex(18)
-	s.sessions[sessionTok] = u
+	s.persistSessionLocked(sessionTok, u)
 
 	elapsed := time.Since(started).Milliseconds()
 	if elapsed < 1 {
@@ -845,13 +725,19 @@ func (s *appServer) issueLiveTraceLocked(r *http.Request, clientID, email, name,
 			"userInfo": map[string]any{
 				"sub":            matched.ID,
 				"email":          matched.Email,
-				"email_verified": true,
+				"email_verified": matched.EmailVerified,
 				"name":           matched.DisplayName,
+				"role":           role,
 				"provider":       providerLabel,
 			},
 			"elapsedMs": elapsed,
 		},
 	}
+}
+
+func (s *appServer) issueLiveTraceLocked(r *http.Request, clientID, email, name, providerKey, providerLabel, authMethod string) map[string]any {
+	jitAction, matched := s.resolveOrLinkIdentityLocked(providerKey, providerLabel, providerKey+"_"+randomHex(4), email, name, true)
+	return s.issueSessionForUserLocked(r, matched, clientID, providerLabel, authMethod, jitAction)
 }
 
 func (s *appServer) requireAdmin(next http.HandlerFunc) http.HandlerFunc {
@@ -862,11 +748,28 @@ func (s *appServer) requireAdmin(next http.HandlerFunc) http.HandlerFunc {
 			return
 		}
 		tok := strings.TrimSpace(strings.TrimPrefix(hdr, "Bearer "))
-		s.mu.RLock()
-		_, ok := s.sessions[tok]
-		s.mu.RUnlock()
+		s.mu.Lock()
+		u, ok := s.resolveSessionLocked(tok)
+		active := true
+		if ok {
+			for _, usr := range s.users {
+				if usr.ID == u.Sub && usr.Status != "active" {
+					active = false
+					break
+				}
+			}
+		}
+		s.mu.Unlock()
 		if !ok {
-			writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized", "message": "Session expired"})
+			writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized", "message": "Session expired. Please sign in again."})
+			return
+		}
+		if !active {
+			writeJSON(w, http.StatusForbidden, map[string]any{"error": "account_banned", "message": "Account has been suspended."})
+			return
+		}
+		if u.Role != "super_admin" {
+			writeJSON(w, http.StatusForbidden, map[string]any{"error": "forbidden", "message": "System administrator privileges are required."})
 			return
 		}
 		next(w, r)
@@ -1086,6 +989,7 @@ func (s *appServer) handleDeviceAuth(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *appServer) handleDeviceApprove(w http.ResponseWriter, r *http.Request) {
+	me, _ := s.currentSessionUser(r)
 	var body struct {
 		UserCode string `json:"user_code"`
 		Email    string `json:"email"`
@@ -1093,14 +997,15 @@ func (s *appServer) handleDeviceApprove(w http.ResponseWriter, r *http.Request) 
 	_ = json.NewDecoder(r.Body).Decode(&body)
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	devCode, ok := s.deviceByUser[strings.ToUpper(strings.TrimSpace(body.UserCode))]
+	codeKey := strings.ToUpper(strings.TrimSpace(body.UserCode))
+	devCode, ok := s.deviceByUser[codeKey]
 	if !ok {
 		writeJSON(w, http.StatusNotFound, map[string]any{"error": "invalid_user_code", "message": "Device code not found or expired"})
 		return
 	}
 	sess := s.deviceCodes[devCode]
 	sess.Status = "approved"
-	sess.ApprovedEmail = defaultStr(body.Email, s.cfgMgr.Get().AdminEmail)
+	sess.ApprovedEmail = defaultStr(strings.TrimSpace(body.Email), defaultStr(me.Email, s.cfgMgr.Get().AdminEmail))
 	writeJSON(w, http.StatusOK, map[string]any{"approved": true, "user_code": sess.UserCode})
 }
 
@@ -1112,7 +1017,7 @@ func (s *appServer) handleDevicePoll(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	sess, ok := s.deviceCodes[body.DeviceCode]
-	if !ok {
+	if !ok || time.Now().After(sess.ExpiresAt) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "expired_token"})
 		return
 	}
@@ -1120,7 +1025,9 @@ func (s *appServer) handleDevicePoll(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusAccepted, map[string]any{"status": "authorization_pending"})
 		return
 	}
-	issued := s.issueLiveTraceLocked(r, sess.ClientID, defaultStr(sess.ApprovedEmail, "admin@wimotek.dev"), "Wimotek Admin", "microsoft", "Device Flow (RFC 8628)", "device_code_qr")
+	delete(s.deviceCodes, body.DeviceCode)
+	delete(s.deviceByUser, sess.UserCode)
+	issued := s.issueLiveTraceLocked(r, sess.ClientID, defaultStr(sess.ApprovedEmail, "admin@wimotek.dev"), strings.Split(defaultStr(sess.ApprovedEmail, "user"), "@")[0], "device_flow", "Device Flow (RFC 8628)", "device_code_qr")
 	writeJSON(w, http.StatusOK, issued)
 }
 
@@ -1304,14 +1211,56 @@ func (s *appServer) handleSetupComplete(w http.ResponseWriter, r *http.Request) 
 		_ = s.resilient.Close()
 	}
 	s.resilient = cache.NewResilientCache(rdb, repo.DB(), repo.Driver())
+	s.seedAndLoadDBLocked(r.Context())
 
-	if len(s.users) > 0 && s.users[0].ID == "usr_super_admin" {
-		s.users[0].Email = newCfg.AdminEmail
+	normAdminEmail := strings.ToLower(strings.TrimSpace(newCfg.AdminEmail))
+	nowISO := time.Now().UTC().Format(time.RFC3339)
+	adminIdx := -1
+	for i := range s.users {
+		if s.users[i].ID == "usr_super_admin" || strings.EqualFold(s.users[i].Email, normAdminEmail) {
+			adminIdx = i
+			break
+		}
+	}
+	if adminIdx >= 0 {
+		s.users[adminIdx].Email = normAdminEmail
+		s.users[adminIdx].Role = "super_admin"
+		s.users[adminIdx].Status = "active"
+		s.users[adminIdx].EmailVerified = true
+		s.users[adminIdx].PasswordAlgo = "argon2id"
+		s.users[adminIdx].PasswordHash = hash
+		s.users[adminIdx].LastLoginAt = nowISO
+		s.persistUserLocked(s.users[adminIdx])
+	} else {
+		adminUser := identityUser{
+			ID:            "usr_super_admin",
+			Email:         normAdminEmail,
+			EmailVerified: true,
+			DisplayName:   "System Admin",
+			Role:          "super_admin",
+			Status:        "active",
+			PasswordAlgo:  "argon2id",
+			PasswordHash:  hash,
+			TotpEnabled:   false,
+			PasskeyCount:  0,
+			Identities:    []userIdentityLink{},
+			CreatedAt:     nowISO,
+			LastLoginAt:   nowISO,
+		}
+		s.users = append([]identityUser{adminUser}, s.users...)
+		s.persistUserLocked(adminUser)
+		adminIdx = 0
 	}
 
-	u := authUser{Sub: "usr_super_admin", Email: newCfg.AdminEmail, Name: "Wimotek Admin", Role: "super_admin", Provider: "local_setup"}
+	u := authUser{
+		Sub:      s.users[adminIdx].ID,
+		Email:    s.users[adminIdx].Email,
+		Name:     s.users[adminIdx].DisplayName,
+		Role:     "super_admin",
+		Provider: "local_setup",
+	}
 	tok := "wm_sess_" + randomHex(18)
-	s.sessions[tok] = u
+	s.persistSessionLocked(tok, u)
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"initialized":  true,
@@ -1348,13 +1297,35 @@ func (s *appServer) handlePasswordLogin(w http.ResponseWriter, r *http.Request) 
 	}
 
 	cfg := s.cfgMgr.Get()
-	if cfg.AdminPasswordHash == "" {
+	if !cfg.Initialized && cfg.AdminPasswordHash == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "setup_required", "message": "Complete the first-run setup wizard to configure the administrator account."})
 		return
 	}
 
-	ok, _ := auth.VerifyPasswordArgon2id(body.Password, cfg.AdminPasswordHash)
-	if normEmail != strings.ToLower(cfg.AdminEmail) || !ok {
+	matchedIdx := -1
+	for i := range s.users {
+		if strings.ToLower(s.users[i].Email) == normEmail {
+			matchedIdx = i
+			break
+		}
+	}
+
+	verified := false
+	if matchedIdx >= 0 {
+		if s.users[matchedIdx].Status != "active" {
+			writeJSON(w, http.StatusForbidden, map[string]any{"error": "account_banned", "message": "This account has been suspended by an administrator."})
+			return
+		}
+		if s.users[matchedIdx].PasswordHash != "" {
+			verified, _ = auth.VerifyPasswordArgon2id(body.Password, s.users[matchedIdx].PasswordHash)
+		} else if strings.EqualFold(normEmail, cfg.AdminEmail) && cfg.AdminPasswordHash != "" {
+			verified, _ = auth.VerifyPasswordArgon2id(body.Password, cfg.AdminPasswordHash)
+		}
+	} else if strings.EqualFold(normEmail, cfg.AdminEmail) && cfg.AdminPasswordHash != "" {
+		verified, _ = auth.VerifyPasswordArgon2id(body.Password, cfg.AdminPasswordHash)
+	}
+
+	if !verified {
 		s.loginFails[normEmail]++
 		dur := risk.BackoffDuration(s.loginFails[normEmail])
 		if dur > 0 {
@@ -1368,9 +1339,35 @@ func (s *appServer) handlePasswordLogin(w http.ResponseWriter, r *http.Request) 
 
 	delete(s.loginFails, normEmail)
 	delete(s.lockUntil, normEmail)
-	u := authUser{Sub: "usr_super_admin", Email: cfg.AdminEmail, Name: "Wimotek Admin", Role: "super_admin", Provider: "argon2id_password"}
+	nowISO := time.Now().UTC().Format(time.RFC3339)
+
+	var u authUser
+	if matchedIdx >= 0 {
+		s.users[matchedIdx].LastLoginAt = nowISO
+		s.persistUserLocked(s.users[matchedIdx])
+		role := s.users[matchedIdx].Role
+		if role != "super_admin" {
+			role = "member"
+		}
+		u = authUser{
+			Sub:      s.users[matchedIdx].ID,
+			Email:    s.users[matchedIdx].Email,
+			Name:     defaultStr(s.users[matchedIdx].DisplayName, s.users[matchedIdx].Email),
+			Role:     role,
+			Provider: "argon2id_password",
+		}
+	} else {
+		u = authUser{
+			Sub:      "usr_super_admin",
+			Email:    cfg.AdminEmail,
+			Name:     "System Admin",
+			Role:     "super_admin",
+			Provider: "argon2id_password",
+		}
+	}
+
 	tok := "wm_sess_" + randomHex(18)
-	s.sessions[tok] = u
+	s.persistSessionLocked(tok, u)
 	writeJSON(w, http.StatusOK, map[string]any{"user": u, "sessionToken": tok})
 }
 
@@ -1461,59 +1458,172 @@ func (s *appServer) handleVerifyEmailOTP(w http.ResponseWriter, r *http.Request)
 }
 
 func (s *appServer) handlePasskeyChallenge(w http.ResponseWriter, r *http.Request) {
-	s.mu.RLock()
-	enabled := s.policy.EnablePasskeysWebAuthn
-	s.mu.RUnlock()
-	if !enabled {
+	var body struct {
+		Email string `json:"email"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&body)
+	normEmail := strings.ToLower(strings.TrimSpace(body.Email))
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.policy.EnablePasskeysWebAuthn {
 		writeJSON(w, http.StatusForbidden, map[string]any{"error": "auth_method_disabled", "message": "Passkeys (WebAuthn) are disabled by Auth Policy."})
 		return
 	}
-	ch := randomHex(20)
-	host := strings.Split(defaultStr(r.Header.Get("X-Forwarded-Host"), r.Host), ":")[0]
-	if host == "" {
-		host = "localhost"
+
+	activeUserByID := make(map[string]identityUser, len(s.users))
+	for _, u := range s.users {
+		if u.Status == "active" {
+			activeUserByID[u.ID] = u
+		}
 	}
-	s.mu.Lock()
-	s.cacheSetLocked("webauthn:ch:"+ch, host, 2*time.Minute)
-	s.mu.Unlock()
+
+	allow := make([]map[string]string, 0)
+	for _, pk := range s.passkeys {
+		owner, ok := activeUserByID[pk.UserID]
+		if !ok {
+			continue
+		}
+		if normEmail != "" && !strings.EqualFold(owner.Email, normEmail) {
+			continue
+		}
+		allow = append(allow, map[string]string{
+			"id":   pk.CredentialID,
+			"type": "public-key",
+		})
+	}
+
+	if len(allow) == 0 {
+		msg := "No Passkey has been registered in the system yet. Please sign in with your administrator email and password first, then register a Passkey under Identity Directory."
+		if normEmail != "" {
+			msg = "No registered Passkey was found for this account. Sign in with password and register a Passkey first."
+		}
+		writeJSON(w, http.StatusNotFound, map[string]any{
+			"error":   "no_passkeys_registered",
+			"message": msg,
+		})
+		return
+	}
+
+	ch := randomBase64URL(32)
+	rpID := s.requestRPID(r)
+	s.cacheSetLocked("webauthn:ch:"+ch, rpID, 2*time.Minute)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"challenge":        ch,
-		"rpId":             host,
+		"rpId":             rpID,
 		"timeout":          60000,
 		"userVerification": "preferred",
+		"allowCredentials": allow,
 	})
 }
 
 func (s *appServer) handlePasskeyAuth(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Challenge     string `json:"challenge"`
-		Email         string `json:"email"`
-		ClientID      string `json:"clientId"`
-		Authenticator string `json:"authenticator"`
+		Challenge         string `json:"challenge"`
+		CredentialID      string `json:"credentialId"`
+		ClientDataJSON    string `json:"clientDataJSON"`
+		AuthenticatorData string `json:"authenticatorData"`
+		Signature         string `json:"signature"`
+		ClientID          string `json:"clientId"`
 	}
-	_ = json.NewDecoder(r.Body).Decode(&body)
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	rpID, ok := s.cacheGetLocked("webauthn:ch:" + body.Challenge)
-	if !ok {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid_challenge", "message": "WebAuthn challenge expired or invalid"})
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid_json", "message": "Invalid JSON payload"})
 		return
 	}
-	s.cacheDeleteLocked("webauthn:ch:" + body.Challenge)
-	authLabel := defaultStr(body.Authenticator, "Platform Biometric (FIDO2)")
-	email := defaultStr(body.Email, defaultStr(s.cfgMgr.Get().AdminEmail, "admin@wimotek.dev"))
-	issued := s.issueLiveTraceLocked(r, body.ClientID, email, "Wimotek Admin", "passkey", fmt.Sprintf("Passkey (%s · RP: %s)", authLabel, rpID), "hwk_webauthn")
-	issued["rpId"] = rpID
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.policy.EnablePasskeysWebAuthn {
+		writeJSON(w, http.StatusForbidden, map[string]any{"error": "auth_method_disabled", "message": "Passkeys (WebAuthn) are disabled by Auth Policy."})
+		return
+	}
+	rpID, ok := s.cacheGetLocked("webauthn:ch:" + strings.TrimSpace(body.Challenge))
+	if !ok {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid_challenge", "message": "WebAuthn challenge expired or invalid."})
+		return
+	}
+	s.cacheDeleteLocked("webauthn:ch:" + strings.TrimSpace(body.Challenge))
+
+	credID := strings.TrimSpace(body.CredentialID)
+	if credID == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "passkey_not_registered", "message": "Passkey credential ID is required and must be pre-registered."})
+		return
+	}
+
+	pkIdx := -1
+	for i := range s.passkeys {
+		if s.passkeys[i].CredentialID == credID {
+			pkIdx = i
+			break
+		}
+	}
+	if pkIdx == -1 {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "passkey_not_registered", "message": "Unknown Passkey credential. Register this Passkey inside the console first."})
+		return
+	}
+
+	pk := s.passkeys[pkIdx]
+	userIdx := -1
+	for i := range s.users {
+		if s.users[i].ID == pk.UserID {
+			userIdx = i
+			break
+		}
+	}
+	if userIdx == -1 || s.users[userIdx].Status != "active" {
+		writeJSON(w, http.StatusForbidden, map[string]any{"error": "account_unavailable", "message": "The account linked to this Passkey is unavailable or suspended."})
+		return
+	}
+
+	expectedRP := pk.RPID
+	if expectedRP == "" {
+		expectedRP = rpID
+	}
+	newSignCount, err := auth.VerifyWebAuthnAssertion(
+		body.Challenge,
+		expectedRP,
+		pk.PublicKeySPKI,
+		body.ClientDataJSON,
+		body.AuthenticatorData,
+		body.Signature,
+		pk.SignCount,
+	)
+	if err != nil {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "passkey_verification_failed", "message": err.Error()})
+		return
+	}
+
+	nowISO := time.Now().UTC().Format(time.RFC3339)
+	s.passkeys[pkIdx].SignCount = newSignCount
+	s.passkeys[pkIdx].LastUsedAt = nowISO
+	s.persistPasskeyUsageLocked(s.passkeys[pkIdx])
+
+	s.users[userIdx].LastLoginAt = nowISO
+	s.persistUserLocked(s.users[userIdx])
+
+	issued := s.issueSessionForUserLocked(
+		r,
+		s.users[userIdx],
+		body.ClientID,
+		fmt.Sprintf("Passkey (%s · RP: %s)", defaultStr(pk.Label, "FIDO2"), expectedRP),
+		"hwk_webauthn",
+		"matched_existing_identity",
+	)
+	issued["rpId"] = expectedRP
 	writeJSON(w, http.StatusOK, issued)
 }
 
-func (s *appServer) handleTotpEnroll(w http.ResponseWriter, _ *http.Request) {
+func (s *appServer) handleTotpEnroll(w http.ResponseWriter, r *http.Request) {
 	secret, err := auth.GenerateTOTPSecret()
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return
 	}
+	me, ok := s.currentSessionUser(r)
 	email := defaultStr(s.cfgMgr.Get().AdminEmail, "admin@wimotek.dev")
+	if ok && me.Email != "" {
+		email = me.Email
+	}
 	uri := auth.BuildOTPAuthURI("wimotek/Oauth", email, secret)
 	code, _ := auth.GenerateTOTP(secret, time.Now())
 	codes := make([]string, 8)
@@ -1540,7 +1650,15 @@ func (s *appServer) handleTotpVerify(w http.ResponseWriter, r *http.Request) {
 		Code string `json:"code"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&body)
+	me, hasMe := s.currentSessionUser(r)
 	email := defaultStr(s.cfgMgr.Get().AdminEmail, "admin@wimotek.dev")
+	targetID := "usr_super_admin"
+	if hasMe && me.Sub != "" {
+		targetID = me.Sub
+		if me.Email != "" {
+			email = me.Email
+		}
+	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -1551,18 +1669,22 @@ func (s *appServer) handleTotpVerify(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "message": "Invalid 6-digit TOTP code"})
 			return
 		}
-		s.totpEnrolled["usr_super_admin"] = pending
+		s.totpEnrolled[targetID] = pending
 		delete(s.totpPending, email)
+		recBytes, _ := json.Marshal(pending.RecoveryCodes)
 		for i := range s.users {
-			if s.users[i].ID == "usr_super_admin" {
+			if s.users[i].ID == targetID {
 				s.users[i].TotpEnabled = true
+				s.users[i].TotpSecretEnc = pending.SecretEnc
+				s.users[i].RecoveryHashes = string(recBytes)
+				s.persistUserLocked(s.users[i])
 			}
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "enrolled": true, "message": "TOTP 2FA verified and enabled for account."})
 		return
 	}
 
-	enrolled, ok := s.totpEnrolled["usr_super_admin"]
+	enrolled, ok := s.totpEnrolled[targetID]
 	if !ok {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "message": "No TOTP secret enrolled yet"})
 		return
@@ -1577,9 +1699,9 @@ func (s *appServer) handleTotpVerify(w http.ResponseWriter, r *http.Request) {
 
 func (s *appServer) handleAuthMe(w http.ResponseWriter, r *http.Request) {
 	tok := strings.TrimSpace(strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "))
-	s.mu.RLock()
-	u := s.sessions[tok]
-	s.mu.RUnlock()
+	s.mu.Lock()
+	u, _ := s.resolveSessionLocked(tok)
+	s.mu.Unlock()
 	writeJSON(w, http.StatusOK, map[string]any{"user": u})
 }
 
@@ -1728,8 +1850,10 @@ func (s *appServer) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 	}
 	s.mu.Lock()
 	s.apps = append([]oauthApplication{created}, s.apps...)
+	s.persistAppLocked(created)
+	appsCopy := append([]oauthApplication(nil), s.apps...)
 	s.mu.Unlock()
-	writeJSON(w, http.StatusCreated, map[string]any{"application": created})
+	writeJSON(w, http.StatusCreated, map[string]any{"application": created, "applications": appsCopy})
 }
 
 func (s *appServer) handleUpdateApp(w http.ResponseWriter, r *http.Request) {
@@ -1774,7 +1898,8 @@ func (s *appServer) handleUpdateApp(w http.ResponseWriter, r *http.Request) {
 			if len(body.Scopes) > 0 {
 				s.apps[i].Scopes = body.Scopes
 			}
-			writeJSON(w, http.StatusOK, map[string]any{"application": s.apps[i]})
+			s.persistAppLocked(s.apps[i])
+			writeJSON(w, http.StatusOK, map[string]any{"application": s.apps[i], "applications": s.apps})
 			return
 		}
 	}
@@ -1788,6 +1913,7 @@ func (s *appServer) handleResetAppSecret(w http.ResponseWriter, r *http.Request)
 	for i := range s.apps {
 		if s.apps[i].ID == key || s.apps[i].ClientID == key {
 			s.apps[i].ClientSecret = "wms_" + randomHex(14)
+			s.persistAppLocked(s.apps[i])
 			writeJSON(w, http.StatusOK, map[string]any{
 				"ok":           true,
 				"clientId":     s.apps[i].ClientID,
@@ -1807,7 +1933,8 @@ func (s *appServer) handleDeleteApp(w http.ResponseWriter, r *http.Request) {
 	for i, a := range s.apps {
 		if a.ID == id {
 			s.apps = append(s.apps[:i], s.apps[i+1:]...)
-			writeJSON(w, http.StatusOK, map[string]any{"deleted": true})
+			s.persistDeleteAppLocked(id)
+			writeJSON(w, http.StatusOK, map[string]any{"deleted": true, "applications": s.apps})
 			return
 		}
 	}
@@ -1997,6 +2124,7 @@ func (s *appServer) handleUpdateAppTheme(w http.ResponseWriter, r *http.Request)
 		if s.apps[i].ClientID == key || s.apps[i].ID == key {
 			normalized := normalizeLoginTheme(payload, s.apps[i].Name)
 			s.apps[i].LoginTheme = &normalized
+			s.persistAppLocked(s.apps[i])
 			writeJSON(w, http.StatusOK, map[string]any{
 				"ok":          true,
 				"clientId":    s.apps[i].ClientID,
@@ -2061,6 +2189,7 @@ func (s *appServer) handleReorderConnectors(w http.ResponseWriter, r *http.Reque
 		}
 	}
 	s.connectors = next
+	s.persistConnectorOrderLocked()
 	writeJSON(w, http.StatusOK, map[string]any{"connectors": s.serializeConnectorsLocked()})
 }
 
@@ -2102,6 +2231,7 @@ func (s *appServer) handleUpdateConnector(w http.ResponseWriter, r *http.Request
 				}
 			}
 			s.connectors[i].UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+			s.persistConnectorLocked(s.connectors[i], i)
 			writeJSON(w, http.StatusOK, map[string]any{"connectors": s.serializeConnectorsLocked()})
 			return
 		}
@@ -2140,8 +2270,10 @@ func (s *appServer) handleCreateConnector(w http.ResponseWriter, r *http.Request
 	}
 	s.mu.Lock()
 	s.connectors = append(s.connectors, created)
+	s.persistConnectorLocked(created, len(s.connectors)-1)
+	conns := s.serializeConnectorsLocked()
 	s.mu.Unlock()
-	writeJSON(w, http.StatusCreated, map[string]any{"id": created.ID})
+	writeJSON(w, http.StatusCreated, map[string]any{"id": created.ID, "connectors": conns})
 }
 
 func (s *appServer) handleListUsers(w http.ResponseWriter, _ *http.Request) {
@@ -2149,6 +2281,7 @@ func (s *appServer) handleListUsers(w http.ResponseWriter, _ *http.Request) {
 	defer s.mu.RUnlock()
 	writeJSON(w, http.StatusOK, map[string]any{
 		"users":       s.users,
+		"passkeys":    s.serializePasskeysLocked(""),
 		"webhooks":    s.serializeWebhooksLocked(),
 		"webhookLogs": s.webhookLogs,
 	})
@@ -2172,13 +2305,14 @@ func (s *appServer) handleSimulateJit(w http.ResponseWriter, r *http.Request) {
 	}
 	s.mu.Lock()
 	action, usr := s.resolveOrLinkIdentityLocked(body.Provider, defaultStr(labels[body.Provider], body.Provider), body.Provider+"_"+randomHex(4), body.Email, body.DisplayName, body.EmailVerified)
-	usersCopy := s.users
+	usersCopy := append([]identityUser(nil), s.users...)
 	s.mu.Unlock()
 	writeJSON(w, http.StatusOK, map[string]any{"action": action, "user": usr, "users": usersCopy})
 }
 
 func (s *appServer) handleUserStatus(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
+	me, _ := s.currentSessionUser(r)
 	var body struct {
 		Status string `json:"status"`
 	}
@@ -2190,10 +2324,27 @@ func (s *appServer) handleUserStatus(w http.ResponseWriter, r *http.Request) {
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if nextStatus == "banned" && me.Sub == id {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "cannot_ban_self", "message": "You cannot suspend the administrator account you are currently signed into."})
+		return
+	}
 	for i := range s.users {
 		if s.users[i].ID == id {
+			if nextStatus == "banned" && s.users[i].Role == "super_admin" && s.users[i].Status == "active" && s.countActiveAdminsLocked() <= 1 {
+				writeJSON(w, http.StatusBadRequest, map[string]any{"error": "last_admin", "message": "Cannot suspend the last active system administrator."})
+				return
+			}
 			s.users[i].Status = nextStatus
+			s.persistUserLocked(s.users[i])
 			if nextStatus == "banned" {
+				for tok, sess := range s.sessions {
+					if sess.Sub == id {
+						delete(s.sessions, tok)
+						if s.repo != nil {
+							_ = s.repo.DeleteSession(context.Background(), tok)
+						}
+					}
+				}
 				for _, wh := range s.webhooks {
 					if !wh.Enabled {
 						continue
@@ -2223,7 +2374,7 @@ func (s *appServer) handleUserStatus(w http.ResponseWriter, r *http.Request) {
 					s.webhookLogs = append([]webhookDeliveryLog{entry}, s.webhookLogs...)
 				}
 			}
-			writeJSON(w, http.StatusOK, map[string]any{"user": s.users[i], "webhookLogs": s.webhookLogs})
+			writeJSON(w, http.StatusOK, map[string]any{"user": s.users[i], "users": s.users, "webhookLogs": s.webhookLogs})
 			return
 		}
 	}
@@ -2270,8 +2421,10 @@ func (s *appServer) handleCreateWebhook(w http.ResponseWriter, r *http.Request) 
 	}
 	s.mu.Lock()
 	s.webhooks = append([]storedWebhook{created}, s.webhooks...)
+	s.persistWebhookLocked(created)
+	whs := s.serializeWebhooksLocked()
 	s.mu.Unlock()
-	writeJSON(w, http.StatusCreated, map[string]any{"id": created.ID})
+	writeJSON(w, http.StatusCreated, map[string]any{"id": created.ID, "webhooks": whs})
 }
 
 func (s *appServer) handleDeleteWebhook(w http.ResponseWriter, r *http.Request) {
@@ -2281,7 +2434,8 @@ func (s *appServer) handleDeleteWebhook(w http.ResponseWriter, r *http.Request) 
 	for i, wh := range s.webhooks {
 		if wh.ID == id {
 			s.webhooks = append(s.webhooks[:i], s.webhooks[i+1:]...)
-			writeJSON(w, http.StatusOK, map[string]any{"deleted": true})
+			s.persistDeleteWebhookLocked(id)
+			writeJSON(w, http.StatusOK, map[string]any{"deleted": true, "webhooks": s.serializeWebhooksLocked()})
 			return
 		}
 	}
@@ -2302,6 +2456,7 @@ func (s *appServer) handleUpdatePolicy(w http.ResponseWriter, r *http.Request) {
 	}
 	s.mu.Lock()
 	s.policy = next
+	s.persistPolicyLocked()
 	s.mu.Unlock()
 	writeJSON(w, http.StatusOK, map[string]any{"policy": next})
 }

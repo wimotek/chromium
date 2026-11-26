@@ -19,6 +19,7 @@ import {
   normalizeLoginTheme,
 } from '../lib/loginTheme';
 import { type AuthModeTab, resolveActiveAuthMode } from '../lib/authPolicy';
+import { authenticateBrowserPasskey } from '../lib/webauthn';
 import { BrandMark, ProviderIcon } from './ProviderIcons';
 
 interface HostedLoginCardProps {
@@ -218,19 +219,33 @@ ${resolvedTheme.customCss || ''}
     setLocalError(null);
     setWorking(true);
     try {
-      const chRes = await fetch('/api/auth/passkey/challenge', { method: 'POST' });
-      const ch = await chRes.json();
+      const chRes = await fetch('/api/auth/passkey/challenge', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        cache: 'no-store',
+        body: JSON.stringify({ email: email.trim() }),
+      });
+      const ch = await chRes.json().catch(() => ({}));
+      if (!chRes.ok) {
+        throw new Error(
+          ch.message ||
+            (locale === 'zh-CN' || locale === 'zh-TW'
+              ? '系统中尚未注册任何通行密钥（Passkey）。请先使用管理员邮箱与密码登录，在「用户与身份目录」中创建并绑定 Passkey。'
+              : 'No Passkeys are registered yet. Sign in with your email and password first, then register a Passkey in Identity Directory.')
+        );
+      }
+
+      const assertion = await authenticateBrowserPasskey(ch);
       const authRes = await fetch('/api/auth/passkey/authenticate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        cache: 'no-store',
         body: JSON.stringify({
-          challenge: ch.challenge,
-          email: email.trim(),
+          ...assertion,
           clientId,
-          authenticator: 'TouchID / FaceID / Windows Hello',
         }),
       });
-      const data = await authRes.json();
+      const data = await authRes.json().catch(() => ({}));
       if (!authRes.ok) throw new Error(data.message || 'Passkey sign-in failed');
       onAuthCompleted?.(data);
     } catch (err) {
@@ -247,34 +262,39 @@ ${resolvedTheme.customCss || ''}
       const res = await fetch('/oauth/device_authorization', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        cache: 'no-store',
         body: JSON.stringify({ client_id: clientId }),
       });
       const data = await res.json();
+      if (!res.ok) throw new Error(data.message || 'Failed to start Device Flow');
       setDeviceSession(data);
-    } catch {
-      setLocalError('Failed to start Device Flow');
+    } catch (err) {
+      setLocalError(err instanceof Error ? err.message : 'Failed to start Device Flow');
     } finally {
       setWorking(false);
     }
   }
 
-  async function handleApproveAndPollDevice() {
+  async function handlePollDevice() {
     if (!deviceSession) return;
     setLocalError(null);
     setWorking(true);
     try {
-      await fetch('/api/oauth/device/approve', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ userCode: deviceSession.user_code, email: email.trim() }),
-      });
       const pollRes = await fetch('/api/oauth/device/poll', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        cache: 'no-store',
         body: JSON.stringify({ deviceCode: deviceSession.device_code }),
       });
-      const data = await pollRes.json();
-      if (!pollRes.ok) throw new Error(data.message || 'Device poll failed');
+      const data = await pollRes.json().catch(() => ({}));
+      if (!pollRes.ok) {
+        throw new Error(
+          data.message ||
+            (locale === 'zh-CN' || locale === 'zh-TW'
+              ? '设备码尚未被已登录账户批准，请先在已登录终端授权后再检查状态。'
+              : 'Authorization is still pending. Approve this user code from an authenticated session first.')
+        );
+      }
       setDeviceSession({ ...deviceSession, approved: true });
       onAuthCompleted?.(data);
     } catch (err) {
@@ -526,30 +546,56 @@ ${resolvedTheme.customCss || ''}
 
       {/* Mode 3: Passkeys (WebAuthn / FIDO2) */}
       {activeMode === 'passkey' && policy.enablePasskeysWebAuthn && (
-        <div className="mt-4 space-y-3 text-center">
+        <div className="mt-4 space-y-3">
+          <div className="text-left">
+            <label htmlFor={`passkey-email-${scopeUid}`} className={`block text-xs font-medium ${labelTextClass} mb-1`}>
+              {t.emailLabel} ({locale === 'zh-CN' || locale === 'zh-TW' ? '可选' : 'Optional'})
+            </label>
+            <input
+              id={`passkey-email-${scopeUid}`}
+              type="email"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              placeholder="admin@company.com"
+              autoComplete="username webauthn"
+              className={inputClass}
+            />
+          </div>
           <div
-            className={`p-4 ${radius.control} border space-y-2 ${
+            className={`p-3.5 ${radius.control} border text-center space-y-1.5 ${
               isDarkSurface
                 ? 'bg-slate-900/70 border-slate-800'
                 : 'bg-slate-50 dark:bg-[#0B0F19] border-slate-200 dark:border-slate-800'
             }`}
           >
-            <Fingerprint className="w-8 h-8 mx-auto wm-accent-text" />
+            <Fingerprint className="w-7 h-7 mx-auto wm-accent-text" />
             <div className="text-xs font-medium">
-              Phishing-Resistant Passkey (WebAuthn / FIDO2)
+              {locale === 'zh-CN' || locale === 'zh-TW'
+                ? 'WebAuthn / FIDO2 通行密钥认证'
+                : 'Phishing-Resistant Passkey (WebAuthn / FIDO2)'}
             </div>
             <p className={`text-[11px] ${mutedTextClass} leading-relaxed`}>
-              Cryptographically bound to this domain RP ID. Works with FaceID, TouchID, Windows Hello, and YubiKey without passwords.
+              {locale === 'zh-CN' || locale === 'zh-TW'
+                ? '仅支持已在后台「用户与身份目录」中注册并保存公钥的 Passkey，通过硬件签名校验身份。'
+                : 'Requires a Passkey registered and saved in Identity Directory. Verified cryptographically via WebAuthn.'}
             </p>
           </div>
           <button
             type="button"
             onClick={handlePasskeySignIn}
             disabled={working}
-            className={`wm-primary-btn w-full min-h-[42px] px-4 py-2 ${radius.control} text-sm font-medium flex items-center justify-center gap-2`}
+            className={`wm-primary-btn w-full min-h-[42px] px-4 py-2 ${radius.control} text-sm font-medium flex items-center justify-center gap-2 disabled:opacity-60`}
           >
             <ShieldCheck className="w-4 h-4 shrink-0" />
-            <span>{working ? 'Verifying Passkey...' : 'Sign in with Passkey (FaceID / TouchID)'}</span>
+            <span>
+              {working
+                ? locale === 'zh-CN' || locale === 'zh-TW'
+                  ? '正在校验 Passkey...'
+                  : 'Verifying Passkey...'
+                : locale === 'zh-CN' || locale === 'zh-TW'
+                  ? '使用已注册 Passkey 登录'
+                  : 'Sign in with Registered Passkey'}
+            </span>
           </button>
         </div>
       )}
@@ -575,7 +621,11 @@ ${resolvedTheme.customCss || ''}
                   : 'bg-slate-50 dark:bg-[#0B0F19] border-slate-200 dark:border-slate-800'
               }`}
             >
-              <div className="text-[11px] text-slate-500">Enter this code on your phone or CLI verification URL</div>
+              <div className="text-[11px] text-slate-500">
+                {locale === 'zh-CN' || locale === 'zh-TW'
+                  ? '请在已登录设备打开验证地址并输入下方授权码'
+                  : 'Approve this code on an already signed-in device'}
+              </div>
               <div className="font-mono text-2xl font-bold tracking-widest tabular-nums">
                 {deviceSession.user_code}
               </div>
@@ -587,11 +637,17 @@ ${resolvedTheme.customCss || ''}
               ) : (
                 <button
                   type="button"
-                  onClick={handleApproveAndPollDevice}
+                  onClick={handlePollDevice}
                   disabled={working}
                   className={`wm-primary-btn w-full min-h-[38px] px-3 py-1.5 ${radius.control} text-xs font-medium`}
                 >
-                  Confirm on Phone &amp; Complete Login
+                  {working
+                    ? locale === 'zh-CN' || locale === 'zh-TW'
+                      ? '检查授权状态...'
+                      : 'Checking approval...'
+                    : locale === 'zh-CN' || locale === 'zh-TW'
+                      ? '检查设备授权状态'
+                      : 'Check Approval Status'}
                 </button>
               )}
             </div>

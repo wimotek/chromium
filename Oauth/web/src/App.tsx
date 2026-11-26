@@ -23,6 +23,7 @@ import type {
   LoginThemeConfig,
   OAuthApplication,
   OidcFlowTrace,
+  PasskeyCredential,
   SigningKeyStatus,
   SocialConnector,
   SystemConfig,
@@ -31,6 +32,7 @@ import type {
 } from './types';
 import { SUPPORTED_LOCALES, TRANSLATIONS, detectBrowserLocale, reorderConnectors } from './lib/i18n';
 import { DEFAULT_LOGIN_THEME, normalizeLoginTheme } from './lib/loginTheme';
+import { registerBrowserPasskey } from './lib/webauthn';
 import { BrandMark } from './components/ProviderIcons';
 import { SetupWizard } from './components/SetupWizard';
 import { HostedLoginCard } from './components/HostedLoginCard';
@@ -76,6 +78,7 @@ export default function App() {
   const [connectors, setConnectors] = useState<SocialConnector[]>([]);
   const [authPolicy, setAuthPolicy] = useState<AuthPolicyConfig>(DEFAULT_AUTH_POLICY);
   const [identityUsers, setIdentityUsers] = useState<IdentityUser[]>([]);
+  const [passkeys, setPasskeys] = useState<PasskeyCredential[]>([]);
   const [webhooks, setWebhooks] = useState<WebhookSubscription[]>([]);
   const [webhookLogs, setWebhookLogs] = useState<WebhookDeliveryLog[]>([]);
   const [counts, setCounts] = useState({ applications: 0, enabledConnectors: 0, totalConnectors: 0 });
@@ -95,15 +98,51 @@ export default function App() {
     document.documentElement.classList.toggle('dark', darkMode);
   }, [darkMode]);
 
+  const authFetch = useCallback(
+    async (url: string, init?: RequestInit, tokenOverride?: string) => {
+      const token = tokenOverride ?? sessionToken;
+      if (!token) {
+        throw new Error('Authentication required. Please sign in again.');
+      }
+      const headers = new Headers(init?.headers || {});
+      headers.set('Authorization', `Bearer ${token}`);
+      const res = await fetch(url, {
+        ...init,
+        headers,
+        cache: 'no-store',
+      });
+      if (res.status === 401) {
+        setSessionToken(null);
+        setUser(null);
+        setAuthError(
+          locale === 'zh-CN' || locale === 'zh-TW'
+            ? '登录会话已失效，请重新登录。'
+            : 'Session expired. Please sign in again.'
+        );
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.message || 'Session expired. Please sign in again.');
+      }
+      return res;
+    },
+    [sessionToken, locale]
+  );
+
   const fetchProtectedData = useCallback(async (token: string) => {
     const headers = { Authorization: `Bearer ${token}` };
     const [ovRes, appsRes, connRes, usersRes, policyRes] = await Promise.all([
-      fetch('/api/system/overview', { headers }),
-      fetch('/api/applications', { headers }),
-      fetch('/api/connectors', { headers }),
-      fetch('/api/users', { headers }),
-      fetch('/api/security/policy', { headers }),
+      fetch('/api/system/overview', { headers, cache: 'no-store' }),
+      fetch('/api/applications', { headers, cache: 'no-store' }),
+      fetch('/api/connectors', { headers, cache: 'no-store' }),
+      fetch('/api/users', { headers, cache: 'no-store' }),
+      fetch('/api/security/policy', { headers, cache: 'no-store' }),
     ]);
+
+    if ([ovRes, appsRes, connRes, usersRes, policyRes].some((r) => r.status === 401)) {
+      setSessionToken(null);
+      setUser(null);
+      setAuthError('Session expired. Please sign in again.');
+      return;
+    }
 
     if (ovRes.ok) {
       const ov = await ovRes.json();
@@ -128,6 +167,7 @@ export default function App() {
     if (usersRes.ok) {
       const data = await usersRes.json();
       setIdentityUsers(data.users || []);
+      setPasskeys(data.passkeys || []);
       setWebhooks(data.webhooks || []);
       setWebhookLogs(data.webhookLogs || []);
     }
@@ -143,7 +183,7 @@ export default function App() {
     async function boot() {
       try {
         setBootError(null);
-        const res = await fetch('/api/setup/status');
+        const res = await fetch('/api/setup/status', { cache: 'no-store' });
         if (!res.ok) {
           throw new Error(`Setup status returned HTTP ${res.status}`);
         }
@@ -239,6 +279,14 @@ export default function App() {
         setAuthError(data.message || 'Authentication failed');
         return;
       }
+      if (data.user?.role && data.user.role !== 'super_admin') {
+        setAuthError(
+          locale === 'zh-CN' || locale === 'zh-TW'
+            ? '认证成功，但该账号为普通成员 (member)，仅系统管理员 (super_admin) 可进入管理控制台。'
+            : 'Signed in, but this account has role "member". Only super_admin accounts can access the Admin Console.'
+        );
+        return;
+      }
       setUser(data.user);
       setSessionToken(data.sessionToken);
       await fetchProtectedData(data.sessionToken);
@@ -303,50 +351,49 @@ export default function App() {
   }
 
   async function handleCreateApp(payload: { name: string; description: string; redirectUris: string }) {
-    if (!sessionToken) return;
-    const res = await fetch('/api/applications', {
+    const res = await authFetch('/api/applications', {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${sessionToken}`,
-      },
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
     });
-    const data = await res.json();
+    const data = await res.json().catch(() => ({}));
     if (!res.ok) {
       throw new Error(data.message || 'Failed to create application');
     }
-    await fetchProtectedData(sessionToken);
+    if (Array.isArray(data.applications)) {
+      setApplications(data.applications);
+    } else if (data.application) {
+      setApplications((prev) => [data.application, ...prev.filter((a) => a.id !== data.application.id)]);
+    }
+    if (sessionToken) {
+      void fetchProtectedData(sessionToken);
+    }
   }
 
   async function handleUpdateApp(id: string, payload: { name: string; description: string; redirectUris: string }) {
-    if (!sessionToken) return;
-    const res = await fetch(`/api/applications/${encodeURIComponent(id)}`, {
+    const res = await authFetch(`/api/applications/${encodeURIComponent(id)}`, {
       method: 'PUT',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${sessionToken}`,
-      },
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
     });
-    const data = await res.json();
+    const data = await res.json().catch(() => ({}));
     if (!res.ok) {
       throw new Error(data.message || 'Failed to update application');
     }
-    if (data.application) {
+    if (Array.isArray(data.applications)) {
+      setApplications(data.applications);
+    } else if (data.application) {
       setApplications((prev) => prev.map((a) => (a.id === id ? data.application : a)));
-    } else {
+    } else if (sessionToken) {
       await fetchProtectedData(sessionToken);
     }
   }
 
   async function handleResetAppSecret(id: string): Promise<string | null> {
-    if (!sessionToken) return null;
-    const res = await fetch(`/api/applications/${encodeURIComponent(id)}/reset-secret`, {
+    const res = await authFetch(`/api/applications/${encodeURIComponent(id)}/reset-secret`, {
       method: 'POST',
-      headers: { Authorization: `Bearer ${sessionToken}` },
     });
-    const data = await res.json();
+    const data = await res.json().catch(() => ({}));
     if (!res.ok) {
       throw new Error(data.message || 'Failed to reset client secret');
     }
@@ -357,25 +404,30 @@ export default function App() {
   }
 
   async function handleDeleteApp(id: string) {
-    if (!sessionToken) return;
-    await fetch(`/api/applications/${id}`, {
+    const res = await authFetch(`/api/applications/${encodeURIComponent(id)}`, {
       method: 'DELETE',
-      headers: { Authorization: `Bearer ${sessionToken}` },
     });
-    await fetchProtectedData(sessionToken);
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      throw new Error(data.message || 'Failed to delete application');
+    }
+    if (Array.isArray(data.applications)) {
+      setApplications(data.applications);
+    } else {
+      setApplications((prev) => prev.filter((a) => a.id !== id));
+    }
+    if (sessionToken) {
+      void fetchProtectedData(sessionToken);
+    }
   }
 
   async function handleSaveAppTheme(clientId: string, theme: LoginThemeConfig) {
-    if (!sessionToken) return;
-    const res = await fetch(`/api/applications/${encodeURIComponent(clientId)}/theme`, {
+    const res = await authFetch(`/api/applications/${encodeURIComponent(clientId)}/theme`, {
       method: 'PUT',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${sessionToken}`,
-      },
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(theme),
     });
-    const data = await res.json();
+    const data = await res.json().catch(() => ({}));
     if (!res.ok) {
       throw new Error(data.message || 'Failed to save login theme');
     }
@@ -392,21 +444,25 @@ export default function App() {
     id: string,
     payload: {
       enabled?: boolean;
+      displayName?: string;
       clientId?: string;
       clientSecret?: string;
       extra?: Record<string, string>;
     }
   ) {
-    if (!sessionToken) return;
-    const res = await fetch(`/api/connectors/${id}`, {
+    const res = await authFetch(`/api/connectors/${encodeURIComponent(id)}`, {
       method: 'PUT',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${sessionToken}`,
-      },
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
     });
-    if (res.ok) {
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      throw new Error(data.message || 'Failed to update connector');
+    }
+    if (Array.isArray(data.connectors)) {
+      setConnectors(data.connectors);
+    }
+    if (sessionToken) {
       await fetchProtectedData(sessionToken);
     }
   }
@@ -417,29 +473,47 @@ export default function App() {
     clientSecret: string;
     issuerUrl: string;
   }) {
-    if (!sessionToken) return;
-    const res = await fetch('/api/connectors', {
+    const res = await authFetch('/api/connectors', {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${sessionToken}`,
-      },
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
     });
-    if (res.ok) {
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      throw new Error(data.message || 'Failed to add custom connector');
+    }
+    if (Array.isArray(data.connectors)) {
+      setConnectors(data.connectors);
+    }
+    if (sessionToken) {
       await fetchProtectedData(sessionToken);
+    }
+  }
+
+  async function handleDeleteConnector(id: string) {
+    const res = await authFetch(`/api/connectors/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      throw new Error(data.message || 'Failed to delete connector');
+    }
+    if (Array.isArray(data.connectors)) {
+      setConnectors(data.connectors);
+    } else {
+      setConnectors((prev) => prev.filter((c) => c.id !== id));
+    }
+    if (sessionToken) {
+      void fetchProtectedData(sessionToken);
     }
   }
 
   async function handleReorderConnectors(orderedIds: string[]) {
     setConnectors((prev) => reorderConnectors(prev, orderedIds));
     if (!sessionToken) return;
-    const res = await fetch('/api/connectors/reorder', {
+    const res = await authFetch('/api/connectors/reorder', {
       method: 'PUT',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${sessionToken}`,
-      },
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ orderedIds }),
     });
     if (res.ok) {
@@ -450,10 +524,7 @@ export default function App() {
 
   async function handleRerunWizard() {
     if (!sessionToken) return;
-    await fetch('/api/setup/reset', {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${sessionToken}` },
-    });
+    await authFetch('/api/setup/reset', { method: 'POST' });
     setConfig((prev) => (prev ? { ...prev, initialized: false } : prev));
     setSessionToken(null);
     setUser(null);
@@ -465,72 +536,174 @@ export default function App() {
     provider: IdentityProviderType;
     emailVerified: boolean;
   }): Promise<{ action: string; user: IdentityUser } | null> {
-    if (!sessionToken) return null;
-    const res = await fetch('/api/users/jit-simulate', {
+    const res = await authFetch('/api/users/jit-simulate', {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${sessionToken}`,
-      },
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
     });
-    if (!res.ok) return null;
-    const data = await res.json();
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.message || 'JIT simulation failed');
     if (data.users) setIdentityUsers(data.users);
     return { action: data.action, user: data.user };
   }
 
-  async function handleToggleUserStatus(userId: string, nextStatus: 'active' | 'banned') {
-    if (!sessionToken) return;
-    const res = await fetch(`/api/users/${userId}/status`, {
+  async function handleCreateUser(payload: {
+    email: string;
+    displayName: string;
+    password: string;
+    role: 'super_admin' | 'member';
+    emailVerified: boolean;
+  }) {
+    const res = await authFetch('/api/users', {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${sessionToken}`,
-      },
-      body: JSON.stringify({ status: nextStatus }),
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
     });
-    if (res.ok) {
-      const data = await res.json();
-      if (data.webhookLogs) setWebhookLogs(data.webhookLogs);
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.message || 'Failed to create user');
+    if (Array.isArray(data.users)) {
+      setIdentityUsers(data.users);
+    } else if (sessionToken) {
       await fetchProtectedData(sessionToken);
     }
   }
 
-  async function handleCreateWebhook(payload: { name: string; targetUrl: string; signingSecret: string }) {
-    if (!sessionToken) return;
-    const res = await fetch('/api/webhooks', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${sessionToken}`,
-      },
+  async function handleUpdateUser(
+    userId: string,
+    payload: {
+      email: string;
+      displayName: string;
+      role: 'super_admin' | 'member';
+      emailVerified: boolean;
+    }
+  ) {
+    const res = await authFetch(`/api/users/${encodeURIComponent(userId)}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
     });
-    const data = await res.json();
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.message || 'Failed to update user');
+    if (Array.isArray(data.users)) {
+      setIdentityUsers(data.users);
+    } else if (sessionToken) {
+      await fetchProtectedData(sessionToken);
+    }
+  }
+
+  async function handleResetUserPassword(userId: string, password: string) {
+    const res = await authFetch(`/api/users/${encodeURIComponent(userId)}/password`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ password }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.message || 'Failed to reset password');
+    if (Array.isArray(data.users)) {
+      setIdentityUsers(data.users);
+    }
+  }
+
+  async function handleDeleteUser(userId: string) {
+    const res = await authFetch(`/api/users/${encodeURIComponent(userId)}`, {
+      method: 'DELETE',
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.message || 'Failed to delete user');
+    if (Array.isArray(data.users)) setIdentityUsers(data.users);
+    if (Array.isArray(data.passkeys)) setPasskeys(data.passkeys);
+  }
+
+  async function handleUnlinkIdentity(userId: string, identityId: string) {
+    const res = await authFetch(
+      `/api/users/${encodeURIComponent(userId)}/identities/${encodeURIComponent(identityId)}`,
+      { method: 'DELETE' }
+    );
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.message || 'Failed to unlink identity');
+    if (Array.isArray(data.users)) setIdentityUsers(data.users);
+  }
+
+  async function handleToggleUserStatus(userId: string, nextStatus: 'active' | 'banned') {
+    const res = await authFetch(`/api/users/${encodeURIComponent(userId)}/status`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status: nextStatus }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.message || 'Failed to update user status');
+    if (data.webhookLogs) setWebhookLogs(data.webhookLogs);
+    if (sessionToken) {
+      await fetchProtectedData(sessionToken);
+    }
+  }
+
+  async function handleRegisterPasskey(payload: { userId?: string; label: string }) {
+    const optRes = await authFetch('/api/auth/passkey/register/options', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ userId: payload.userId }),
+    });
+    const options = await optRes.json().catch(() => ({}));
+    if (!optRes.ok) {
+      throw new Error(options.message || 'Failed to create Passkey registration challenge');
+    }
+    const regPayload = await registerBrowserPasskey(options, payload.label, payload.userId);
+    const verifyRes = await authFetch('/api/auth/passkey/register/verify', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(regPayload),
+    });
+    const verifyData = await verifyRes.json().catch(() => ({}));
+    if (!verifyRes.ok) {
+      throw new Error(verifyData.message || 'Passkey verification failed');
+    }
+    if (Array.isArray(verifyData.passkeys)) setPasskeys(verifyData.passkeys);
+    if (Array.isArray(verifyData.users)) setIdentityUsers(verifyData.users);
+  }
+
+  async function handleDeletePasskey(credentialId: string) {
+    const res = await authFetch(`/api/auth/passkey/credentials/${encodeURIComponent(credentialId)}`, {
+      method: 'DELETE',
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.message || 'Failed to revoke Passkey');
+    if (Array.isArray(data.passkeys)) setPasskeys(data.passkeys);
+    if (Array.isArray(data.users)) setIdentityUsers(data.users);
+  }
+
+  async function handleCreateWebhook(payload: { name: string; targetUrl: string; signingSecret: string }) {
+    const res = await authFetch('/api/webhooks', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    const data = await res.json().catch(() => ({}));
     if (!res.ok) {
       throw new Error(data.message || 'Failed to create webhook');
     }
-    await fetchProtectedData(sessionToken);
+    if (sessionToken) {
+      await fetchProtectedData(sessionToken);
+    }
   }
 
   async function handleDeleteWebhook(id: string) {
-    if (!sessionToken) return;
-    await fetch(`/api/webhooks/${id}`, {
+    const res = await authFetch(`/api/webhooks/${encodeURIComponent(id)}`, {
       method: 'DELETE',
-      headers: { Authorization: `Bearer ${sessionToken}` },
     });
-    await fetchProtectedData(sessionToken);
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      throw new Error(data.message || 'Failed to delete webhook');
+    }
+    if (sessionToken) {
+      await fetchProtectedData(sessionToken);
+    }
   }
 
   async function handleSavePolicy(next: AuthPolicyConfig) {
-    if (!sessionToken) return;
-    const res = await fetch('/api/security/policy', {
+    const res = await authFetch('/api/security/policy', {
       method: 'PUT',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${sessionToken}`,
-      },
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(next),
     });
     if (res.ok) {
@@ -542,6 +715,14 @@ export default function App() {
   function handleAuthCompleted(result: { user: AuthUser; sessionToken: string; trace: OidcFlowTrace }) {
     setLatestTrace(result.trace);
     if (!sessionToken) {
+      if (result.user.role && result.user.role !== 'super_admin') {
+        setAuthError(
+          locale === 'zh-CN' || locale === 'zh-TW'
+            ? `账号 ${result.user.email} 认证成功（普通用户），但访问管理控制台需要系统管理员（Super Admin）权限。`
+            : `Signed in as ${result.user.email} (member), but console access requires a Super Admin account.`
+        );
+        return;
+      }
       setUser(result.user);
       setSessionToken(result.sessionToken);
       void fetchProtectedData(result.sessionToken);
@@ -850,6 +1031,7 @@ export default function App() {
               connectors={connectors}
               onUpdateConnector={handleUpdateConnector}
               onAddCustomConnector={handleAddCustomConnector}
+              onDeleteConnector={handleDeleteConnector}
               onReorderConnectors={handleReorderConnectors}
             />
           )}
@@ -857,12 +1039,21 @@ export default function App() {
           {activeTab === 'users' && (
             <IdentityDirectoryView
               locale={locale}
+              currentUser={user}
               users={identityUsers}
+              passkeys={passkeys}
               webhooks={webhooks}
               webhookLogs={webhookLogs}
               jitAutoLinkEnabled={authPolicy.jitVerifiedEmailAutoLink}
               onSimulateJit={handleSimulateJit}
+              onCreateUser={handleCreateUser}
+              onUpdateUser={handleUpdateUser}
+              onResetUserPassword={handleResetUserPassword}
+              onDeleteUser={handleDeleteUser}
+              onUnlinkIdentity={handleUnlinkIdentity}
               onToggleUserStatus={handleToggleUserStatus}
+              onRegisterPasskey={handleRegisterPasskey}
+              onDeletePasskey={handleDeletePasskey}
               onCreateWebhook={handleCreateWebhook}
               onDeleteWebhook={handleDeleteWebhook}
             />
