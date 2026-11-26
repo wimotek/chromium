@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useId, useMemo, useState } from 'react';
 import {
   ChevronDown,
   ChevronUp,
@@ -10,8 +10,14 @@ import {
   ShieldCheck,
   CheckCircle2,
 } from 'lucide-react';
-import type { AuthPolicyConfig, Locale, OidcFlowTrace, SocialConnector } from '../types';
+import type { AuthPolicyConfig, Locale, LoginThemeConfig, OidcFlowTrace, SocialConnector } from '../types';
 import { TRANSLATIONS, partitionConnectors } from '../lib/i18n';
+import {
+  DEFAULT_LOGIN_THEME,
+  getFontFamilyClass,
+  getRadiusClasses,
+  normalizeLoginTheme,
+} from '../lib/loginTheme';
 import { BrandMark, ProviderIcon } from './ProviderIcons';
 
 type AuthModeTab = 'password' | 'email_otp' | 'passkey' | 'device';
@@ -20,6 +26,7 @@ interface HostedLoginCardProps {
   locale: Locale;
   connectors: SocialConnector[];
   authPolicy?: AuthPolicyConfig;
+  theme?: LoginThemeConfig;
   clientId?: string;
   rtl?: boolean;
   compact?: boolean;
@@ -34,6 +41,7 @@ export function HostedLoginCard({
   locale,
   connectors,
   authPolicy,
+  theme,
   clientId = 'wimotek_erp_portal',
   rtl = false,
   compact = false,
@@ -44,6 +52,12 @@ export function HostedLoginCard({
   errorMessage = null,
 }: HostedLoginCardProps) {
   const t = TRANSLATIONS[locale];
+  const scopeUid = useId().replace(/[^a-zA-Z0-9_-]/g, '');
+  const scopeAttr = `wm-${scopeUid}`;
+  const resolvedTheme = useMemo(() => normalizeLoginTheme(theme), [theme]);
+  const radius = getRadiusClasses(resolvedTheme.borderRadius);
+  const fontClass = getFontFamilyClass(resolvedTheme.fontFamily);
+
   const [mode, setMode] = useState<AuthModeTab>('password');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
@@ -87,6 +101,61 @@ export function HostedLoginCard({
     ...(policy.enablePasskeysWebAuthn ? [{ id: 'passkey' as const, label: t.tabPasskey }] : []),
     ...(policy.enableDeviceFlowRfc8628 ? [{ id: 'device' as const, label: t.tabDeviceFlow }] : []),
   ];
+
+  const isSplit = !compact && (resolvedTheme.layout === 'split_left' || resolvedTheme.layout === 'split_right');
+  const isMinimal = resolvedTheme.layout === 'minimal';
+  const hasExplicitSurface =
+    resolvedTheme.surfaceMode !== 'auto' ||
+    resolvedTheme.cardColor.toLowerCase() !== DEFAULT_LOGIN_THEME.cardColor.toLowerCase() ||
+    resolvedTheme.textColor.toLowerCase() !== DEFAULT_LOGIN_THEME.textColor.toLowerCase() ||
+    resolvedTheme.backgroundColor.toLowerCase() !== DEFAULT_LOGIN_THEME.backgroundColor.toLowerCase();
+
+  const isDarkSurface = resolvedTheme.surfaceMode === 'dark';
+
+  const scopedThemeCss = useMemo(() => {
+    const sel = `[data-wimotek-scope="${scopeAttr}"]`;
+    const surfaceRules = hasExplicitSurface
+      ? `
+${sel} [data-wimotek-login-card] {
+  background-color: ${isMinimal ? 'transparent' : resolvedTheme.cardColor};
+  color: ${resolvedTheme.textColor};
+}
+${sel} .wm-divider-chip {
+  background-color: ${isMinimal ? resolvedTheme.backgroundColor : resolvedTheme.cardColor};
+}
+`
+      : '';
+
+    return `
+${sel} {
+  --wm-primary: ${resolvedTheme.primaryColor};
+  --wm-bg: ${resolvedTheme.backgroundColor};
+  --wm-card: ${resolvedTheme.cardColor};
+  --wm-text: ${resolvedTheme.textColor};
+}
+${sel} .wm-primary-btn {
+  background-color: var(--wm-primary);
+  color: #FFFFFF;
+}
+${sel} .wm-primary-btn:hover {
+  filter: brightness(0.93);
+}
+${sel} .wm-accent-text {
+  color: var(--wm-primary);
+}
+${sel} .wm-hero-panel {
+  background: linear-gradient(145deg, ${resolvedTheme.primaryColor} 0%, #0F172A 100%);
+}
+${surfaceRules}
+${resolvedTheme.customCss || ''}
+`;
+  }, [scopeAttr, resolvedTheme, hasExplicitSurface, isMinimal]);
+
+  const headingText =
+    resolvedTheme.brandTitle && resolvedTheme.brandTitle !== DEFAULT_LOGIN_THEME.brandTitle
+      ? resolvedTheme.brandTitle
+      : t.loginTitle;
+  const subtitleText = resolvedTheme.brandSubtitle || t.loginSubtitle;
 
   async function handleSubmitPassword(e: React.FormEvent) {
     e.preventDefault();
@@ -215,19 +284,85 @@ export function HostedLoginCard({
     }
   }
 
-  return (
+  const inputClass = `w-full min-h-[40px] px-3 py-2 text-sm ${radius.control} border ${
+    isDarkSurface
+      ? 'border-slate-700 bg-slate-900/90 text-slate-100 placeholder:text-slate-500'
+      : 'border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100'
+  }`;
+
+  const mutedTextClass = isDarkSurface ? 'text-slate-400' : 'text-slate-600 dark:text-slate-400';
+  const labelTextClass = isDarkSurface ? 'text-slate-300' : 'text-slate-700 dark:text-slate-300';
+  const socialBtnClass = `w-full min-h-[40px] px-3 py-2 ${radius.control} border text-sm font-medium flex items-center justify-center gap-2 transition-colors disabled:opacity-50 ${
+    isDarkSurface
+      ? 'border-slate-700 bg-slate-900/70 hover:bg-slate-800 text-slate-100'
+      : 'border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900/70 hover:bg-slate-50 dark:hover:bg-slate-800/80 text-slate-800 dark:text-slate-100'
+  }`;
+
+  const heroPanel = (
+    <div className="wm-hero-panel md:col-span-5 p-6 sm:p-7 text-white flex flex-col justify-between gap-6">
+      <div className="space-y-4">
+        <div className="inline-flex items-center gap-2.5">
+          {resolvedTheme.logoUrl ? (
+            <img
+              src={resolvedTheme.logoUrl}
+              alt={resolvedTheme.brandTitle}
+              className="h-8 max-w-[140px] object-contain"
+            />
+          ) : (
+            <BrandMark className="w-8 h-8" />
+          )}
+          <span className="font-display text-sm font-semibold tracking-tight text-white/95">
+            {resolvedTheme.brandTitle || 'wimotek/Oauth'}
+          </span>
+        </div>
+
+        <div className="space-y-2.5 pt-2">
+          <h3 className="font-display text-xl font-bold tracking-tight leading-snug text-balance">
+            {resolvedTheme.heroTitle}
+          </h3>
+          <p className="text-xs leading-relaxed text-white/80">
+            {resolvedTheme.heroSubtitle}
+          </p>
+        </div>
+      </div>
+
+      <div className="pt-4 border-t border-white/15 flex items-center justify-between gap-2 flex-wrap text-[11px] font-mono text-white/75">
+        <span>OIDC 1.0 · PKCE</span>
+        <span>RS256</span>
+      </div>
+    </div>
+  );
+
+  const cardBody = (
     <div
-      dir={rtl ? 'rtl' : 'ltr'}
-      className={`w-full ${compact ? 'max-w-sm' : 'max-w-[440px]'} mx-auto bg-white dark:bg-[#111827] border border-slate-200 dark:border-slate-800 rounded-xl shadow-sm p-6 sm:p-7 transition-colors`}
+      data-wimotek-login-card=""
+      className={`${
+        isSplit
+          ? 'md:col-span-7 p-6 sm:p-7'
+          : isMinimal
+            ? `w-full ${compact ? 'max-w-sm' : 'max-w-[440px]'} mx-auto p-4 sm:p-6`
+            : `w-full ${compact ? 'max-w-sm' : 'max-w-[440px]'} mx-auto bg-white dark:bg-[#111827] border ${
+                isDarkSurface ? 'border-slate-800' : 'border-slate-200 dark:border-slate-800'
+              } ${radius.card} shadow-sm p-6 sm:p-7`
+      } transition-colors`}
     >
       {/* Header */}
       <div className="flex flex-col items-center text-center mb-5">
-        <BrandMark className="w-10 h-10 mb-3.5" />
-        <h2 className="text-xl font-semibold tracking-tight text-slate-900 dark:text-slate-50 i18n-safe text-balance leading-snug">
-          {t.loginTitle}
+        {!isSplit &&
+          (resolvedTheme.logoUrl ? (
+            <img
+              src={resolvedTheme.logoUrl}
+              alt={resolvedTheme.brandTitle}
+              className="h-10 max-w-[160px] object-contain mb-3.5"
+            />
+          ) : (
+            <BrandMark className="w-10 h-10 mb-3.5" />
+          ))}
+        <h2 className="text-xl font-semibold tracking-tight i18n-safe text-balance leading-snug">
+          {headingText}
         </h2>
-        <p className="mt-1 text-xs sm:text-sm text-slate-600 dark:text-slate-400 i18n-safe leading-relaxed">
-          {t.loginSubtitle}
+        <p className={`mt-1 text-xs sm:text-sm ${mutedTextClass} i18n-safe leading-relaxed`}>
+          {subtitleText}
         </p>
       </div>
 
@@ -236,7 +371,9 @@ export function HostedLoginCard({
         <div
           role="tablist"
           aria-label="Authentication methods"
-          className="mt-4 grid grid-cols-2 sm:grid-cols-4 gap-1 p-1 rounded-lg bg-slate-100 dark:bg-slate-800/80"
+          className={`mt-4 grid grid-cols-2 sm:grid-cols-4 gap-1 p-1 ${radius.control} ${
+            isDarkSurface ? 'bg-slate-800/80' : 'bg-slate-100 dark:bg-slate-800/80'
+          }`}
         >
           {availableTabs.map((tab) => (
             <button
@@ -248,10 +385,14 @@ export function HostedLoginCard({
                 setMode(tab.id);
                 setLocalError(null);
               }}
-              className={`px-2 py-1.5 text-[11px] font-medium rounded-md transition-colors truncate ${
+              className={`px-2 py-1.5 text-[11px] font-medium ${radius.control} transition-colors truncate ${
                 mode === tab.id
-                  ? 'bg-white dark:bg-[#111827] text-slate-900 dark:text-white shadow-xs'
-                  : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
+                  ? isDarkSurface
+                    ? 'bg-slate-900 text-white shadow-xs'
+                    : 'bg-white dark:bg-[#111827] text-slate-900 dark:text-white shadow-xs'
+                  : isDarkSurface
+                    ? 'text-slate-400 hover:text-white'
+                    : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
               }`}
             >
               {tab.label}
@@ -264,38 +405,44 @@ export function HostedLoginCard({
       {mode === 'password' && (
         <form onSubmit={handleSubmitPassword} className="mt-4 space-y-3">
           <div>
-            <label htmlFor="hosted-login-email" className="block text-xs font-medium text-slate-700 dark:text-slate-300 mb-1 i18n-safe">
+            <label htmlFor={`hosted-login-email-${scopeUid}`} className={`block text-xs font-medium ${labelTextClass} mb-1 i18n-safe`}>
               {t.emailLabel}
             </label>
             <input
-              id="hosted-login-email"
+              id={`hosted-login-email-${scopeUid}`}
               type="email"
               value={email}
               onChange={(e) => setEmail(e.target.value)}
               placeholder="you@example.com"
               autoComplete="username"
-              className="w-full min-h-[40px] px-3 py-2 text-sm rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100"
+              className={inputClass}
             />
           </div>
 
           <div>
-            <label htmlFor="hosted-login-password" className="block text-xs font-medium text-slate-700 dark:text-slate-300 mb-1 i18n-safe">
+            <label htmlFor={`hosted-login-password-${scopeUid}`} className={`block text-xs font-medium ${labelTextClass} mb-1 i18n-safe`}>
               {t.passwordLabel}
             </label>
             <input
-              id="hosted-login-password"
+              id={`hosted-login-password-${scopeUid}`}
               type="password"
               value={password}
               onChange={(e) => setPassword(e.target.value)}
               autoComplete="current-password"
               placeholder="••••••••••••"
-              className="w-full min-h-[40px] px-3 py-2 text-sm rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100"
+              className={inputClass}
             />
           </div>
 
           {policy.captchaProvider !== 'none' && (
-            <label className="flex items-center justify-between gap-3 px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50/70 dark:bg-slate-900/60 text-xs cursor-pointer">
-              <span className="flex items-center gap-2 text-slate-700 dark:text-slate-300">
+            <label
+              className={`flex items-center justify-between gap-3 px-3 py-2 ${radius.control} border text-xs cursor-pointer ${
+                isDarkSurface
+                  ? 'border-slate-700 bg-slate-900/60 text-slate-300'
+                  : 'border-slate-200 dark:border-slate-700 bg-slate-50/70 dark:bg-slate-900/60 text-slate-700 dark:text-slate-300'
+              }`}
+            >
+              <span className="flex items-center gap-2">
                 <input
                   type="checkbox"
                   checked={captchaVerified}
@@ -313,7 +460,7 @@ export function HostedLoginCard({
           <button
             type="submit"
             disabled={Boolean(busyProvider) || working}
-            className="w-full min-h-[40px] px-4 py-2 rounded-lg bg-slate-900 dark:bg-slate-100 text-white dark:text-slate-900 hover:bg-slate-800 dark:hover:bg-white text-sm font-medium flex items-center justify-center gap-2 transition-colors disabled:opacity-60"
+            className={`wm-primary-btn w-full min-h-[40px] px-4 py-2 ${radius.control} text-sm font-medium flex items-center justify-center gap-2 transition-all disabled:opacity-60`}
           >
             <KeyRound className="w-4 h-4 shrink-0" />
             <span className="i18n-safe">{t.signInButton}</span>
@@ -326,23 +473,23 @@ export function HostedLoginCard({
         <div className="mt-4 space-y-3">
           <form onSubmit={handleSendOtp} className="space-y-2.5">
             <div>
-              <label htmlFor="otp-email" className="block text-xs font-medium text-slate-700 dark:text-slate-300 mb-1">
+              <label htmlFor={`otp-email-${scopeUid}`} className={`block text-xs font-medium ${labelTextClass} mb-1`}>
                 {t.emailLabel}
               </label>
               <input
-                id="otp-email"
+                id={`otp-email-${scopeUid}`}
                 type="email"
                 required
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
                 placeholder="you@example.com"
-                className="w-full min-h-[40px] px-3 py-2 text-sm rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900"
+                className={inputClass}
               />
             </div>
             <button
               type="submit"
               disabled={working}
-              className="w-full min-h-[40px] px-4 py-2 rounded-lg bg-slate-900 dark:bg-slate-100 text-white dark:text-slate-900 text-sm font-medium flex items-center justify-center gap-2"
+              className={`wm-primary-btn w-full min-h-[40px] px-4 py-2 ${radius.control} text-sm font-medium flex items-center justify-center gap-2`}
             >
               <Mail className="w-4 h-4 shrink-0" />
               <span>Send 6-Digit OTP &amp; Magic Link</span>
@@ -351,7 +498,7 @@ export function HostedLoginCard({
 
           {otpSent && (
             <div className="p-3.5 rounded-lg bg-slate-50 dark:bg-[#0B0F19] border border-slate-200 dark:border-slate-800 space-y-2.5 text-xs">
-              <div className="text-slate-600 dark:text-slate-400">
+              <div className={mutedTextClass}>
                 A 6-digit verification code has been sent to your email (valid for 5 minutes).
               </div>
               <div className="flex gap-2">
@@ -361,13 +508,13 @@ export function HostedLoginCard({
                   onChange={(e) => setOtpInput(e.target.value)}
                   placeholder="6-digit OTP"
                   aria-label="6-digit email OTP"
-                  className="flex-1 min-w-0 min-h-[36px] px-3 py-1 font-mono text-sm tabular-nums rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900"
+                  className={`flex-1 min-w-0 min-h-[36px] px-3 py-1 font-mono text-sm tabular-nums ${radius.control} border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900`}
                 />
                 <button
                   type="button"
                   onClick={handleVerifyOtp}
                   disabled={working}
-                  className="px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white font-medium whitespace-nowrap"
+                  className={`wm-primary-btn px-3 py-1.5 ${radius.control} font-medium whitespace-nowrap`}
                 >
                   Verify OTP
                 </button>
@@ -380,12 +527,18 @@ export function HostedLoginCard({
       {/* Mode 3: Passkeys (WebAuthn / FIDO2) */}
       {mode === 'passkey' && (
         <div className="mt-4 space-y-3 text-center">
-          <div className="p-4 rounded-lg bg-slate-50 dark:bg-[#0B0F19] border border-slate-200 dark:border-slate-800 space-y-2">
-            <Fingerprint className="w-8 h-8 mx-auto text-indigo-600 dark:text-indigo-400" />
-            <div className="text-xs font-medium text-slate-900 dark:text-white">
+          <div
+            className={`p-4 ${radius.control} border space-y-2 ${
+              isDarkSurface
+                ? 'bg-slate-900/70 border-slate-800'
+                : 'bg-slate-50 dark:bg-[#0B0F19] border-slate-200 dark:border-slate-800'
+            }`}
+          >
+            <Fingerprint className="w-8 h-8 mx-auto wm-accent-text" />
+            <div className="text-xs font-medium">
               Phishing-Resistant Passkey (WebAuthn / FIDO2)
             </div>
-            <p className="text-[11px] text-slate-500 dark:text-slate-400 leading-relaxed">
+            <p className={`text-[11px] ${mutedTextClass} leading-relaxed`}>
               Cryptographically bound to this domain RP ID. Works with FaceID, TouchID, Windows Hello, and YubiKey without passwords.
             </p>
           </div>
@@ -393,7 +546,7 @@ export function HostedLoginCard({
             type="button"
             onClick={handlePasskeySignIn}
             disabled={working}
-            className="w-full min-h-[42px] px-4 py-2 rounded-lg bg-slate-900 dark:bg-slate-100 text-white dark:text-slate-900 text-sm font-medium flex items-center justify-center gap-2"
+            className={`wm-primary-btn w-full min-h-[42px] px-4 py-2 ${radius.control} text-sm font-medium flex items-center justify-center gap-2`}
           >
             <ShieldCheck className="w-4 h-4 shrink-0" />
             <span>{working ? 'Verifying Passkey...' : 'Sign in with Passkey (FaceID / TouchID)'}</span>
@@ -409,15 +562,21 @@ export function HostedLoginCard({
               type="button"
               onClick={handleStartDeviceFlow}
               disabled={working}
-              className="w-full min-h-[42px] px-4 py-2 rounded-lg bg-slate-900 dark:bg-slate-100 text-white dark:text-slate-900 text-sm font-medium flex items-center justify-center gap-2"
+              className={`wm-primary-btn w-full min-h-[42px] px-4 py-2 ${radius.control} text-sm font-medium flex items-center justify-center gap-2`}
             >
               <Smartphone className="w-4 h-4 shrink-0" />
               <span>Generate Device Code (RFC 8628)</span>
             </button>
           ) : (
-            <div className="p-4 rounded-lg bg-slate-50 dark:bg-[#0B0F19] border border-slate-200 dark:border-slate-800 text-center space-y-2.5">
+            <div
+              className={`p-4 ${radius.control} border text-center space-y-2.5 ${
+                isDarkSurface
+                  ? 'bg-slate-900/70 border-slate-800'
+                  : 'bg-slate-50 dark:bg-[#0B0F19] border-slate-200 dark:border-slate-800'
+              }`}
+            >
               <div className="text-[11px] text-slate-500">Enter this code on your phone or CLI verification URL</div>
-              <div className="font-mono text-2xl font-bold tracking-widest text-slate-900 dark:text-white tabular-nums">
+              <div className="font-mono text-2xl font-bold tracking-widest tabular-nums">
                 {deviceSession.user_code}
               </div>
               <div className="text-[11px] font-mono text-slate-500 truncate">{deviceSession.verification_uri}</div>
@@ -430,7 +589,7 @@ export function HostedLoginCard({
                   type="button"
                   onClick={handleApproveAndPollDevice}
                   disabled={working}
-                  className="w-full min-h-[38px] px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-medium"
+                  className={`wm-primary-btn w-full min-h-[38px] px-3 py-1.5 ${radius.control} text-xs font-medium`}
                 >
                   Confirm on Phone &amp; Complete Login
                 </button>
@@ -443,7 +602,7 @@ export function HostedLoginCard({
       {(localError || errorMessage) && (
         <div
           role="alert"
-          className="mt-3 flex items-start gap-2 text-xs text-red-700 dark:text-red-400 bg-red-50 dark:bg-red-950/40 border border-red-200 dark:border-red-900/60 rounded-lg px-3 py-2 leading-relaxed"
+          className={`mt-3 flex items-start gap-2 text-xs text-red-700 dark:text-red-400 bg-red-50 dark:bg-red-950/40 border border-red-200 dark:border-red-900/60 ${radius.control} px-3 py-2 leading-relaxed`}
         >
           <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
           <span className="i18n-safe">{localError || errorMessage}</span>
@@ -453,10 +612,10 @@ export function HostedLoginCard({
       {/* Divider */}
       <div className="relative my-5">
         <div className="absolute inset-0 flex items-center" aria-hidden="true">
-          <div className="w-full border-t border-slate-200 dark:border-slate-800" />
+          <div className={`w-full border-t ${isDarkSurface ? 'border-slate-800' : 'border-slate-200 dark:border-slate-800'}`} />
         </div>
         <div className="relative flex justify-center">
-          <span className="bg-white dark:bg-[#111827] px-3 text-xs text-slate-500 dark:text-slate-400 i18n-safe">
+          <span className="wm-divider-chip bg-white dark:bg-[#111827] px-3 text-xs text-slate-500 dark:text-slate-400 i18n-safe">
             {t.orContinueWith}
           </span>
         </div>
@@ -464,23 +623,25 @@ export function HostedLoginCard({
 
       {/* Adaptive Social Connectors Zone */}
       {enabledCount === 0 ? (
-        <p className="text-xs text-center text-slate-500 dark:text-slate-400 py-2 i18n-safe leading-relaxed">
+        <p className={`text-xs text-center ${mutedTextClass} py-2 i18n-safe leading-relaxed`}>
           {t.noConnectorsEnabled}
         </p>
       ) : (
         <div className="space-y-2">
-          <div className="grid grid-cols-1 gap-2">
+          <div className={`grid ${resolvedTheme.socialLayout === 'grid' ? 'grid-cols-2' : 'grid-cols-1'} gap-2`}>
             {primary.map((conn) => (
               <button
                 key={conn.id}
                 type="button"
                 onClick={() => onSocialSignIn(conn.provider)}
                 disabled={Boolean(busyProvider) || working}
-                className="w-full min-h-[40px] px-3.5 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900/70 hover:bg-slate-50 dark:hover:bg-slate-800/80 text-slate-800 dark:text-slate-100 text-sm font-medium flex items-center justify-center gap-2.5 transition-colors disabled:opacity-50"
+                className={socialBtnClass}
               >
                 <ProviderIcon provider={conn.provider} className="w-4 h-4 shrink-0" />
-                <span className="min-w-0 i18n-safe text-center leading-snug">
-                  {t.continueWithProvider.replace('{provider}', conn.displayName)}
+                <span className="min-w-0 i18n-safe text-center leading-snug truncate">
+                  {resolvedTheme.socialLayout === 'grid'
+                    ? conn.displayName
+                    : t.continueWithProvider.replace('{provider}', conn.displayName)}
                 </span>
               </button>
             ))}
@@ -496,7 +657,7 @@ export function HostedLoginCard({
                       type="button"
                       onClick={() => onSocialSignIn(conn.provider)}
                       disabled={Boolean(busyProvider) || working}
-                      className="min-h-[40px] px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900/70 hover:bg-slate-50 dark:hover:bg-slate-800/80 text-slate-800 dark:text-slate-100 text-xs font-medium flex items-center justify-center gap-2 transition-colors disabled:opacity-50"
+                      className={`${socialBtnClass} text-xs`}
                     >
                       <ProviderIcon provider={conn.provider} className="w-4 h-4 shrink-0" />
                       <span className="min-w-0 truncate">{conn.displayName}</span>
@@ -509,7 +670,7 @@ export function HostedLoginCard({
                 type="button"
                 aria-expanded={expanded}
                 onClick={() => setExpanded((v) => !v)}
-                className="w-full py-1.5 text-xs font-medium text-indigo-600 dark:text-indigo-400 hover:text-indigo-700 dark:hover:text-indigo-300 flex items-center justify-center gap-1.5 transition-colors"
+                className="w-full py-1.5 text-xs font-medium wm-accent-text hover:opacity-80 flex items-center justify-center gap-1.5 transition-opacity"
               >
                 <span className="i18n-safe">
                   {expanded ? t.fewerSignInMethods : `${t.moreSignInMethods} (${overflow.length})`}
@@ -522,10 +683,49 @@ export function HostedLoginCard({
       )}
 
       {/* Quiet protocol footer */}
-      <div className="mt-5 pt-3.5 border-t border-slate-100 dark:border-slate-800/80 flex items-center justify-between text-[11px] text-slate-400 dark:text-slate-500 gap-2 flex-wrap">
-        <span>wimotek/Oauth</span>
-        <span className="font-mono">OIDC · Passkey · OTP · RFC 8628</span>
+      <div
+        className={`mt-5 pt-3.5 border-t ${
+          isDarkSurface ? 'border-slate-800/80' : 'border-slate-100 dark:border-slate-800/80'
+        } flex items-center justify-between text-[11px] text-slate-400 dark:text-slate-500 gap-2 flex-wrap`}
+      >
+        <span>{resolvedTheme.footerText || 'wimotek/Oauth'}</span>
+        <span className="font-mono">OIDC · Passkey · OTP</span>
       </div>
+    </div>
+  );
+
+  return (
+    <div
+      dir={rtl ? 'rtl' : 'ltr'}
+      data-wimotek-login-root=""
+      data-wimotek-scope={scopeAttr}
+      data-layout={resolvedTheme.layout}
+      data-surface={resolvedTheme.surfaceMode}
+      className={`w-full ${fontClass} ${isDarkSurface ? 'dark' : ''}`}
+    >
+      <style>{scopedThemeCss}</style>
+
+      {isSplit ? (
+        <div
+          className={`w-full max-w-[820px] mx-auto grid grid-cols-1 md:grid-cols-12 overflow-hidden border ${
+            isDarkSurface ? 'border-slate-800 bg-[#111827]' : 'border-slate-200 dark:border-slate-800 bg-white dark:bg-[#111827]'
+          } ${radius.card} shadow-md`}
+        >
+          {resolvedTheme.layout === 'split_left' ? (
+            <>
+              {heroPanel}
+              {cardBody}
+            </>
+          ) : (
+            <>
+              {cardBody}
+              {heroPanel}
+            </>
+          )}
+        </div>
+      ) : (
+        cardBody
+      )}
     </div>
   );
 }

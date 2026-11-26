@@ -1,0 +1,207 @@
+# ==============================================================================
+# Wimotek Commercial PKI Suite (ca/ca + ca/cli) Docker Compose
+# ==============================================================================
+# 快速启动（默认 SQLite + 自动生成 HTTPS 证书，零配置开箱即用）：
+#   mkdir -p ./ca-data && chown -R 10001:10001 ./ca-data
+#   docker compose up -d
+#
+# 按需启用可选组件 Profile（可任意组合）：
+#   docker compose --profile cli up -d                 # 同时启动 wimotek-cli Web 管理台 (:9443)
+#   docker compose --profile mysql --profile redis up -d  # 启用 MySQL 8.4 + Redis 7 高并发架构
+#   docker compose --profile cli --profile mysql --profile redis up -d
+#
+# 安全说明：
+#   - 镜像以非 root 用户 UID/GID 10001:10001 运行，宿主机挂载目录需赋予 10001 写权限。
+#   - AI_PROMPT.md 已由 .dockerignore 严格排除，构建镜像时不会被打包进去。
+# ==============================================================================
+
+services:
+  # ----------------------------------------------------------------------------
+  # 1. 核心服务：Wimotek CA Server（私有两级 CA + RFC 8555 ACME v2 + 公网可信 CA 代理托管）
+  # ----------------------------------------------------------------------------
+  ca:
+    image: ghcr.io/wimotek/ca:latest
+    # 可选：改用 Docker Hub 镜像源
+    # image: wimotek/ca:latest
+    # 可选：如需从本地源码构建镜像（AI_PROMPT.md 已在 .dockerignore 中排除）
+    # build:
+    #   context: ./ca
+    #   dockerfile: Dockerfile
+    container_name: wimotek-ca
+    restart: unless-stopped
+    user: "10001:10001"
+    ports:
+      # 默认内置 HTTPS 监听端口；若设置 CA_TLS_ENABLED=false 改为纯 HTTP（前置反代），请同步改为 "8080:8080"
+      - "8443:8443"
+    volumes:
+      # 持久化数据目录：存放 SQLite 数据库、自动生成的 .master.key、未挂载外部证书时的自签 /data/tls 证书
+      - ./ca-data:/data
+      # 可选：只读挂载外部 TLS 证书目录（支持自动识别 tls.crt+tls.key / fullchain.pem+privkey.pem / server.crt+server.key，每 30 秒热重载）
+      # 注意：宿主机目录权限建议 755，私钥对 UID 10001 可读（chgrp 10001 && chmod 640）
+      # - ./tls-certs:/certs:ro
+    environment:
+      # ========================================================================
+      # [一] 核心网络、域名与内置 TLS（均有安全默认值）
+      # ========================================================================
+      # CA_ORG_NAME: "Wimotek Enterprise"        # 可选：自动初始化 Root CA / Issuing CA 的组织名称 (Subject O)，也可在首次 3 步安装向导中修改
+      # CA_BASE_URL: "https://ca.example.com"    # 可选（公网/生产强烈建议填写）：对外访问根 URL，写入 CRL CDP、OCSP AIA、ACME 目录及 OAuth 回调地址
+      # CA_TLS_ENABLED: "true"                   # 可选：是否启用内置 HTTPS（默认 true）；前置 Nginx/Caddy/Traefik 终止 TLS 时设为 false
+      # CA_LISTEN_ADDR: ":8443"                  # 可选：监听地址（CA_TLS_ENABLED=true 默认 :8443；false 默认 :8080）
+      # CA_DATA_DIR: "/data"                     # 可选：容器内持久化数据目录（默认 /data）
+      # CA_CERTS_DIR: "/certs"                   # 可选：容器内外部证书只读挂载目录（默认 /certs）
+      # CA_TLS_HOSTS: "localhost,127.0.0.1"      # 可选：自动签发内置 HTTPS 证书时额外附加的 SAN 域名或 IP（逗号分隔，如 "ca.corp.local,10.0.0.10"）
+
+      # ========================================================================
+      # [二] 管理员与加密安全（可选；留空启用零配置向导与自动密钥持久化）
+      # ========================================================================
+      # CA_ADMIN_USER: "admin"                   # 可选：初始管理员用户名（默认 admin）
+      # CA_ADMIN_PASSWORD: ""                    # 可选：初始管理员密码；留空时首次访问 Web 将进入 3 步安装向导自行设置
+      # CA_MASTER_KEY: ""                        # 可选：32 字节十六进制主密钥（openssl rand -hex 32），用于 AES-256-GCM 加密 CA 私钥/DNS 凭据/通知密钥；留空自动生成并保存至 /data/.master.key
+      # CA_POW_DIFFICULTY: "16"                  # 可选：登录离线 SHA-256 PoW 防刷难度（前导零位数，范围 8-24，默认 16）
+
+      # ========================================================================
+      # [三] 数据库存储（默认零配置 SQLite WAL；高并发集群可切换 MySQL）
+      # ========================================================================
+      # CA_DB_DRIVER: "sqlite"                   # 可选：数据库驱动，支持 "sqlite"（默认）或 "mysql"
+      # CA_DB_DSN: "/data/wimotek-ca.db"         # 可选：数据库连接串；使用 MySQL 时取消下方注释并启用 --profile mysql
+      # CA_DB_DRIVER: "mysql"
+      # CA_DB_DSN: "wimotek:change-this-mysql-pass@tcp(mysql:3306)/wimotek_ca?parseTime=false&multiStatements=true"
+
+      # ========================================================================
+      # [四] 混合缓存 HybridCache（可选 Redis；未配置或 Redis 宕机自动无感降级 SQL）
+      # ========================================================================
+      # CA_REDIS_ADDR: "redis:6379"              # 可选：Redis 地址（启用 --profile redis 时填入 "redis:6379"）
+      # CA_REDIS_PASSWORD: ""                    # 可选：Redis 鉴权密码
+      # CA_REDIS_TLS: "false"                    # 可选：是否启用 Redis TLS 1.2+ 连接（默认 false）
+      # CA_REDIS_TLS_INSECURE: "false"           # 可选：启用 Redis TLS 时是否跳过证书校验（仅限内网自签 Redis）
+
+      # ========================================================================
+      # [五] 证书到期自动巡检与 Webhook 安全策略
+      # ========================================================================
+      # CA_NOTIFY_INTERVAL_MIN: "60"             # 可选：后台到期巡检间隔分钟数（默认 60）
+      # CA_ALLOW_PRIVATE_WEBHOOKS: "false"       # 可选：是否允许通知 Webhook 推送至内网/本机私网 IP（默认 false 防止 SSRF，内网中继可设为 true）
+
+      # ========================================================================
+      # [六] 统一身份认证网关 wimotek/OAuth（PKCE S256 主 SSO 通道，推荐）
+      #      注：以下仅为可选环境变量默认值，登录后台「系统设置」亦可随时可视化动态编辑
+      # ========================================================================
+      # WIMOTEK_OAUTH_ISSUER: "https://oauth.example.com"       # 可选：统一 OAuth/OIDC 网关 Issuer 根地址（按实际部署地址填写）
+      # WIMOTEK_OAUTH_CLIENT_ID: ""                             # 可选：在 OAuth 网关中注册的 Client ID
+      # WIMOTEK_OAUTH_CLIENT_SECRET: ""                         # 可选：Client Secret（公有 PKCE 客户端可留空；机密客户端建议配置）
+      # WIMOTEK_OAUTH_SCOPES: "openid profile email"            # 可选：请求的 OAuth Scope（默认 "openid profile email"）
+
+      # ========================================================================
+      # [七] 直连社交 OAuth 备选通道（可选，可与统一网关并存）
+      # ========================================================================
+      # OAUTH_MICROSOFT_CLIENT_ID: ""            # 可选：Microsoft Entra ID (Azure AD) Client ID
+      # OAUTH_MICROSOFT_CLIENT_SECRET: ""        # 可选：Microsoft Entra ID Client Secret
+      # OAUTH_MICROSOFT_TENANT_ID: "common"      # 可选：Microsoft Tenant ID（默认 "common" 支持多租户与个人账户）
+      # OAUTH_GITHUB_CLIENT_ID: ""               # 可选：GitHub OAuth App Client ID
+      # OAUTH_GITHUB_CLIENT_SECRET: ""           # 可选：GitHub OAuth App Client Secret
+      # OAUTH_GOOGLE_CLIENT_ID: ""               # 可选：Google Cloud OAuth Client ID
+      # OAUTH_GOOGLE_CLIENT_SECRET: ""           # 可选：Google Cloud OAuth Client Secret
+
+      # ========================================================================
+      # [八] 系统级 SMTP 邮件配置（可选；用于新用户邮箱验证与 2FA 邮箱 OTP 验证码）
+      # ========================================================================
+      # CA_SMTP_HOST: ""                         # 可选：SMTP 服务器地址（如 smtp.resend.com / smtp.exmail.qq.com）
+      # CA_SMTP_PORT: "587"                      # 可选：SMTP 端口（默认 587 STARTTLS，或 465 SSL）
+      # CA_SMTP_USER: ""                         # 可选：SMTP 登录账号
+      # CA_SMTP_PASSWORD: ""                     # 可选：SMTP 登录密码或应用专用授权码
+      # CA_SMTP_FROM: ""                         # 可选：发件人地址（如 "Wimotek CA <no-reply@example.com>"）
+
+      # 时区设置（可选，默认 UTC）
+      TZ: "Asia/Shanghai"
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-check-certificate -qO- https://127.0.0.1:8443/api/health || wget -qO- http://127.0.0.1:8080/api/health || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    networks:
+      - wimotek-net
+
+  # ----------------------------------------------------------------------------
+  # 2. 可选服务：wimotek-cli 嵌入式 Web 管理台与自动续签代理（--profile cli 启用）
+  # ----------------------------------------------------------------------------
+  wimotek-cli:
+    profiles: ["cli"]
+    image: ghcr.io/wimotek/ca:cli
+    # 可选：改用 Docker Hub 镜像源
+    # image: wimotek/ca:cli
+    # 可选：从本地源码构建（AI_PROMPT.md 已在 .dockerignore 中排除）
+    # build:
+    #   context: ./cli
+    #   dockerfile: Dockerfile
+    container_name: wimotek-cli
+    restart: unless-stopped
+    user: "10001:10001"
+    ports:
+      - "9443:9443"
+    volumes:
+      # CLI 上下文配置与本地托管证书持久化目录（宿主机需 chown -R 10001:10001 ./cli-data）
+      - ./cli-data:/data
+    environment:
+      WIMOTEK_PATH: "/data"
+      WIMOTEK_CLI_LISTEN: "0.0.0.0:9443"
+      # 可选（公网或局域网暴露时强烈建议设置）：访问 CLI Web 控制台的登录口令
+      # WIMOTEK_CLI_WEB_PASSWORD: "change-me-strong-password"
+      TZ: "Asia/Shanghai"
+    networks:
+      - wimotek-net
+
+  # ----------------------------------------------------------------------------
+  # 3. 可选服务：MySQL 8.4 数据库（--profile mysql 启用，需同步取消上方 CA_DB_DRIVER/DSN 注释）
+  # ----------------------------------------------------------------------------
+  mysql:
+    profiles: ["mysql"]
+    image: mysql:8.4
+    container_name: wimotek-mysql
+    restart: unless-stopped
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+    environment:
+      MYSQL_ROOT_PASSWORD: "${MYSQL_ROOT_PASSWORD:-change-this-root-pass}"
+      MYSQL_DATABASE: "${MYSQL_DATABASE:-wimotek_ca}"
+      MYSQL_USER: "${MYSQL_USER:-wimotek}"
+      MYSQL_PASSWORD: "${MYSQL_PASSWORD:-change-this-mysql-pass}"
+      TZ: "Asia/Shanghai"
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "--silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - wimotek-net
+
+  # ----------------------------------------------------------------------------
+  # 4. 可选服务：Redis 7 缓存（--profile redis 启用，需同步取消上方 CA_REDIS_ADDR 注释）
+  # ----------------------------------------------------------------------------
+  redis:
+    profiles: ["redis"]
+    image: redis:7-alpine
+    container_name: wimotek-redis
+    restart: unless-stopped
+    # 可选：如需启用密码鉴权，取消下方注释并在 ca 服务中填写对应的 CA_REDIS_PASSWORD
+    # command: ["redis-server", "--appendonly", "yes", "--requirepass", "change-this-redis-pass"]
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    networks:
+      - wimotek-net
+
+volumes:
+  mysql_data:
+  redis_data:
+
+networks:
+  wimotek-net:
+    driver: bridge

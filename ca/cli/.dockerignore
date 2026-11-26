@@ -1,0 +1,28 @@
+# Strictly exclude AI prompt files from CLI Docker builds (critical since Dockerfile uses COPY . .)
+AI_PROMPT.md
+**/AI_PROMPT.md
+*AI_PROMPT*
+*.prompt.md
+
+# Exclude compose files, docs, secrets, and local artifacts
+docker-compose.yml
+docker-compose.*.yml
+compose.yml
+compose.*.yml
+.git
+.github
+.gitignore
+.env
+.env.*
+!.env.example
+README.md
+**/README.md
+LICENSE
+
+# Exclude local runtime data and build outputs
+data/
+cli-data/
+bin/
+dist/
+*.log
+.DS_Store

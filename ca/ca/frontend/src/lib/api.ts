@@ -280,6 +280,186 @@ export interface OAuthGatewayConfig {
   source: 'database' | 'env' | 'unconfigured';
 }
 
+export interface ACMEPolicy {
+  require_eab: boolean;
+  default_ttl_days: number;
+  rate_limit_orders_per_hour: number;
+  rate_limit_req_per_min: number;
+  allow_wildcard: boolean;
+  terms_url: string;
+}
+
+export interface ACMEEABRecord {
+  kid: string;
+  owner_username: string;
+  label: string;
+  hmac_prefix: string;
+  bound_count: number;
+  last_used_at: number;
+  enabled: boolean;
+  created_at: number;
+}
+
+export interface ACMEAccountRecord {
+  id: string;
+  owner_username: string;
+  eab_kid: string;
+  jwk_thumbprint: string;
+  contacts_json: string;
+  status: string;
+  created_at: number;
+}
+
+export interface ACMEOrderRecord {
+  id: string;
+  account_id: string;
+  owner_username: string;
+  status: string;
+  identifiers_json: string;
+  expires_at: number;
+  cert_serial: string;
+  error_json: string;
+  created_at: number;
+}
+
+export interface ACMEOverviewResponse {
+  directory_url: string;
+  policy: ACMEPolicy;
+  credentials: ACMEEABRecord[];
+  accounts: ACMEAccountRecord[];
+  orders: ACMEOrderRecord[];
+  manual_active_certs: number;
+  manual_quota: number;
+  acme_active_certs: number;
+  acme_quota: number;
+}
+
+export type UpstreamProviderType =
+  | 'letsencrypt_prod'
+  | 'letsencrypt_staging'
+  | 'google_trust'
+  | 'zerossl'
+  | 'custom';
+
+export type ManagedChallengeMethod = 'cname_delegation' | 'dns_api' | 'dns_manual' | 'http_01';
+export type ManagedEngineMode = 'upstream_public' | 'private_ca';
+export type DnsProviderType = 'cloudflare' | 'aliyun' | 'dnspod' | 'webhook';
+
+export interface ManagedUpstreamRecord {
+  id: string;
+  name: string;
+  provider: UpstreamProviderType;
+  directory_url: string;
+  requires_eab: boolean;
+  eab_kid: string;
+  eab_hmac_configured: boolean;
+  eab_hmac_prefix: string;
+  contact_email: string;
+  priority: number;
+  enabled: boolean;
+  account_registered: boolean;
+  last_probe_at: number;
+  last_probe_ok: boolean;
+  last_probe_ms: number;
+  last_probe_error: string;
+  created_at: number;
+  updated_at: number;
+}
+
+export interface ManagedDnsCredential {
+  id: string;
+  owner_username: string;
+  name: string;
+  provider: DnsProviderType;
+  zone_hint: string;
+  secret_prefix: string;
+  created_at: number;
+  updated_at: number;
+}
+
+export interface ManagedChallengeRecord {
+  domain: string;
+  method: ManagedChallengeMethod;
+  record_type: 'CNAME' | 'TXT' | 'HTTP';
+  record_host: string;
+  record_value: string;
+  delegation_cname_host?: string;
+  delegation_cname_target?: string;
+  status: 'pending' | 'valid' | 'invalid';
+  last_error?: string;
+}
+
+export interface ManagedCertificateRecord {
+  id: string;
+  owner_username: string;
+  common_name: string;
+  domains: string[];
+  engine_mode: ManagedEngineMode;
+  upstream_id: string;
+  resolved_upstream_id: string;
+  resolved_issuer_name: string;
+  challenge_method: ManagedChallengeMethod;
+  dns_credential_id: string;
+  cname_delegation_token: string;
+  cname_delegation_target: string;
+  status: 'pending_validation' | 'issuing' | 'active' | 'renewing' | 'error' | 'revoked';
+  auto_renew: boolean;
+  renew_before_days: number;
+  challenges: ManagedChallengeRecord[];
+  serial_hex: string;
+  fingerprint_sha256: string;
+  not_before: number;
+  not_after: number;
+  cert_pem: string;
+  chain_pem: string;
+  has_private_key: boolean;
+  deploy_webhook_url: string;
+  deploy_webhook_secret_prefix: string;
+  has_deploy_secret: boolean;
+  last_deploy_at: number;
+  last_deploy_status: string;
+  last_error: string;
+  last_renewed_at: number;
+  created_at: number;
+  updated_at: number;
+}
+
+export interface ManagedDeployLog {
+  id: string;
+  cert_id: string;
+  owner_username: string;
+  common_name: string;
+  action: string;
+  target: string;
+  status: 'ok' | 'error';
+  detail: string;
+  created_at: number;
+}
+
+export interface ManagedProxyPolicy {
+  mode: 'dual_engine' | 'private_ca' | 'upstream_proxy';
+  auto_failover: boolean;
+  default_renew_before_days: number;
+  cname_delegation_zone: string;
+  allow_private_webhooks?: boolean;
+}
+
+export interface ManagedOverviewResponse {
+  proxy_policy: ManagedProxyPolicy;
+  proxy_base_url: string;
+  upstreams: ManagedUpstreamRecord[];
+  dns_credentials: ManagedDnsCredential[];
+  certificates: ManagedCertificateRecord[];
+  deploy_logs: ManagedDeployLog[];
+  stats: {
+    total_certs: number;
+    active_certs: number;
+    pending_certs: number;
+    due_renewal: number;
+    enabled_upstreams: number;
+  };
+}
+
 export interface SetupWizardPayload {
   username: string;
   password: string;
@@ -776,6 +956,170 @@ class ApiClient {
 
   listAudits() {
     return this.request<{ audits: AuditRecord[] }>('/api/audit');
+  }
+
+  // Commercial ACME v2 & EAB (External Account Binding) Management
+  getAcmeOverview(all = false) {
+    return this.request<ACMEOverviewResponse>(`/api/acme/eab${all ? '?all=1' : ''}`);
+  }
+
+  createAcmeEab(label: string) {
+    return this.request<{ credential: ACMEEABRecord; eab_kid: string; eab_hmac: string }>(
+      '/api/acme/eab',
+      {
+        method: 'POST',
+        body: JSON.stringify({ label }),
+      }
+    );
+  }
+
+  deleteAcmeEab(kid: string) {
+    return this.request<{ deleted: string }>(`/api/acme/eab/${encodeURIComponent(kid)}`, {
+      method: 'DELETE',
+    });
+  }
+
+  updateAcmePolicy(payload: Partial<ACMEPolicy>) {
+    return this.request<{ directory_url: string; policy: ACMEPolicy }>('/api/acme/policy', {
+      method: 'PUT',
+      body: JSON.stringify(payload),
+    });
+  }
+
+  // Public Trusted CA ACME Proxy & Managed SSL Hosting
+  getManagedOverview(all = false) {
+    return this.request<ManagedOverviewResponse>(`/api/managed/overview${all ? '?all=1' : ''}`);
+  }
+
+  updateManagedPolicy(payload: Partial<ManagedProxyPolicy>) {
+    return this.request<{ proxy_policy: ManagedProxyPolicy }>('/api/managed/proxy-policy', {
+      method: 'PUT',
+      body: JSON.stringify(payload),
+    });
+  }
+
+  saveManagedUpstream(payload: {
+    id?: string;
+    name: string;
+    provider: UpstreamProviderType;
+    directory_url: string;
+    requires_eab: boolean;
+    eab_kid?: string;
+    eab_hmac?: string;
+    contact_email?: string;
+    priority?: number;
+    enabled?: boolean;
+  }) {
+    return this.request<{ upstream: ManagedUpstreamRecord }>('/api/managed/upstreams', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  }
+
+  deleteManagedUpstream(id: string) {
+    return this.request<{ deleted: string }>(`/api/managed/upstreams/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+    });
+  }
+
+  probeManagedUpstream(id: string) {
+    return this.request<{
+      ok: boolean;
+      latency_ms: number;
+      directory?: { newNonce: string; newAccount: string; newOrder: string; externalAccountRequired: boolean };
+      upstream: ManagedUpstreamRecord;
+    }>(`/api/managed/upstreams/${encodeURIComponent(id)}/probe`, {
+      method: 'POST',
+    });
+  }
+
+  createManagedDnsCred(payload: {
+    name: string;
+    provider: DnsProviderType;
+    zone_hint?: string;
+    api_token?: string;
+    access_key_id?: string;
+    access_key_secret?: string;
+  }) {
+    return this.request<{ credential: ManagedDnsCredential }>('/api/managed/dns-credentials', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  }
+
+  deleteManagedDnsCred(id: string) {
+    return this.request<{ deleted: string }>(`/api/managed/dns-credentials/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+    });
+  }
+
+  createManagedCert(payload: {
+    domains: string[];
+    engine_mode: ManagedEngineMode;
+    upstream_id?: string;
+    challenge_method: ManagedChallengeMethod;
+    dns_credential_id?: string;
+    auto_renew?: boolean;
+    renew_before_days?: number;
+    deploy_webhook_url?: string;
+    deploy_webhook_secret?: string;
+  }) {
+    return this.request<{ certificate: ManagedCertificateRecord }>('/api/managed/certs', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  }
+
+  verifyManagedCert(id: string) {
+    return this.request<{ certificate: ManagedCertificateRecord }>(
+      `/api/managed/certs/${encodeURIComponent(id)}/verify`,
+      { method: 'POST' }
+    );
+  }
+
+  renewManagedCert(id: string) {
+    return this.request<{ certificate: ManagedCertificateRecord }>(
+      `/api/managed/certs/${encodeURIComponent(id)}/renew`,
+      { method: 'POST' }
+    );
+  }
+
+  checkManagedCertDns(id: string) {
+    return this.request<{
+      all_matched: boolean;
+      checks: Array<{ domain: string; host: string; expected: string; observed: string[]; matched: boolean }>;
+    }>(`/api/managed/certs/${encodeURIComponent(id)}/check-dns`, { method: 'POST' });
+  }
+
+  deployManagedCert(id: string) {
+    return this.request<{ ok: boolean; status: number; detail: string; certificate: ManagedCertificateRecord }>(
+      `/api/managed/certs/${encodeURIComponent(id)}/deploy`,
+      { method: 'POST' }
+    );
+  }
+
+  downloadManagedBundle(id: string) {
+    return this.request<{
+      id: string;
+      common_name: string;
+      serial_hex: string;
+      cert_pem: string;
+      chain_pem: string;
+      private_key_pem: string;
+    }>(`/api/managed/certs/${encodeURIComponent(id)}/bundle`);
+  }
+
+  deleteManagedCert(id: string) {
+    return this.request<{ deleted: string }>(`/api/managed/certs/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+    });
+  }
+
+  scanRenewManagedCerts() {
+    return this.request<{ scanned: number; due: number; renewed: string[]; failed?: Array<{ id: string; error: string }> }>(
+      '/api/managed/scan-renew',
+      { method: 'POST' }
+    );
   }
 }
 

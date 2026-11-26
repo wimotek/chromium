@@ -283,13 +283,25 @@ func (s *Store) ResetUserAuthFailures(ctx context.Context, username string, now 
 	})
 }
 
-// CountActiveCertificatesByUser counts non-revoked, non-expired certificates issued by a specific user.
+// CountActiveCertificatesByUser counts non-revoked, non-expired manual/REST certificates issued by a specific user.
+// ACME-issued certificates (key_mode = 'acme_csr') are unlimited and excluded from manual tier quotas.
 func (s *Store) CountActiveCertificatesByUser(ctx context.Context, username string) (int, error) {
 	now := time.Now().Unix()
 	var cnt int
 	err := s.ReadDB.QueryRowContext(ctx, `
 		SELECT COUNT(*) FROM certificates
-		WHERE issued_by = ? AND status = 'active' AND not_after > ?
+		WHERE issued_by = ? AND status = 'active' AND not_after > ? AND key_mode != 'acme_csr'
+	`, username, now).Scan(&cnt)
+	return cnt, err
+}
+
+// CountActiveACMECertificatesByUser counts non-revoked, non-expired ACME-issued certificates for a specific user.
+func (s *Store) CountActiveACMECertificatesByUser(ctx context.Context, username string) (int, error) {
+	now := time.Now().Unix()
+	var cnt int
+	err := s.ReadDB.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM certificates
+		WHERE issued_by = ? AND status = 'active' AND not_after > ? AND key_mode = 'acme_csr'
 	`, username, now).Scan(&cnt)
 	return cnt, err
 }
@@ -326,11 +338,11 @@ func (s *Store) ListCertificatesByUser(ctx context.Context, username string) ([]
 func (s *Store) InsertCertificateWithQuota(ctx context.Context, rec CertificateRecord, ownerUsername string, maxQuota int) error {
 	now := time.Now().Unix()
 	return s.WithTx(ctx, func(tx *sql.Tx) error {
-		if maxQuota >= 0 && ownerUsername != "" {
+		if maxQuota >= 0 && ownerUsername != "" && rec.KeyMode != "acme_csr" {
 			var activeCount int
 			if err := tx.QueryRowContext(ctx, `
 				SELECT COUNT(*) FROM certificates
-				WHERE issued_by = ? AND status = 'active' AND not_after > ?
+				WHERE issued_by = ? AND status = 'active' AND not_after > ? AND key_mode != 'acme_csr'
 			`, ownerUsername, now).Scan(&activeCount); err != nil {
 				return err
 			}

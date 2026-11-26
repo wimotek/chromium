@@ -1452,7 +1452,7 @@
         document.body.appendChild(a);
         a.click();
         a.remove();
-        URL.revokeObjectURL(url);
+        setTimeout(() => URL.revokeObjectURL(url), 60000);
       } catch (e) { showBanner('err', e.message); }
     }
 
@@ -1649,7 +1649,7 @@
         document.body.appendChild(a);
         a.click();
         a.remove();
-        URL.revokeObjectURL(url);
+        setTimeout(() => URL.revokeObjectURL(url), 60000);
         showToast('Downloaded Modern2023 .pfx bundle');
       } catch (err) { showBanner('err', err.message); }
     });

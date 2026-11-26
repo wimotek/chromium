@@ -162,3 +162,148 @@ CREATE TABLE IF NOT EXISTS audit_logs (
     created_at BIGINT NOT NULL,
     INDEX idx_audit_logs_created_at (created_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS acme_eab_credentials (
+    kid VARCHAR(64) PRIMARY KEY,
+    owner_username VARCHAR(128) NOT NULL,
+    label VARCHAR(255) NOT NULL DEFAULT '',
+    hmac_key_enc LONGTEXT NOT NULL,
+    hmac_prefix VARCHAR(32) NOT NULL DEFAULT '',
+    bound_count INT NOT NULL DEFAULT 0,
+    last_used_at BIGINT NOT NULL DEFAULT 0,
+    enabled TINYINT NOT NULL DEFAULT 1,
+    created_at BIGINT NOT NULL,
+    INDEX idx_acme_eab_owner (owner_username)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS acme_accounts (
+    id VARCHAR(64) PRIMARY KEY,
+    owner_username VARCHAR(128) NOT NULL DEFAULT '',
+    eab_kid VARCHAR(64) NOT NULL DEFAULT '',
+    jwk_thumbprint VARCHAR(128) NOT NULL UNIQUE,
+    jwk_json TEXT NOT NULL,
+    contacts_json TEXT NOT NULL,
+    status VARCHAR(32) NOT NULL DEFAULT 'valid',
+    created_at BIGINT NOT NULL,
+    INDEX idx_acme_accounts_owner (owner_username)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS acme_orders (
+    id VARCHAR(64) PRIMARY KEY,
+    account_id VARCHAR(64) NOT NULL,
+    owner_username VARCHAR(128) NOT NULL DEFAULT '',
+    status VARCHAR(32) NOT NULL DEFAULT 'pending',
+    identifiers_json TEXT NOT NULL,
+    expires_at BIGINT NOT NULL,
+    cert_serial VARCHAR(64) NOT NULL DEFAULT '',
+    error_json TEXT NOT NULL,
+    created_at BIGINT NOT NULL,
+    INDEX idx_acme_orders_account (account_id),
+    INDEX idx_acme_orders_owner (owner_username),
+    INDEX idx_acme_orders_created_at (created_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS acme_authorizations (
+    id VARCHAR(64) PRIMARY KEY,
+    order_id VARCHAR(64) NOT NULL,
+    account_id VARCHAR(64) NOT NULL,
+    identifier_type VARCHAR(32) NOT NULL DEFAULT 'dns',
+    identifier_value VARCHAR(255) NOT NULL,
+    wildcard TINYINT NOT NULL DEFAULT 0,
+    status VARCHAR(32) NOT NULL DEFAULT 'pending',
+    expires_at BIGINT NOT NULL,
+    challenges_json LONGTEXT NOT NULL,
+    created_at BIGINT NOT NULL,
+    INDEX idx_acme_authz_order (order_id),
+    INDEX idx_acme_authz_account (account_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS managed_upstreams (
+    id VARCHAR(64) PRIMARY KEY,
+    name VARCHAR(128) NOT NULL,
+    provider VARCHAR(32) NOT NULL,
+    directory_url VARCHAR(512) NOT NULL,
+    requires_eab TINYINT NOT NULL DEFAULT 0,
+    eab_kid VARCHAR(255) NOT NULL DEFAULT '',
+    eab_hmac_enc LONGTEXT NOT NULL,
+    eab_hmac_prefix VARCHAR(32) NOT NULL DEFAULT '',
+    contact_email VARCHAR(255) NOT NULL DEFAULT '',
+    priority INT NOT NULL DEFAULT 1,
+    enabled TINYINT NOT NULL DEFAULT 1,
+    account_url VARCHAR(512) NOT NULL DEFAULT '',
+    account_key_enc LONGTEXT NOT NULL,
+    last_probe_at BIGINT NOT NULL DEFAULT 0,
+    last_probe_ok TINYINT NOT NULL DEFAULT 0,
+    last_probe_ms INT NOT NULL DEFAULT 0,
+    last_probe_error TEXT NOT NULL,
+    created_at BIGINT NOT NULL,
+    updated_at BIGINT NOT NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS managed_dns_credentials (
+    id VARCHAR(64) PRIMARY KEY,
+    owner_username VARCHAR(128) NOT NULL,
+    name VARCHAR(128) NOT NULL,
+    provider VARCHAR(32) NOT NULL,
+    zone_hint VARCHAR(128) NOT NULL DEFAULT '',
+    secret_enc LONGTEXT NOT NULL,
+    secret_prefix VARCHAR(32) NOT NULL DEFAULT '',
+    created_at BIGINT NOT NULL,
+    updated_at BIGINT NOT NULL,
+    INDEX idx_managed_dns_owner (owner_username)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS managed_certificates (
+    id VARCHAR(64) PRIMARY KEY,
+    owner_username VARCHAR(128) NOT NULL,
+    common_name VARCHAR(255) NOT NULL,
+    domains_json TEXT NOT NULL,
+    engine_mode VARCHAR(32) NOT NULL DEFAULT 'upstream_public',
+    upstream_id VARCHAR(64) NOT NULL DEFAULT 'auto',
+    resolved_upstream_id VARCHAR(64) NOT NULL DEFAULT '',
+    resolved_issuer_name VARCHAR(128) NOT NULL DEFAULT '',
+    challenge_method VARCHAR(32) NOT NULL DEFAULT 'cname_delegation',
+    dns_credential_id VARCHAR(64) NOT NULL DEFAULT '',
+    cname_delegation_token VARCHAR(64) NOT NULL DEFAULT '',
+    cname_delegation_target VARCHAR(255) NOT NULL DEFAULT '',
+    status VARCHAR(32) NOT NULL DEFAULT 'pending_validation',
+    auto_renew TINYINT NOT NULL DEFAULT 1,
+    renew_before_days INT NOT NULL DEFAULT 30,
+    upstream_order_url VARCHAR(512) NOT NULL DEFAULT '',
+    upstream_finalize_url VARCHAR(512) NOT NULL DEFAULT '',
+    challenges_json LONGTEXT NOT NULL,
+    serial_hex VARCHAR(64) NOT NULL DEFAULT '',
+    fingerprint_sha256 VARCHAR(128) NOT NULL DEFAULT '',
+    not_before BIGINT NOT NULL DEFAULT 0,
+    not_after BIGINT NOT NULL DEFAULT 0,
+    cert_pem LONGTEXT NOT NULL,
+    chain_pem LONGTEXT NOT NULL,
+    private_key_enc LONGTEXT NOT NULL,
+    deploy_webhook_url VARCHAR(512) NOT NULL DEFAULT '',
+    deploy_webhook_secret_enc LONGTEXT NOT NULL,
+    deploy_webhook_secret_prefix VARCHAR(32) NOT NULL DEFAULT '',
+    last_deploy_at BIGINT NOT NULL DEFAULT 0,
+    last_deploy_status VARCHAR(255) NOT NULL DEFAULT '',
+    last_error TEXT NOT NULL,
+    last_renewed_at BIGINT NOT NULL DEFAULT 0,
+    created_at BIGINT NOT NULL,
+    updated_at BIGINT NOT NULL,
+    INDEX idx_managed_certs_owner (owner_username),
+    INDEX idx_managed_certs_not_after (not_after)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS managed_deploy_logs (
+    id VARCHAR(64) PRIMARY KEY,
+    cert_id VARCHAR(64) NOT NULL,
+    owner_username VARCHAR(128) NOT NULL,
+    common_name VARCHAR(255) NOT NULL,
+    action VARCHAR(32) NOT NULL,
+    target VARCHAR(512) NOT NULL,
+    status VARCHAR(16) NOT NULL,
+    detail TEXT NOT NULL,
+    created_at BIGINT NOT NULL,
+    INDEX idx_managed_logs_owner (owner_username),
+    INDEX idx_managed_logs_created (created_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+

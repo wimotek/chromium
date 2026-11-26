@@ -29,6 +29,7 @@ import {
 } from '../lib/api';
 import { solvePowChallenge, type PowChallenge } from '../lib/pow';
 import { parseAdvanceDays } from '../lib/pki-utils';
+import { downloadProjectBundle } from '../lib/download';
 import { LOCALE_OPTIONS, type LocaleCode, type LocaleDict } from '../lib/i18n';
 
 function base64UrlToUint8Array(b64url: string): Uint8Array {
@@ -106,6 +107,20 @@ export const AuthGate: React.FC<AuthGateProps> = ({
   const [solving, setSolving] = useState(false);
   const [powNote, setPowNote] = useState('');
   const [error, setError] = useState('');
+  const [downloadingBundle, setDownloadingBundle] = useState(false);
+
+  const handleDownloadBundle = async () => {
+    if (downloadingBundle) return;
+    setDownloadingBundle(true);
+    setError('');
+    try {
+      await downloadProjectBundle('wimotek-pki-suite.zip');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to download project bundle');
+    } finally {
+      setDownloadingBundle(false);
+    }
+  };
 
   // Auth mode: unified wimotek/OAuth primary + collapsible local login/register
   const [authTab, setAuthTab] = useState<'login' | 'register'>('login');
@@ -1518,14 +1533,15 @@ export const AuthGate: React.FC<AuthGateProps> = ({
                   <span>{t.auth.demoQuickLoginUser}</span>
                 </button>
               </div>
-              <a
-                href="/api/demo/download-bundle"
-                download="wimotek-ca-project.zip"
-                className="w-full inline-flex items-center justify-center gap-2 border border-slate-300 bg-white hover:bg-slate-50 text-slate-800 font-medium text-xs rounded-lg px-4 py-2.5 transition-colors"
+              <button
+                type="button"
+                disabled={downloadingBundle}
+                onClick={handleDownloadBundle}
+                className="w-full inline-flex items-center justify-center gap-2 border border-slate-300 bg-white hover:bg-slate-50 disabled:opacity-60 text-slate-800 font-medium text-xs rounded-lg px-4 py-2.5 transition-colors cursor-pointer"
               >
                 <Archive className="w-3.5 h-3.5 text-slate-600 shrink-0" aria-hidden="true" />
-                <span>{t.auth.downloadBundle}</span>
-              </a>
+                <span>{downloadingBundle ? '...' : t.auth.downloadBundle}</span>
+              </button>
             </div>
           )}
             </div>

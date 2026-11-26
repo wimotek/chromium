@@ -31,6 +31,30 @@ export interface SigningKeyStatus {
   retiringKeys: RetiringKeyInfo[];
 }
 
+export type LoginThemeLayout = 'centered' | 'split_left' | 'split_right' | 'minimal';
+export type LoginThemeSurface = 'auto' | 'light' | 'dark';
+export type LoginThemeRadius = 'sharp' | 'rounded' | 'pill';
+export type LoginThemeFont = 'sans' | 'serif' | 'mono';
+
+export interface LoginThemeConfig {
+  layout: LoginThemeLayout;
+  surfaceMode: LoginThemeSurface;
+  brandTitle: string;
+  brandSubtitle: string;
+  heroTitle: string;
+  heroSubtitle: string;
+  logoUrl: string;
+  primaryColor: string;
+  backgroundColor: string;
+  cardColor: string;
+  textColor: string;
+  borderRadius: LoginThemeRadius;
+  fontFamily: LoginThemeFont;
+  socialLayout: 'stack' | 'grid';
+  footerText: string;
+  customCss: string;
+}
+
 export interface OAuthApplication {
   id: string;
   name: string;
@@ -39,6 +63,7 @@ export interface OAuthApplication {
   clientSecret: string;
   redirectUris: string[];
   scopes: string[];
+  loginTheme?: LoginThemeConfig;
   createdAt: string;
 }
 

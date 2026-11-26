@@ -10,6 +10,7 @@ import {
   parseJsonStringArray,
 } from '../lib/pki-utils';
 import { CopyButton } from './CopyButton';
+import { triggerBlobDownload } from '../lib/download';
 
 interface CertificatesViewProps {
   t: LocaleDict;
@@ -77,12 +78,7 @@ export const CertificatesView: React.FC<CertificatesViewProps> = ({
 
   const downloadCertPem = (cert: CertificateRecord) => {
     const blob = new Blob([cert.cert_pem], { type: 'application/x-pem-file' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `${cert.serial_hex.slice(0, 12)}.crt`;
-    a.click();
-    URL.revokeObjectURL(url);
+    triggerBlobDownload(blob, `${cert.serial_hex.slice(0, 12)}.crt`);
   };
 
   const handleRenew = async (cert: CertificateRecord) => {

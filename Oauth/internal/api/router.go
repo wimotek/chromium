@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -65,15 +66,35 @@ type authPolicyConfig struct {
 	CaptchaSiteKey           string `json:"captchaSiteKey"`
 }
 
+type loginThemeConfig struct {
+	Layout          string `json:"layout"`
+	SurfaceMode     string `json:"surfaceMode"`
+	BrandTitle      string `json:"brandTitle"`
+	BrandSubtitle   string `json:"brandSubtitle"`
+	HeroTitle       string `json:"heroTitle"`
+	HeroSubtitle    string `json:"heroSubtitle"`
+	LogoURL         string `json:"logoUrl"`
+	PrimaryColor    string `json:"primaryColor"`
+	BackgroundColor string `json:"backgroundColor"`
+	CardColor       string `json:"cardColor"`
+	TextColor       string `json:"textColor"`
+	BorderRadius    string `json:"borderRadius"`
+	FontFamily      string `json:"fontFamily"`
+	SocialLayout    string `json:"socialLayout"`
+	FooterText      string `json:"footerText"`
+	CustomCSS       string `json:"customCss"`
+}
+
 type oauthApplication struct {
-	ID           string   `json:"id"`
-	Name         string   `json:"name"`
-	Description  string   `json:"description"`
-	ClientID     string   `json:"clientId"`
-	ClientSecret string   `json:"clientSecret"`
-	RedirectUris []string `json:"redirectUris"`
-	Scopes       []string `json:"scopes"`
-	CreatedAt    string   `json:"createdAt"`
+	ID           string            `json:"id"`
+	Name         string            `json:"name"`
+	Description  string            `json:"description"`
+	ClientID     string            `json:"clientId"`
+	ClientSecret string            `json:"clientSecret"`
+	RedirectUris []string          `json:"redirectUris"`
+	Scopes       []string          `json:"scopes"`
+	CreatedAt    string            `json:"createdAt"`
+	LoginTheme   *loginThemeConfig `json:"loginTheme,omitempty"`
 }
 
 type storedConnector struct {
@@ -255,6 +276,10 @@ func NewRouter(cfgMgr *config.Manager, keys *crypto.KeyManager, certSources ...s
 				RedirectUris: []string{"http://localhost:4000/callback", "https://erp.wimotek.dev/auth/callback"},
 				Scopes:       []string{"openid", "profile", "email", "offline_access"},
 				CreatedAt:    nowISO,
+				LoginTheme: func() *loginThemeConfig {
+					t := defaultLoginTheme("Enterprise ERP Portal")
+					return &t
+				}(),
 			},
 			{
 				ID:           "app_wiki_02",
@@ -265,6 +290,17 @@ func NewRouter(cfgMgr *config.Manager, keys *crypto.KeyManager, certSources ...s
 				RedirectUris: []string{"http://localhost:4100/oauth/callback"},
 				Scopes:       []string{"openid", "profile", "email"},
 				CreatedAt:    nowISO,
+				LoginTheme: func() *loginThemeConfig {
+					t := defaultLoginTheme("Engineering Docs & Wiki")
+					t.SurfaceMode = "dark"
+					t.PrimaryColor = "#6366F1"
+					t.BackgroundColor = "#090D16"
+					t.CardColor = "#111827"
+					t.TextColor = "#F8FAFC"
+					t.FontFamily = "mono"
+					t.SocialLayout = "grid"
+					return &t
+				}(),
 			},
 		},
 		connectors: []storedConnector{
@@ -453,10 +489,13 @@ func NewRouter(cfgMgr *config.Manager, keys *crypto.KeyManager, certSources ...s
 	mux.HandleFunc("GET /api/system/overview", s.requireAdmin(s.handleOverview))
 	mux.HandleFunc("POST /api/system/cache-sim", s.requireAdmin(s.handleCacheSim))
 
-	// Applications CRUD
+	// Applications CRUD & Per-Client Hosted Login Theme APIs
+	mux.HandleFunc("GET /api/public/theme", s.handlePublicTheme)
 	mux.HandleFunc("GET /api/applications", s.requireAdmin(s.handleListApps))
 	mux.HandleFunc("POST /api/applications", s.requireAdmin(s.handleCreateApp))
 	mux.HandleFunc("DELETE /api/applications/{id}", s.requireAdmin(s.handleDeleteApp))
+	mux.HandleFunc("GET /api/applications/{clientId}/theme", s.requireAdmin(s.handleGetAppTheme))
+	mux.HandleFunc("PUT /api/applications/{clientId}/theme", s.requireAdmin(s.handleUpdateAppTheme))
 
 	// Social Connectors CRUD + Reorder
 	mux.HandleFunc("GET /api/connectors/public", s.handlePublicConnectors)
@@ -1655,6 +1694,7 @@ func (s *appServer) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid_uris", "message": "At least one http(s) redirect URI is required"})
 		return
 	}
+	appTheme := defaultLoginTheme(strings.TrimSpace(body.Name))
 	created := oauthApplication{
 		ID:           "app_" + randomHex(4),
 		Name:         strings.TrimSpace(body.Name),
@@ -1664,6 +1704,7 @@ func (s *appServer) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 		RedirectUris: uris,
 		Scopes:       []string{"openid", "profile", "email", "offline_access"},
 		CreatedAt:    time.Now().UTC().Format(time.RFC3339),
+		LoginTheme:   &appTheme,
 	}
 	s.mu.Lock()
 	s.apps = append([]oauthApplication{created}, s.apps...)
@@ -1683,6 +1724,202 @@ func (s *appServer) handleDeleteApp(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, http.StatusNotFound, map[string]any{"error": "not_found"})
+}
+
+var (
+	themeHexColorRe  = regexp.MustCompile(`^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$`)
+	cssStyleTagRe    = regexp.MustCompile(`(?i)</?style[^>]*>`)
+	cssImportRe      = regexp.MustCompile(`(?i)@import\b[^;]*;?`)
+	cssExpressionRe  = regexp.MustCompile(`(?i)expression\s*\([^)]*\)`)
+	cssJsSchemeRe    = regexp.MustCompile(`(?i)(?:javascript|vbscript)\s*:`)
+	cssBehaviorRe    = regexp.MustCompile(`(?i)behavior\s*:`)
+	cssUnsafeUrlRe   = regexp.MustCompile(`(?i)url\s*\(\s*['"]?\s*(?:javascript|data:text/html)`)
+)
+
+func defaultLoginTheme(brand string) loginThemeConfig {
+	title := strings.TrimSpace(brand)
+	if title == "" {
+		title = "wimotek/Oauth"
+	}
+	footer := "wimotek/Oauth"
+	if title != "wimotek/Oauth" {
+		footer = title + " · wimotek/Oauth"
+	}
+	return loginThemeConfig{
+		Layout:          "centered",
+		SurfaceMode:     "auto",
+		BrandTitle:      title,
+		BrandSubtitle:   "",
+		HeroTitle:       "One unified identity for every workspace.",
+		HeroSubtitle:    "Sign in once with Passkeys, Social OIDC, or Passwordless Email OTP — secured with RS256 and PKCE S256.",
+		LogoURL:         "",
+		PrimaryColor:    "#4F46E5",
+		BackgroundColor: "#F8FAFC",
+		CardColor:       "#FFFFFF",
+		TextColor:       "#0F172A",
+		BorderRadius:    "rounded",
+		FontFamily:      "sans",
+		SocialLayout:    "stack",
+		FooterText:      footer,
+		CustomCSS:       "",
+	}
+}
+
+func truncateRunes(val string, max int) string {
+	r := []rune(strings.TrimSpace(val))
+	if len(r) > max {
+		return string(r[:max])
+	}
+	return string(r)
+}
+
+func sanitizeLoginLogoURL(raw string) string {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return ""
+	}
+	if strings.HasPrefix(trimmed, "/") && !strings.HasPrefix(trimmed, "//") {
+		return truncateRunes(trimmed, 400)
+	}
+	if u, err := url.Parse(trimmed); err == nil && (u.Scheme == "https" || u.Scheme == "http") {
+		return truncateRunes(trimmed, 400)
+	}
+	return ""
+}
+
+func sanitizeLoginCustomCSS(raw string) string {
+	out := cssStyleTagRe.ReplaceAllString(raw, "")
+	out = cssImportRe.ReplaceAllString(out, "")
+	out = cssExpressionRe.ReplaceAllString(out, "")
+	out = cssJsSchemeRe.ReplaceAllString(out, "")
+	out = cssBehaviorRe.ReplaceAllString(out, "")
+	out = cssUnsafeUrlRe.ReplaceAllString(out, "url(about:blank")
+	return truncateRunes(out, 4000)
+}
+
+func normalizeLoginTheme(in loginThemeConfig, fallbackBrand string) loginThemeConfig {
+	base := defaultLoginTheme(fallbackBrand)
+	switch in.Layout {
+	case "centered", "split_left", "split_right", "minimal":
+		base.Layout = in.Layout
+	}
+	switch in.SurfaceMode {
+	case "auto", "light", "dark":
+		base.SurfaceMode = in.SurfaceMode
+	}
+	if strings.TrimSpace(in.BrandTitle) != "" {
+		base.BrandTitle = truncateRunes(in.BrandTitle, 80)
+	}
+	base.BrandSubtitle = truncateRunes(in.BrandSubtitle, 160)
+	if strings.TrimSpace(in.HeroTitle) != "" {
+		base.HeroTitle = truncateRunes(in.HeroTitle, 120)
+	}
+	if strings.TrimSpace(in.HeroSubtitle) != "" {
+		base.HeroSubtitle = truncateRunes(in.HeroSubtitle, 240)
+	}
+	base.LogoURL = sanitizeLoginLogoURL(in.LogoURL)
+	if themeHexColorRe.MatchString(strings.TrimSpace(in.PrimaryColor)) {
+		base.PrimaryColor = strings.TrimSpace(in.PrimaryColor)
+	}
+	if themeHexColorRe.MatchString(strings.TrimSpace(in.BackgroundColor)) {
+		base.BackgroundColor = strings.TrimSpace(in.BackgroundColor)
+	}
+	if themeHexColorRe.MatchString(strings.TrimSpace(in.CardColor)) {
+		base.CardColor = strings.TrimSpace(in.CardColor)
+	}
+	if themeHexColorRe.MatchString(strings.TrimSpace(in.TextColor)) {
+		base.TextColor = strings.TrimSpace(in.TextColor)
+	}
+	switch in.BorderRadius {
+	case "sharp", "rounded", "pill":
+		base.BorderRadius = in.BorderRadius
+	}
+	switch in.FontFamily {
+	case "sans", "serif", "mono":
+		base.FontFamily = in.FontFamily
+	}
+	if in.SocialLayout == "grid" {
+		base.SocialLayout = "grid"
+	} else {
+		base.SocialLayout = "stack"
+	}
+	if strings.TrimSpace(in.FooterText) != "" {
+		base.FooterText = truncateRunes(in.FooterText, 80)
+	}
+	base.CustomCSS = sanitizeLoginCustomCSS(in.CustomCSS)
+	return base
+}
+
+func (s *appServer) handlePublicTheme(w http.ResponseWriter, r *http.Request) {
+	clientID := strings.TrimSpace(r.URL.Query().Get("client_id"))
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, a := range s.apps {
+		if clientID != "" && (a.ClientID == clientID || a.ID == clientID) {
+			theme := defaultLoginTheme(a.Name)
+			if a.LoginTheme != nil {
+				theme = normalizeLoginTheme(*a.LoginTheme, a.Name)
+			}
+			writeJSON(w, http.StatusOK, map[string]any{
+				"clientId": a.ClientID,
+				"appName":  a.Name,
+				"theme":    theme,
+			})
+			return
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"clientId": "default",
+		"appName":  "wimotek/Oauth",
+		"theme":    defaultLoginTheme("wimotek/Oauth"),
+	})
+}
+
+func (s *appServer) handleGetAppTheme(w http.ResponseWriter, r *http.Request) {
+	key := strings.TrimSpace(r.PathValue("clientId"))
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, a := range s.apps {
+		if a.ClientID == key || a.ID == key {
+			theme := defaultLoginTheme(a.Name)
+			if a.LoginTheme != nil {
+				theme = normalizeLoginTheme(*a.LoginTheme, a.Name)
+			}
+			writeJSON(w, http.StatusOK, map[string]any{
+				"clientId": a.ClientID,
+				"appName":  a.Name,
+				"theme":    theme,
+			})
+			return
+		}
+	}
+	writeJSON(w, http.StatusNotFound, map[string]any{"error": "application_not_found"})
+}
+
+func (s *appServer) handleUpdateAppTheme(w http.ResponseWriter, r *http.Request) {
+	key := strings.TrimSpace(r.PathValue("clientId"))
+	var payload loginThemeConfig
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid_json", "message": "Invalid theme JSON payload"})
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i := range s.apps {
+		if s.apps[i].ClientID == key || s.apps[i].ID == key {
+			normalized := normalizeLoginTheme(payload, s.apps[i].Name)
+			s.apps[i].LoginTheme = &normalized
+			writeJSON(w, http.StatusOK, map[string]any{
+				"ok":          true,
+				"clientId":    s.apps[i].ClientID,
+				"appName":     s.apps[i].Name,
+				"theme":       normalized,
+				"application": s.apps[i],
+			})
+			return
+		}
+	}
+	writeJSON(w, http.StatusNotFound, map[string]any{"error": "application_not_found"})
 }
 
 func (s *appServer) handlePublicConnectors(w http.ResponseWriter, _ *http.Request) {

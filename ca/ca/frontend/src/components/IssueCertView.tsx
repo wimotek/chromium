@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { Download, FileCheck2, UserCircle2, AlertTriangle } from 'lucide-react';
 import { api, type IssueCertResponse, type UserProfile } from '../lib/api';
 import type { LocaleDict } from '../lib/i18n';
+import { triggerBlobDownload } from '../lib/download';
 import { CopyButton, CodeBlock } from './CopyButton';
 import {
   ALL_PROFILES,
@@ -162,23 +163,13 @@ export const IssueCertView: React.FC<IssueCertViewProps> = ({
     const bytes = new Uint8Array(bin.length);
     for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
     const blob = new Blob([bytes], { type: 'application/x-pkcs12' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `${result.filename || 'certificate'}.pfx`;
-    a.click();
-    URL.revokeObjectURL(url);
+    triggerBlobDownload(blob, `${result.filename || 'certificate'}.pfx`);
   };
 
   const downloadChainPem = () => {
     if (!result?.chain_pem) return;
     const blob = new Blob([result.chain_pem], { type: 'application/x-pem-file' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `${result.filename || 'certificate'}-chain.pem`;
-    a.click();
-    URL.revokeObjectURL(url);
+    triggerBlobDownload(blob, `${result.filename || 'certificate'}-chain.pem`);
   };
 
   if (result) {

@@ -9,6 +9,7 @@ import {
   Play,
   Info,
   ExternalLink,
+  Globe,
 } from 'lucide-react';
 import {
   api,
@@ -23,6 +24,7 @@ import {
 import type { LocaleDict } from '../lib/i18n';
 import { formatUnixUtc } from '../lib/pki-utils';
 import { CodeBlock, CopyButton } from './CopyButton';
+import { AcmeEabPanel } from './AcmeEabPanel';
 
 const ALL_SCOPES: Array<{ value: TokenScope; label: string; desc: string }> = [
   { value: 'certs:read', label: 'certs:read', desc: 'List / inspect certificates & expiring inventory' },
@@ -322,7 +324,7 @@ interface AutomationViewProps {
 }
 
 export const AutomationView: React.FC<AutomationViewProps> = ({ t, overview, currentUser }) => {
-  const [subTab, setSubTab] = useState<'tokens' | 'mcp' | 'recipes'>('tokens');
+  const [subTab, setSubTab] = useState<'acme' | 'tokens' | 'mcp' | 'recipes'>('acme');
   const [tokens, setTokens] = useState<ApiTokenRecord[]>([]);
   const [name, setName] = useState('');
   const [purpose, setPurpose] = useState('');
@@ -558,6 +560,20 @@ app.internal {
         <button
           type="button"
           role="tab"
+          aria-selected={subTab === 'acme'}
+          onClick={() => setSubTab('acme')}
+          className={`inline-flex items-center gap-2 px-4 py-2.5 text-xs font-semibold border-b-2 transition-colors cursor-pointer ${
+            subTab === 'acme'
+              ? 'border-[#0F766E] text-[#0F766E]'
+              : 'border-transparent text-slate-600 hover:text-slate-900'
+          }`}
+        >
+          <Globe className="w-3.5 h-3.5" aria-hidden="true" />
+          <span>{t.automation.tabAcme}</span>
+        </button>
+        <button
+          type="button"
+          role="tab"
           aria-selected={subTab === 'tokens'}
           onClick={() => setSubTab('tokens')}
           className={`inline-flex items-center gap-2 px-4 py-2.5 text-xs font-semibold border-b-2 transition-colors cursor-pointer ${
@@ -598,6 +614,11 @@ app.internal {
           <span>{t.automation.tabRecipes}</span>
         </button>
       </div>
+
+      {/* TAB 0: Commercial ACME v2 & EAB (ZeroSSL Mode) */}
+      {subTab === 'acme' && (
+        <AcmeEabPanel t={t} overview={overview} currentUser={currentUser} />
+      )}
 
       {/* TAB 1: Multi-Purpose User API Tokens */}
       {subTab === 'tokens' && (

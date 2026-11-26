@@ -16,6 +16,7 @@ import {
   UserCircle2,
   BellRing,
   BookOpen,
+  CloudCog,
 } from 'lucide-react';
 import {
   api,
@@ -26,6 +27,7 @@ import {
   type UserProfile,
 } from './lib/api';
 import { isRtlLocale, LOCALE_OPTIONS, LOCALES, type LocaleCode } from './lib/i18n';
+import { downloadProjectBundle } from './lib/download';
 import { AuthGate } from './components/AuthGate';
 import { OverviewView } from './components/OverviewView';
 import { IssueCertView } from './components/IssueCertView';
@@ -34,11 +36,13 @@ import { AuditView, AutomationView, TrustView } from './components/TrustAndAutom
 import { ProfileView, UsersManagementView } from './components/UsersAndProfileView';
 import { NotificationsView } from './components/NotificationsView';
 import { HelpView } from './components/HelpView';
+import { ManagedSSLView } from './components/ManagedSSLView';
 
 export type TabKey =
   | 'overview'
   | 'issue'
   | 'certificates'
+  | 'managed'
   | 'trust'
   | 'notifications'
   | 'users'
@@ -61,6 +65,19 @@ export default function App() {
   const [recentAudits, setRecentAudits] = useState<AuditRecord[]>([]);
   const [certificates, setCertificates] = useState<CertificateRecord[]>([]);
   const [loadingData, setLoadingData] = useState(false);
+  const [downloadingBundle, setDownloadingBundle] = useState(false);
+
+  const handleDownloadBundle = async () => {
+    if (downloadingBundle) return;
+    setDownloadingBundle(true);
+    try {
+      await downloadProjectBundle('wimotek-pki-suite.zip');
+    } catch (err) {
+      console.error('Failed to download project bundle:', err);
+    } finally {
+      setDownloadingBundle(false);
+    }
+  };
 
   const t = LOCALES[locale];
 
@@ -139,6 +156,7 @@ export default function App() {
     { key: 'overview', label: t.nav.overview, icon: LayoutDashboard },
     { key: 'issue', label: t.nav.issue, icon: FilePlus2 },
     { key: 'certificates', label: t.nav.certificates, icon: ListChecks },
+    { key: 'managed', label: t.nav.managed, icon: CloudCog },
     { key: 'trust', label: t.nav.trust, icon: Shield },
     { key: 'notifications', label: t.nav.notifications, icon: BellRing },
     { key: 'automation', label: t.nav.automation, icon: Terminal },
@@ -207,14 +225,15 @@ export default function App() {
                 <Terminal className="w-4 h-4 shrink-0" aria-hidden="true" />
                 <span className="truncate">wimotek-cli Web UI</span>
               </a>
-              <a
-                href="/api/demo/download-bundle"
-                download="wimotek-pki-suite.zip"
-                className="w-full flex items-center gap-2.5 px-3 py-2 rounded-lg bg-slate-800/80 text-teal-300 hover:bg-slate-800 hover:text-teal-200 transition-colors"
+              <button
+                type="button"
+                disabled={downloadingBundle}
+                onClick={handleDownloadBundle}
+                className="w-full flex items-center gap-2.5 px-3 py-2 rounded-lg bg-slate-800/80 text-teal-300 hover:bg-slate-800 hover:text-teal-200 disabled:opacity-60 transition-colors cursor-pointer text-start"
               >
                 <Archive className="w-4 h-4 shrink-0" aria-hidden="true" />
-                <span className="truncate">{t.auth.downloadBundle}</span>
-              </a>
+                <span className="truncate">{downloadingBundle ? '...' : t.auth.downloadBundle}</span>
+              </button>
             </>
           )}
           <button
@@ -274,14 +293,15 @@ export default function App() {
                     <Terminal className="w-4 h-4 shrink-0" aria-hidden="true" />
                     <span className="truncate">wimotek-cli Web UI</span>
                   </a>
-                  <a
-                    href="/api/demo/download-bundle"
-                    download="wimotek-pki-suite.zip"
-                    className="w-full flex items-center gap-2.5 px-3 py-2 rounded-lg bg-slate-800/80 text-xs text-teal-300 hover:bg-slate-800"
+                  <button
+                    type="button"
+                    disabled={downloadingBundle}
+                    onClick={handleDownloadBundle}
+                    className="w-full flex items-center gap-2.5 px-3 py-2 rounded-lg bg-slate-800/80 text-xs text-teal-300 hover:bg-slate-800 disabled:opacity-60 cursor-pointer text-start"
                   >
                     <Archive className="w-4 h-4 shrink-0" aria-hidden="true" />
-                    <span className="truncate">{t.auth.downloadBundle}</span>
-                  </a>
+                    <span className="truncate">{downloadingBundle ? '...' : t.auth.downloadBundle}</span>
+                  </button>
                 </>
               )}
               <button
@@ -378,6 +398,9 @@ export default function App() {
               onRefresh={refreshData}
               onOpenIssue={() => setActiveTab('issue')}
             />
+          )}
+          {activeTab === 'managed' && (
+            <ManagedSSLView t={t} currentUser={currentUser} />
           )}
           {activeTab === 'trust' && <TrustView t={t} overview={overview} />}
           {activeTab === 'notifications' && (

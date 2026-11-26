@@ -169,3 +169,155 @@ CREATE TABLE IF NOT EXISTS audit_logs (
 );
 
 CREATE INDEX IF NOT EXISTS idx_audit_logs_created_at ON audit_logs(created_at);
+
+CREATE TABLE IF NOT EXISTS acme_eab_credentials (
+    kid TEXT PRIMARY KEY,
+    owner_username TEXT NOT NULL,
+    label TEXT NOT NULL DEFAULT '',
+    hmac_key_enc TEXT NOT NULL,
+    hmac_prefix TEXT NOT NULL DEFAULT '',
+    bound_count INTEGER NOT NULL DEFAULT 0,
+    last_used_at BIGINT NOT NULL DEFAULT 0,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    created_at BIGINT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_acme_eab_owner ON acme_eab_credentials(owner_username);
+
+CREATE TABLE IF NOT EXISTS acme_accounts (
+    id TEXT PRIMARY KEY,
+    owner_username TEXT NOT NULL DEFAULT '',
+    eab_kid TEXT NOT NULL DEFAULT '',
+    jwk_thumbprint TEXT NOT NULL UNIQUE,
+    jwk_json TEXT NOT NULL,
+    contacts_json TEXT NOT NULL DEFAULT '[]',
+    status TEXT NOT NULL DEFAULT 'valid',
+    created_at BIGINT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_acme_accounts_owner ON acme_accounts(owner_username);
+
+CREATE TABLE IF NOT EXISTS acme_orders (
+    id TEXT PRIMARY KEY,
+    account_id TEXT NOT NULL,
+    owner_username TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'pending',
+    identifiers_json TEXT NOT NULL DEFAULT '[]',
+    expires_at BIGINT NOT NULL,
+    cert_serial TEXT NOT NULL DEFAULT '',
+    error_json TEXT NOT NULL DEFAULT '',
+    created_at BIGINT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_acme_orders_account ON acme_orders(account_id);
+CREATE INDEX IF NOT EXISTS idx_acme_orders_owner ON acme_orders(owner_username);
+CREATE INDEX IF NOT EXISTS idx_acme_orders_created_at ON acme_orders(created_at);
+
+CREATE TABLE IF NOT EXISTS acme_authorizations (
+    id TEXT PRIMARY KEY,
+    order_id TEXT NOT NULL,
+    account_id TEXT NOT NULL,
+    identifier_type TEXT NOT NULL DEFAULT 'dns',
+    identifier_value TEXT NOT NULL,
+    wildcard INTEGER NOT NULL DEFAULT 0,
+    status TEXT NOT NULL DEFAULT 'pending',
+    expires_at BIGINT NOT NULL,
+    challenges_json TEXT NOT NULL DEFAULT '[]',
+    created_at BIGINT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_acme_authz_order ON acme_authorizations(order_id);
+CREATE INDEX IF NOT EXISTS idx_acme_authz_account ON acme_authorizations(account_id);
+
+CREATE TABLE IF NOT EXISTS managed_upstreams (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    provider TEXT NOT NULL,
+    directory_url TEXT NOT NULL,
+    requires_eab INTEGER NOT NULL DEFAULT 0,
+    eab_kid TEXT NOT NULL DEFAULT '',
+    eab_hmac_enc TEXT NOT NULL DEFAULT '',
+    eab_hmac_prefix TEXT NOT NULL DEFAULT '',
+    contact_email TEXT NOT NULL DEFAULT '',
+    priority INTEGER NOT NULL DEFAULT 1,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    account_url TEXT NOT NULL DEFAULT '',
+    account_key_enc TEXT NOT NULL DEFAULT '',
+    last_probe_at BIGINT NOT NULL DEFAULT 0,
+    last_probe_ok INTEGER NOT NULL DEFAULT 0,
+    last_probe_ms INTEGER NOT NULL DEFAULT 0,
+    last_probe_error TEXT NOT NULL DEFAULT '',
+    created_at BIGINT NOT NULL,
+    updated_at BIGINT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS managed_dns_credentials (
+    id TEXT PRIMARY KEY,
+    owner_username TEXT NOT NULL,
+    name TEXT NOT NULL,
+    provider TEXT NOT NULL,
+    zone_hint TEXT NOT NULL DEFAULT '',
+    secret_enc TEXT NOT NULL,
+    secret_prefix TEXT NOT NULL DEFAULT '',
+    created_at BIGINT NOT NULL,
+    updated_at BIGINT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_managed_dns_owner ON managed_dns_credentials(owner_username);
+
+CREATE TABLE IF NOT EXISTS managed_certificates (
+    id TEXT PRIMARY KEY,
+    owner_username TEXT NOT NULL,
+    common_name TEXT NOT NULL,
+    domains_json TEXT NOT NULL DEFAULT '[]',
+    engine_mode TEXT NOT NULL DEFAULT 'upstream_public',
+    upstream_id TEXT NOT NULL DEFAULT 'auto',
+    resolved_upstream_id TEXT NOT NULL DEFAULT '',
+    resolved_issuer_name TEXT NOT NULL DEFAULT '',
+    challenge_method TEXT NOT NULL DEFAULT 'cname_delegation',
+    dns_credential_id TEXT NOT NULL DEFAULT '',
+    cname_delegation_token TEXT NOT NULL DEFAULT '',
+    cname_delegation_target TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'pending_validation',
+    auto_renew INTEGER NOT NULL DEFAULT 1,
+    renew_before_days INTEGER NOT NULL DEFAULT 30,
+    upstream_order_url TEXT NOT NULL DEFAULT '',
+    upstream_finalize_url TEXT NOT NULL DEFAULT '',
+    challenges_json TEXT NOT NULL DEFAULT '[]',
+    serial_hex TEXT NOT NULL DEFAULT '',
+    fingerprint_sha256 TEXT NOT NULL DEFAULT '',
+    not_before BIGINT NOT NULL DEFAULT 0,
+    not_after BIGINT NOT NULL DEFAULT 0,
+    cert_pem TEXT NOT NULL DEFAULT '',
+    chain_pem TEXT NOT NULL DEFAULT '',
+    private_key_enc TEXT NOT NULL DEFAULT '',
+    deploy_webhook_url TEXT NOT NULL DEFAULT '',
+    deploy_webhook_secret_enc TEXT NOT NULL DEFAULT '',
+    deploy_webhook_secret_prefix TEXT NOT NULL DEFAULT '',
+    last_deploy_at BIGINT NOT NULL DEFAULT 0,
+    last_deploy_status TEXT NOT NULL DEFAULT '',
+    last_error TEXT NOT NULL DEFAULT '',
+    last_renewed_at BIGINT NOT NULL DEFAULT 0,
+    created_at BIGINT NOT NULL,
+    updated_at BIGINT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_managed_certs_owner ON managed_certificates(owner_username);
+CREATE INDEX IF NOT EXISTS idx_managed_certs_not_after ON managed_certificates(not_after);
+
+CREATE TABLE IF NOT EXISTS managed_deploy_logs (
+    id TEXT PRIMARY KEY,
+    cert_id TEXT NOT NULL,
+    owner_username TEXT NOT NULL,
+    common_name TEXT NOT NULL,
+    action TEXT NOT NULL,
+    target TEXT NOT NULL,
+    status TEXT NOT NULL,
+    detail TEXT NOT NULL DEFAULT '',
+    created_at BIGINT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_managed_logs_owner ON managed_deploy_logs(owner_username);
+CREATE INDEX IF NOT EXISTS idx_managed_logs_created ON managed_deploy_logs(created_at);
+
+

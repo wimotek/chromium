@@ -78,9 +78,10 @@ type IssueRequest struct {
 	ValidityDays int      `json:"validity_days"`
 	CSRPEM       string   `json:"csr_pem"`
 	PFXPassword  string   `json:"pfx_password"`
-	IssuedBy     string   `json:"-"`
-	ClientIP     string   `json:"-"`
-	MaxQuota     int      `json:"-"` // -1 = unlimited; >=0 enforced atomically inside WithTx
+	IssuedBy        string   `json:"-"`
+	ClientIP        string   `json:"-"`
+	MaxQuota        int      `json:"-"` // -1 = unlimited; >=0 enforced atomically inside WithTx
+	KeyModeOverride string   `json:"-"` // optional override (e.g. "acme_csr")
 }
 
 // IssueResult returns the issued certificate record and optional Modern2023 .pfx bundle.
@@ -419,6 +420,45 @@ func (e *Engine) decryptPrivateKey(encoded string) (*ecdsa.PrivateKey, error) {
 	return x509.ParseECPrivateKey(der)
 }
 
+// EncryptSecret encrypts arbitrary secret bytes with the CA MasterKey (AES-256-GCM).
+func (e *Engine) EncryptSecret(plain []byte) (string, error) {
+	block, err := aes.NewCipher(e.cfg.MasterKey)
+	if err != nil {
+		return "", err
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return "", err
+	}
+	nonce := make([]byte, gcm.NonceSize())
+	if _, err := rand.Read(nonce); err != nil {
+		return "", err
+	}
+	sealed := gcm.Seal(nonce, nonce, plain, nil)
+	return base64.StdEncoding.EncodeToString(sealed), nil
+}
+
+// DecryptSecret decrypts an AES-256-GCM secret encrypted by EncryptSecret.
+func (e *Engine) DecryptSecret(encoded string) ([]byte, error) {
+	raw, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil {
+		return nil, err
+	}
+	block, err := aes.NewCipher(e.cfg.MasterKey)
+	if err != nil {
+		return nil, err
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, err
+	}
+	if len(raw) < gcm.NonceSize() {
+		return nil, errors.New("encrypted secret truncated")
+	}
+	nonce, ciphertext := raw[:gcm.NonceSize()], raw[gcm.NonceSize():]
+	return gcm.Open(nil, nonce, ciphertext, nil)
+}
+
 func subjectKeyID(pub *ecdsa.PublicKey) []byte {
 	b, _ := x509.MarshalPKIXPublicKey(pub)
 	sum := sha256.Sum256(b)
@@ -581,6 +621,9 @@ func (e *Engine) Issue(ctx context.Context, req IssueRequest) (*IssueResult, err
 			return nil, fmt.Errorf("generate leaf key: %w", err)
 		}
 		pubKey = &leafKey.PublicKey
+	}
+	if strings.TrimSpace(req.KeyModeOverride) != "" {
+		keyMode = strings.TrimSpace(req.KeyModeOverride)
 	}
 
 	if cn == "" {

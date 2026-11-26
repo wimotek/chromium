@@ -119,10 +119,10 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("POST /v1/pki/sign/{role}", s.requireAuthOrProvisioner(s.handleVaultIssue))
 	s.mux.HandleFunc("POST /v1/pki/revoke", s.requireAuthOrProvisioner(s.handleVaultRevoke))
 
-	// Step-CA Style ACME Discovery Endpoints
-	s.mux.HandleFunc("GET /acme/directory", s.handleACMEDirectory)
-	s.mux.HandleFunc("HEAD /acme/new-nonce", s.handleACMENonce)
-	s.mux.HandleFunc("GET /acme/new-nonce", s.handleACMENonce)
+	// Full RFC 8555 ACME v2 Server with EAB & Commercial Rate Limiting (/acme/* & /api/acme/*)
+	s.registerACMERoutes()
+	// Public Trusted CA ACME Proxy & Managed SSL Auto-Renewal (/acme/proxy/* & /api/managed/*)
+	s.registerManagedSSLRoutes()
 
 	// Extended Automation, Multi-Purpose Tokens, Personal ServerChan Webhook Relay, and MCP Server
 	s.registerExtensionRoutes()
@@ -939,24 +939,6 @@ func (s *Server) handleVaultRevoke(w http.ResponseWriter, r *http.Request, actor
 			"revocation_time": time.Now().Unix(),
 		},
 	})
-}
-
-func (s *Server) handleACMEDirectory(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{
-		"newNonce":   s.base + "/acme/new-nonce",
-		"newAccount": s.base + "/acme/new-account",
-		"newOrder":   s.base + "/acme/new-order",
-		"revokeCert": s.base + "/v1/pki/revoke",
-		"meta": map[string]any{
-			"website": s.base,
-		},
-	})
-}
-
-func (s *Server) handleACMENonce(w http.ResponseWriter, _ *http.Request) {
-	w.Header().Set("Replay-Nonce", store.GenerateRandomID(16))
-	w.Header().Set("Cache-Control", "no-store")
-	w.WriteHeader(http.StatusOK)
 }
 
 func (s *Server) requireSession(next func(http.ResponseWriter, *http.Request, *auth.SessionInfo)) http.HandlerFunc {

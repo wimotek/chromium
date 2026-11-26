@@ -1,0 +1,35 @@
+# Strictly exclude AI prompt files from all Docker build contexts and images
+AI_PROMPT.md
+**/AI_PROMPT.md
+*AI_PROMPT*
+*.prompt.md
+
+# Exclude compose files, VCS, docs, and local secrets
+docker-compose.yml
+docker-compose.*.yml
+compose.yml
+compose.*.yml
+.git
+.github
+.gitignore
+.env
+.env.*
+!.env.example
+README.md
+**/README.md
+LICENSE
+
+# Exclude local runtime data, build artifacts, and dependencies
+data/
+ca-data/
+cli-data/
+.wimotek-data/
+bin/
+dist/
+node_modules/
+**/node_modules/
+*.db
+*.db-shm
+*.db-wal
+*.log
+.DS_Store

@@ -20,6 +20,7 @@ import type {
   IdentityProviderType,
   IdentityUser,
   Locale,
+  LoginThemeConfig,
   OAuthApplication,
   OidcFlowTrace,
   SigningKeyStatus,
@@ -29,6 +30,7 @@ import type {
   WebhookSubscription,
 } from './types';
 import { SUPPORTED_LOCALES, TRANSLATIONS, detectBrowserLocale, reorderConnectors } from './lib/i18n';
+import { DEFAULT_LOGIN_THEME, normalizeLoginTheme } from './lib/loginTheme';
 import { BrandMark } from './components/ProviderIcons';
 import { SetupWizard } from './components/SetupWizard';
 import { HostedLoginCard } from './components/HostedLoginCard';
@@ -81,6 +83,7 @@ export default function App() {
   const [signingKeyStatus, setSigningKeyStatus] = useState<SigningKeyStatus | null>(null);
   const [cacheStats, setCacheStats] = useState({ mode: 'redis', redisKeys: 0, sqlFallbackKeys: 0 });
   const [selectedLabClientId, setSelectedLabClientId] = useState('wimotek_erp_portal');
+  const [portalTheme, setPortalTheme] = useState<LoginThemeConfig>(DEFAULT_LOGIN_THEME);
   const [latestTrace, setLatestTrace] = useState<OidcFlowTrace | null>(null);
   const [authError, setAuthError] = useState<string | null>(null);
   const [busyAuthProvider, setBusyAuthProvider] = useState<string | null>(null);
@@ -167,6 +170,23 @@ export default function App() {
         setConnectors(Array.isArray(data.connectors) ? data.connectors : []);
         if (data.authPolicy) setAuthPolicy(data.authPolicy);
         setCacheStats(data.cacheStats || { mode: normalizedConfig.activeCacheMode, redisKeys: 0, sqlFallbackKeys: 0 });
+
+        const params = new URLSearchParams(window.location.search);
+        const queryClientId = (params.get('client_id') || '').trim();
+        if (queryClientId) {
+          setSelectedLabClientId(queryClientId);
+        }
+        try {
+          const themeRes = await fetch(
+            `/api/public/theme${queryClientId ? `?client_id=${encodeURIComponent(queryClientId)}` : ''}`
+          );
+          if (themeRes.ok && mounted) {
+            const themeData = await themeRes.json();
+            if (themeData.theme) setPortalTheme(normalizeLoginTheme(themeData.theme));
+          }
+        } catch {
+          // keep default login theme if public theme lookup fails
+        }
       } catch (err) {
         if (mounted) {
           setBootError(err instanceof Error ? err.message : 'Unable to reach wimotek/Oauth backend API');
@@ -306,6 +326,29 @@ export default function App() {
       headers: { Authorization: `Bearer ${sessionToken}` },
     });
     await fetchProtectedData(sessionToken);
+  }
+
+  async function handleSaveAppTheme(clientId: string, theme: LoginThemeConfig) {
+    if (!sessionToken) return;
+    const res = await fetch(`/api/applications/${encodeURIComponent(clientId)}/theme`, {
+      method: 'PUT',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${sessionToken}`,
+      },
+      body: JSON.stringify(theme),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      throw new Error(data.message || 'Failed to save login theme');
+    }
+    const savedTheme = normalizeLoginTheme(data.theme || theme);
+    setApplications((prev) =>
+      prev.map((app) => (app.clientId === clientId || app.id === clientId ? { ...app, loginTheme: savedTheme } : app))
+    );
+    if (clientId === selectedLabClientId) {
+      setPortalTheme(savedTheme);
+    }
   }
 
   async function handleUpdateConnector(
@@ -561,6 +604,7 @@ export default function App() {
             locale={locale}
             connectors={connectors}
             authPolicy={authPolicy}
+            theme={portalTheme}
             clientId={selectedLabClientId}
             onPasswordSignIn={handlePasswordSignIn}
             onSocialSignIn={handleSocialSignIn}
@@ -797,11 +841,13 @@ export default function App() {
           {activeTab === 'login_lab' && (
             <LoginLabView
               locale={locale}
+              issuerUrl={config.issuerUrl}
               connectors={connectors}
               applications={applications}
               authPolicy={authPolicy}
               selectedClientId={selectedLabClientId}
               onSelectClientId={setSelectedLabClientId}
+              onSaveTheme={handleSaveAppTheme}
               onPasswordSignIn={handlePasswordSignIn}
               onSocialSignIn={handleSocialSignIn}
               onAuthCompleted={handleAuthCompleted}
