@@ -27,6 +27,7 @@ import type {
   SigningKeyStatus,
   SocialConnector,
   SystemConfig,
+  UserAuthMethods,
   WebhookDeliveryLog,
   WebhookSubscription,
 } from './types';
@@ -238,6 +239,13 @@ export default function App() {
         if (queryClientId) {
           setSelectedLabClientId(queryClientId);
         }
+        const callbackAuthError = (params.get('auth_error') || '').trim();
+        if (callbackAuthError) {
+          setAuthError(callbackAuthError);
+          params.delete('auth_error');
+          const nextSearch = params.toString();
+          window.history.replaceState({}, '', `${window.location.pathname}${nextSearch ? `?${nextSearch}` : ''}${window.location.hash}`);
+        }
         try {
           const themeRes = await fetch(
             `/api/public/theme${queryClientId ? `?client_id=${encodeURIComponent(queryClientId)}` : ''}`
@@ -354,7 +362,10 @@ export default function App() {
   }
 
   async function handleSocialSignIn(provider: string) {
-    setAuthError(`Configure the ${provider} connector credentials in Social Connectors to redirect users to the upstream IdP.`);
+    setAuthError(null);
+    setBusyAuthProvider(provider);
+    const qs = selectedLabClientId ? `?client_id=${encodeURIComponent(selectedLabClientId)}` : '';
+    window.location.assign(`/oauth/social/${encodeURIComponent(provider)}/start${qs}`);
   }
 
   async function handleSimulateCacheFailover(simulatedDown: boolean) {
@@ -470,6 +481,23 @@ export default function App() {
     }
   }
 
+  async function handleToggleAppLock(id: string, locked: boolean) {
+    const res = await authFetch(`/api/applications/${encodeURIComponent(id)}/lock`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ locked }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      throw new Error(data.message || 'Failed to toggle application lock');
+    }
+    if (Array.isArray(data.applications)) {
+      setApplications(data.applications);
+    } else if (data.application) {
+      setApplications((prev) => prev.map((a) => (a.id === id ? data.application : a)));
+    }
+  }
+
   async function handleSaveAppTheme(clientId: string, theme: LoginThemeConfig) {
     const res = await authFetch(`/api/applications/${encodeURIComponent(clientId)}/theme`, {
       method: 'PUT',
@@ -521,6 +549,7 @@ export default function App() {
     clientId: string;
     clientSecret: string;
     issuerUrl: string;
+    extra?: Record<string, string>;
   }) {
     const res = await authFetch('/api/connectors', {
       method: 'POST',
@@ -537,6 +566,55 @@ export default function App() {
     if (sessionToken) {
       await fetchProtectedData(sessionToken);
     }
+  }
+
+  async function handleDiscoverOidc(issuerUrl: string) {
+    const res = await authFetch('/api/connectors/discover', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ issuerUrl }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !data.discovery) {
+      throw new Error(data.message || 'OIDC auto-discovery failed');
+    }
+    return data.discovery as {
+      issuer: string;
+      authorization_endpoint: string;
+      token_endpoint: string;
+      userinfo_endpoint?: string;
+      jwks_uri?: string;
+      end_session_endpoint?: string;
+      scopes_supported?: string[];
+    };
+  }
+
+  async function handleAutoProvisionMicrosoft(payload: {
+    graphAccessToken: string;
+    displayName: string;
+    signInAudience: string;
+    tenantId?: string;
+  }) {
+    const res = await authFetch('/api/connectors/auto-provision/microsoft', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      throw new Error(data.message || 'Microsoft Graph auto-registration failed');
+    }
+    if (Array.isArray(data.connectors)) {
+      setConnectors(data.connectors);
+    }
+    if (sessionToken) {
+      void fetchProtectedData(sessionToken);
+    }
+    return {
+      appId: String(data.appId || data.clientId || ''),
+      tenantId: String(data.tenantId || payload.tenantId || 'common'),
+      callbackUri: String(data.callbackUri || ''),
+    };
   }
 
   async function handleDeleteConnector(id: string) {
@@ -633,6 +711,23 @@ export default function App() {
     });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(data.message || 'Failed to update user');
+    if (Array.isArray(data.users)) {
+      setIdentityUsers(data.users);
+    } else if (sessionToken) {
+      await fetchProtectedData(sessionToken);
+    }
+  }
+
+  async function handleUpdateUserFactors(userId: string, allowedMethods: UserAuthMethods) {
+    const res = await authFetch(`/api/users/${encodeURIComponent(userId)}/factors`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ allowedMethods }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      throw new Error(data.message || 'Failed to update user authentication methods');
+    }
     if (Array.isArray(data.users)) {
       setIdentityUsers(data.users);
     } else if (sessionToken) {
@@ -1113,6 +1208,7 @@ export default function App() {
               onUpdateApp={handleUpdateApp}
               onResetSecret={handleResetAppSecret}
               onDeleteApp={handleDeleteApp}
+              onToggleLock={handleToggleAppLock}
               onTestAppFlow={(clientId) => {
                 setSelectedLabClientId(clientId);
                 setActiveTab('login_lab');
@@ -1123,11 +1219,14 @@ export default function App() {
           {activeTab === 'connectors' && (
             <ConnectorsView
               locale={locale}
+              issuerUrl={config.issuerUrl}
               connectors={connectors}
               onUpdateConnector={handleUpdateConnector}
               onAddCustomConnector={handleAddCustomConnector}
               onDeleteConnector={handleDeleteConnector}
               onReorderConnectors={handleReorderConnectors}
+              onDiscoverOidc={handleDiscoverOidc}
+              onAutoProvisionMicrosoft={handleAutoProvisionMicrosoft}
             />
           )}
 
@@ -1140,9 +1239,12 @@ export default function App() {
               webhooks={webhooks}
               webhookLogs={webhookLogs}
               jitAutoLinkEnabled={authPolicy.jitVerifiedEmailAutoLink}
+              authPolicy={authPolicy}
+              connectors={connectors}
               onSimulateJit={handleSimulateJit}
               onCreateUser={handleCreateUser}
               onUpdateUser={handleUpdateUser}
+              onUpdateUserFactors={handleUpdateUserFactors}
               onResetUserPassword={handleResetUserPassword}
               onClearUserPassword={handleClearUserPassword}
               onEnrollUserTotp={handleEnrollUserTotp}

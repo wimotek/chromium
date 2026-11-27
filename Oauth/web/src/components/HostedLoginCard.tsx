@@ -707,7 +707,7 @@ ${resolvedTheme.customCss || ''}
               <button
                 key={conn.id}
                 type="button"
-                onClick={() => onSocialSignIn(conn.provider)}
+                onClick={() => onSocialSignIn(conn.provider === 'custom_oidc' ? conn.id : conn.provider)}
                 disabled={Boolean(busyProvider) || working}
                 className={socialBtnClass}
               >
@@ -729,7 +729,7 @@ ${resolvedTheme.customCss || ''}
                     <button
                       key={conn.id}
                       type="button"
-                      onClick={() => onSocialSignIn(conn.provider)}
+                      onClick={() => onSocialSignIn(conn.provider === 'custom_oidc' ? conn.id : conn.provider)}
                       disabled={Boolean(busyProvider) || working}
                       className={`${socialBtnClass} text-xs`}
                     >

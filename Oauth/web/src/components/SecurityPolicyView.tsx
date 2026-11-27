@@ -10,48 +10,13 @@ import {
 } from 'lucide-react';
 import type { AuthPolicyConfig, CaptchaProvider, Locale } from '../types';
 import { TRANSLATIONS } from '../lib/i18n';
+import { TotpEnrollModal, type TotpEnrollDraft } from './QrCodeSvg';
 
 interface SecurityPolicyViewProps {
   locale: Locale;
   policy: AuthPolicyConfig;
   sessionToken: string;
   onSavePolicy: (next: AuthPolicyConfig) => Promise<void>;
-}
-
-/**
- * Deterministic decorative SVG QR visual derived from otpauth URI for zero-dependency TOTP enrollment preview.
- */
-function SimpleQrPreview({ seed }: { seed: string }) {
-  const size = 15;
-  const cells: boolean[][] = Array.from({ length: size }, (_, r) =>
-    Array.from({ length: size }, (_, c) => {
-      // Corner finder patterns
-      const inTL = r < 5 && c < 5;
-      const inTR = r < 5 && c >= size - 5;
-      const inBL = r >= size - 5 && c < 5;
-      if (inTL || inTR || inBL) {
-        const lr = inBL ? r - (size - 5) : r;
-        const lc = inTR ? c - (size - 5) : c;
-        return lr === 0 || lr === 4 || lc === 0 || lc === 4 || (lr === 2 && lc === 2);
-      }
-      const code = seed.charCodeAt((r * size + c) % seed.length);
-      return ((code + r * 7 + c * 13) % 3) === 0;
-    })
-  );
-
-  return (
-    <svg
-      viewBox={`0 0 ${size} ${size}`}
-      className="w-32 h-32 p-2 bg-white rounded-lg border border-slate-200 shrink-0"
-      aria-label="TOTP Authenticator QR Code"
-    >
-      {cells.map((row, r) =>
-        row.map((on, c) =>
-          on ? <rect key={`${r}-${c}`} x={c} y={r} width="1" height="1" fill="#0F172A" /> : null
-        )
-      )}
-    </svg>
-  );
 }
 
 export function SecurityPolicyView({
@@ -95,14 +60,13 @@ export function SecurityPolicyView({
     }
   }
 
-  // Live TOTP 2FA Enrollment State
-  const [totpEnroll, setTotpEnroll] = useState<{
-    secret: string;
-    otpauthUri: string;
-    currentCode: string;
-    recoveryCodes: string[];
-  } | null>(null);
-  const [totpInput, setTotpInput] = useState('');
+  const isZh = locale === 'zh-CN' || locale === 'zh-TW';
+
+  // Live TOTP 2FA Modal Enrollment State
+  const [totpEnroll, setTotpEnroll] = useState<TotpEnrollDraft | null>(null);
+  const [totpBusy, setTotpBusy] = useState(false);
+  const [totpError, setTotpError] = useState<string | null>(null);
+  const [totpVerifiedCodes, setTotpVerifiedCodes] = useState<string[] | null>(null);
   const [totpVerifyMsg, setTotpVerifyMsg] = useState<{ ok: boolean; text: string } | null>(null);
 
   // Live Risk Control Backoff Probe State
@@ -135,30 +99,59 @@ export function SecurityPolicyView({
   }
 
   async function handleStartTotpEnroll() {
+    if (!draft.enableTotp2fa) {
+      setTotpVerifyMsg({
+        ok: false,
+        text: isZh ? '管理员已在上方策略中全局禁用 TOTP 2FA。' : 'TOTP 2FA is disabled in Security Policy above.',
+      });
+      return;
+    }
     setTotpVerifyMsg(null);
-    const res = await fetch('/api/auth/totp/enroll', {
-      method: 'POST',
-      credentials: 'include',
-      headers: buildAuthHeaders(),
-    });
-    if (res.ok) {
+    setTotpError(null);
+    setTotpVerifiedCodes(null);
+    setTotpBusy(true);
+    try {
+      const res = await fetch('/api/auth/totp/enroll', {
+        method: 'POST',
+        credentials: 'include',
+        headers: buildAuthHeaders(),
+      });
       const data = await res.json();
-      setTotpEnroll(data);
-      setTotpInput(data.currentCode);
+      if (!res.ok) {
+        setTotpVerifyMsg({ ok: false, text: data.message || 'Failed to start TOTP enrollment.' });
+        return;
+      }
+      setTotpEnroll({
+        email: data.email || 'Admin Account',
+        secret: data.secret,
+        otpauthUri: data.otpauthUri,
+        recoveryCodes: Array.isArray(data.recoveryCodes) ? data.recoveryCodes : [],
+      });
+    } finally {
+      setTotpBusy(false);
     }
   }
 
-  async function handleVerifyTotp(e: React.FormEvent) {
-    e.preventDefault();
-    setTotpVerifyMsg(null);
-    const res = await fetch('/api/auth/totp/verify', {
-      method: 'POST',
-      credentials: 'include',
-      headers: buildAuthHeaders({ 'Content-Type': 'application/json' }),
-      body: JSON.stringify({ code: totpInput }),
-    });
-    const data = await res.json();
-    setTotpVerifyMsg({ ok: Boolean(data.ok), text: data.message });
+  async function handleVerifyTotpCode(code: string) {
+    setTotpBusy(true);
+    setTotpError(null);
+    try {
+      const res = await fetch('/api/auth/totp/verify', {
+        method: 'POST',
+        credentials: 'include',
+        headers: buildAuthHeaders({ 'Content-Type': 'application/json' }),
+        body: JSON.stringify({ code }),
+      });
+      const data = await res.json();
+      if (!res.ok || !data.ok) {
+        setTotpError(data.message || (isZh ? '验证码无效，请核对手机验证器。' : 'Invalid 6-digit code.'));
+        return;
+      }
+      setTotpVerifiedCodes(totpEnroll?.recoveryCodes || []);
+      setTotpVerifyMsg({ ok: true, text: isZh ? 'TOTP 动态验证器已绑定生效。' : data.message || 'TOTP 2FA enabled.' });
+    } finally {
+      setTotpBusy(false);
+    }
   }
 
   async function handleSimulateBruteForce() {
@@ -390,86 +383,67 @@ export function SecurityPolicyView({
         </section>
       </form>
 
-      {/* Interactive TOTP 2FA Enrollment & Recovery Codes Lab */}
-      <section className="bg-white dark:bg-[#111827] border border-slate-200 dark:border-slate-800 rounded-xl p-6 space-y-5">
+      {/* Interactive TOTP 2FA Enrollment (Modal QR Flow) */}
+      <section className="bg-white dark:bg-[#111827] border border-slate-200 dark:border-slate-800 rounded-xl p-6 space-y-4">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-          <div className="flex items-center gap-2">
-            <QrCode className="w-4 h-4 text-indigo-600 dark:text-indigo-400" />
-            <h2 className="text-sm font-semibold text-slate-900 dark:text-white">
-              TOTP 2FA (RFC 6238) &amp; Single-Use Recovery Codes Enrollment
-            </h2>
+          <div className="space-y-1">
+            <div className="flex items-center gap-2">
+              <QrCode className="w-4 h-4 text-indigo-600 dark:text-indigo-400" />
+              <h2 className="text-sm font-semibold text-slate-900 dark:text-white">
+                {isZh
+                  ? 'TOTP 动态口令 (2FA) 扫码绑定'
+                  : 'TOTP 2FA (RFC 6238) Authenticator Enrollment'}
+              </h2>
+            </div>
+            <p className="text-xs text-slate-500 dark:text-slate-400">
+              {!draft.enableTotp2fa
+                ? isZh
+                  ? 'TOTP 2FA 已在上方全局策略中关闭，用户无法新绑定或启用验证器。'
+                  : 'TOTP 2FA is currently disabled in global policy; enrollment is locked.'
+                : isZh
+                  ? '点击右侧按钮弹出标准二维码，用 Google / Microsoft Authenticator 或 1Password 扫码并输入 6 位验证码即可完成绑定。'
+                  : 'Click to open a scannable QR code modal for Google/Microsoft Authenticator or 1Password, then confirm with the 6-digit code.'}
+            </p>
           </div>
           <button
             type="button"
-            onClick={handleStartTotpEnroll}
-            className="min-h-[38px] px-3.5 py-1.5 rounded-lg border border-slate-300 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800 text-xs font-medium flex items-center gap-1.5 whitespace-nowrap"
+            disabled={!draft.enableTotp2fa || totpBusy}
+            onClick={() => void handleStartTotpEnroll()}
+            className="min-h-[38px] px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-700 disabled:opacity-45 disabled:cursor-not-allowed text-white text-xs font-medium flex items-center gap-1.5 whitespace-nowrap shrink-0 transition-colors"
           >
             <Lock className="w-3.5 h-3.5" />
-            <span>Generate New TOTP Secret &amp; Recovery Codes</span>
+            <span>{isZh ? '扫码添加 TOTP 验证器' : 'Add Authenticator App (QR)'}</span>
           </button>
         </div>
 
-        {totpEnroll && (
-          <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 pt-3 border-t border-slate-100 dark:border-slate-800">
-            <div className="lg:col-span-7 flex flex-col sm:flex-row gap-5 items-start">
-              <SimpleQrPreview seed={totpEnroll.otpauthUri} />
-              <div className="space-y-3 min-w-0 flex-1 text-xs">
-                <div>
-                  <div className="text-slate-500 mb-0.5">Base32 Secret (Encrypted at rest via AES-256-GCM)</div>
-                  <code className="font-mono text-slate-900 dark:text-white break-all">{totpEnroll.secret}</code>
-                </div>
-                <div>
-                  <div className="text-slate-500 mb-0.5">Live 6-Digit Authenticator Code (30s window)</div>
-                  <code className="font-mono text-base font-bold text-indigo-600 dark:text-indigo-400 tabular-nums">
-                    {totpEnroll.currentCode}
-                  </code>
-                </div>
-
-                <form onSubmit={handleVerifyTotp} className="flex items-center gap-2 pt-1">
-                  <input
-                    type="text"
-                    value={totpInput}
-                    onChange={(e) => setTotpInput(e.target.value)}
-                    placeholder="Enter 6-digit code"
-                    aria-label="TOTP 6-digit code"
-                    className="w-40 min-h-[36px] px-3 py-1.5 text-sm font-mono tabular-nums rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900"
-                  />
-                  <button
-                    type="submit"
-                    className="min-h-[36px] px-3.5 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-medium"
-                  >
-                    Verify &amp; Bind 2FA
-                  </button>
-                </form>
-
-                {totpVerifyMsg && (
-                  <div
-                    className={`flex items-center gap-1.5 text-xs ${
-                      totpVerifyMsg.ok ? 'text-emerald-700 dark:text-emerald-400' : 'text-red-600 dark:text-red-400'
-                    }`}
-                  >
-                    {totpVerifyMsg.ok ? <CheckCircle2 className="w-4 h-4" /> : <AlertCircle className="w-4 h-4" />}
-                    <span>{totpVerifyMsg.text}</span>
-                  </div>
-                )}
-              </div>
-            </div>
-
-            <div className="lg:col-span-5 bg-slate-50 dark:bg-[#0B0F19] border border-slate-200 dark:border-slate-800 rounded-lg p-4">
-              <div className="text-xs font-semibold text-slate-800 dark:text-slate-200 mb-2">
-                8 Single-Use Recovery Codes
-              </div>
-              <div className="grid grid-cols-2 gap-2 font-mono text-xs tabular-nums text-slate-700 dark:text-slate-300">
-                {totpEnroll.recoveryCodes.map((rc) => (
-                  <div key={rc} className="px-2 py-1 rounded bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 text-center">
-                    {rc}
-                  </div>
-                ))}
-              </div>
-            </div>
+        {totpVerifyMsg && (
+          <div
+            className={`flex items-center gap-2 text-xs rounded-lg px-3.5 py-2.5 border ${
+              totpVerifyMsg.ok
+                ? 'text-emerald-700 dark:text-emerald-400 bg-emerald-50 dark:bg-emerald-950/30 border-emerald-200 dark:border-emerald-900/50'
+                : 'text-red-700 dark:text-red-400 bg-red-50 dark:bg-red-950/30 border-red-200 dark:border-red-900/50'
+            }`}
+          >
+            {totpVerifyMsg.ok ? <CheckCircle2 className="w-4 h-4 shrink-0" /> : <AlertCircle className="w-4 h-4 shrink-0" />}
+            <span>{totpVerifyMsg.text}</span>
           </div>
         )}
       </section>
+
+      <TotpEnrollModal
+        open={Boolean(totpEnroll)}
+        locale={locale}
+        draft={totpEnroll}
+        busy={totpBusy}
+        error={totpError}
+        verifiedRecoveryCodes={totpVerifiedCodes}
+        onClose={() => {
+          setTotpEnroll(null);
+          setTotpError(null);
+          setTotpVerifiedCodes(null);
+        }}
+        onVerify={handleVerifyTotpCode}
+      />
     </div>
   );
 }

@@ -63,8 +63,34 @@ export interface OAuthApplication {
   clientSecret: string;
   redirectUris: string[];
   scopes: string[];
+  locked?: boolean;
   loginTheme?: LoginThemeConfig;
   createdAt: string;
+}
+
+export interface BackupSettings {
+  enabled: boolean;
+  retentionDays: number;
+  intervalHours: number;
+}
+
+export interface BackupRecord {
+  id: string;
+  filename: string;
+  driver: string;
+  sizeBytes: number;
+  createdAt: string;
+  expiresAt: string;
+  trigger: 'manual' | 'scheduled';
+}
+
+export interface UserAuthMethods {
+  password: boolean;
+  passkey: boolean;
+  emailOtp: boolean;
+  totp: boolean;
+  deviceFlow: boolean;
+  social: boolean;
 }
 
 export type SocialProviderId = 'microsoft' | 'apple' | 'google' | 'wechat' | 'github' | 'custom_oidc';
@@ -102,6 +128,7 @@ export interface IdentityUser {
   totpEnabled: boolean;
   passkeyCount: number;
   status: 'active' | 'banned';
+  allowedMethods?: UserAuthMethods;
   identities: UserIdentityLink[];
   createdAt: string;
   lastLoginAt: string;

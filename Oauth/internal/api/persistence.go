@@ -404,6 +404,9 @@ func (s *appServer) loadStateFromDBLocked(ctx context.Context) {
 		}
 		s.webhooks = whs
 	}
+
+	// 6. Extension settings (App locks, Per-User Allowed Methods, Backup retention config)
+	s.loadExtensionSettingsLocked(ctx)
 }
 
 func (s *appServer) syncPasskeyCountsLocked() {
@@ -1037,6 +1040,11 @@ func (s *appServer) handleDeleteUserPassword(w http.ResponseWriter, r *http.Requ
 func (s *appServer) handleAdminTotpEnroll(w http.ResponseWriter, r *http.Request) {
 	id := strings.TrimSpace(r.PathValue("id"))
 	s.mu.Lock()
+	if !s.policy.EnableTotp2fa {
+		s.mu.Unlock()
+		writeJSON(w, http.StatusForbidden, map[string]any{"error": "auth_method_disabled", "message": "TOTP 2FA is globally disabled by administrator Security Policy."})
+		return
+	}
 	var target *identityUser
 	for i := range s.users {
 		if s.users[i].ID == id {
@@ -1089,6 +1097,10 @@ func (s *appServer) handleAdminTotpVerify(w http.ResponseWriter, r *http.Request
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if !s.policy.EnableTotp2fa {
+		writeJSON(w, http.StatusForbidden, map[string]any{"error": "auth_method_disabled", "message": "TOTP 2FA is globally disabled by administrator Security Policy."})
+		return
+	}
 
 	pending, ok := s.totpPending[id]
 	if !ok {

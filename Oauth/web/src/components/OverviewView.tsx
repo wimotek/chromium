@@ -17,6 +17,7 @@ import {
 } from 'lucide-react';
 import type { Locale, SigningKeyStatus, SystemConfig } from '../types';
 import { TRANSLATIONS } from '../lib/i18n';
+import { DatabaseBackupSection } from './DatabaseBackupSection';
 
 interface OverviewViewProps {
   locale: Locale;
@@ -554,6 +555,9 @@ export function OverviewView({
           )}
         </div>
       </section>
+
+      {/* Database Backup & Retention Policy */}
+      <DatabaseBackupSection locale={locale} />
     </div>
   );
 }

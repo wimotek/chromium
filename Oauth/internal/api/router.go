@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"io/fs"
 	"log"
 	"net"
@@ -94,6 +95,7 @@ type oauthApplication struct {
 	ClientSecret string            `json:"clientSecret"`
 	RedirectUris []string          `json:"redirectUris"`
 	Scopes       []string          `json:"scopes"`
+	Locked       bool              `json:"locked"`
 	CreatedAt    string            `json:"createdAt"`
 	LoginTheme   *loginThemeConfig `json:"loginTheme,omitempty"`
 }
@@ -144,6 +146,7 @@ type identityUser struct {
 	TotpSecretEnc  string             `json:"-"`
 	RecoveryHashes string             `json:"-"`
 	PasskeyCount   int                `json:"passkeyCount"`
+	AllowedMethods *userAuthMethods   `json:"allowedMethods,omitempty"`
 	Identities     []userIdentityLink `json:"identities"`
 	CreatedAt      string             `json:"createdAt"`
 	LastLoginAt    string             `json:"lastLoginAt"`
@@ -224,6 +227,7 @@ type appServer struct {
 	oidcProvider *oidc.Provider
 
 	policy       authPolicyConfig
+	backupCfg    backupSettings
 	apps         []oauthApplication
 	connectors   []storedConnector
 	users        []identityUser
@@ -264,6 +268,7 @@ func NewRouter(cfgMgr *config.Manager, keys *crypto.KeyManager, certSources ...s
 			CaptchaProvider:          "none",
 			CaptchaSiteKey:           "",
 		},
+		backupCfg:    defaultBackupSettings(),
 		apps:         make([]oauthApplication, 0),
 		connectors:   make([]storedConnector, 0),
 		users:        make([]identityUser, 0),
@@ -303,7 +308,11 @@ func NewRouter(cfgMgr *config.Manager, keys *crypto.KeyManager, certSources ...s
 	}
 	s.oidcProvider = oidc.NewProvider(cfg.IssuerURL, keys, s.resilient)
 
+	stopBackupCh := make(chan struct{})
+	s.startBackupScheduler(stopBackupCh)
+
 	cleanup := func() {
+		close(stopBackupCh)
 		s.mu.Lock()
 		defer s.mu.Unlock()
 		if s.resilient != nil {
@@ -328,6 +337,9 @@ func NewRouter(cfgMgr *config.Manager, keys *crypto.KeyManager, certSources ...s
 	mux.HandleFunc("POST /oauth/device_authorization", s.handleDeviceAuth)
 	mux.HandleFunc("GET /oauth/userinfo", s.handleUserInfo)
 	mux.HandleFunc("GET /oauth/logout", s.handleLogout)
+	mux.HandleFunc("GET /oauth/social/{provider}/start", s.handleSocialStart)
+	mux.HandleFunc("GET /oauth/callback/{provider}", s.handleSocialCallback)
+	mux.HandleFunc("POST /oauth/callback/{provider}", s.handleSocialCallback)
 
 	// Device Flow Approval (authenticated) & Poll
 	mux.HandleFunc("POST /api/oauth/device/approve", s.requireAdmin(s.handleDeviceApprove))
@@ -355,32 +367,41 @@ func NewRouter(cfgMgr *config.Manager, keys *crypto.KeyManager, certSources ...s
 	mux.HandleFunc("POST /api/auth/totp/verify", s.requireAdmin(s.handleTotpVerify))
 	mux.HandleFunc("GET /api/auth/me", s.requireAdmin(s.handleAuthMe))
 
-	// Overview & Cache Failover
+	// Overview, Cache Failover & Database Backups
 	mux.HandleFunc("GET /api/system/overview", s.requireAdmin(s.handleOverview))
 	mux.HandleFunc("POST /api/system/cache-sim", s.requireAdmin(s.handleCacheSim))
+	mux.HandleFunc("GET /api/system/backups", s.requireAdmin(s.handleListBackups))
+	mux.HandleFunc("PUT /api/system/backups/settings", s.requireAdmin(s.handleUpdateBackupSettings))
+	mux.HandleFunc("POST /api/system/backups/now", s.requireAdmin(s.handleCreateBackupNow))
+	mux.HandleFunc("GET /api/system/backups/{id}/download", s.requireAdmin(s.handleDownloadBackup))
+	mux.HandleFunc("DELETE /api/system/backups/{id}", s.requireAdmin(s.handleDeleteBackup))
 
-	// Applications CRUD & Per-Client Hosted Login Theme APIs
+	// Applications CRUD, Lock & Per-Client Hosted Login Theme APIs
 	mux.HandleFunc("GET /api/public/theme", s.handlePublicTheme)
 	mux.HandleFunc("GET /api/applications", s.requireAdmin(s.handleListApps))
 	mux.HandleFunc("POST /api/applications", s.requireAdmin(s.handleCreateApp))
 	mux.HandleFunc("PUT /api/applications/{id}", s.requireAdmin(s.handleUpdateApp))
+	mux.HandleFunc("POST /api/applications/{id}/lock", s.requireAdmin(s.handleToggleAppLock))
 	mux.HandleFunc("POST /api/applications/{id}/reset-secret", s.requireAdmin(s.handleResetAppSecret))
 	mux.HandleFunc("DELETE /api/applications/{id}", s.requireAdmin(s.handleDeleteApp))
 	mux.HandleFunc("GET /api/applications/{clientId}/theme", s.requireAdmin(s.handleGetAppTheme))
 	mux.HandleFunc("PUT /api/applications/{clientId}/theme", s.requireAdmin(s.handleUpdateAppTheme))
 
-	// Social Connectors CRUD + Reorder
+	// Social Connectors CRUD + Reorder + OIDC Auto-Discovery + Microsoft Graph Auto-Provisioning
 	mux.HandleFunc("GET /api/connectors/public", s.handlePublicConnectors)
 	mux.HandleFunc("GET /api/connectors", s.requireAdmin(s.handleListConnectors))
+	mux.HandleFunc("POST /api/connectors/discover", s.requireAdmin(s.handleDiscoverConnectorOIDC))
+	mux.HandleFunc("POST /api/connectors/auto-provision/microsoft", s.requireAdmin(s.handleAutoProvisionMicrosoft))
 	mux.HandleFunc("PUT /api/connectors/reorder", s.requireAdmin(s.handleReorderConnectors))
 	mux.HandleFunc("PUT /api/connectors/{id}", s.requireAdmin(s.handleUpdateConnector))
 	mux.HandleFunc("DELETE /api/connectors/{id}", s.requireAdmin(s.handleDeleteConnector))
 	mux.HandleFunc("POST /api/connectors", s.requireAdmin(s.handleCreateConnector))
 
-	// Identity Directory, User CRUD, JIT Linking & Account Ban Webhooks
+	// Identity Directory, User CRUD, Per-User Security Factors, JIT Linking & Account Ban Webhooks
 	mux.HandleFunc("GET /api/users", s.requireAdmin(s.handleListUsers))
 	mux.HandleFunc("POST /api/users", s.requireAdmin(s.handleCreateUser))
 	mux.HandleFunc("PUT /api/users/{id}", s.requireAdmin(s.handleUpdateUser))
+	mux.HandleFunc("PUT /api/users/{id}/factors", s.requireAdmin(s.handleUpdateUserFactors))
 	mux.HandleFunc("POST /api/users/{id}/password", s.requireAdmin(s.handleResetUserPassword))
 	mux.HandleFunc("DELETE /api/users/{id}/password", s.requireAdmin(s.handleDeleteUserPassword))
 	mux.HandleFunc("POST /api/users/{id}/totp/enroll", s.requireAdmin(s.handleAdminTotpEnroll))
@@ -1339,10 +1360,19 @@ func (s *appServer) handlePasswordLogin(w http.ResponseWriter, r *http.Request) 
 		}
 	}
 
+	if !s.policy.EnablePasswordArgon2id {
+		writeJSON(w, http.StatusForbidden, map[string]any{"error": "auth_method_disabled", "message": "Password login is disabled by administrator Security Policy."})
+		return
+	}
+
 	verified := false
 	if matchedIdx >= 0 {
 		if s.users[matchedIdx].Status != "active" {
 			writeJSON(w, http.StatusForbidden, map[string]any{"error": "account_banned", "message": "This account has been suspended by an administrator."})
+			return
+		}
+		if !s.effectiveUserMethodsLocked(s.users[matchedIdx]).Password {
+			writeJSON(w, http.StatusForbidden, map[string]any{"error": "factor_disabled_for_user", "message": "Password sign-in is disabled for this account. Use an enabled factor such as Passkey."})
 			return
 		}
 		if s.users[matchedIdx].PasswordHash != "" {
@@ -1424,6 +1454,13 @@ func (s *appServer) handleSendEmailOTP(w http.ResponseWriter, r *http.Request) {
 	payload, _ := json.Marshal(map[string]string{"code": code, "magicToken": magicTok})
 
 	s.mu.Lock()
+	for _, u := range s.users {
+		if strings.ToLower(u.Email) == email && !s.effectiveUserMethodsLocked(u).EmailOtp {
+			s.mu.Unlock()
+			writeJSON(w, http.StatusForbidden, map[string]any{"error": "factor_disabled_for_user", "message": "Email OTP sign-in is disabled for this account."})
+			return
+		}
+	}
 	s.cacheSetLocked("otp:email:"+email, string(payload), 5*time.Minute)
 	s.cacheSetLocked("otp:magic:"+magicTok, email, 5*time.Minute)
 	mode := s.activeCacheModeLocked()
@@ -1650,6 +1687,13 @@ func (s *appServer) handlePasskeyAuth(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *appServer) handleTotpEnroll(w http.ResponseWriter, r *http.Request) {
+	s.mu.RLock()
+	totpAllowed := s.policy.EnableTotp2fa
+	s.mu.RUnlock()
+	if !totpAllowed {
+		writeJSON(w, http.StatusForbidden, map[string]any{"error": "auth_method_disabled", "message": "TOTP 2FA is globally disabled by administrator Security Policy."})
+		return
+	}
 	secret, err := auth.GenerateTOTPSecret()
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
@@ -1698,6 +1742,10 @@ func (s *appServer) handleTotpVerify(w http.ResponseWriter, r *http.Request) {
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if !s.policy.EnableTotp2fa {
+		writeJSON(w, http.StatusForbidden, map[string]any{"ok": false, "error": "auth_method_disabled", "message": "TOTP 2FA is globally disabled by administrator Security Policy."})
+		return
+	}
 
 	if pending, ok := s.totpPending[email]; ok {
 		plain, _ := s.keys.DecryptSecret(pending.SecretEnc)
@@ -1928,6 +1976,10 @@ func (s *appServer) handleUpdateApp(w http.ResponseWriter, r *http.Request) {
 	defer s.mu.Unlock()
 	for i := range s.apps {
 		if s.apps[i].ID == key || s.apps[i].ClientID == key {
+			if s.apps[i].Locked {
+				writeJSON(w, http.StatusLocked, map[string]any{"error": "application_locked", "message": "This application is locked. Unlock it before editing."})
+				return
+			}
 			s.apps[i].Name = strings.TrimSpace(body.Name)
 			s.apps[i].Description = strings.TrimSpace(body.Description)
 			s.apps[i].RedirectUris = uris
@@ -1948,6 +2000,10 @@ func (s *appServer) handleResetAppSecret(w http.ResponseWriter, r *http.Request)
 	defer s.mu.Unlock()
 	for i := range s.apps {
 		if s.apps[i].ID == key || s.apps[i].ClientID == key {
+			if s.apps[i].Locked {
+				writeJSON(w, http.StatusLocked, map[string]any{"error": "application_locked", "message": "This application is locked. Unlock it before resetting the client secret."})
+				return
+			}
 			s.apps[i].ClientSecret = "wms_" + randomHex(14)
 			s.persistAppLocked(s.apps[i])
 			writeJSON(w, http.StatusOK, map[string]any{
@@ -1968,8 +2024,13 @@ func (s *appServer) handleDeleteApp(w http.ResponseWriter, r *http.Request) {
 	defer s.mu.Unlock()
 	for i, a := range s.apps {
 		if a.ID == id {
+			if a.Locked {
+				writeJSON(w, http.StatusLocked, map[string]any{"error": "application_locked", "message": "This application is locked and cannot be deleted. Unlock it first."})
+				return
+			}
 			s.apps = append(s.apps[:i], s.apps[i+1:]...)
 			s.persistDeleteAppLocked(id)
+			s.persistAppLocksLocked()
 			writeJSON(w, http.StatusOK, map[string]any{"deleted": true, "applications": s.apps})
 			return
 		}
@@ -2158,6 +2219,10 @@ func (s *appServer) handleUpdateAppTheme(w http.ResponseWriter, r *http.Request)
 	defer s.mu.Unlock()
 	for i := range s.apps {
 		if s.apps[i].ClientID == key || s.apps[i].ID == key {
+			if s.apps[i].Locked {
+				writeJSON(w, http.StatusLocked, map[string]any{"error": "application_locked", "message": "This application is locked. Unlock it before changing its login theme."})
+				return
+			}
 			normalized := normalizeLoginTheme(payload, s.apps[i].Name)
 			s.apps[i].LoginTheme = &normalized
 			s.persistAppLocked(s.apps[i])
@@ -2275,12 +2340,153 @@ func (s *appServer) handleUpdateConnector(w http.ResponseWriter, r *http.Request
 	writeJSON(w, http.StatusNotFound, map[string]any{"error": "not_found"})
 }
 
+func isPrivateOrReservedNetIP(ip net.IP) bool {
+	if ip == nil {
+		return true
+	}
+	if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsMulticast() || ip.IsUnspecified() {
+		return true
+	}
+	if v4 := ip.To4(); v4 != nil {
+		// Block CGNAT 100.64.0.0/10 and reserved >= 224
+		if v4[0] == 100 && v4[1] >= 64 && v4[1] <= 127 {
+			return true
+		}
+		if v4[0] >= 224 || v4[0] == 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *appServer) handleDiscoverConnectorOIDC(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		IssuerURL string `json:"issuerUrl"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&body)
+	rawIssuer := strings.TrimSpace(body.IssuerURL)
+	parsed, err := url.Parse(rawIssuer)
+	if err != nil || parsed.Scheme != "https" || parsed.Hostname() == "" || parsed.User != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{
+			"error":   "invalid_issuer_url",
+			"message": "OIDC Discovery requires a valid HTTPS issuer URL without credentials.",
+		})
+		return
+	}
+	host := strings.ToLower(parsed.Hostname())
+	if host == "localhost" || strings.HasSuffix(host, ".localhost") || strings.HasSuffix(host, ".local") || strings.HasSuffix(host, ".internal") || host == "metadata.google.internal" || net.ParseIP(host) != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{
+			"error":   "blocked_host",
+			"message": "Local, internal metadata, or direct IP hosts are not allowed for OIDC discovery.",
+		})
+		return
+	}
+
+	normalized := strings.TrimRight(parsed.String(), "/")
+	discoveryURL := normalized
+	if !strings.HasSuffix(normalized, "/.well-known/openid-configuration") {
+		discoveryURL = normalized + "/.well-known/openid-configuration"
+	}
+
+	dialer := &net.Dialer{Timeout: 4 * time.Second}
+	client := &http.Client{
+		Timeout: 5 * time.Second,
+		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+			return fmt.Errorf("redirects are disabled for OIDC discovery")
+		},
+		Transport: &http.Transport{
+			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+				h, port, splitErr := net.SplitHostPort(addr)
+				if splitErr != nil {
+					return nil, splitErr
+				}
+				ips, lookupErr := net.DefaultResolver.LookupIPAddr(ctx, h)
+				if lookupErr != nil || len(ips) == 0 {
+					return nil, fmt.Errorf("unable to resolve host")
+				}
+				for _, ipAddr := range ips {
+					if isPrivateOrReservedNetIP(ipAddr.IP) {
+						return nil, fmt.Errorf("blocked private or reserved IP address")
+					}
+				}
+				return dialer.DialContext(ctx, network, net.JoinHostPort(ips[0].IP.String(), port))
+			},
+		},
+	}
+
+	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, discoveryURL, nil)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid_request", "message": err.Error()})
+		return
+	}
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]any{"error": "discovery_unreachable", "message": err.Error()})
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		writeJSON(w, http.StatusBadGateway, map[string]any{
+			"error":   "discovery_failed",
+			"message": fmt.Sprintf("Discovery endpoint returned HTTP %d", resp.StatusCode),
+		})
+		return
+	}
+
+	rawBytes, err := io.ReadAll(io.LimitReader(resp.Body, 131072))
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]any{"error": "discovery_read_failed", "message": err.Error()})
+		return
+	}
+
+	var doc struct {
+		Issuer                string   `json:"issuer"`
+		AuthorizationEndpoint string   `json:"authorization_endpoint"`
+		TokenEndpoint         string   `json:"token_endpoint"`
+		UserinfoEndpoint      string   `json:"userinfo_endpoint"`
+		JwksURI               string   `json:"jwks_uri"`
+		EndSessionEndpoint    string   `json:"end_session_endpoint"`
+		ScopesSupported       []string `json:"scopes_supported"`
+	}
+	if err := json.Unmarshal(rawBytes, &doc); err != nil || doc.AuthorizationEndpoint == "" || doc.TokenEndpoint == "" {
+		writeJSON(w, http.StatusBadGateway, map[string]any{
+			"error":   "invalid_discovery_doc",
+			"message": "Discovery document is missing authorization_endpoint or token_endpoint.",
+		})
+		return
+	}
+	if doc.Issuer == "" {
+		doc.Issuer = strings.TrimRight(rawIssuer, "/")
+	}
+	if len(doc.ScopesSupported) > 20 {
+		doc.ScopesSupported = doc.ScopesSupported[:20]
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":           true,
+		"discoveryUrl": discoveryURL,
+		"discovery": map[string]any{
+			"issuer":                 doc.Issuer,
+			"authorization_endpoint": doc.AuthorizationEndpoint,
+			"token_endpoint":         doc.TokenEndpoint,
+			"userinfo_endpoint":      doc.UserinfoEndpoint,
+			"jwks_uri":               doc.JwksURI,
+			"end_session_endpoint":   doc.EndSessionEndpoint,
+			"scopes_supported":       doc.ScopesSupported,
+		},
+	})
+}
+
 func (s *appServer) handleCreateConnector(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		DisplayName  string `json:"displayName"`
-		ClientID     string `json:"clientId"`
-		ClientSecret string `json:"clientSecret"`
-		IssuerURL    string `json:"issuerUrl"`
+		DisplayName  string            `json:"displayName"`
+		ClientID     string            `json:"clientId"`
+		ClientSecret string            `json:"clientSecret"`
+		IssuerURL    string            `json:"issuerUrl"`
+		Extra        map[string]string `json:"extra"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&body)
 	if strings.TrimSpace(body.DisplayName) == "" {
@@ -2293,6 +2499,15 @@ func (s *appServer) handleCreateConnector(w http.ResponseWriter, r *http.Request
 		enc, _ = s.keys.EncryptSecret(strings.TrimSpace(body.ClientSecret))
 		preview = maskSecret(strings.TrimSpace(body.ClientSecret))
 	}
+	extra := map[string]string{}
+	for k, v := range body.Extra {
+		if strings.TrimSpace(v) != "" {
+			extra[k] = strings.TrimSpace(v)
+		}
+	}
+	if strings.TrimSpace(body.IssuerURL) != "" {
+		extra["discovery_url"] = strings.TrimSpace(body.IssuerURL)
+	}
 	created := storedConnector{
 		ID:              "conn_custom_" + randomHex(4),
 		Provider:        "custom_oidc",
@@ -2301,7 +2516,7 @@ func (s *appServer) handleCreateConnector(w http.ResponseWriter, r *http.Request
 		ClientID:        defaultStr(strings.TrimSpace(body.ClientID), "oidc_"+randomHex(4)),
 		EncryptedSecret: enc,
 		SecretPreview:   preview,
-		Extra:           map[string]string{"discovery_url": strings.TrimSpace(body.IssuerURL)},
+		Extra:           extra,
 		UpdatedAt:       time.Now().UTC().Format(time.RFC3339),
 	}
 	s.mu.Lock()
