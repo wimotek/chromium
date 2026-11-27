@@ -11,6 +11,17 @@ on:
       - 'url/**'
       - '.github/workflows/pulic_url.yml'
   workflow_dispatch:
+    inputs:
+      bump:
+        description: 'Version bump type (auto / patch / minor / major)'
+        required: false
+        default: 'auto'
+        type: choice
+        options:
+          - auto
+          - patch
+          - minor
+          - major
 
 env:
   WORKING_DIR: url
@@ -20,12 +31,82 @@ jobs:
   build-and-push:
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      contents: write
       packages: write
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Compute automatic semantic version
+        id: version
+        env:
+          REF_NAME: ${{ github.ref_name }}
+          REF_TYPE: ${{ github.ref_type }}
+          BUMP_INPUT: ${{ inputs.bump || 'auto' }}
+          GITHUB_SHA_FULL: ${{ github.sha }}
+        run: |
+          SHORT_SHA="${GITHUB_SHA_FULL:0:7}"
+          BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          DATE_STAMP="$(date -u +%Y%m%d)"
+
+          if [ "$REF_TYPE" = "tag" ] && echo "$REF_NAME" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            TAG="$REF_NAME"
+            VER="${TAG#v}"
+            CREATED_NEW_TAG="false"
+          else
+            LATEST_TAG="$(git tag --list 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname | head -n 1)"
+            if [ -z "$LATEST_TAG" ]; then
+              MAJOR=1
+              MINOR=0
+              PATCH=0
+            else
+              CLEAN="${LATEST_TAG#v}"
+              IFS='.' read -r MAJOR MINOR PATCH <<< "$CLEAN"
+
+              BUMP="$BUMP_INPUT"
+              if [ "$BUMP" = "auto" ]; then
+                LAST_MSG="$(git log -1 --pretty=%B)"
+                if echo "$LAST_MSG" | grep -Eq '(BREAKING CHANGE|^[a-zA-Z0-9_-]+(\([^)]+\))?!:)'; then
+                  BUMP="major"
+                elif echo "$LAST_MSG" | grep -Eq '^feat(\([^)]+\))?:'; then
+                  BUMP="minor"
+                else
+                  BUMP="patch"
+                fi
+              fi
+
+              if [ "$BUMP" = "major" ]; then
+                MAJOR=$((MAJOR + 1))
+                MINOR=0
+                PATCH=0
+              elif [ "$BUMP" = "minor" ]; then
+                MINOR=$((MINOR + 1))
+                PATCH=0
+              else
+                PATCH=$((PATCH + 1))
+              fi
+            fi
+
+            VER="${MAJOR}.${MINOR}.${PATCH}"
+            TAG="v${VER}"
+            CREATED_NEW_TAG="true"
+          fi
+
+          IFS='.' read -r V_MAJOR V_MINOR V_PATCH <<< "$VER"
+
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "version=${VER}" >> "$GITHUB_OUTPUT"
+          echo "major_minor=${V_MAJOR}.${V_MINOR}" >> "$GITHUB_OUTPUT"
+          echo "major=${V_MAJOR}" >> "$GITHUB_OUTPUT"
+          echo "commit=${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+          echo "build_date=${BUILD_DATE}" >> "$GITHUB_OUTPUT"
+          echo "date_tag=${DATE_STAMP}-${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+          echo "created_new_tag=${CREATED_NEW_TAG}" >> "$GITHUB_OUTPUT"
+
+          echo "Resolved image version: ${TAG} (commit ${SHORT_SHA})"
 
       - name: Verify WORKING_DIR contents
         working-directory: ${{ env.WORKING_DIR }}
@@ -79,10 +160,13 @@ jobs:
         with:
           images: ${{ steps.registries.outputs.images }}
           tags: |
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=${{ steps.version.outputs.tag }}
+            type=raw,value=${{ steps.version.outputs.version }}
+            type=raw,value=${{ steps.version.outputs.major_minor }}
+            type=raw,value=${{ steps.version.outputs.major }}
+            type=raw,value=${{ steps.version.outputs.date_tag }}
             type=sha,prefix=sha-
-            type=raw,value=latest,enable={{is_default_branch}}
+            type=raw,value=latest
 
       - name: Build and push multi-arch images (linux/amd64, linux/arm64)
         uses: docker/build-push-action@v6
@@ -93,5 +177,21 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            APP_VERSION=${{ steps.version.outputs.tag }}
+            APP_COMMIT=${{ steps.version.outputs.commit }}
+            BUILD_DATE=${{ steps.version.outputs.build_date }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: Push auto-incremented Git version tag
+        if: steps.version.outputs.created_new_tag == 'true'
+        env:
+          NEW_TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          if ! git rev-parse "$NEW_TAG" >/dev/null 2>&1; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git tag -a "$NEW_TAG" -m "Release $NEW_TAG"
+            git push origin "$NEW_TAG"
+          fi

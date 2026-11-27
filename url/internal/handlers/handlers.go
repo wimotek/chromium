@@ -30,6 +30,9 @@ type Deps struct {
 	Scheduler *scheduler.Scheduler
 	StaticFS  fs.FS
 	DataDir   string
+	Version   string
+	Commit    string
+	BuildDate string
 }
 
 func NewRouter(d Deps) http.Handler {
@@ -38,6 +41,9 @@ func NewRouter(d Deps) http.Handler {
 	mux.HandleFunc("/health", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{
 			"status":      "ok",
+			"version":     d.Version,
+			"commit":      d.Commit,
+			"build_date":  d.BuildDate,
 			"initialized": d.Config.Get().Initialized,
 			"cache":       d.Cache.EngineName(),
 		})

@@ -27,6 +27,12 @@ import (
 //go:embed all:web/dist
 var embeddedFrontend embed.FS
 
+var (
+	Version   = "dev"
+	Commit    = "unknown"
+	BuildDate = "unknown"
+)
+
 func main() {
 	dataDir := getenv("WIMOTEK_DATA_DIR", "/data")
 	certsDir := getenv("WIMOTEK_CERTS_DIR", "/certs")
@@ -80,13 +86,16 @@ func main() {
 		Scheduler: sched,
 		StaticFS:  staticFS,
 		DataDir:   dataDir,
+		Version:   Version,
+		Commit:    Commit,
+		BuildDate: BuildDate,
 	})
 
 	tlsCfg, tlsSource, err := tlsutil.LoadOrGenerate(certsDir, filepath.Join(dataDir, "certs"), cfg.IssuerHostname())
 	if err != nil {
 		log.Fatalf("TLS initialization failed: %v", err)
 	}
-	log.Printf("wimotek/url starting (TLS source: %s, initialized: %v)", tlsSource, cfg.Initialized)
+	log.Printf("wimotek/url %s (%s) starting (TLS source: %s, initialized: %v)", Version, Commit, tlsSource, cfg.Initialized)
 
 	httpSrv := &http.Server{
 		Addr:              httpAddr,

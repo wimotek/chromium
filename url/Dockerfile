@@ -3,7 +3,7 @@
 # ==============================================================================
 # Stage 1: Build Production Frontend (Pure React + TypeScript + Tailwind CSS)
 # ==============================================================================
-FROM node:22-alpine AS web-builder
+FROM --platform=$BUILDPLATFORM node:22-alpine AS web-builder
 WORKDIR /src/web
 
 COPY web/package.json web/package-lock.json* ./
@@ -15,27 +15,40 @@ RUN npm run build
 # ==============================================================================
 # Stage 2: Build Single Static Go Binary with go:embed Frontend
 # ==============================================================================
-FROM golang:1.24-alpine AS go-builder
+FROM --platform=$BUILDPLATFORM golang:1.24-alpine AS go-builder
 WORKDIR /src
 
 RUN apk add --no-cache ca-certificates tzdata
 
 COPY go.mod go.sum* ./
-RUN go mod download || true
-
 COPY cmd/ ./cmd/
 COPY internal/ ./internal/
 COPY --from=web-builder /src/web/dist ./cmd/server/web/dist
 
+RUN go mod tidy
+
 ARG TARGETOS=linux
 ARG TARGETARCH=amd64
+ARG APP_VERSION=dev
+ARG APP_COMMIT=unknown
+ARG BUILD_DATE=unknown
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
-    go build -trimpath -ldflags="-s -w" -o /out/wimotek-url ./cmd/server
+    go build -trimpath \
+    -ldflags="-s -w -X main.Version=${APP_VERSION} -X main.Commit=${APP_COMMIT} -X main.BuildDate=${BUILD_DATE}" \
+    -o /out/wimotek-url ./cmd/server
 
 # ==============================================================================
 # Stage 3: Minimal Non-Root Production Runtime
 # ==============================================================================
 FROM alpine:3.21 AS runtime
+
+ARG APP_VERSION=dev
+ARG APP_COMMIT=unknown
+ARG BUILD_DATE=unknown
+LABEL org.opencontainers.image.title="wimotek/url" \
+      org.opencontainers.image.version="${APP_VERSION}" \
+      org.opencontainers.image.revision="${APP_COMMIT}" \
+      org.opencontainers.image.created="${BUILD_DATE}"
 
 RUN apk add --no-cache ca-certificates tzdata \
     && addgroup -g 10001 -S wimotek \
