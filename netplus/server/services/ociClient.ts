@@ -214,7 +214,12 @@ export async function ociApiRequest<T = unknown>(params: {
   const cleanUser = sanitizeOcid(params.creds.userOcid);
   const cleanFp = params.creds.fingerprint.trim().toLowerCase();
   const host = `${params.service}.${region}.oraclecloud.com`;
-  const bodyStr = params.body !== undefined ? JSON.stringify(params.body) : undefined;
+  const bodyStr =
+    params.body !== undefined
+      ? JSON.stringify(params.body)
+      : params.method === 'POST' || params.method === 'PUT'
+      ? ''
+      : undefined;
 
   const executeOnce = async (dateOverride?: Date) => {
     let headers: Record<string, string>;
@@ -1797,7 +1802,6 @@ export async function ociInstancePowerAction(
     service: 'iaas',
     method: 'POST',
     apiPath: `/20160918/instances/${encodeURIComponent(instanceId)}?action=${encodeURIComponent(action)}`,
-    body: {},
   });
 
   if (!res.ok) {
