@@ -1,0 +1,18 @@
+{
+  "layout": "split_left",
+  "surfaceMode": "auto",
+  "brandTitle": "wimotek/url",
+  "brandSubtitle": "Shorten Your URL — Enterprise Link Infrastructure",
+  "heroTitle": "Precision Short Links & Real-Time GeoIP Telemetry",
+  "heroSubtitle": "Unified custom domains, password & expiry controls, SEO auto-submission, and MCP AI Agent readiness for modern teams.",
+  "logoUrl": "https://u.wimotek.com/logo.svg",
+  "primaryColor": "#2563EB",
+  "backgroundColor": "#F8FAFC",
+  "cardColor": "#FFFFFF",
+  "textColor": "#0F172A",
+  "borderRadius": "rounded",
+  "fontFamily": "sans",
+  "socialLayout": "stack",
+  "footerText": "wimotek/url · Powered by wimotek/Oauth",
+  "customCss": "[data-wimotek-login-root] { font-family: \"Plus Jakarta Sans\", \"PingFang SC\", \"Microsoft YaHei\", system-ui, sans-serif; } [data-wimotek-login-card] { border: 1px solid #E2E8F0; border-radius: 10px; box-shadow: 0 12px 32px rgba(15, 23, 42, 0.06); }"
+}

@@ -1,0 +1,26 @@
+@import "tailwindcss";
+@custom-variant dark (&:where(.dark, .dark *));
+
+:root {
+  --font-sans: "Plus Jakarta Sans", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans SC", system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --brand-primary: #2563EB;
+  --bg-canvas: #F8FAFC;
+  --bg-surface: #FFFFFF;
+  --border-hairline: #E2E8F0;
+  --text-primary: #0F172A;
+}
+
+.dark {
+  --brand-primary: #3B82F6;
+  --bg-canvas: #090D16;
+  --bg-surface: #111827;
+  --border-hairline: #1F2937;
+  --text-primary: #F8FAFC;
+}
+
+body {
+  font-family: var(--font-sans);
+  background: var(--bg-canvas);
+  color: var(--text-primary);
+}

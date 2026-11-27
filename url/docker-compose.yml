@@ -1,0 +1,24 @@
+services:
+  wimotek-url:
+    image: ghcr.io/wimotek/url:latest
+    container_name: wimotek-url
+    restart: unless-stopped
+    user: "10001:10001"
+    ports:
+      - "80:8080"
+      - "443:8443"
+    environment:
+      WIMOTEK_DATA_DIR: /data
+      WIMOTEK_CERTS_DIR: /certs
+      WIMOTEK_HTTP_ADDR: ":8080"
+      WIMOTEK_HTTPS_ADDR: ":8443"
+    volumes:
+      - ./data:/data
+      # Optional read-only TLS certificate mount (fullchain.pem & privkey.pem or fullchain & prikey).
+      # Leave empty or remove to automatically generate self-signed TLS certificates in /data/certs.
+      - ./certs:/certs:ro
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp
