@@ -647,15 +647,18 @@ func (s *appServer) resolveSessionLocked(tok string) (authUser, bool) {
 }
 
 func isHTTPSRequest(r *http.Request) bool {
-	if r.TLS != nil {
+	return detectRequestScheme(r) == "https"
+}
+
+func (s *appServer) isPublicHTTPS(r *http.Request) bool {
+	if isHTTPSRequest(r) {
 		return true
 	}
-	proto := strings.ToLower(strings.TrimSpace(r.Header.Get("X-Forwarded-Proto")))
-	return proto == "https"
+	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(s.cfgMgr.Get().IssuerURL)), "https://")
 }
 
 func (s *appServer) setSessionCookie(w http.ResponseWriter, r *http.Request, tok string) {
-	if isHTTPSRequest(r) {
+	if s.isPublicHTTPS(r) {
 		w.Header().Add("Set-Cookie", adminSessionCookieName+"="+tok+"; Path=/; Max-Age=604800; HttpOnly; Secure; SameSite=None; Partitioned")
 		return
 	}
@@ -663,7 +666,7 @@ func (s *appServer) setSessionCookie(w http.ResponseWriter, r *http.Request, tok
 }
 
 func (s *appServer) clearSessionCookie(w http.ResponseWriter, r *http.Request) {
-	if isHTTPSRequest(r) {
+	if s.isPublicHTTPS(r) {
 		w.Header().Add("Set-Cookie", adminSessionCookieName+"=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=None; Partitioned")
 		return
 	}

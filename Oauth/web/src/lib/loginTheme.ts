@@ -341,3 +341,97 @@ export function buildAiIntegrationPrompt(opts: {
 3. Map authenticated users via \`sub\` (and link legacy accounts via \`email\` when \`email_verified === true\`).
 4. Implement \`/login\`, \`/callback\`, \`/logout\`, and update \`.env.example\`.`;
 }
+
+const KNOWN_THEME_KEYS: ReadonlyArray<keyof LoginThemeConfig> = [
+  'layout',
+  'surfaceMode',
+  'brandTitle',
+  'brandSubtitle',
+  'heroTitle',
+  'heroSubtitle',
+  'logoUrl',
+  'primaryColor',
+  'backgroundColor',
+  'cardColor',
+  'textColor',
+  'borderRadius',
+  'fontFamily',
+  'socialLayout',
+  'footerText',
+  'customCss',
+];
+
+export type ThemeJsonImportResult =
+  | { ok: true; theme: LoginThemeConfig; matchedKeys: string[] }
+  | { ok: false; error: string };
+
+/**
+ * Parses a login theme JSON pasted from AI output, a saved `.json` file,
+ * a Markdown ```json``` block, an API response (`{ theme: {...} }`),
+ * or a `curl -d '{...}'` snippet, and normalizes/sanitizes all fields.
+ */
+export function parseImportedLoginThemeJson(raw: string, baseTheme?: LoginThemeConfig): ThemeJsonImportResult {
+  const trimmed = (raw || '').trim();
+  if (!trimmed) {
+    return { ok: false, error: 'Please paste a theme JSON object or upload a .json file.' };
+  }
+
+  const candidates: string[] = [trimmed];
+
+  const fenceMatch = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  if (fenceMatch && fenceMatch[1]) {
+    candidates.unshift(fenceMatch[1].trim());
+  }
+
+  const firstBrace = trimmed.indexOf('{');
+  const lastBrace = trimmed.lastIndexOf('}');
+  if (firstBrace !== -1 && lastBrace > firstBrace) {
+    candidates.push(trimmed.slice(firstBrace, lastBrace + 1));
+  }
+
+  let parsed: unknown = null;
+  let parseSucceeded = false;
+  for (const candidate of candidates) {
+    try {
+      parsed = JSON.parse(candidate);
+      parseSucceeded = true;
+      break;
+    } catch {
+      // try next extraction candidate
+    }
+  }
+
+  if (!parseSucceeded || !parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    return { ok: false, error: 'Invalid JSON format. Expected a JSON object containing theme properties.' };
+  }
+
+  let obj = parsed as Record<string, unknown>;
+  if (obj.theme && typeof obj.theme === 'object' && !Array.isArray(obj.theme)) {
+    obj = obj.theme as Record<string, unknown>;
+  } else if (obj.loginTheme && typeof obj.loginTheme === 'object' && !Array.isArray(obj.loginTheme)) {
+    obj = obj.loginTheme as Record<string, unknown>;
+  }
+
+  const matchedKeys = KNOWN_THEME_KEYS.filter((k) => Object.prototype.hasOwnProperty.call(obj, k));
+  if (matchedKeys.length === 0) {
+    return {
+      ok: false,
+      error: 'No recognized LoginThemeConfig fields found (e.g. layout, primaryColor, backgroundColor, brandTitle).',
+    };
+  }
+
+  const merged: Partial<LoginThemeConfig> = { ...(baseTheme || DEFAULT_LOGIN_THEME) };
+  for (const key of matchedKeys) {
+    const val = obj[key];
+    if (typeof val === 'string') {
+      (merged as Record<string, unknown>)[key] = val;
+    }
+  }
+
+  return {
+    ok: true,
+    theme: normalizeLoginTheme(merged),
+    matchedKeys,
+  };
+}
+

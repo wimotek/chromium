@@ -14,6 +14,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"regexp"
 	"strings"
 	"sync"
@@ -368,8 +369,9 @@ func NewRouter(cfgMgr *config.Manager, keys *crypto.KeyManager, certSources ...s
 	mux.HandleFunc("POST /api/auth/totp/verify", s.requireAdmin(s.handleTotpVerify))
 	mux.HandleFunc("GET /api/auth/me", s.requireAdmin(s.handleAuthMe))
 
-	// Overview, Cache Failover & Database Backups
+	// Overview, Cache Failover, Issuer URL & Database Backups
 	mux.HandleFunc("GET /api/system/overview", s.requireAdmin(s.handleOverview))
+	mux.HandleFunc("PUT /api/system/issuer", s.requireAdmin(s.handleUpdateIssuerURL))
 	mux.HandleFunc("POST /api/system/cache-sim", s.requireAdmin(s.handleCacheSim))
 	mux.HandleFunc("GET /api/system/backups", s.requireAdmin(s.handleListBackups))
 	mux.HandleFunc("PUT /api/system/backups/settings", s.requireAdmin(s.handleUpdateBackupSettings))
@@ -471,27 +473,102 @@ func NewRouter(cfgMgr *config.Manager, keys *crypto.KeyManager, certSources ...s
 // Helpers
 // ============================================================================
 
-func (s *appServer) getIssuer(r *http.Request) string {
-	cfg := s.cfgMgr.Get()
-	if cfg.IssuerURL != "" && !strings.HasPrefix(cfg.IssuerURL, "http://localhost") {
-		return strings.TrimRight(cfg.IssuerURL, "/")
+func isLocalHostName(host string) bool {
+	h := strings.ToLower(strings.TrimSpace(host))
+	if h == "" {
+		return true
 	}
-	proto := r.Header.Get("X-Forwarded-Proto")
-	if proto == "" {
-		if r.TLS != nil {
-			proto = "https"
-		} else {
-			proto = "http"
+	if parsedHost, _, err := net.SplitHostPort(h); err == nil {
+		h = parsedHost
+	}
+	h = strings.Trim(h, "[]")
+	return h == "localhost" || h == "127.0.0.1" || h == "::1" || h == "0.0.0.0" || strings.HasSuffix(h, ".localhost")
+}
+
+func detectRequestHost(r *http.Request) string {
+	host := strings.TrimSpace(r.Header.Get("X-Forwarded-Host"))
+	if idx := strings.Index(host, ","); idx != -1 {
+		host = strings.TrimSpace(host[:idx])
+	}
+	if host == "" {
+		host = strings.TrimSpace(r.Host)
+	}
+	return host
+}
+
+// detectRequestScheme accurately detects HTTPS behind Nginx, Caddy, Traefik, Cloudflare, 1Panel, or multi-hop reverse proxies.
+func detectRequestScheme(r *http.Request) string {
+	if r.TLS != nil {
+		return "https"
+	}
+	if xfp := strings.TrimSpace(r.Header.Get("X-Forwarded-Proto")); xfp != "" {
+		if idx := strings.Index(xfp, ","); idx != -1 {
+			xfp = strings.TrimSpace(xfp[:idx])
+		}
+		if strings.EqualFold(xfp, "https") {
+			return "https"
+		}
+		if strings.EqualFold(xfp, "http") {
+			// Still allow stronger reverse-proxy hints below before falling back to http
 		}
 	}
-	host := r.Header.Get("X-Forwarded-Host")
-	if host == "" {
-		host = r.Host
+	if fwd := strings.ToLower(r.Header.Get("Forwarded")); strings.Contains(fwd, "proto=https") {
+		return "https"
 	}
-	if host == "" {
+	if strings.EqualFold(strings.TrimSpace(r.Header.Get("X-Forwarded-Ssl")), "on") ||
+		strings.EqualFold(strings.TrimSpace(r.Header.Get("Front-End-Https")), "on") ||
+		strings.EqualFold(strings.TrimSpace(r.Header.Get("X-Url-Scheme")), "https") {
+		return "https"
+	}
+	if cfv := strings.ToLower(r.Header.Get("CF-Visitor")); strings.Contains(cfv, `"https"`) {
+		return "https"
+	}
+	// Fallback for reverse proxies that omit X-Forwarded-Proto: inspect same-host Origin / Referer sent by HTTPS browsers.
+	reqHost := detectRequestHost(r)
+	for _, hdr := range []string{"Origin", "Referer"} {
+		if raw := strings.TrimSpace(r.Header.Get(hdr)); raw != "" {
+			if parsed, err := url.Parse(raw); err == nil && strings.EqualFold(parsed.Scheme, "https") {
+				if reqHost == "" || strings.EqualFold(parsed.Host, reqHost) {
+					return "https"
+				}
+			}
+		}
+	}
+	return "http"
+}
+
+func (s *appServer) getIssuer(r *http.Request) string {
+	cfg := s.cfgMgr.Get()
+	reqScheme := detectRequestScheme(r)
+	reqHost := detectRequestHost(r)
+
+	configured := strings.TrimRight(strings.TrimSpace(cfg.IssuerURL), "/")
+	if configured == "" || isLocalHostName(func() string {
+		if u, err := url.Parse(configured); err == nil {
+			return u.Host
+		}
+		return ""
+	}()) {
+		if envIssuer := strings.TrimRight(strings.TrimSpace(defaultStr(os.Getenv("ISSUER_URL"), os.Getenv("PUBLIC_URL"))), "/"); envIssuer != "" {
+			configured = envIssuer
+		}
+	}
+
+	if configured != "" {
+		if u, err := url.Parse(configured); err == nil && u.Host != "" && !isLocalHostName(u.Host) {
+			// If config.json previously saved http://<domain> behind a reverse proxy, auto-upgrade to https:// when request arrives over HTTPS.
+			if strings.EqualFold(u.Scheme, "http") && reqScheme == "https" && (reqHost == "" || strings.EqualFold(u.Host, reqHost)) {
+				u.Scheme = "https"
+				return strings.TrimRight(u.String(), "/")
+			}
+			return configured
+		}
+	}
+
+	if reqHost == "" {
 		return "http://localhost:8080"
 	}
-	return fmt.Sprintf("%s://%s", proto, host)
+	return fmt.Sprintf("%s://%s", reqScheme, reqHost)
 }
 
 func (s *appServer) activeCacheModeLocked() string {

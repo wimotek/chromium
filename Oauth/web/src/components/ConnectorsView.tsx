@@ -67,6 +67,7 @@ interface ConnectorsViewProps {
     signInAudience: string;
     tenantId?: string;
   }) => Promise<{ appId: string; tenantId: string; callbackUri: string }>;
+  onUpdateIssuerUrl?: (nextIssuerUrl: string) => Promise<void>;
 }
 
 type EditorTab = 'config' | 'import' | 'guide';
@@ -81,6 +82,7 @@ export function ConnectorsView({
   onReorderConnectors,
   onDiscoverOidc,
   onAutoProvisionMicrosoft,
+  onUpdateIssuerUrl,
 }: ConnectorsViewProps) {
   const t = TRANSLATIONS[locale];
   const isZh = locale === 'zh-CN' || locale === 'zh-TW';
@@ -120,6 +122,15 @@ export function ConnectorsView({
   );
   const [msGraphToken, setMsGraphToken] = useState('');
   const [msProvisioning, setMsProvisioning] = useState(false);
+
+  // Public Issuer URL / Reverse-Proxy HTTPS override state
+  const [editingIssuer, setEditingIssuer] = useState(false);
+  const [draftIssuerUrl, setDraftIssuerUrl] = useState(issuerUrl);
+  const [savingIssuer, setSavingIssuer] = useState(false);
+
+  useEffect(() => {
+    setDraftIssuerUrl(issuerUrl);
+  }, [issuerUrl]);
 
   const [draggingId, setDraggingId] = useState<string | null>(null);
   const [dragOverId, setDragOverId] = useState<string | null>(null);
@@ -970,43 +981,167 @@ export function ConnectorsView({
               </a>
             </div>
 
-            <div className="bg-slate-50/90 dark:bg-slate-900/60 border border-slate-200 dark:border-slate-800 rounded-lg p-3.5 space-y-2.5">
-              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
-                <div className="min-w-0">
-                  <div className="text-xs font-medium text-slate-700 dark:text-slate-300">
-                    {isZh ? '自动生成的 Callback URI（复制到第三方应用回调白名单）' : 'Auto-Generated Callback URI (paste into provider console)'}
-                  </div>
-                  <div className="mt-1 text-xs font-mono text-indigo-700 dark:text-indigo-300 break-all">
-                    {setupGuide.callbackInfo.callbackUri}
-                  </div>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => copyValue('callback_uri', setupGuide.callbackInfo.callbackUri)}
-                  className="min-h-[34px] px-3 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 hover:bg-slate-100 dark:hover:bg-slate-800 text-xs font-medium text-slate-700 dark:text-slate-200 inline-flex items-center gap-1.5 whitespace-nowrap shrink-0"
-                >
-                  {copiedKey === 'callback_uri' ? <Check className="w-3.5 h-3.5 text-emerald-600" /> : <Copy className="w-3.5 h-3.5" />}
-                  <span>{copiedKey === 'callback_uri' ? (isZh ? '已复制' : 'Copied') : isZh ? '复制 URI' : 'Copy URI'}</span>
-                </button>
-              </div>
+            {(() => {
+              const cbUri = setupGuide.callbackInfo.callbackUri;
+              const isNonLocalHttp = (() => {
+                try {
+                  const u = new URL(cbUri);
+                  const h = u.hostname.toLowerCase();
+                  return (
+                    u.protocol === 'http:' &&
+                    h !== 'localhost' &&
+                    h !== '127.0.0.1' &&
+                    h !== '::1' &&
+                    !h.endsWith('.localhost')
+                  );
+                } catch {
+                  return false;
+                }
+              })();
+              const suggestedHttpsIssuer = issuerUrl.replace(/^http:\/\//i, 'https://').replace(/\/$/, '');
 
-              {(selected.provider === 'wechat' || selected.provider === 'apple') && (
-                <div className="pt-2 border-t border-slate-200/80 dark:border-slate-800 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
-                  <div className="text-xs text-slate-600 dark:text-slate-400">
-                    <span>{selected.provider === 'wechat' ? (isZh ? '微信授权回调域（纯域名）：' : 'WeChat Callback Domain: ') : isZh ? 'Apple Domains & Subdomains：' : 'Apple Domain: '}</span>
-                    <code className="font-mono text-slate-900 dark:text-slate-200">{setupGuide.callbackInfo.callbackDomain}</code>
+              async function submitIssuerUrl(nextUrl: string) {
+                if (!onUpdateIssuerUrl) return;
+                setSavingIssuer(true);
+                setActionNotice(null);
+                try {
+                  await onUpdateIssuerUrl(nextUrl.trim());
+                  setEditingIssuer(false);
+                  setActionNotice({
+                    text: isZh
+                      ? `公开域名已更新为 ${nextUrl.trim()}，所有连接器 Callback URI 已同步生效。`
+                      : `Public Issuer URL updated to ${nextUrl.trim()}. All Callback URIs updated.`,
+                  });
+                } catch (err) {
+                  setActionNotice({
+                    text: err instanceof Error ? err.message : 'Failed to update Issuer URL',
+                    isError: true,
+                  });
+                } finally {
+                  setSavingIssuer(false);
+                }
+              }
+
+              return (
+                <div className="bg-slate-50/90 dark:bg-slate-900/60 border border-slate-200 dark:border-slate-800 rounded-lg p-3.5 space-y-2.5">
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                    <div className="min-w-0">
+                      <div className="text-xs font-medium text-slate-700 dark:text-slate-300">
+                        {isZh ? '自动生成的 Callback URI（复制到第三方应用回调白名单）' : 'Auto-Generated Callback URI (paste into provider console)'}
+                      </div>
+                      <div className="mt-1 text-xs font-mono text-indigo-700 dark:text-indigo-300 break-all">
+                        {cbUri}
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-1.5 shrink-0">
+                      {onUpdateIssuerUrl && (
+                        <button
+                          type="button"
+                          onClick={() => setEditingIssuer((v) => !v)}
+                          className="min-h-[34px] px-2.5 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 hover:bg-slate-100 dark:hover:bg-slate-800 text-xs font-medium text-slate-600 dark:text-slate-300 inline-flex items-center gap-1 whitespace-nowrap"
+                        >
+                          <Globe className="w-3.5 h-3.5" />
+                          <span>{isZh ? '修改域名' : 'Edit Domain'}</span>
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        onClick={() => copyValue('callback_uri', cbUri)}
+                        className="min-h-[34px] px-3 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 hover:bg-slate-100 dark:hover:bg-slate-800 text-xs font-medium text-slate-700 dark:text-slate-200 inline-flex items-center gap-1.5 whitespace-nowrap"
+                      >
+                        {copiedKey === 'callback_uri' ? <Check className="w-3.5 h-3.5 text-emerald-600" /> : <Copy className="w-3.5 h-3.5" />}
+                        <span>{copiedKey === 'callback_uri' ? (isZh ? '已复制' : 'Copied') : isZh ? '复制 URI' : 'Copy URI'}</span>
+                      </button>
+                    </div>
                   </div>
-                  <button
-                    type="button"
-                    onClick={() => copyValue('callback_domain', setupGuide.callbackInfo.callbackDomain)}
-                    className="text-xs font-medium text-indigo-600 dark:text-indigo-400 hover:underline inline-flex items-center gap-1 whitespace-nowrap shrink-0"
-                  >
-                    {copiedKey === 'callback_domain' ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
-                    <span>{copiedKey === 'callback_domain' ? (isZh ? '已复制域名' : 'Copied Domain') : isZh ? '复制域名' : 'Copy Domain'}</span>
-                  </button>
+
+                  {isNonLocalHttp && (
+                    <div className="p-3 rounded-lg bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800/70 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 text-xs">
+                      <div className="flex items-start gap-2 text-amber-900 dark:text-amber-200">
+                        <AlertCircle className="w-4 h-4 text-amber-600 dark:text-amber-400 shrink-0 mt-0.5" />
+                        <div className="space-y-0.5 leading-relaxed">
+                          <div className="font-semibold">
+                            {isZh
+                              ? '检测到回调地址为 HTTP（常见于反向代理到 8080 端口）'
+                              : 'HTTP Callback URI detected on public domain (reverse proxy)'}
+                          </div>
+                          <p className="text-[11px] text-amber-800/90 dark:text-amber-300/90">
+                            {isZh
+                              ? 'Microsoft Entra ID / Google / Apple 强制非本地域名使用 HTTPS（否则报 AADSTS50011）。请点击右侧按钮一键切换为 HTTPS，并建议在反代中透传 X-Forwarded-Proto: https。'
+                              : 'Microsoft Entra ID / Google / Apple require HTTPS for non-localhost domains (otherwise AADSTS50011). Switch Issuer URL to HTTPS below and forward X-Forwarded-Proto: https in your reverse proxy.'}
+                          </p>
+                        </div>
+                      </div>
+                      {onUpdateIssuerUrl && (
+                        <button
+                          type="button"
+                          disabled={savingIssuer}
+                          onClick={() => void submitIssuerUrl(suggestedHttpsIssuer)}
+                          className="min-h-[34px] px-3 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-700 disabled:opacity-50 text-white text-xs font-medium whitespace-nowrap shrink-0 transition-colors"
+                        >
+                          {savingIssuer
+                            ? isZh
+                              ? '切换中...'
+                              : 'Switching...'
+                            : isZh
+                              ? '一键切换为 HTTPS'
+                              : 'Switch to HTTPS'}
+                        </button>
+                      )}
+                    </div>
+                  )}
+
+                  {editingIssuer && onUpdateIssuerUrl && (
+                    <div className="pt-2 border-t border-slate-200/80 dark:border-slate-800 flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
+                      <input
+                        type="url"
+                        value={draftIssuerUrl}
+                        onChange={(e) => setDraftIssuerUrl(e.target.value)}
+                        placeholder="https://ca.wimotek.com"
+                        className="flex-1 min-h-[36px] px-3 py-1.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-[#111827] text-xs font-mono text-slate-900 dark:text-slate-100"
+                      />
+                      <div className="flex items-center gap-1.5 shrink-0">
+                        <button
+                          type="button"
+                          disabled={savingIssuer || !draftIssuerUrl.trim()}
+                          onClick={() => void submitIssuerUrl(draftIssuerUrl)}
+                          className="min-h-[36px] px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white text-xs font-medium"
+                        >
+                          {savingIssuer ? (isZh ? '保存中...' : 'Saving...') : isZh ? '保存公开域名' : 'Save Issuer URL'}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setDraftIssuerUrl(issuerUrl);
+                            setEditingIssuer(false);
+                          }}
+                          className="min-h-[36px] px-2.5 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 text-xs text-slate-600 dark:text-slate-300"
+                        >
+                          {isZh ? '取消' : 'Cancel'}
+                        </button>
+                      </div>
+                    </div>
+                  )}
+
+                  {(selected.provider === 'wechat' || selected.provider === 'apple') && (
+                    <div className="pt-2 border-t border-slate-200/80 dark:border-slate-800 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                      <div className="text-xs text-slate-600 dark:text-slate-400">
+                        <span>{selected.provider === 'wechat' ? (isZh ? '微信授权回调域（纯域名）：' : 'WeChat Callback Domain: ') : isZh ? 'Apple Domains & Subdomains：' : 'Apple Domain: '}</span>
+                        <code className="font-mono text-slate-900 dark:text-slate-200">{setupGuide.callbackInfo.callbackDomain}</code>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => copyValue('callback_domain', setupGuide.callbackInfo.callbackDomain)}
+                        className="text-xs font-medium text-indigo-600 dark:text-indigo-400 hover:underline inline-flex items-center gap-1 whitespace-nowrap shrink-0"
+                      >
+                        {copiedKey === 'callback_domain' ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
+                        <span>{copiedKey === 'callback_domain' ? (isZh ? '已复制域名' : 'Copied Domain') : isZh ? '复制域名' : 'Copy Domain'}</span>
+                      </button>
+                    </div>
+                  )}
                 </div>
-              )}
-            </div>
+              );
+            })()}
 
             <div className="flex flex-wrap items-center justify-between gap-3">
               <div className="inline-flex items-center gap-1 p-1 bg-slate-100 dark:bg-slate-900 rounded-lg border border-slate-200/70 dark:border-slate-800">

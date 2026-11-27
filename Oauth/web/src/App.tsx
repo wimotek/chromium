@@ -617,6 +617,23 @@ export default function App() {
     };
   }
 
+  async function handleUpdateIssuerUrl(nextIssuerUrl: string) {
+    const res = await authFetch('/api/system/issuer', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ issuerUrl: nextIssuerUrl }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      throw new Error(data.message || 'Failed to update public Issuer URL');
+    }
+    if (data.config) {
+      setConfig(data.config);
+    } else if (typeof data.issuerUrl === 'string') {
+      setConfig((prev) => (prev ? { ...prev, issuerUrl: data.issuerUrl } : prev));
+    }
+  }
+
   async function handleDeleteConnector(id: string) {
     const res = await authFetch(`/api/connectors/${encodeURIComponent(id)}`, {
       method: 'DELETE',
@@ -1227,6 +1244,7 @@ export default function App() {
               onReorderConnectors={handleReorderConnectors}
               onDiscoverOidc={handleDiscoverOidc}
               onAutoProvisionMicrosoft={handleAutoProvisionMicrosoft}
+              onUpdateIssuerUrl={handleUpdateIssuerUrl}
             />
           )}
 

@@ -326,6 +326,7 @@ type socialOAuthState struct {
 	ConnectorID string `json:"connectorId"`
 	Provider    string `json:"provider"`
 	RedirectTo  string `json:"redirectTo"`
+	RedirectURI string `json:"redirectUri,omitempty"`
 	CreatedAt   int64  `json:"createdAt"`
 }
 
@@ -340,12 +341,54 @@ func (s *appServer) findConnectorBySlugLocked(slug string) (*storedConnector, in
 }
 
 func (s *appServer) connectorCallbackURI(r *http.Request, conn storedConnector) string {
+	if custom := strings.TrimSpace(conn.Extra["redirect_uri"]); custom != "" {
+		if u, err := url.Parse(custom); err == nil && (u.Scheme == "https" || (u.Scheme == "http" && isLocalHostName(u.Host))) && u.Host != "" {
+			return custom
+		}
+	}
 	issuer := strings.TrimRight(s.getIssuer(r), "/")
 	slug := conn.Provider
 	if conn.Provider == "custom_oidc" {
 		slug = conn.ID
 	}
 	return issuer + "/oauth/callback/" + url.PathEscape(slug)
+}
+
+func (s *appServer) handleUpdateIssuerURL(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		IssuerURL string `json:"issuerUrl"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid_json", "message": "Invalid JSON payload"})
+		return
+	}
+	raw := strings.TrimRight(strings.TrimSpace(body.IssuerURL), "/")
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.Host == "" || (parsed.Scheme != "https" && parsed.Scheme != "http") {
+		writeJSON(w, http.StatusBadRequest, map[string]any{
+			"error":   "invalid_issuer_url",
+			"message": "Issuer URL must be a valid http:// or https:// URL (e.g. https://ca.wimotek.com).",
+		})
+		return
+	}
+	clean := strings.TrimRight(parsed.String(), "/")
+
+	s.mu.Lock()
+	cfg := s.cfgMgr.Get()
+	cfg.IssuerURL = clean
+	if err := s.cfgMgr.Update(cfg); err != nil {
+		s.mu.Unlock()
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "persist_failed", "message": err.Error()})
+		return
+	}
+	payload := s.buildConfigPayloadLocked(r)
+	s.mu.Unlock()
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":        true,
+		"issuerUrl": clean,
+		"config":    payload,
+	})
 }
 
 func (s *appServer) handleSocialStart(w http.ResponseWriter, r *http.Request) {
@@ -380,11 +423,13 @@ func (s *appServer) handleSocialStart(w http.ResponseWriter, r *http.Request) {
 	}
 	connCopy.Extra = extraCopy
 
+	callbackURI := s.connectorCallbackURI(r, connCopy)
 	state := "st_" + randomHex(18)
 	stateBytes, _ := json.Marshal(socialOAuthState{
 		ConnectorID: connCopy.ID,
 		Provider:    connCopy.Provider,
 		RedirectTo:  redirectTo,
+		RedirectURI: callbackURI,
 		CreatedAt:   time.Now().UTC().Unix(),
 	})
 	s.cacheSetLocked("social_state:"+state, string(stateBytes), 10*time.Minute)
@@ -399,7 +444,7 @@ func (s *appServer) handleSocialStart(w http.ResponseWriter, r *http.Request) {
 
 	authURL, err := adapter.BuildAuthURL(providers.Config{
 		ClientID:    connCopy.ClientID,
-		RedirectURI: s.connectorCallbackURI(r, connCopy),
+		RedirectURI: callbackURI,
 		Extra:       connCopy.Extra,
 	}, state)
 	if err != nil {
@@ -486,10 +531,14 @@ func (s *appServer) handleSocialCallback(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	callbackURI := st.RedirectURI
+	if callbackURI == "" {
+		callbackURI = s.connectorCallbackURI(r, connCopy)
+	}
 	profile, err := adapter.ExchangeCode(r.Context(), providers.Config{
 		ClientID:     connCopy.ClientID,
 		ClientSecret: plainSecret,
-		RedirectURI:  s.connectorCallbackURI(r, connCopy),
+		RedirectURI:  callbackURI,
 		Extra:        connCopy.Extra,
 	}, code)
 	if err != nil {

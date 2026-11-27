@@ -15,6 +15,11 @@ import {
   Globe,
   KeyRound,
   Cpu,
+  Upload,
+  Download,
+  FileJson,
+  X,
+  AlertCircle,
 } from 'lucide-react';
 import type {
   AuthPolicyConfig,
@@ -35,6 +40,7 @@ import {
   buildAiIntegrationPrompt,
   buildAiThemeSyncPrompt,
   normalizeLoginTheme,
+  parseImportedLoginThemeJson,
 } from '../lib/loginTheme';
 import { HostedLoginCard } from './HostedLoginCard';
 import { AdminTokenManagerModal, buildMcpClientConfigJson } from './AdminApiTokensSection';
@@ -96,6 +102,11 @@ export function LoginLabView({
   const [tokenModalOpen, setTokenModalOpen] = useState(false);
   const [mintedTokenInMem, setMintedTokenInMem] = useState<string | null>(null);
   const [fillMintedToken, setFillMintedToken] = useState(true);
+  const [jsonModalOpen, setJsonModalOpen] = useState(false);
+  const [jsonInputText, setJsonInputText] = useState('');
+  const [jsonImportError, setJsonImportError] = useState<string | null>(null);
+  const [importingSave, setImportingSave] = useState(false);
+  const jsonFileInputRef = useRef<HTMLInputElement | null>(null);
 
   const prevClientIdRef = useRef<string | undefined>(selectedApp?.clientId);
   useEffect(() => {
@@ -199,6 +210,78 @@ export function LoginLabView({
     setSaveNotice(null);
   }
 
+  const parsedJsonPreview = useMemo(() => {
+    if (!jsonInputText.trim()) return null;
+    return parseImportedLoginThemeJson(jsonInputText, draftTheme);
+  }, [jsonInputText, draftTheme]);
+
+  function openJsonImportModal() {
+    setJsonImportError(null);
+    setJsonModalOpen(true);
+  }
+
+  function handleJsonFileSelected(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      const text = typeof reader.result === 'string' ? reader.result : '';
+      setJsonInputText(text);
+      setJsonImportError(null);
+    };
+    reader.readAsText(file);
+  }
+
+  function handleApplyImportedJson(andSave: boolean) {
+    const result = parseImportedLoginThemeJson(jsonInputText, draftTheme);
+    if (!result.ok) {
+      setJsonImportError(result.error);
+      return;
+    }
+    setDraftTheme(result.theme);
+    setJsonImportError(null);
+    setSaveError(null);
+    setRightTab('theme');
+
+    if (!andSave) {
+      setSaveNotice(
+        isZh
+          ? `已导入 ${result.matchedKeys.length} 个主题字段到实时预览，确认后点击保存即可生效。`
+          : `Imported ${result.matchedKeys.length} theme fields into live preview. Click Save to persist.`
+      );
+      setJsonModalOpen(false);
+      return;
+    }
+
+    setImportingSave(true);
+    void onSaveTheme(activeClientId, result.theme)
+      .then(() => {
+        setSaveNotice(
+          isZh
+            ? `已导入 JSON 并保存到 ${activeClientId} 实时生效`
+            : `Imported JSON and saved theme for ${activeClientId}`
+        );
+        setJsonModalOpen(false);
+      })
+      .catch((err) => {
+        setJsonImportError(err instanceof Error ? err.message : 'Failed to save imported theme');
+      })
+      .finally(() => {
+        setImportingSave(false);
+      });
+  }
+
+  function handleDownloadCurrentThemeJson() {
+    const blob = new Blob([JSON.stringify(draftTheme, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `wimotek-theme-${activeClientId}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+
   const isSplitLayout = draftTheme.layout === 'split_left' || draftTheme.layout === 'split_right';
 
   return (
@@ -268,6 +351,15 @@ export function LoginLabView({
           >
             <ArrowLeftRight className="w-3.5 h-3.5" />
             <span>{t.rtlPreview}</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={openJsonImportModal}
+            className="min-h-[38px] px-3 py-1.5 text-xs font-medium rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-[#111827] hover:bg-slate-50 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-200 flex items-center gap-1.5 whitespace-nowrap transition-colors"
+          >
+            <FileJson className="w-3.5 h-3.5 text-indigo-600 dark:text-indigo-400" />
+            <span>{isZh ? '导入 / 导出 JSON' : 'Import / Export JSON'}</span>
           </button>
         </div>
       </div>
@@ -910,6 +1002,177 @@ export function LoginLabView({
           setFillMintedToken(true);
         }}
       />
+
+      {jsonModalOpen && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/60 backdrop-blur-xs"
+          onClick={() => setJsonModalOpen(false)}
+        >
+          <div
+            className="w-full max-w-2xl max-h-[88vh] flex flex-col rounded-2xl bg-white dark:bg-[#111827] border border-slate-200 dark:border-slate-800 shadow-2xl overflow-hidden"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="px-5 py-4 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between gap-3">
+              <div className="flex items-center gap-2">
+                <FileJson className="w-4 h-4 text-indigo-600 dark:text-indigo-400" />
+                <div>
+                  <h3 className="text-sm font-semibold text-slate-900 dark:text-white">
+                    {isZh ? '导入 / 导出登录页主题 JSON' : 'Import / Export Hosted Login Theme JSON'}
+                  </h3>
+                  <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                    {isZh
+                      ? `目标应用：${activeAppName} (${activeClientId}) · 支持纯 JSON、AI 输出的 Markdown 代码块或 curl 片段`
+                      : `Target: ${activeAppName} (${activeClientId}) · Supports plain JSON, AI Markdown blocks, or curl snippets`}
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setJsonModalOpen(false)}
+                className="p-1.5 rounded-lg text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800"
+                aria-label="Close"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="p-5 overflow-y-auto space-y-4 text-xs">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <input
+                    ref={jsonFileInputRef}
+                    type="file"
+                    accept=".json,application/json,text/plain"
+                    onChange={handleJsonFileSelected}
+                    className="hidden"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => jsonFileInputRef.current?.click()}
+                    className="min-h-[34px] px-3 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 hover:bg-slate-50 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-200 font-medium inline-flex items-center gap-1.5"
+                  >
+                    <Upload className="w-3.5 h-3.5" />
+                    <span>{isZh ? '选择 .json 文件' : 'Upload .json File'}</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setJsonInputText(JSON.stringify(draftTheme, null, 2));
+                      setJsonImportError(null);
+                    }}
+                    className="min-h-[34px] px-3 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 hover:bg-slate-50 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-200 font-medium"
+                  >
+                    {isZh ? '载入当前主题 JSON' : 'Load Current Theme'}
+                  </button>
+                </div>
+
+                <div className="flex items-center gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() => handleCopy('export_theme_json', JSON.stringify(draftTheme, null, 2))}
+                    className="min-h-[34px] px-2.5 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 hover:bg-slate-50 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-200 inline-flex items-center gap-1"
+                  >
+                    {copiedId === 'export_theme_json' ? <Check className="w-3.5 h-3.5 text-emerald-600" /> : <Copy className="w-3.5 h-3.5" />}
+                    <span>{copiedId === 'export_theme_json' ? (isZh ? '已复制' : 'Copied') : isZh ? '复制当前 JSON' : 'Copy Current'}</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleDownloadCurrentThemeJson}
+                    className="min-h-[34px] px-2.5 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 hover:bg-slate-50 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-200 inline-flex items-center gap-1"
+                  >
+                    <Download className="w-3.5 h-3.5" />
+                    <span>{isZh ? '导出 .json' : 'Export .json'}</span>
+                  </button>
+                </div>
+              </div>
+
+              <textarea
+                rows={11}
+                value={jsonInputText}
+                onChange={(e) => {
+                  setJsonInputText(e.target.value);
+                  setJsonImportError(null);
+                }}
+                placeholder={
+                  isZh
+                    ? '在此粘贴 AI 生成的主题 JSON、```json``` 代码块或 curl -d 命令内容...\n{\n  "layout": "split_left",\n  "primaryColor": "#059669",\n  "brandTitle": "My App"\n}'
+                    : 'Paste theme JSON, an AI ```json``` block, or a curl -d snippet here...\n{\n  "layout": "split_left",\n  "primaryColor": "#059669",\n  "brandTitle": "My App"\n}'
+                }
+                className="w-full p-3 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-[#0B0F19] font-mono text-[11.5px] text-slate-800 dark:text-slate-200 leading-relaxed focus:outline-none focus:ring-2 focus:ring-indigo-500/40"
+              />
+
+              {parsedJsonPreview && parsedJsonPreview.ok && (
+                <div className="p-3 rounded-xl bg-emerald-50/70 dark:bg-emerald-950/25 border border-emerald-200 dark:border-emerald-800/70 flex flex-wrap items-center justify-between gap-2 text-[11.5px]">
+                  <div className="flex items-center gap-2 text-emerald-800 dark:text-emerald-300">
+                    <CheckCircle2 className="w-4 h-4 text-emerald-600 dark:text-emerald-400 shrink-0" />
+                    <span>
+                      {isZh
+                        ? `解析成功：识别到 ${parsedJsonPreview.matchedKeys.length} 个字段（布局 ${parsedJsonPreview.theme.layout} · 表面 ${parsedJsonPreview.theme.surfaceMode} · 字体 ${parsedJsonPreview.theme.fontFamily}）`
+                        : `Valid JSON: ${parsedJsonPreview.matchedKeys.length} fields detected (${parsedJsonPreview.theme.layout} · ${parsedJsonPreview.theme.surfaceMode} · ${parsedJsonPreview.theme.fontFamily})`}
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-1.5">
+                    {[
+                      parsedJsonPreview.theme.primaryColor,
+                      parsedJsonPreview.theme.backgroundColor,
+                      parsedJsonPreview.theme.cardColor,
+                    ].map((hex, i) => (
+                      <span
+                        key={`${hex}-${i}`}
+                        title={hex}
+                        className="w-4 h-4 rounded-full border border-slate-300 dark:border-slate-700 inline-block"
+                        style={{ backgroundColor: hex }}
+                      />
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {(jsonImportError || (parsedJsonPreview && !parsedJsonPreview.ok)) && (
+                <div className="p-3 rounded-xl bg-red-50 dark:bg-red-950/30 border border-red-200 dark:border-red-900/60 flex items-start gap-2 text-red-700 dark:text-red-400">
+                  <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+                  <span>{jsonImportError || (parsedJsonPreview && !parsedJsonPreview.ok ? parsedJsonPreview.error : '')}</span>
+                </div>
+              )}
+            </div>
+
+            <div className="px-5 py-3.5 border-t border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-[#0D1321] flex flex-wrap items-center justify-end gap-2 text-xs">
+              <button
+                type="button"
+                onClick={() => setJsonModalOpen(false)}
+                className="min-h-[36px] px-3.5 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800"
+              >
+                {isZh ? '取消' : 'Cancel'}
+              </button>
+              <button
+                type="button"
+                disabled={!jsonInputText.trim() || importingSave}
+                onClick={() => handleApplyImportedJson(false)}
+                className="min-h-[36px] px-3.5 py-1.5 rounded-lg border border-indigo-300 dark:border-indigo-700 bg-indigo-50 dark:bg-indigo-950/40 text-indigo-700 dark:text-indigo-300 hover:bg-indigo-100 dark:hover:bg-indigo-900/40 disabled:opacity-50 font-medium"
+              >
+                {isZh ? '应用到实时预览' : 'Apply to Preview'}
+              </button>
+              <button
+                type="button"
+                disabled={!jsonInputText.trim() || importingSave}
+                onClick={() => handleApplyImportedJson(true)}
+                className="min-h-[36px] px-4 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white font-medium inline-flex items-center gap-1.5"
+              >
+                <Save className="w-3.5 h-3.5" />
+                <span>
+                  {importingSave
+                    ? isZh
+                      ? '正在保存...'
+                      : 'Saving...'
+                    : isZh
+                      ? `导入并保存到 ${activeClientId}`
+                      : `Import & Save to ${activeClientId}`}
+                </span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
