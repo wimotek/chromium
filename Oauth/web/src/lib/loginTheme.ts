@@ -190,6 +190,71 @@ export function getFontFamilyClass(font: LoginThemeFont): string {
   }
 }
 
+export type AiLoginEntryMode = 'direct_redirect' | 'button_trigger';
+
+function isLocalHostname(hostname: string): boolean {
+  const h = hostname.trim().toLowerCase().replace(/^\[|\]$/g, '');
+  return !h || h === 'localhost' || h === '127.0.0.1' || h === '::1' || h === '0.0.0.0' || h.endsWith('.localhost');
+}
+
+export function isNonLocalHttpUrl(urlStr?: string): boolean {
+  const raw = (urlStr || '').trim();
+  if (!raw) return false;
+  try {
+    const parsed = new URL(raw);
+    return parsed.protocol === 'http:' && !isLocalHostname(parsed.hostname);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Resolves the effective public Issuer URL for prompts, MCP configs, SDK snippets, and Callback URIs.
+ * When accessed over HTTPS behind a reverse proxy that forwards plain HTTP internally (and may omit X-Forwarded-Proto),
+ * automatically upgrades matching-host or localhost http:// issuers to the browser's https:// origin.
+ */
+export function resolveEffectiveIssuerUrl(issuerUrl?: string, browserOrigin?: string): string {
+  const fallbackOrigin =
+    (browserOrigin !== undefined ? browserOrigin : typeof window !== 'undefined' ? window.location.origin : '')
+      .trim()
+      .replace(/\/+$/, '');
+  const rawIssuer = (issuerUrl || '').trim().replace(/\/+$/, '');
+
+  if (!rawIssuer) {
+    return fallbackOrigin || 'http://localhost:8080';
+  }
+
+  if (!fallbackOrigin) {
+    return rawIssuer;
+  }
+
+  try {
+    const parsedIssuer = new URL(rawIssuer);
+    const parsedBrowser = new URL(fallbackOrigin);
+    if (parsedBrowser.protocol === 'https:') {
+      if (isLocalHostname(parsedIssuer.hostname) && !isLocalHostname(parsedBrowser.hostname)) {
+        return fallbackOrigin;
+      }
+      if (
+        parsedIssuer.protocol === 'http:' &&
+        parsedIssuer.hostname.toLowerCase() === parsedBrowser.hostname.toLowerCase()
+      ) {
+        parsedIssuer.protocol = 'https:';
+        if (parsedBrowser.port) {
+          parsedIssuer.port = parsedBrowser.port;
+        } else if (parsedIssuer.port === '80' || parsedIssuer.port === '8080') {
+          parsedIssuer.port = '';
+        }
+        return parsedIssuer.toString().replace(/\/+$/, '');
+      }
+    }
+  } catch {
+    // keep rawIssuer if parsing fails
+  }
+
+  return rawIssuer;
+}
+
 export function buildAiThemeSyncPrompt(opts: {
   issuerUrl: string;
   clientId: string;
@@ -197,7 +262,7 @@ export function buildAiThemeSyncPrompt(opts: {
   currentTheme: LoginThemeConfig;
   locale: Locale;
 }): string {
-  const issuer = opts.issuerUrl.replace(/\/$/, '');
+  const issuer = resolveEffectiveIssuerUrl(opts.issuerUrl);
   const isZh = opts.locale === 'zh-CN' || opts.locale === 'zh-TW';
 
   if (isZh) {
@@ -290,11 +355,25 @@ export function buildAiIntegrationPrompt(opts: {
   appName: string;
   redirectUri: string;
   locale: Locale;
+  loginEntryMode?: AiLoginEntryMode;
 }): string {
-  const issuer = opts.issuerUrl.replace(/\/$/, '');
+  const issuer = resolveEffectiveIssuerUrl(opts.issuerUrl);
   const isZh = opts.locale === 'zh-CN' || opts.locale === 'zh-TW';
+  const entryMode: AiLoginEntryMode = opts.loginEntryMode || 'direct_redirect';
 
   if (isZh) {
+    const entryRequirement =
+      entryMode === 'direct_redirect'
+        ? `**【当前指定：方式 A —— 未登录直接自动跳转至登录页（默认）】**
+1. **禁止额外生成一个只有单个「点击登录」按钮的中间引导页！**
+2. 当未登录用户访问首页（\`/\`）或任意受保护页面时，必须通过服务端认证中间件 / 路由守卫（HTTP \`302\` 重定向或前端 \`window.location.replace('/login')\`）直接发起 OIDC 授权并跳转到 \`${issuer}/oauth/authorize?client_id=${opts.clientId}&...\` 托管登录页。
+3. 自动跳转前将用户原本访问的站内相对路径保存到 \`returnTo\`（严格校验以 \`/\` 开头且非 \`//\`，防止开放重定向），\`/callback\` 换票成功后自动跳回原页面。
+4. **防止重定向死循环**：用户主动点击退出登录后跳转到静态 \`/logged-out\` 页面（或在 \`/callback\` 校验失败时停留在错误提示页），此时不触发自动跳转，仅展示简洁的「重新登录」链接。`
+        : `**【当前指定：方式 B —— 页面按钮触发登录（保留公开访客页）】**
+1. 保持站点公开页面（如官网首页、公开文档、商品浏览页）可被未登录访客直接访问，不要在首页强制重定向。
+2. 在页面导航栏或登录入口处提供清晰的「登录」按钮，用户点击后跳转至 \`/login\` → \`${issuer}/oauth/authorize?client_id=${opts.clientId}&...\` 完成统一认证。
+3. 当未登录用户访问需要权限的私有页面或受保护操作时，再跳转 \`/login\` 并携带站内相对路径 \`returnTo\`，登录成功后自动返回。`;
+
     return `请为我当前项目集成 **wimotek/Oauth**（标准 OIDC 1.0 + OAuth 2.0 PKCE S256 统一登录认证中心）。
 
 ### 1. 认证中心参数（已自动代入）
@@ -309,17 +388,36 @@ export function buildAiIntegrationPrompt(opts: {
 - **Client Secret**: 从环境变量 \`OAUTH_SECRET\` 读取（严禁硬编码到代码仓库）
 - **Redirect URI**: \`${opts.redirectUri}\`
 
-### 2. 安全与架构要求
+### 2. 登录入口交互方式（必须严格按当前指定方式实现）
+${entryRequirement}
+
+> **两种登录入口方式区别说明（可按业务场景自由选择）**：
+> - **方式 A · 直接跳转登录页（默认）**：未登录打开站点即自动 302 / 守卫直达 wimotek/Oauth 托管登录页，无需多点一次按钮；适合后台管理系统、企业内部工具、私有应用与纯 SaaS 工作台。
+> - **方式 B · 页面按钮触发登录**：未登录时先展示业务站首页或公开内容，用户点击「登录」按钮后再跳往托管登录页；适合官网、博客、文档站、社区或电商等含公开访客内容的网站。
+
+### 3. 安全与架构要求
 1. 必须使用 **Authorization Code + PKCE (\`S256\`)** 流程，并校验随机 \`state\` 防 CSRF。
 2. 将 \`state\` 与 \`code_verifier\` 存入 \`HttpOnly\` Cookie 或服务端 Session（5 分钟 TTL），回调换票成功后立即销毁。
 3. 跳转到 \`${issuer}/oauth/authorize?client_id=${opts.clientId}&...\` 时，wimotek/Oauth 会根据 \`client_id\` 自动加载我们在后台为 **${opts.appName}** 定制的专属登录页主题与排版。
 4. 登录后使用返回的 \`sub\`（用户唯一稳定 ID）与 \`email\`（当 \`email_verified=true\` 时）平滑绑定或自动创建本地用户账号。
 5. （可选）如果项目需要即时封禁踢人，新增 \`POST /webhooks/oauth-events\` 接口，用 \`X-Wimotek-Signature-256\`（HMAC-SHA256）验签并在收到 \`user.banned\` 时清除该用户本地会话。
 
-### 3. 交付要求
-- 先识别我当前项目使用的语言和框架（Next.js / React / Vue / Go / Python / Java / PHP 等），使用最轻量、零冗余依赖的方式实现 \`/login\`、\`/callback\`、\`/logout\` 与当前用户信息读取。
+### 4. 交付要求
+- 先识别我当前项目使用的语言和框架（Next.js / React / Vue / Go / Python / Java / PHP 等），使用最轻量、零冗余依赖的方式实现 \`/login\`、\`/callback\`、\`/logout\`、认证守卫/入口逻辑与当前用户信息读取。
 - 在 \`.env.example\` 中补充 \`OAUTH_ISSUER\`、\`OAUTH_CLIENT_ID\`、\`OAUTH_SECRET\`、\`OAUTH_REDIRECT_URI\`。`;
   }
+
+  const entryRequirementEn =
+    entryMode === 'direct_redirect'
+      ? `**[Selected Mode A — Direct Auto-Redirect to Login Page (Default)]**
+1. **Do NOT build an unnecessary intermediate splash page containing only a single "Sign in" button.**
+2. When an unauthenticated visitor hits \`/\` or any protected route, immediately redirect via server middleware / route guard (HTTP \`302\` or \`window.location.replace('/login')\`) directly to \`/login\` -> \`${issuer}/oauth/authorize?client_id=${opts.clientId}&...\`.
+3. Preserve the original relative \`returnTo\` path (strictly validated to start with \`/\` and not \`//\` to prevent open redirects) and restore it after \`/callback\` succeeds.
+4. **Prevent redirect loops**: after explicit \`/logout\` or on callback error, render a static \`/logged-out\` or error view with a "Sign in again" link instead of auto-redirecting.`
+      : `**[Selected Mode B — Button-Triggered Login Entry (Public Guest Pages)]**
+1. Keep public pages (landing page, docs, catalog) accessible to unauthenticated guests without forcing an immediate redirect.
+2. Place a clear "Sign in" button in the navbar or entry view that navigates to \`/login\` -> \`${issuer}/oauth/authorize?client_id=${opts.clientId}&...\`.
+3. Only redirect unauthenticated users when they access protected routes/actions, preserving a safe relative \`returnTo\` path.`;
 
   return `Integrate **wimotek/Oauth** (standard OIDC 1.0 + OAuth 2.0 with PKCE S256) authentication into my current project.
 
@@ -335,11 +433,18 @@ export function buildAiIntegrationPrompt(opts: {
 - **Client Secret**: Read from \`OAUTH_SECRET\` environment variable (never hardcode)
 - **Redirect URI**: \`${opts.redirectUri}\`
 
-### 2. Requirements
+### 2. Login Entry Flow (Follow Selected Mode Strictly)
+${entryRequirementEn}
+
+> **Comparison of the Two Login Entry Modes**:
+> - **Mode A · Direct Auto-Redirect (Default)**: Unauthenticated visitors are sent straight to the wimotek/Oauth hosted login page with zero extra click; ideal for admin panels, internal tools, private apps, and login-gated SaaS workspaces.
+> - **Mode B · Button-Triggered Entry**: Guests can browse public pages first and click a "Sign in" button when ready; ideal for marketing sites, docs, blogs, communities, and storefronts.
+
+### 3. Security & Delivery Requirements
 1. Use **Authorization Code + PKCE (S256)** with random CSRF \`state\` stored in an \`HttpOnly\` cookie/session.
 2. Redirecting with \`client_id=${opts.clientId}\` automatically renders the custom hosted login theme configured for **${opts.appName}**.
 3. Map authenticated users via \`sub\` (and link legacy accounts via \`email\` when \`email_verified === true\`).
-4. Implement \`/login\`, \`/callback\`, \`/logout\`, and update \`.env.example\`.`;
+4. Implement \`/login\`, \`/callback\`, \`/logout\`, the auth guard/entry flow above, and update \`.env.example\`.`;
 }
 
 const KNOWN_THEME_KEYS: ReadonlyArray<keyof LoginThemeConfig> = [

@@ -14,6 +14,7 @@ import {
 } from 'lucide-react';
 import type { Locale, OAuthApplication } from '../types';
 import { TRANSLATIONS } from '../lib/i18n';
+import { resolveEffectiveIssuerUrl } from '../lib/loginTheme';
 import { EMBEDDED_SDKS, SDK_ORDER, type SdkLang } from '../lib/sdkSources';
 
 type DocsSection = 'idp_guide' | 'sdks' | 'webhooks_jit' | 'deployment';
@@ -174,7 +175,7 @@ export function SdkDocsView({ locale, issuerUrl, applications }: SdkDocsViewProp
 
   const selectedApp = applications.find((a) => a.id === selectedAppId) || applications[0];
   const currentSdk = EMBEDDED_SDKS[lang];
-  const cleanIssuer = issuerUrl.replace(/\/$/, '');
+  const cleanIssuer = resolveEffectiveIssuerUrl(issuerUrl);
   const activeClientId = selectedApp?.clientId || 'wimotek_erp_portal';
   const activeRedirectUri = selectedApp?.redirectUris[0] || 'http://localhost:4000/callback';
 

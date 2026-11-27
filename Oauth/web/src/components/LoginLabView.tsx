@@ -39,8 +39,11 @@ import {
   LOGIN_THEME_PRESETS,
   buildAiIntegrationPrompt,
   buildAiThemeSyncPrompt,
+  isNonLocalHttpUrl,
   normalizeLoginTheme,
   parseImportedLoginThemeJson,
+  resolveEffectiveIssuerUrl,
+  type AiLoginEntryMode,
 } from '../lib/loginTheme';
 import { HostedLoginCard } from './HostedLoginCard';
 import { AdminTokenManagerModal, buildMcpClientConfigJson } from './AdminApiTokensSection';
@@ -50,6 +53,7 @@ type LabRightTab = 'theme' | 'ai_api' | 'trace';
 interface LoginLabViewProps {
   locale: Locale;
   issuerUrl: string;
+  rawServerIssuerUrl?: string;
   sessionToken?: string;
   connectors: SocialConnector[];
   applications: OAuthApplication[];
@@ -57,6 +61,7 @@ interface LoginLabViewProps {
   selectedClientId: string;
   onSelectClientId: (clientId: string) => void;
   onSaveTheme: (clientId: string, theme: LoginThemeConfig) => Promise<void>;
+  onUpdateIssuerUrl?: (nextIssuerUrl: string) => Promise<void>;
   onPasswordSignIn: (email: string, password: string) => Promise<void>;
   onSocialSignIn: (provider: string) => Promise<void>;
   onAuthCompleted?: (result: { user: any; sessionToken: string; trace: OidcFlowTrace }) => void;
@@ -66,6 +71,7 @@ interface LoginLabViewProps {
 export function LoginLabView({
   locale,
   issuerUrl,
+  rawServerIssuerUrl,
   sessionToken = '',
   connectors,
   applications,
@@ -73,6 +79,7 @@ export function LoginLabView({
   selectedClientId,
   onSelectClientId,
   onSaveTheme,
+  onUpdateIssuerUrl,
   onPasswordSignIn,
   onSocialSignIn,
   onAuthCompleted,
@@ -106,6 +113,11 @@ export function LoginLabView({
   const [jsonInputText, setJsonInputText] = useState('');
   const [jsonImportError, setJsonImportError] = useState<string | null>(null);
   const [importingSave, setImportingSave] = useState(false);
+  const [loginEntryMode, setLoginEntryMode] = useState<AiLoginEntryMode>('direct_redirect');
+  const [editingIssuer, setEditingIssuer] = useState(false);
+  const [draftIssuerUrl, setDraftIssuerUrl] = useState('');
+  const [savingIssuer, setSavingIssuer] = useState(false);
+  const [issuerNotice, setIssuerNotice] = useState<{ text: string; isError?: boolean } | null>(null);
   const jsonFileInputRef = useRef<HTMLInputElement | null>(null);
 
   const prevClientIdRef = useRef<string | undefined>(selectedApp?.clientId);
@@ -121,7 +133,40 @@ export function LoginLabView({
   const activeClientId = selectedApp?.clientId || selectedClientId || 'wimotek_erp_portal';
   const activeAppName = selectedApp?.name || 'wimotek/Oauth';
   const activeRedirectUri = selectedApp?.redirectUris?.[0] || 'https://app.example.com/auth/callback';
-  const cleanIssuer = (issuerUrl || (typeof window !== 'undefined' ? window.location.origin : 'http://localhost:8080')).replace(/\/$/, '');
+  const cleanIssuer = resolveEffectiveIssuerUrl(issuerUrl);
+  const effectiveIsNonLocalHttp = isNonLocalHttpUrl(cleanIssuer);
+  const serverNeedsHttpsSync = Boolean(
+    rawServerIssuerUrl && isNonLocalHttpUrl(rawServerIssuerUrl) && cleanIssuer.startsWith('https://')
+  );
+  const suggestedHttpsIssuer = cleanIssuer.replace(/^http:\/\//i, 'https://').replace(/\/+$/, '');
+
+  useEffect(() => {
+    setDraftIssuerUrl(cleanIssuer);
+  }, [cleanIssuer]);
+
+  async function handleSubmitIssuerUrl(nextUrl: string) {
+    if (!onUpdateIssuerUrl) return;
+    const trimmed = nextUrl.trim().replace(/\/+$/, '');
+    if (!trimmed) return;
+    setSavingIssuer(true);
+    setIssuerNotice(null);
+    try {
+      await onUpdateIssuerUrl(trimmed);
+      setEditingIssuer(false);
+      setIssuerNotice({
+        text: isZh
+          ? `对外 Issuer 地址已保存为 ${trimmed}，所有 AI 提示词、MCP 与 OIDC Discovery 已同步生效。`
+          : `Public Issuer URL saved as ${trimmed}. AI prompts, MCP, and OIDC Discovery are now in sync.`,
+      });
+    } catch (err) {
+      setIssuerNotice({
+        text: err instanceof Error ? err.message : 'Failed to update Issuer URL',
+        isError: true,
+      });
+    } finally {
+      setSavingIssuer(false);
+    }
+  }
 
   const aiThemePrompt = useMemo(
     () =>
@@ -143,8 +188,9 @@ export function LoginLabView({
         appName: activeAppName,
         redirectUri: activeRedirectUri,
         locale,
+        loginEntryMode,
       }),
-    [cleanIssuer, activeClientId, activeAppName, activeRedirectUri, locale]
+    [cleanIssuer, activeClientId, activeAppName, activeRedirectUri, locale, loginEntryMode]
   );
 
   const activeTokenDisplay = mintedTokenInMem && fillMintedToken ? mintedTokenInMem : '$WIMOTEK_ADMIN_TOKEN';
@@ -775,6 +821,115 @@ export function LoginLabView({
                   </p>
                 </div>
 
+                {/* Public Issuer URL & Reverse Proxy HTTPS Calibration */}
+                <div className="border border-slate-200 dark:border-slate-800 rounded-lg p-3 space-y-2.5 bg-slate-50/70 dark:bg-[#0D1321]">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="min-w-0">
+                      <div className="text-[11px] font-medium text-slate-500 dark:text-slate-400">
+                        {isZh ? '当前提示词 / MCP / API 使用的对外地址 (Issuer)' : 'Public Issuer URL used in Prompts / MCP / API'}
+                      </div>
+                      <div className="font-mono text-[11.5px] font-semibold text-slate-900 dark:text-slate-100 break-all mt-0.5">
+                        {cleanIssuer}
+                      </div>
+                    </div>
+                    {onUpdateIssuerUrl && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setDraftIssuerUrl(cleanIssuer);
+                          setEditingIssuer((v) => !v);
+                        }}
+                        className="px-2.5 py-1 rounded-md border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 hover:bg-slate-100 dark:hover:bg-slate-800 text-[11px] font-medium text-slate-700 dark:text-slate-200 inline-flex items-center gap-1 shrink-0"
+                      >
+                        <Globe className="w-3 h-3" />
+                        <span>{isZh ? '修改对外域名' : 'Edit Issuer'}</span>
+                      </button>
+                    )}
+                  </div>
+
+                  {serverNeedsHttpsSync && onUpdateIssuerUrl && (
+                    <div className="p-2.5 rounded-md bg-emerald-50/80 dark:bg-emerald-950/30 border border-emerald-200 dark:border-emerald-800/70 flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-[11px]">
+                      <div className="text-emerald-900 dark:text-emerald-200 leading-relaxed">
+                        {isZh
+                          ? `检测到通过 HTTPS 反代访问，下方提示词与接口已自动修正为 ${cleanIssuer}。建议同步写入服务端，使 /.well-known/openid-configuration 也返回 HTTPS。`
+                          : `HTTPS reverse proxy detected — prompts and endpoints below are auto-upgraded to ${cleanIssuer}. Persist this to the server so OIDC Discovery also returns HTTPS.`}
+                      </div>
+                      <button
+                        type="button"
+                        disabled={savingIssuer}
+                        onClick={() => void handleSubmitIssuerUrl(cleanIssuer)}
+                        className="px-2.5 py-1.5 rounded-md bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white font-medium whitespace-nowrap shrink-0"
+                      >
+                        {savingIssuer ? (isZh ? '同步中...' : 'Saving...') : isZh ? '同步写入服务端 HTTPS' : 'Save HTTPS to Server'}
+                      </button>
+                    </div>
+                  )}
+
+                  {effectiveIsNonLocalHttp && (
+                    <div className="p-2.5 rounded-md bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800/70 flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-[11px]">
+                      <div className="flex items-start gap-1.5 text-amber-900 dark:text-amber-200 leading-relaxed">
+                        <AlertCircle className="w-3.5 h-3.5 text-amber-600 dark:text-amber-400 shrink-0 mt-0.5" />
+                        <span>
+                          {isZh
+                            ? '当前对外地址为 HTTP（常见于反代转发到内部 HTTP 端口且未透传 X-Forwarded-Proto: https）。点击右侧一键切换为 HTTPS，避免 AI 提示词生成 http:// 地址。'
+                            : 'Public Issuer is currently HTTP (typical when a reverse proxy forwards to internal HTTP without X-Forwarded-Proto: https). Switch to HTTPS so AI prompts use https://.'}
+                        </span>
+                      </div>
+                      {onUpdateIssuerUrl && (
+                        <button
+                          type="button"
+                          disabled={savingIssuer}
+                          onClick={() => void handleSubmitIssuerUrl(suggestedHttpsIssuer)}
+                          className="px-2.5 py-1.5 rounded-md bg-amber-600 hover:bg-amber-700 disabled:opacity-50 text-white font-medium whitespace-nowrap shrink-0"
+                        >
+                          {savingIssuer ? (isZh ? '切换中...' : 'Switching...') : isZh ? '一键切换为 HTTPS' : 'Switch to HTTPS'}
+                        </button>
+                      )}
+                    </div>
+                  )}
+
+                  {editingIssuer && onUpdateIssuerUrl && (
+                    <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-1.5 pt-1">
+                      <input
+                        type="url"
+                        value={draftIssuerUrl}
+                        onChange={(e) => setDraftIssuerUrl(e.target.value)}
+                        placeholder="https://auth.example.com"
+                        className="flex-1 min-h-[34px] px-2.5 py-1 rounded-md border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 font-mono text-[11.5px] text-slate-900 dark:text-slate-100"
+                      />
+                      <div className="flex items-center gap-1.5 shrink-0">
+                        <button
+                          type="button"
+                          disabled={savingIssuer || !draftIssuerUrl.trim()}
+                          onClick={() => void handleSubmitIssuerUrl(draftIssuerUrl)}
+                          className="min-h-[34px] px-3 py-1 rounded-md bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white text-[11px] font-medium"
+                        >
+                          {savingIssuer ? (isZh ? '保存中...' : 'Saving...') : isZh ? '保存' : 'Save'}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setEditingIssuer(false)}
+                          className="min-h-[34px] px-2.5 py-1 rounded-md border border-slate-200 dark:border-slate-700 text-[11px] text-slate-600 dark:text-slate-300"
+                        >
+                          {isZh ? '取消' : 'Cancel'}
+                        </button>
+                      </div>
+                    </div>
+                  )}
+
+                  {issuerNotice && (
+                    <div
+                      className={`text-[11px] px-2.5 py-1.5 rounded-md border ${
+                        issuerNotice.isError
+                          ? 'bg-red-50 dark:bg-red-950/30 border-red-200 dark:border-red-900/60 text-red-700 dark:text-red-400'
+                          : 'bg-emerald-50 dark:bg-emerald-950/30 border-emerald-200 dark:border-emerald-900/60 text-emerald-700 dark:text-emerald-400'
+                      }`}
+                    >
+                      {issuerNotice.text}
+                    </div>
+                  )}
+                </div>
+
                 <div className="border border-slate-200 dark:border-slate-800 rounded-lg overflow-hidden">
                   <div className="px-3.5 py-2.5 bg-slate-50 dark:bg-[#0D1321] border-b border-slate-200 dark:border-slate-800 flex flex-wrap items-center justify-between gap-2">
                     <div className="flex items-center gap-1.5 font-semibold text-slate-900 dark:text-white">
@@ -897,7 +1052,84 @@ export function LoginLabView({
                       <span>{copiedId === 'prompt_oidc' ? (isZh ? '已复制' : 'Copied') : isZh ? '复制提示词' : 'Copy Prompt'}</span>
                     </button>
                   </div>
-                  <pre className="p-3 bg-slate-50/70 dark:bg-[#0B0F19] font-mono text-[11px] text-slate-700 dark:text-slate-300 whitespace-pre-wrap max-h-48 overflow-y-auto leading-relaxed">
+
+                  {/* Login Entry Mode Selector + Comparison Note */}
+                  <div className="p-3 border-b border-slate-200 dark:border-slate-800 bg-white dark:bg-[#111827] space-y-2.5">
+                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                      <span className="text-[11px] font-semibold text-slate-700 dark:text-slate-300">
+                        {isZh ? '选择未登录时的入口方式' : 'Unauthenticated Entry Behavior'}
+                      </span>
+                      <div
+                        role="radiogroup"
+                        aria-label={isZh ? '登录入口方式' : 'Login entry mode'}
+                        className="inline-flex p-0.5 rounded-lg bg-slate-100 dark:bg-slate-800/80 border border-slate-200 dark:border-slate-700 gap-0.5"
+                      >
+                        <button
+                          type="button"
+                          role="radio"
+                          aria-checked={loginEntryMode === 'direct_redirect'}
+                          onClick={() => setLoginEntryMode('direct_redirect')}
+                          className={`px-2.5 py-1 rounded-md text-[11px] font-medium transition-colors whitespace-nowrap ${
+                            loginEntryMode === 'direct_redirect'
+                              ? 'bg-white dark:bg-[#111827] text-indigo-700 dark:text-indigo-300 shadow-xs'
+                              : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
+                          }`}
+                        >
+                          {isZh ? '方式 A：直接跳转登录页（默认）' : 'Mode A: Direct Redirect (Default)'}
+                        </button>
+                        <button
+                          type="button"
+                          role="radio"
+                          aria-checked={loginEntryMode === 'button_trigger'}
+                          onClick={() => setLoginEntryMode('button_trigger')}
+                          className={`px-2.5 py-1 rounded-md text-[11px] font-medium transition-colors whitespace-nowrap ${
+                            loginEntryMode === 'button_trigger'
+                              ? 'bg-white dark:bg-[#111827] text-indigo-700 dark:text-indigo-300 shadow-xs'
+                              : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
+                          }`}
+                        >
+                          {isZh ? '方式 B：按钮点击后登录' : 'Mode B: Button Trigger'}
+                        </button>
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-[11px] leading-relaxed">
+                      <div
+                        className={`p-2.5 rounded-lg border transition-colors ${
+                          loginEntryMode === 'direct_redirect'
+                            ? 'border-indigo-300 dark:border-indigo-700 bg-indigo-50/60 dark:bg-indigo-950/30 text-slate-800 dark:text-slate-200'
+                            : 'border-slate-200 dark:border-slate-800 bg-slate-50/60 dark:bg-slate-900/40 text-slate-600 dark:text-slate-400'
+                        }`}
+                      >
+                        <div className="font-semibold text-slate-900 dark:text-white mb-0.5">
+                          {isZh ? '方式 A · 直接跳转登录页（默认）' : 'Mode A · Direct Auto-Redirect (Default)'}
+                        </div>
+                        <p>
+                          {isZh
+                            ? '打开网站未登录时直接 302 / 守卫跳转至认证中心登录页，不生成多余的「点击登录」中间页。适合后台系统、企业内部工具与纯 SaaS 工作台。'
+                            : 'Redirects unauthenticated visitors straight to the hosted login page with zero extra click. Best for admin panels, internal tools, and private SaaS apps.'}
+                        </p>
+                      </div>
+                      <div
+                        className={`p-2.5 rounded-lg border transition-colors ${
+                          loginEntryMode === 'button_trigger'
+                            ? 'border-indigo-300 dark:border-indigo-700 bg-indigo-50/60 dark:bg-indigo-950/30 text-slate-800 dark:text-slate-200'
+                            : 'border-slate-200 dark:border-slate-800 bg-slate-50/60 dark:bg-slate-900/40 text-slate-600 dark:text-slate-400'
+                        }`}
+                      >
+                        <div className="font-semibold text-slate-900 dark:text-white mb-0.5">
+                          {isZh ? '方式 B · 页面按钮点击后登录' : 'Mode B · Button-Triggered Entry'}
+                        </div>
+                        <p>
+                          {isZh
+                            ? '保留未登录公开浏览页，用户在导航栏或入口页点击「登录」按钮后再跳往认证中心。适合官网、博客、文档站、社区或电商等含公开内容的网站。'
+                            : 'Allows guests to browse public pages first and sign in via a navbar/page button. Best for landing sites, docs, blogs, forums, and storefronts.'}
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+
+                  <pre className="p-3 bg-slate-50/70 dark:bg-[#0B0F19] font-mono text-[11px] text-slate-700 dark:text-slate-300 whitespace-pre-wrap max-h-56 overflow-y-auto leading-relaxed">
                     {aiIntegrationPrompt}
                   </pre>
                 </div>

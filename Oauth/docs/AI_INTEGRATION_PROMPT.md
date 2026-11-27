@@ -83,10 +83,24 @@ curl -X PUT "https://auth.your-domain.com/api/applications/wimotek_erp_portal/th
 
 ## 二、直接发给 AI 的提示词模板
 
-你也可以直接在控制台 **「托管登录页调试 -> AI 提示词 & Theme API」** 一键复制已自动代入当前 `Issuer` 与 `client_id` 的完整提示词。
+你也可以直接在控制台 **「托管登录页调试 -> AI 提示词 & API」** 一键复制已自动代入当前 `Issuer` 与 `client_id` 的完整提示词。
+
+> **反向代理部署提示（HTTPS 反代至内部 HTTP 8080 端口）**：
+> 若通过 Nginx / Caddy / 1Panel / 宝塔 / Cloudflare 终结 HTTPS 并反向代理至容器 HTTP 端口，建议在反代中透传 `X-Forwarded-Proto: https`（或 `X-Scheme: https`）；若未透传，也可在控制台 **「AI 提示词 & API」** 顶部的对外地址栏一键切换为 `https://` 并写入服务端配置，确保所有 AI 提示词、MCP 端点与 OIDC Discovery 均输出 `https://`。
 
 ### 提示词 A：让 AI 按业务站风格自动同步登录页样式
 > 分析我当前网站项目的视觉设计系统（Tailwind 配置、CSS 变量、主色、背景色、圆角、字体与 Logo），按照 `wimotek/Oauth` 的 Theme JSON Schema（`layout`、`surfaceMode`、`primaryColor`、`backgroundColor`、`cardColor`、`textColor`、`borderRadius`、`fontFamily`、`logoUrl`、`brandTitle`、`customCss`），生成最匹配的主题 JSON，并输出调用 `PUT <ISSUER>/api/applications/<CLIENT_ID>/theme` 的 `curl` 同步脚本。
 
-### 提示词 B：让 AI 一键完成 OIDC 登录集成开发
-> 为我当前项目集成 `wimotek/Oauth`（标准 OIDC 1.0 + PKCE S256），Discovery 地址为 `<ISSUER>/.well-known/openid-configuration`，Client ID 为 `<CLIENT_ID>`，Client Secret 从环境变量 `OAUTH_SECRET` 读取，回调地址为 `<REDIRECT_URI>`。实现 `/login`（生成 state 与 PKCE verifier 存入 HttpOnly Cookie 并跳转 `/oauth/authorize`）、`/callback`（校验 state、换取 Token 并调用 `/oauth/userinfo`）和 `/logout`，并按 `sub` 与已验证 `email` 绑定本地用户。
+### 提示词 B：让 AI 一键完成 OIDC 登录集成开发（默认直接跳转登录页）
+> 为我当前项目集成 `wimotek/Oauth`（标准 OIDC 1.0 + PKCE S256），Discovery 地址为 `<ISSUER>/.well-known/openid-configuration`，Client ID 为 `<CLIENT_ID>`，Client Secret 从环境变量 `OAUTH_SECRET` 读取，回调地址为 `<REDIRECT_URI>`。
+>
+> **登录入口方式（默认：方式 A · 直接跳转登录页）**：
+> - 未登录访问首页（`/`）或任意受保护页面时，**禁止额外生成只有一个「点击登录」按钮的中间页**，必须直接通过 302 重定向或路由守卫自动跳转到 `/login` → `<ISSUER>/oauth/authorize`，并保存站内相对路径 `returnTo` 以便登录后回跳；主动退出后跳转静态 `/logged-out` 页（或在回调失败时停留错误页）以避免重定向死循环。
+> - 实现 `/login`（生成 state 与 PKCE verifier 存入 HttpOnly Cookie 并跳转 `/oauth/authorize`）、`/callback`（校验 state、换取 Token 并调用 `/oauth/userinfo`）和 `/logout`，并按 `sub` 与已验证 `email` 绑定本地用户。
+
+### 两种登录入口方式区别说明（可在控制台自由切换）
+
+| 入口方式 | 未登录时的交互行为 | 适用业务场景 |
+| :--- | :--- | :--- |
+| **方式 A · 直接跳转登录页（默认）** | 打开网站未登录时直接 302 / 守卫自动跳转至 `wimotek/Oauth` 托管登录页，省去多余一次点击（退出登录或出错时停留在提示页防死循环） | 企业后台、内部管理系统、私有工具、纯 SaaS 工作台 |
+| **方式 B · 页面按钮点击后登录** | 保留未登录公开页面，用户在导航栏或落地页点击「登录」按钮后再跳转 `/login` → 托管登录页 | 官网、博客、文档站、社区、电商等含公开内容的网站 |

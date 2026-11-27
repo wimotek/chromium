@@ -13,6 +13,7 @@ import {
 } from 'lucide-react';
 import type { DbDriver, Locale, SystemConfig } from '../types';
 import { SUPPORTED_LOCALES, TRANSLATIONS } from '../lib/i18n';
+import { resolveEffectiveIssuerUrl } from '../lib/loginTheme';
 import { BrandMark } from './ProviderIcons';
 
 interface SetupWizardProps {
@@ -53,7 +54,7 @@ export function SetupWizard({
   const [redisTest, setRedisTest] = useState<{ ok: boolean; msg: string } | null>(null);
   const [testingRedis, setTestingRedis] = useState(false);
 
-  const [issuerUrl, setIssuerUrl] = useState(initialConfig.issuerUrl || window.location.origin);
+  const [issuerUrl, setIssuerUrl] = useState(() => resolveEffectiveIssuerUrl(initialConfig.issuerUrl));
   const [adminEmail, setAdminEmail] = useState(
     initialConfig.initialized && initialConfig.adminEmail && initialConfig.adminEmail !== 'admin@wimotek.dev'
       ? initialConfig.adminEmail

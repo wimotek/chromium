@@ -32,7 +32,7 @@ import type {
   WebhookSubscription,
 } from './types';
 import { SUPPORTED_LOCALES, TRANSLATIONS, detectBrowserLocale, reorderConnectors } from './lib/i18n';
-import { DEFAULT_LOGIN_THEME, normalizeLoginTheme } from './lib/loginTheme';
+import { DEFAULT_LOGIN_THEME, normalizeLoginTheme, resolveEffectiveIssuerUrl } from './lib/loginTheme';
 import { registerBrowserPasskey } from './lib/webauthn';
 import { BrandMark } from './components/ProviderIcons';
 import { SetupWizard } from './components/SetupWizard';
@@ -1202,117 +1202,128 @@ export default function App() {
 
         {/* Viewport Content */}
         <main className="flex-1 max-w-6xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-8">
-          {activeTab === 'overview' && (
-            <OverviewView
-              locale={locale}
-              config={config}
-              counts={counts}
-              jwksKid={jwksKid}
-              signingKeyStatus={signingKeyStatus}
-              cacheStats={cacheStats}
-              onSimulateCacheFailover={handleSimulateCacheFailover}
-              onRotateSigningKey={handleRotateSigningKey}
-              onPurgeRetiringKeys={handlePurgeRetiringKeys}
-              onRerunWizard={handleRerunWizard}
-            />
-          )}
+          {(() => {
+            const effectiveIssuerUrl = resolveEffectiveIssuerUrl(config.issuerUrl);
+            const effectiveConfig: SystemConfig =
+              effectiveIssuerUrl === config.issuerUrl ? config : { ...config, issuerUrl: effectiveIssuerUrl };
+            return (
+              <>
+                {activeTab === 'overview' && (
+                  <OverviewView
+                    locale={locale}
+                    config={effectiveConfig}
+                    counts={counts}
+                    jwksKid={jwksKid}
+                    signingKeyStatus={signingKeyStatus}
+                    cacheStats={cacheStats}
+                    onSimulateCacheFailover={handleSimulateCacheFailover}
+                    onRotateSigningKey={handleRotateSigningKey}
+                    onPurgeRetiringKeys={handlePurgeRetiringKeys}
+                    onRerunWizard={handleRerunWizard}
+                  />
+                )}
 
-          {activeTab === 'applications' && (
-            <ApplicationsView
-              locale={locale}
-              applications={applications}
-              onCreateApp={handleCreateApp}
-              onUpdateApp={handleUpdateApp}
-              onResetSecret={handleResetAppSecret}
-              onDeleteApp={handleDeleteApp}
-              onToggleLock={handleToggleAppLock}
-              onTestAppFlow={(clientId) => {
-                setSelectedLabClientId(clientId);
-                setActiveTab('login_lab');
-              }}
-            />
-          )}
+                {activeTab === 'applications' && (
+                  <ApplicationsView
+                    locale={locale}
+                    applications={applications}
+                    onCreateApp={handleCreateApp}
+                    onUpdateApp={handleUpdateApp}
+                    onResetSecret={handleResetAppSecret}
+                    onDeleteApp={handleDeleteApp}
+                    onToggleLock={handleToggleAppLock}
+                    onTestAppFlow={(clientId) => {
+                      setSelectedLabClientId(clientId);
+                      setActiveTab('login_lab');
+                    }}
+                  />
+                )}
 
-          {activeTab === 'connectors' && (
-            <ConnectorsView
-              locale={locale}
-              issuerUrl={config.issuerUrl}
-              connectors={connectors}
-              onUpdateConnector={handleUpdateConnector}
-              onAddCustomConnector={handleAddCustomConnector}
-              onDeleteConnector={handleDeleteConnector}
-              onReorderConnectors={handleReorderConnectors}
-              onDiscoverOidc={handleDiscoverOidc}
-              onAutoProvisionMicrosoft={handleAutoProvisionMicrosoft}
-              onUpdateIssuerUrl={handleUpdateIssuerUrl}
-            />
-          )}
+                {activeTab === 'connectors' && (
+                  <ConnectorsView
+                    locale={locale}
+                    issuerUrl={effectiveIssuerUrl}
+                    connectors={connectors}
+                    onUpdateConnector={handleUpdateConnector}
+                    onAddCustomConnector={handleAddCustomConnector}
+                    onDeleteConnector={handleDeleteConnector}
+                    onReorderConnectors={handleReorderConnectors}
+                    onDiscoverOidc={handleDiscoverOidc}
+                    onAutoProvisionMicrosoft={handleAutoProvisionMicrosoft}
+                    onUpdateIssuerUrl={handleUpdateIssuerUrl}
+                  />
+                )}
 
-          {activeTab === 'users' && (
-            <IdentityDirectoryView
-              locale={locale}
-              currentUser={user}
-              users={identityUsers}
-              passkeys={passkeys}
-              webhooks={webhooks}
-              webhookLogs={webhookLogs}
-              jitAutoLinkEnabled={authPolicy.jitVerifiedEmailAutoLink}
-              authPolicy={authPolicy}
-              connectors={connectors}
-              onSimulateJit={handleSimulateJit}
-              onCreateUser={handleCreateUser}
-              onUpdateUser={handleUpdateUser}
-              onUpdateUserFactors={handleUpdateUserFactors}
-              onResetUserPassword={handleResetUserPassword}
-              onClearUserPassword={handleClearUserPassword}
-              onEnrollUserTotp={handleEnrollUserTotp}
-              onVerifyUserTotp={handleVerifyUserTotp}
-              onDisableUserTotp={handleDisableUserTotp}
-              onDeleteUser={handleDeleteUser}
-              onUnlinkIdentity={handleUnlinkIdentity}
-              onToggleUserStatus={handleToggleUserStatus}
-              onRegisterPasskey={handleRegisterPasskey}
-              onDeletePasskey={handleDeletePasskey}
-              onCreateWebhook={handleCreateWebhook}
-              onDeleteWebhook={handleDeleteWebhook}
-            />
-          )}
+                {activeTab === 'users' && (
+                  <IdentityDirectoryView
+                    locale={locale}
+                    currentUser={user}
+                    users={identityUsers}
+                    passkeys={passkeys}
+                    webhooks={webhooks}
+                    webhookLogs={webhookLogs}
+                    jitAutoLinkEnabled={authPolicy.jitVerifiedEmailAutoLink}
+                    authPolicy={authPolicy}
+                    connectors={connectors}
+                    onSimulateJit={handleSimulateJit}
+                    onCreateUser={handleCreateUser}
+                    onUpdateUser={handleUpdateUser}
+                    onUpdateUserFactors={handleUpdateUserFactors}
+                    onResetUserPassword={handleResetUserPassword}
+                    onClearUserPassword={handleClearUserPassword}
+                    onEnrollUserTotp={handleEnrollUserTotp}
+                    onVerifyUserTotp={handleVerifyUserTotp}
+                    onDisableUserTotp={handleDisableUserTotp}
+                    onDeleteUser={handleDeleteUser}
+                    onUnlinkIdentity={handleUnlinkIdentity}
+                    onToggleUserStatus={handleToggleUserStatus}
+                    onRegisterPasskey={handleRegisterPasskey}
+                    onDeletePasskey={handleDeletePasskey}
+                    onCreateWebhook={handleCreateWebhook}
+                    onDeleteWebhook={handleDeleteWebhook}
+                  />
+                )}
 
-          {activeTab === 'security' && (
-            <SecurityPolicyView
-              locale={locale}
-              policy={authPolicy}
-              sessionToken={sessionToken}
-              issuerUrl={config.issuerUrl}
-              onSavePolicy={handleSavePolicy}
-            />
-          )}
+                {activeTab === 'security' && (
+                  <SecurityPolicyView
+                    locale={locale}
+                    policy={authPolicy}
+                    sessionToken={sessionToken}
+                    issuerUrl={effectiveIssuerUrl}
+                    onSavePolicy={handleSavePolicy}
+                  />
+                )}
 
-          {activeTab === 'login_lab' && (
-            <LoginLabView
-              locale={locale}
-              issuerUrl={config.issuerUrl}
-              sessionToken={sessionToken}
-              connectors={connectors}
-              applications={applications}
-              authPolicy={authPolicy}
-              selectedClientId={selectedLabClientId}
-              onSelectClientId={setSelectedLabClientId}
-              onSaveTheme={handleSaveAppTheme}
-              onPasswordSignIn={handlePasswordSignIn}
-              onSocialSignIn={handleSocialSignIn}
-              onAuthCompleted={handleAuthCompleted}
-              latestTrace={latestTrace}
-            />
-          )}
+                {activeTab === 'login_lab' && (
+                  <LoginLabView
+                    locale={locale}
+                    issuerUrl={effectiveIssuerUrl}
+                    rawServerIssuerUrl={config.issuerUrl}
+                    sessionToken={sessionToken}
+                    connectors={connectors}
+                    applications={applications}
+                    authPolicy={authPolicy}
+                    selectedClientId={selectedLabClientId}
+                    onSelectClientId={setSelectedLabClientId}
+                    onSaveTheme={handleSaveAppTheme}
+                    onUpdateIssuerUrl={handleUpdateIssuerUrl}
+                    onPasswordSignIn={handlePasswordSignIn}
+                    onSocialSignIn={handleSocialSignIn}
+                    onAuthCompleted={handleAuthCompleted}
+                    latestTrace={latestTrace}
+                  />
+                )}
 
-          {activeTab === 'sdks' && (
-            <SdkDocsView
-              locale={locale}
-              issuerUrl={config.issuerUrl}
-              applications={applications}
-            />
-          )}
+                {activeTab === 'sdks' && (
+                  <SdkDocsView
+                    locale={locale}
+                    issuerUrl={effectiveIssuerUrl}
+                    applications={applications}
+                  />
+                )}
+              </>
+            );
+          })()}
         </main>
       </div>
     </div>

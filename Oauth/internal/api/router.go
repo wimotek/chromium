@@ -473,15 +473,22 @@ func NewRouter(cfgMgr *config.Manager, keys *crypto.KeyManager, certSources ...s
 // Helpers
 // ============================================================================
 
-func isLocalHostName(host string) bool {
+func extractHostName(host string) string {
 	h := strings.ToLower(strings.TrimSpace(host))
 	if h == "" {
-		return true
+		return ""
 	}
 	if parsedHost, _, err := net.SplitHostPort(h); err == nil {
 		h = parsedHost
 	}
-	h = strings.Trim(h, "[]")
+	return strings.Trim(h, "[]")
+}
+
+func isLocalHostName(host string) bool {
+	h := extractHostName(host)
+	if h == "" {
+		return true
+	}
 	return h == "localhost" || h == "127.0.0.1" || h == "::1" || h == "0.0.0.0" || strings.HasSuffix(h, ".localhost")
 }
 
@@ -496,39 +503,45 @@ func detectRequestHost(r *http.Request) string {
 	return host
 }
 
-// detectRequestScheme accurately detects HTTPS behind Nginx, Caddy, Traefik, Cloudflare, 1Panel, or multi-hop reverse proxies.
+// detectRequestScheme accurately detects HTTPS behind Nginx, Caddy, Traefik, Cloudflare, 1Panel, BaoTa, Lucky, or multi-hop reverse proxies.
 func detectRequestScheme(r *http.Request) string {
 	if r.TLS != nil {
 		return "https"
 	}
-	if xfp := strings.TrimSpace(r.Header.Get("X-Forwarded-Proto")); xfp != "" {
-		if idx := strings.Index(xfp, ","); idx != -1 {
-			xfp = strings.TrimSpace(xfp[:idx])
-		}
-		if strings.EqualFold(xfp, "https") {
-			return "https"
-		}
-		if strings.EqualFold(xfp, "http") {
-			// Still allow stronger reverse-proxy hints below before falling back to http
+	for _, hdr := range []string{"X-Forwarded-Proto", "X-Forwarded-Scheme", "X-Scheme", "X-Original-Proto", "X-Url-Scheme"} {
+		if val := strings.TrimSpace(r.Header.Get(hdr)); val != "" {
+			for _, part := range strings.Split(val, ",") {
+				if strings.EqualFold(strings.TrimSpace(part), "https") {
+					return "https"
+				}
+			}
 		}
 	}
 	if fwd := strings.ToLower(r.Header.Get("Forwarded")); strings.Contains(fwd, "proto=https") {
 		return "https"
 	}
 	if strings.EqualFold(strings.TrimSpace(r.Header.Get("X-Forwarded-Ssl")), "on") ||
-		strings.EqualFold(strings.TrimSpace(r.Header.Get("Front-End-Https")), "on") ||
-		strings.EqualFold(strings.TrimSpace(r.Header.Get("X-Url-Scheme")), "https") {
+		strings.EqualFold(strings.TrimSpace(r.Header.Get("Front-End-Https")), "on") {
 		return "https"
+	}
+	if xfpPort := strings.TrimSpace(r.Header.Get("X-Forwarded-Port")); xfpPort != "" {
+		if idx := strings.Index(xfpPort, ","); idx != -1 {
+			xfpPort = strings.TrimSpace(xfpPort[:idx])
+		}
+		if xfpPort == "443" {
+			return "https"
+		}
 	}
 	if cfv := strings.ToLower(r.Header.Get("CF-Visitor")); strings.Contains(cfv, `"https"`) {
 		return "https"
 	}
-	// Fallback for reverse proxies that omit X-Forwarded-Proto: inspect same-host Origin / Referer sent by HTTPS browsers.
-	reqHost := detectRequestHost(r)
+	// Fallback for reverse proxies that omit X-Forwarded-Proto: inspect Origin / Referer sent by HTTPS browsers.
+	reqHostName := extractHostName(detectRequestHost(r))
 	for _, hdr := range []string{"Origin", "Referer"} {
 		if raw := strings.TrimSpace(r.Header.Get(hdr)); raw != "" {
 			if parsed, err := url.Parse(raw); err == nil && strings.EqualFold(parsed.Scheme, "https") {
-				if reqHost == "" || strings.EqualFold(parsed.Host, reqHost) {
+				parsedHostName := extractHostName(parsed.Host)
+				if reqHostName == "" || isLocalHostName(reqHostName) || strings.EqualFold(parsedHostName, reqHostName) {
 					return "https"
 				}
 			}
@@ -541,6 +554,7 @@ func (s *appServer) getIssuer(r *http.Request) string {
 	cfg := s.cfgMgr.Get()
 	reqScheme := detectRequestScheme(r)
 	reqHost := detectRequestHost(r)
+	reqHostName := extractHostName(reqHost)
 
 	configured := strings.TrimRight(strings.TrimSpace(cfg.IssuerURL), "/")
 	if configured == "" || isLocalHostName(func() string {
@@ -549,7 +563,11 @@ func (s *appServer) getIssuer(r *http.Request) string {
 		}
 		return ""
 	}()) {
-		if envIssuer := strings.TrimRight(strings.TrimSpace(defaultStr(os.Getenv("ISSUER_URL"), os.Getenv("PUBLIC_URL"))), "/"); envIssuer != "" {
+		envIssuer := strings.TrimRight(strings.TrimSpace(defaultStr(
+			os.Getenv("WIMOTEK_ISSUER_URL"),
+			defaultStr(os.Getenv("ISSUER_URL"), os.Getenv("PUBLIC_URL")),
+		)), "/")
+		if envIssuer != "" {
 			configured = envIssuer
 		}
 	}
@@ -557,8 +575,12 @@ func (s *appServer) getIssuer(r *http.Request) string {
 	if configured != "" {
 		if u, err := url.Parse(configured); err == nil && u.Host != "" && !isLocalHostName(u.Host) {
 			// If config.json previously saved http://<domain> behind a reverse proxy, auto-upgrade to https:// when request arrives over HTTPS.
-			if strings.EqualFold(u.Scheme, "http") && reqScheme == "https" && (reqHost == "" || strings.EqualFold(u.Host, reqHost)) {
+			if strings.EqualFold(u.Scheme, "http") && reqScheme == "https" &&
+				(reqHostName == "" || isLocalHostName(reqHostName) || strings.EqualFold(extractHostName(u.Host), reqHostName)) {
 				u.Scheme = "https"
+				if u.Port() == "80" {
+					u.Host = u.Hostname()
+				}
 				return strings.TrimRight(u.String(), "/")
 			}
 			return configured
@@ -567,6 +589,11 @@ func (s *appServer) getIssuer(r *http.Request) string {
 
 	if reqHost == "" {
 		return "http://localhost:8080"
+	}
+	if reqScheme == "https" {
+		if hostOnly, port, err := net.SplitHostPort(reqHost); err == nil && port == "80" {
+			reqHost = hostOnly
+		}
 	}
 	return fmt.Sprintf("%s://%s", reqScheme, reqHost)
 }
