@@ -21,7 +21,7 @@ Both the CA Server and the CLI Client are published to the same `ca` repository 
 
 | Component | Docker Hub / GHCR Tag | Quick Start |
 |---|---|---|
-| **CA Server** | `ca:latest` (`ca:<version>`) | `docker run -d --name wimotek-ca -p 8443:8443 -v ./ca-data:/data ghcr.io/wimotek/ca:latest` |
+| **CA Server** | `ca:latest` (`ca:<version>`) | `docker run -d --name wimotek-ca -p 8080:8080 -p 8443:8443 -v ./ca-data:/data ghcr.io/wimotek/ca:latest` |
 | **CLI Client + Web Manager** | `ca:cli` (`ca:cli-<version>`) | `docker run -d --name wimotek-cli -p 9443:9443 -e WIMOTEK_CLI_WEB_PASSWORD=change-me -v ./cli-data:/data ghcr.io/wimotek/ca:cli` |
 
 ### Docker Compose Quick Start (Recommended)

@@ -262,7 +262,22 @@ export interface OAuthProviderInfo {
   label: string;
   configured: boolean;
   callback_url: string;
+  default_callback_url?: string;
   issuer?: string;
+}
+
+export interface DirectOAuthProviderConfig {
+  provider: 'microsoft' | 'github' | 'google';
+  label: string;
+  client_id: string;
+  has_client_secret: boolean;
+  client_secret_masked: string;
+  tenant_id?: string;
+  redirect_uri?: string;
+  callback_url: string;
+  default_callback_url: string;
+  configured: boolean;
+  source: 'database' | 'env' | 'unconfigured';
 }
 
 export interface OAuthGatewayConfig {
@@ -727,9 +742,11 @@ class ApiClient {
   }
 
   getOAuthGatewayConfig() {
-    return this.request<{ gateway: OAuthGatewayConfig; providers?: OAuthProviderInfo[] }>(
-      '/api/admin/oauth/gateway'
-    );
+    return this.request<{
+      gateway: OAuthGatewayConfig;
+      direct_providers?: DirectOAuthProviderConfig[];
+      providers?: OAuthProviderInfo[];
+    }>('/api/admin/oauth/gateway');
   }
 
   saveOAuthGatewayConfig(payload: {
@@ -743,13 +760,34 @@ class ApiClient {
     token_endpoint?: string;
     userinfo_endpoint?: string;
   }) {
-    return this.request<{ gateway: OAuthGatewayConfig; providers?: OAuthProviderInfo[] }>(
-      '/api/admin/oauth/gateway',
-      {
-        method: 'PUT',
-        body: JSON.stringify(payload),
-      }
-    );
+    return this.request<{
+      gateway: OAuthGatewayConfig;
+      direct_providers?: DirectOAuthProviderConfig[];
+      providers?: OAuthProviderInfo[];
+    }>('/api/admin/oauth/gateway', {
+      method: 'PUT',
+      body: JSON.stringify(payload),
+    });
+  }
+
+  saveDirectOAuthProviderConfig(
+    provider: 'microsoft' | 'github' | 'google',
+    payload: {
+      client_id: string;
+      client_secret?: string;
+      clear_secret?: boolean;
+      tenant_id?: string;
+      redirect_uri?: string;
+    }
+  ) {
+    return this.request<{
+      gateway: OAuthGatewayConfig;
+      direct_providers?: DirectOAuthProviderConfig[];
+      providers?: OAuthProviderInfo[];
+    }>(`/api/admin/oauth/providers/${encodeURIComponent(provider)}`, {
+      method: 'PUT',
+      body: JSON.stringify(payload),
+    });
   }
 
   // Profile & Email Change Verification

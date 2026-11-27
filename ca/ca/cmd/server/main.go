@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -32,21 +33,26 @@ func main() {
 	defer stopApp()
 
 	// All environment variables carry safe production-ready defaults.
-	tlsEnabled := parseBoolDefault("CA_TLS_ENABLED", true)
-	defaultListen := ":8443"
-	defaultScheme := "https"
-	if !tlsEnabled {
-		defaultListen = ":8080"
-		defaultScheme = "http"
+	// By default, Wimotek CA listens on both HTTP (:8080) and HTTPS (:8443) simultaneously.
+	httpEnabled := parseBoolDefault("CA_HTTP_ENABLED", true)
+	httpAddr := envOrDefault("CA_HTTP_ADDR", ":8080")
+	httpsEnabled := parseBoolDefault("CA_HTTPS_ENABLED", true)
+	httpsAddr := envOrDefault("CA_HTTPS_ADDR", ":8443")
+	if !httpEnabled && !httpsEnabled {
+		log.Fatalf("[wimotek/ca] at least one listener must be enabled (CA_HTTP_ENABLED or CA_HTTPS_ENABLED)")
 	}
 
-	listenAddr := envOrDefault("CA_LISTEN_ADDR", defaultListen)
+	defaultBaseURL := buildDefaultBaseURL("https", httpsAddr)
+	if !httpsEnabled {
+		defaultBaseURL = buildDefaultBaseURL("http", httpAddr)
+	}
+
 	dataDir := resolveWritableDataDir(envOrDefault("CA_DATA_DIR", "/data"))
 	certsDir := envOrDefault("CA_CERTS_DIR", "/certs")
 	dbDriver := strings.ToLower(envOrDefault("CA_DB_DRIVER", "sqlite"))
 	dbDSN := envOrDefault("CA_DB_DSN", filepath.Join(dataDir, "wimotek-ca.db"))
 	orgName := envOrDefault("CA_ORG_NAME", "Wimotek Enterprise")
-	baseURL := envOrDefault("CA_BASE_URL", buildDefaultBaseURL(defaultScheme, listenAddr))
+	baseURL := envOrDefault("CA_BASE_URL", defaultBaseURL)
 	adminUser := envOrDefault("CA_ADMIN_USER", "admin")
 	adminPass := strings.TrimSpace(os.Getenv("CA_ADMIN_PASSWORD"))
 	powDiff := parseIntDefault("CA_POW_DIFFICULTY", 16)
@@ -93,7 +99,7 @@ func main() {
 	notifySvc.StartScheduler(ctx, time.Duration(notifyIntervalMin)*time.Minute)
 
 	var tlsMgr *ca.TLSManager
-	if tlsEnabled {
+	if httpsEnabled {
 		tlsMgr, err = ca.SetupServerTLS(certsDir, dataDir, tlsHostsCSV, pki)
 		if err != nil {
 			log.Fatalf("[wimotek/ca] failed to initialize TLS manager: %v", err)
@@ -116,35 +122,43 @@ func main() {
 		Notifier: notifySvc,
 	})
 
-	srv := &http.Server{
-		Addr:              listenAddr,
-		Handler:           handler,
-		ReadHeaderTimeout: 10 * time.Second,
-		ReadTimeout:       30 * time.Second,
-		WriteTimeout:      60 * time.Second,
-		IdleTimeout:       120 * time.Second,
-	}
-	if tlsMgr != nil {
-		srv.TLSConfig = tlsMgr.TLSConfig()
+	newHTTPServer := func(addr string) *http.Server {
+		return &http.Server{
+			Addr:              addr,
+			Handler:           handler,
+			ReadHeaderTimeout: 10 * time.Second,
+			ReadTimeout:       30 * time.Second,
+			WriteTimeout:      60 * time.Second,
+			IdleTimeout:       120 * time.Second,
+		}
 	}
 
-	go func() {
-		tlsModeLabel := "disabled"
-		if tlsMgr != nil {
-			tlsModeLabel = tlsMgr.Mode()
-		}
-		log.Printf("[wimotek/ca] listening on %s (tls=%s, db=%s, data=%s, certs=%s, cache=%s)",
-			listenAddr, tlsModeLabel, st.Driver, dataDir, certsDir, hc.Status().Mode)
-		var listenErr error
-		if tlsMgr != nil {
-			listenErr = srv.ListenAndServeTLS("", "")
-		} else {
-			listenErr = srv.ListenAndServe()
-		}
-		if listenErr != nil && listenErr != http.ErrServerClosed {
-			log.Fatalf("[wimotek/ca] http server error: %v", listenErr)
-		}
-	}()
+	var activeServers []*http.Server
+
+	if httpEnabled {
+		httpSrv := newHTTPServer(httpAddr)
+		activeServers = append(activeServers, httpSrv)
+		go func() {
+			log.Printf("[wimotek/ca] HTTP listener active on %s (db=%s, data=%s, cache=%s)",
+				httpAddr, st.Driver, dataDir, hc.Status().Mode)
+			if listenErr := httpSrv.ListenAndServe(); listenErr != nil && listenErr != http.ErrServerClosed {
+				log.Fatalf("[wimotek/ca] HTTP server error (%s): %v", httpAddr, listenErr)
+			}
+		}()
+	}
+
+	if httpsEnabled {
+		httpsSrv := newHTTPServer(httpsAddr)
+		httpsSrv.TLSConfig = tlsMgr.TLSConfig()
+		activeServers = append(activeServers, httpsSrv)
+		go func() {
+			log.Printf("[wimotek/ca] HTTPS listener active on %s (tls=%s, certs=%s, db=%s, data=%s, cache=%s)",
+				httpsAddr, tlsMgr.Mode(), certsDir, st.Driver, dataDir, hc.Status().Mode)
+			if listenErr := httpsSrv.ListenAndServeTLS("", ""); listenErr != nil && listenErr != http.ErrServerClosed {
+				log.Fatalf("[wimotek/ca] HTTPS server error (%s): %v", httpsAddr, listenErr)
+			}
+		}()
+	}
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
@@ -153,7 +167,15 @@ func main() {
 	stopApp()
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	_ = srv.Shutdown(shutdownCtx)
+	var wg sync.WaitGroup
+	for _, srv := range activeServers {
+		wg.Add(1)
+		go func(s *http.Server) {
+			defer wg.Done()
+			_ = s.Shutdown(shutdownCtx)
+		}(srv)
+	}
+	wg.Wait()
 }
 
 func envOrDefault(key, fallback string) string {

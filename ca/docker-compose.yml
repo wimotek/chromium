@@ -31,10 +31,17 @@ services:
     restart: unless-stopped
     user: "10001:10001"
     ports:
-      # 模式 A（默认，直接 HTTPS 访问）：保持 CA_TLS_ENABLED=true，映射 8443
+      # 默认同时监听 HTTP (:8080，便于前置 Nginx/Caddy/Traefik 反代或内网直连) 与 HTTPS (:8443，内置自动/挂载 TLS)
+      - "8080:8080"
       - "8443:8443"
-      # 模式 B（前置 Nginx/Caddy/Traefik/Cloudflare 反向代理终止 HTTPS）：设 CA_TLS_ENABLED=false 时容器自动监听纯 HTTP :8080，可改用下方映射：
-      # - "8080:8080"
+    # 可选：若容器内访问自建 OAuth 网关出现 `lookup ... on 127.0.0.11:53: no such host`，
+    # 说明 Docker 内置 DNS (127.0.0.11) 无法解析该域名，可取消下方注释指定上游 DNS 或主机映射，
+    # 或直接在后台「OAuth / SSO」配置内网 Token / Userinfo 端点：
+    # dns:
+    #   - 223.5.5.5
+    #   - 1.1.1.1
+    # extra_hosts:
+    #   - "auth.example.com:host-gateway"
     volumes:
       # 持久化数据目录：存放 SQLite 数据库、自动生成的 .master.key、未挂载外部证书时的自签 /data/tls 证书
       - ./ca-data:/data
@@ -43,12 +50,14 @@ services:
       # - ./tls-certs:/certs:ro
     environment:
       # ========================================================================
-      # [一] 核心网络、域名与内置 TLS（均有安全默认值）
+      # [一] 核心网络、域名与 HTTP/HTTPS 双监听（默认同时监听 :8080 与 :8443）
       # ========================================================================
       # CA_ORG_NAME: "Wimotek Enterprise"        # 可选：自动初始化 Root CA / Issuing CA 的组织名称 (Subject O)，也可在首次 3 步安装向导中修改
       # CA_BASE_URL: "https://ca.example.com"    # 可选（公网/生产强烈建议填写）：对外访问根 URL，写入 CRL CDP、OCSP AIA、ACME 目录及 OAuth 回调地址
-      # CA_TLS_ENABLED: "true"                   # 可选：是否启用容器内置 HTTPS（默认 true 监听 :8443）；仅当前置 Nginx/Caddy/Traefik/SLB 反代时设为 false（自动切为纯 HTTP :8080，免去双层 TLS 握手）
-      # CA_LISTEN_ADDR: ""                       # 可选：显式覆盖监听地址；留空时按 CA_TLS_ENABLED 自动选择（true -> :8443，false -> :8080）
+      # CA_HTTP_ENABLED: "true"                  # 可选：是否启用 HTTP 监听（默认 true）；如仅允许 HTTPS 可设为 false
+      # CA_HTTP_ADDR: ":8080"                    # 可选：HTTP 监听地址（默认 :8080）
+      # CA_HTTPS_ENABLED: "true"                 # 可选：是否启用内置 HTTPS 监听（默认 true）；如仅由前置 Nginx/Caddy/Traefik 终止 TLS 可设为 false
+      # CA_HTTPS_ADDR: ":8443"                   # 可选：HTTPS 监听地址（默认 :8443）
       # CA_DATA_DIR: "/data"                     # 可选：容器内持久化数据目录（默认 /data）
       # CA_CERTS_DIR: "/certs"                   # 可选：容器内外部证书只读挂载目录（默认 /certs）
       # CA_TLS_HOSTS: "localhost,127.0.0.1"      # 可选：自动签发内置 HTTPS 证书时额外附加的 SAN 域名或 IP（逗号分隔，如 "ca.corp.local,10.0.0.10"）
@@ -85,7 +94,7 @@ services:
 
       # ========================================================================
       # [六] 统一身份认证网关 wimotek/OAuth（PKCE S256 主 SSO 通道，推荐）
-      #      注：以下仅为可选环境变量默认值，登录后台「系统设置」亦可随时可视化动态编辑
+      #      注：以下仅为可选环境变量默认值，登录后台「OAuth / SSO」亦可随时可视化动态编辑
       # ========================================================================
       # WIMOTEK_OAUTH_ISSUER: "https://oauth.example.com"       # 可选：统一 OAuth/OIDC 网关 Issuer 根地址（按实际部署地址填写）
       # WIMOTEK_OAUTH_CLIENT_ID: ""                             # 可选：在 OAuth 网关中注册的 Client ID
@@ -93,7 +102,7 @@ services:
       # WIMOTEK_OAUTH_SCOPES: "openid profile email"            # 可选：请求的 OAuth Scope（默认 "openid profile email"）
 
       # ========================================================================
-      # [七] 直连社交 OAuth 备选通道（可选，可与统一网关并存）
+      # [七] 直连社交 OAuth 备选通道（可选，亦可直接在后台「OAuth / SSO」配置）
       # ========================================================================
       # OAUTH_MICROSOFT_CLIENT_ID: ""            # 可选：Microsoft Entra ID (Azure AD) Client ID
       # OAUTH_MICROSOFT_CLIENT_SECRET: ""        # 可选：Microsoft Entra ID Client Secret
@@ -115,7 +124,7 @@ services:
       # 时区设置（可选，默认 UTC）
       TZ: "Asia/Shanghai"
     healthcheck:
-      test: ["CMD-SHELL", "wget --no-check-certificate -qO- https://127.0.0.1:8443/api/health || wget -qO- http://127.0.0.1:8080/api/health || wget -qO- http://127.0.0.1:8443/api/health || exit 1"]
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/api/health || wget --no-check-certificate -qO- https://127.0.0.1:8443/api/health || exit 1"]
       interval: 30s
       timeout: 5s
       retries: 3

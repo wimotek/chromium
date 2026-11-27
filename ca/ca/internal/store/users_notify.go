@@ -47,26 +47,37 @@ func NormalizeRole(role string) string {
 	}
 }
 
+// SocialAccountRecord stores a linked SSO/OAuth identity for a user.
+type SocialAccountRecord struct {
+	Provider    string `json:"provider"`
+	ProviderID  string `json:"provider_id"`
+	Username    string `json:"-"`
+	Email       string `json:"email"`
+	DisplayName string `json:"display_name"`
+	LinkedAt    int64  `json:"linked_at"`
+}
+
 // UserRecord stores user credentials, role tier, certificate quota, and X.509 identity profile.
 type UserRecord struct {
-	Username       string `json:"username"`
-	PasswordHash   string `json:"-"`
-	Role           string `json:"role"`
-	CertQuota      int    `json:"cert_quota"` // -1 = unlimited
-	ActiveCerts    int    `json:"active_certs"`
-	FullName       string `json:"full_name"`
-	Email          string `json:"email"`
-	UPN            string `json:"upn"`
-	Organization   string `json:"organization"`
-	Department     string `json:"department"`
-	Country        string `json:"country"`
-	Province       string `json:"province"`
-	Locality       string `json:"locality"`
-	Enabled        bool   `json:"enabled"`
-	FailedAttempts int    `json:"failed_attempts"`
-	LockedUntil    int64  `json:"locked_until"`
-	CreatedAt      int64  `json:"created_at"`
-	UpdatedAt      int64  `json:"updated_at"`
+	Username       string                `json:"username"`
+	PasswordHash   string                `json:"-"`
+	Role           string                `json:"role"`
+	CertQuota      int                   `json:"cert_quota"` // -1 = unlimited
+	ActiveCerts    int                   `json:"active_certs"`
+	FullName       string                `json:"full_name"`
+	Email          string                `json:"email"`
+	UPN            string                `json:"upn"`
+	Organization   string                `json:"organization"`
+	Department     string                `json:"department"`
+	Country        string                `json:"country"`
+	Province       string                `json:"province"`
+	Locality       string                `json:"locality"`
+	Enabled        bool                  `json:"enabled"`
+	SocialAccounts []SocialAccountRecord `json:"social_accounts"`
+	FailedAttempts int                   `json:"failed_attempts"`
+	LockedUntil    int64                 `json:"locked_until"`
+	CreatedAt      int64                 `json:"created_at"`
+	UpdatedAt      int64                 `json:"updated_at"`
 }
 
 // NotificationChannelRecord stores an outbound expiry notification channel.
@@ -186,6 +197,10 @@ func (s *Store) GetUser(ctx context.Context, username string) (*UserRecord, erro
 	}
 	r.Enabled = enabled == 1
 	r.ActiveCerts, _ = s.CountActiveCertificatesByUser(ctx, r.Username)
+	r.SocialAccounts, _ = s.ListUserSocialAccounts(ctx, r.Username)
+	if r.SocialAccounts == nil {
+		r.SocialAccounts = []SocialAccountRecord{}
+	}
 	return &r, nil
 }
 
@@ -231,10 +246,93 @@ func (s *Store) CountUsers(ctx context.Context) (int, error) {
 	return cnt, err
 }
 
-// DeleteUser removes a non-root user record.
+// DeleteUser removes a non-root user record and its linked social accounts.
 func (s *Store) DeleteUser(ctx context.Context, username string) error {
 	return s.WithTx(ctx, func(tx *sql.Tx) error {
+		_, _ = tx.ExecContext(ctx, `DELETE FROM user_social_accounts WHERE username = ?`, username)
 		_, err := tx.ExecContext(ctx, `DELETE FROM users WHERE username = ?`, username)
+		return err
+	})
+}
+
+// UpsertUserSocialAccount links or updates an OAuth/SSO identity for a user (one link per provider per user).
+func (s *Store) UpsertUserSocialAccount(ctx context.Context, rec SocialAccountRecord) error {
+	if rec.LinkedAt == 0 {
+		rec.LinkedAt = time.Now().Unix()
+	}
+	provider := strings.ToLower(strings.TrimSpace(rec.Provider))
+	providerID := strings.TrimSpace(rec.ProviderID)
+	username := strings.TrimSpace(rec.Username)
+	if provider == "" || providerID == "" || username == "" {
+		return errors.New("provider, provider_id, and username are required")
+	}
+	return s.WithTx(ctx, func(tx *sql.Tx) error {
+		// Replace any previous binding for this user + provider
+		if _, err := tx.ExecContext(ctx, `
+			DELETE FROM user_social_accounts WHERE username = ? AND provider = ? AND provider_id != ?
+		`, username, provider, providerID); err != nil {
+			return err
+		}
+		if s.Driver == DriverMySQL {
+			_, err := tx.ExecContext(ctx, `
+				INSERT INTO user_social_accounts (provider, provider_id, username, email, display_name, linked_at)
+				VALUES (?, ?, ?, ?, ?, ?)
+				ON DUPLICATE KEY UPDATE
+					username=VALUES(username), email=VALUES(email),
+					display_name=VALUES(display_name), linked_at=VALUES(linked_at)
+			`, provider, providerID, username, rec.Email, rec.DisplayName, rec.LinkedAt)
+			return err
+		}
+		_, err := tx.ExecContext(ctx, `
+			INSERT INTO user_social_accounts (provider, provider_id, username, email, display_name, linked_at)
+			VALUES (?, ?, ?, ?, ?, ?)
+			ON CONFLICT(provider, provider_id) DO UPDATE SET
+				username=excluded.username, email=excluded.email,
+				display_name=excluded.display_name, linked_at=excluded.linked_at
+		`, provider, providerID, username, rec.Email, rec.DisplayName, rec.LinkedAt)
+		return err
+	})
+}
+
+// ListUserSocialAccounts returns all linked OAuth/SSO accounts for a username.
+func (s *Store) ListUserSocialAccounts(ctx context.Context, username string) ([]SocialAccountRecord, error) {
+	rows, err := s.ReadDB.QueryContext(ctx, `
+		SELECT provider, provider_id, username, email, display_name, linked_at
+		FROM user_social_accounts WHERE username = ? ORDER BY linked_at ASC
+	`, username)
+	if err != nil {
+		return []SocialAccountRecord{}, err
+	}
+	defer rows.Close()
+	out := []SocialAccountRecord{}
+	for rows.Next() {
+		var r SocialAccountRecord
+		if err := rows.Scan(&r.Provider, &r.ProviderID, &r.Username, &r.Email, &r.DisplayName, &r.LinkedAt); err != nil {
+			return out, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// FindUsernameBySocialAccount resolves the linked local username for a (provider, provider_id) pair.
+func (s *Store) FindUsernameBySocialAccount(ctx context.Context, provider, providerID string) (string, error) {
+	var username string
+	err := s.ReadDB.QueryRowContext(ctx, `
+		SELECT username FROM user_social_accounts WHERE provider = ? AND provider_id = ?
+	`, strings.ToLower(strings.TrimSpace(provider)), strings.TrimSpace(providerID)).Scan(&username)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	return username, err
+}
+
+// DeleteUserSocialAccount removes a user's linked social account for a given provider.
+func (s *Store) DeleteUserSocialAccount(ctx context.Context, username, provider string) error {
+	return s.WithTx(ctx, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx, `
+			DELETE FROM user_social_accounts WHERE username = ? AND provider = ?
+		`, strings.TrimSpace(username), strings.ToLower(strings.TrimSpace(provider)))
 		return err
 	})
 }

@@ -48,9 +48,11 @@ RUN apk add --no-cache ca-certificates tzdata \
 COPY --from=go-builder /out/wimotek-ca /usr/local/bin/wimotek-ca
 
 # Safe Production Defaults (Zero-Config Out of the Box)
-# Note: CA_LISTEN_ADDR is intentionally NOT hardcoded here so main.go automatically
-# defaults to ":8443" when CA_TLS_ENABLED=true and ":8080" when CA_TLS_ENABLED=false.
-ENV CA_TLS_ENABLED="true" \
+# Listens on both HTTP (:8080) and HTTPS (:8443) simultaneously by default.
+ENV CA_HTTP_ENABLED="true" \
+    CA_HTTP_ADDR=":8080" \
+    CA_HTTPS_ENABLED="true" \
+    CA_HTTPS_ADDR=":8443" \
     CA_DATA_DIR="/data" \
     CA_CERTS_DIR="/certs" \
     CA_DB_DRIVER="sqlite" \
@@ -63,12 +65,12 @@ ENV CA_TLS_ENABLED="true" \
 
 WORKDIR /data
 VOLUME ["/data"]
-EXPOSE 8443 8080
+EXPOSE 8080 8443
 
 # Strictly Non-Root Execution
 USER 10001:10001
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD wget --no-check-certificate -qO- https://127.0.0.1:8443/api/health || wget -qO- http://127.0.0.1:8080/api/health || wget -qO- http://127.0.0.1:8443/api/health || exit 1
+    CMD wget -qO- http://127.0.0.1:8080/api/health || wget --no-check-certificate -qO- https://127.0.0.1:8443/api/health || exit 1
 
 ENTRYPOINT ["/usr/local/bin/wimotek-ca"]

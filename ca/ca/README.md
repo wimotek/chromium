@@ -85,8 +85,10 @@ docker run -d --name wimotek-ca \
 
 | 变量名 | 是否必填 | 默认值 | 说明与备注 |
 | :--- | :---: | :--- | :--- |
-| `CA_TLS_ENABLED` | 可选 | `true` | 是否开启内置 HTTPS。设为 `false` 时以纯 HTTP 运行（默认 `:8080`），适用于前置 Nginx/Caddy/Traefik 终止 TLS。 |
-| `CA_LISTEN_ADDR` | 可选 | `:8443`（HTTP 时 `:8080`） | 服务监听地址。 |
+| `CA_HTTP_ENABLED` | 可选 | `true` | 是否启用 HTTP 监听（默认与 HTTPS 同时开启）。仅需纯 HTTPS 时可设为 `false`。 |
+| `CA_HTTP_ADDR` | 可选 | `:8080` | HTTP 服务监听地址。 |
+| `CA_HTTPS_ENABLED` | 可选 | `true` | 是否启用内置 HTTPS 监听（默认与 HTTP 同时开启）。前置 Nginx/Caddy/Traefik 终止 TLS 且不需要内置 HTTPS 时可设为 `false`。 |
+| `CA_HTTPS_ADDR` | 可选 | `:8443` | HTTPS 服务监听地址。 |
 | `CA_BASE_URL` | 可选 | `https://localhost:8443` | 对外访问根地址，用于写入 CRL CDP、OCSP AIA、ACME 目录及 OAuth 回调地址。**公网生产强烈建议显式配置**。 |
 | `CA_ORG_NAME` | 可选 | `Wimotek Enterprise` | 自动初始化 Root CA / Issuing CA 的组织名称（Subject `O`），首次启动亦可在安装向导修改。 |
 | `CA_DATA_DIR` | 可选 | `/data` | 持久化数据目录（存放 SQLite 数据库、`.master.key` 与自签 `/data/tls/`），须对 UID `10001` 可写。 |

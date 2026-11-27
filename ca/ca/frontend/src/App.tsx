@@ -247,11 +247,9 @@ export default function App() {
     { key: 'notifications', label: t.nav.notifications, icon: BellRing },
     { key: 'automation', label: t.nav.automation, icon: Terminal },
     ...(isAdmin
-      ? [
-          { key: 'users' as TabKey, label: t.nav.users, icon: Users },
-          { key: 'oauth' as TabKey, label: t.nav.oauth, icon: KeyRound },
-        ]
+      ? [{ key: 'users' as TabKey, label: t.nav.users, icon: Users }]
       : []),
+    { key: 'oauth', label: t.nav.oauth, icon: KeyRound },
     { key: 'profile', label: t.nav.profile, icon: UserCircle2 },
     { key: 'help', label: t.nav.help, icon: BookOpen },
     { key: 'audit', label: t.nav.audit, icon: ScrollText },
@@ -500,10 +498,11 @@ export default function App() {
           {activeTab === 'users' && isAdmin && (
             <UsersManagementView t={t} currentUsername={username} />
           )}
-          {activeTab === 'oauth' && isAdmin && (
+          {activeTab === 'oauth' && (
             <OAuthSettingsView
               t={t}
               user={currentUser}
+              isAdmin={isAdmin}
               previewMode={previewMode}
               onUpdated={(updated) => setCurrentUser(updated)}
             />

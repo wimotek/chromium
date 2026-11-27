@@ -97,7 +97,9 @@ func (c *Client) resolveEndpoints(ctx context.Context) oidcEndpoints {
 		JWKSURI:               issuer + "/.well-known/jwks.json",
 		EndSessionEndpoint:    issuer + "/oauth/logout",
 	}
-	if c.AuthorizationEndpoint != "" && c.TokenEndpoint != "" && c.UserinfoEndpoint != "" {
+	// If server-to-server endpoints are explicitly overridden (e.g. internal Docker network URLs),
+	// skip remote discovery on the public issuer to avoid container DNS lookup delays or failures.
+	if c.TokenEndpoint != "" && c.UserinfoEndpoint != "" {
 		return c.applyOverrides(fallback)
 	}
 
@@ -108,7 +110,9 @@ func (c *Client) resolveEndpoints(ctx context.Context) oidcEndpoints {
 		return c.applyOverrides(*cached)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, issuer+"/.well-known/openid-configuration", nil)
+	discCtx, cancel := context.WithTimeout(ctx, 4*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(discCtx, http.MethodGet, issuer+"/.well-known/openid-configuration", nil)
 	if err == nil {
 		req.Header.Set("Accept", "application/json")
 		resp, doErr := c.httpClient().Do(req)
@@ -244,6 +248,10 @@ func (c *Client) HandleCallback(ctx context.Context, code, state, expectedState,
 
 	tokenResp, err := c.httpClient().Do(tokenReq)
 	if err != nil {
+		errText := err.Error()
+		if strings.Contains(errText, "no such host") || strings.Contains(errText, "127.0.0.11") {
+			return nil, fmt.Errorf("token exchange request failed: %w (hint: Docker container DNS could not resolve the OAuth hostname; configure dns/extra_hosts in docker-compose or set internal Token/Userinfo endpoints in OAuth / SSO settings)", err)
+		}
 		return nil, fmt.Errorf("token exchange request failed: %w", err)
 	}
 	defer tokenResp.Body.Close()
