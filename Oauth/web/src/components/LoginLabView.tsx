@@ -39,6 +39,7 @@ import {
   LOGIN_THEME_PRESETS,
   buildAiIntegrationPrompt,
   buildAiThemeSyncPrompt,
+  getIssuerMismatchInfo,
   isNonLocalHttpUrl,
   normalizeLoginTheme,
   parseImportedLoginThemeJson,
@@ -54,6 +55,7 @@ interface LoginLabViewProps {
   locale: Locale;
   issuerUrl: string;
   rawServerIssuerUrl?: string;
+  issuerLocked?: boolean;
   sessionToken?: string;
   connectors: SocialConnector[];
   applications: OAuthApplication[];
@@ -61,7 +63,7 @@ interface LoginLabViewProps {
   selectedClientId: string;
   onSelectClientId: (clientId: string) => void;
   onSaveTheme: (clientId: string, theme: LoginThemeConfig) => Promise<void>;
-  onUpdateIssuerUrl?: (nextIssuerUrl: string) => Promise<void>;
+  onUpdateIssuerUrl?: (nextIssuerUrl: string, autoDetect?: boolean) => Promise<void>;
   onPasswordSignIn: (email: string, password: string) => Promise<void>;
   onSocialSignIn: (provider: string) => Promise<void>;
   onAuthCompleted?: (result: { user: any; sessionToken: string; trace: OidcFlowTrace }) => void;
@@ -72,6 +74,7 @@ export function LoginLabView({
   locale,
   issuerUrl,
   rawServerIssuerUrl,
+  issuerLocked,
   sessionToken = '',
   connectors,
   applications,
@@ -134,29 +137,38 @@ export function LoginLabView({
   const activeAppName = selectedApp?.name || 'wimotek/Oauth';
   const activeRedirectUri = selectedApp?.redirectUris?.[0] || 'https://app.example.com/auth/callback';
   const cleanIssuer = resolveEffectiveIssuerUrl(issuerUrl);
+  const issuerMismatch = getIssuerMismatchInfo(rawServerIssuerUrl || issuerUrl);
   const effectiveIsNonLocalHttp = isNonLocalHttpUrl(cleanIssuer);
   const serverNeedsHttpsSync = Boolean(
-    rawServerIssuerUrl && isNonLocalHttpUrl(rawServerIssuerUrl) && cleanIssuer.startsWith('https://')
+    !issuerMismatch.hostMismatch &&
+      rawServerIssuerUrl &&
+      isNonLocalHttpUrl(rawServerIssuerUrl) &&
+      cleanIssuer.startsWith('https://')
   );
-  const suggestedHttpsIssuer = cleanIssuer.replace(/^http:\/\//i, 'https://').replace(/\/+$/, '');
+  const suggestedHttpsIssuer =
+    issuerMismatch.recommendedIssuer || cleanIssuer.replace(/^http:\/\//i, 'https://').replace(/\/+$/, '');
 
   useEffect(() => {
     setDraftIssuerUrl(cleanIssuer);
   }, [cleanIssuer]);
 
-  async function handleSubmitIssuerUrl(nextUrl: string) {
+  async function handleSubmitIssuerUrl(nextUrl: string, autoDetect = false) {
     if (!onUpdateIssuerUrl) return;
     const trimmed = nextUrl.trim().replace(/\/+$/, '');
-    if (!trimmed) return;
+    if (!autoDetect && !trimmed) return;
     setSavingIssuer(true);
     setIssuerNotice(null);
     try {
-      await onUpdateIssuerUrl(trimmed);
+      await onUpdateIssuerUrl(trimmed, autoDetect);
       setEditingIssuer(false);
       setIssuerNotice({
-        text: isZh
-          ? `对外 Issuer 地址已保存为 ${trimmed}，所有 AI 提示词、MCP 与 OIDC Discovery 已同步生效。`
-          : `Public Issuer URL saved as ${trimmed}. AI prompts, MCP, and OIDC Discovery are now in sync.`,
+        text: autoDetect
+          ? isZh
+            ? '已恢复自动跟随当前反代域名模式，AI 提示词、MCP 与 OIDC Discovery 将自动匹配当前访问地址。'
+            : 'Switched back to automatic reverse-proxy domain detection.'
+          : isZh
+            ? `对外 Issuer 地址已保存为 ${trimmed}，所有 AI 提示词、MCP 与 OIDC Discovery 已同步生效。`
+            : `Public Issuer URL saved as ${trimmed}. AI prompts, MCP, and OIDC Discovery are now in sync.`,
       });
     } catch (err) {
       setIssuerNotice({
@@ -827,6 +839,15 @@ export function LoginLabView({
                     <div className="min-w-0">
                       <div className="text-[11px] font-medium text-slate-500 dark:text-slate-400">
                         {isZh ? '当前提示词 / MCP / API 使用的对外地址 (Issuer)' : 'Public Issuer URL used in Prompts / MCP / API'}
+                        <span className="ml-1.5 text-[10.5px] font-normal">
+                          {issuerLocked
+                            ? isZh
+                              ? '· 手动锁定'
+                              : '· Pinned'
+                            : isZh
+                              ? '· 自动跟随反代域名'
+                              : '· Auto-detect'}
+                        </span>
                       </div>
                       <div className="font-mono text-[11.5px] font-semibold text-slate-900 dark:text-slate-100 break-all mt-0.5">
                         {cleanIssuer}
@@ -847,6 +868,33 @@ export function LoginLabView({
                     )}
                   </div>
 
+                  {issuerMismatch.hostMismatch && onUpdateIssuerUrl && issuerMismatch.recommendedIssuer && (
+                    <div className="p-2.5 rounded-md bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800/70 flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-[11px]">
+                      <div className="flex items-start gap-1.5 text-amber-900 dark:text-amber-200 leading-relaxed">
+                        <AlertCircle className="w-3.5 h-3.5 text-amber-600 dark:text-amber-400 shrink-0 mt-0.5" />
+                        <span>
+                          {isZh
+                            ? `检测到服务端保存的域名 (${rawServerIssuerUrl || cleanIssuer}) 与当前浏览器访问域名 (${issuerMismatch.browserOrigin}) 不一致，常见于历史 config.json 旧域名或反代未透传 Host。点击右侧一键同步为当前访问地址。`
+                            : `Server Issuer (${rawServerIssuerUrl || cleanIssuer}) differs from your current browser origin (${issuerMismatch.browserOrigin}). Click to sync immediately.`}
+                        </span>
+                      </div>
+                      <button
+                        type="button"
+                        disabled={savingIssuer}
+                        onClick={() => void handleSubmitIssuerUrl(issuerMismatch.recommendedIssuer)}
+                        className="px-2.5 py-1.5 rounded-md bg-amber-600 hover:bg-amber-700 disabled:opacity-50 text-white font-medium whitespace-nowrap shrink-0"
+                      >
+                        {savingIssuer
+                          ? isZh
+                            ? '同步中...'
+                            : 'Syncing...'
+                          : isZh
+                            ? `同步为 ${issuerMismatch.recommendedIssuer}`
+                            : `Sync to ${issuerMismatch.recommendedIssuer}`}
+                      </button>
+                    </div>
+                  )}
+
                   {serverNeedsHttpsSync && onUpdateIssuerUrl && (
                     <div className="p-2.5 rounded-md bg-emerald-50/80 dark:bg-emerald-950/30 border border-emerald-200 dark:border-emerald-800/70 flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-[11px]">
                       <div className="text-emerald-900 dark:text-emerald-200 leading-relaxed">
@@ -865,7 +913,7 @@ export function LoginLabView({
                     </div>
                   )}
 
-                  {effectiveIsNonLocalHttp && (
+                  {!issuerMismatch.hostMismatch && effectiveIsNonLocalHttp && (
                     <div className="p-2.5 rounded-md bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800/70 flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-[11px]">
                       <div className="flex items-start gap-1.5 text-amber-900 dark:text-amber-200 leading-relaxed">
                         <AlertCircle className="w-3.5 h-3.5 text-amber-600 dark:text-amber-400 shrink-0 mt-0.5" />
@@ -897,7 +945,7 @@ export function LoginLabView({
                         placeholder="https://auth.example.com"
                         className="flex-1 min-h-[34px] px-2.5 py-1 rounded-md border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 font-mono text-[11.5px] text-slate-900 dark:text-slate-100"
                       />
-                      <div className="flex items-center gap-1.5 shrink-0">
+                      <div className="flex items-center gap-1.5 shrink-0 flex-wrap">
                         <button
                           type="button"
                           disabled={savingIssuer || !draftIssuerUrl.trim()}
@@ -905,6 +953,14 @@ export function LoginLabView({
                           className="min-h-[34px] px-3 py-1 rounded-md bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white text-[11px] font-medium"
                         >
                           {savingIssuer ? (isZh ? '保存中...' : 'Saving...') : isZh ? '保存' : 'Save'}
+                        </button>
+                        <button
+                          type="button"
+                          disabled={savingIssuer}
+                          onClick={() => void handleSubmitIssuerUrl('', true)}
+                          className="min-h-[34px] px-2.5 py-1 rounded-md border border-emerald-300 dark:border-emerald-700 bg-emerald-50/70 dark:bg-emerald-950/30 hover:bg-emerald-100 dark:hover:bg-emerald-900/40 text-[11px] font-medium text-emerald-700 dark:text-emerald-300"
+                        >
+                          {isZh ? '恢复自动检测' : 'Auto-Detect'}
                         </button>
                         <button
                           type="button"

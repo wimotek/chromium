@@ -356,18 +356,42 @@ func (s *appServer) connectorCallbackURI(r *http.Request, conn storedConnector) 
 
 func (s *appServer) handleUpdateIssuerURL(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		IssuerURL string `json:"issuerUrl"`
+		IssuerURL  string `json:"issuerUrl"`
+		AutoDetect bool   `json:"autoDetect"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid_json", "message": "Invalid JSON payload"})
 		return
 	}
 	raw := strings.TrimRight(strings.TrimSpace(body.IssuerURL), "/")
+
+	if body.AutoDetect || raw == "" {
+		s.mu.Lock()
+		cfg := s.cfgMgr.Get()
+		cfg.IssuerURL = ""
+		cfg.IssuerLocked = false
+		if err := s.cfgMgr.Update(cfg); err != nil {
+			s.mu.Unlock()
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "persist_failed", "message": err.Error()})
+			return
+		}
+		payload := s.buildConfigPayloadLocked(r)
+		s.mu.Unlock()
+
+		writeJSON(w, http.StatusOK, map[string]any{
+			"ok":         true,
+			"autoDetect": true,
+			"issuerUrl":  payload.IssuerURL,
+			"config":     payload,
+		})
+		return
+	}
+
 	parsed, err := url.Parse(raw)
 	if err != nil || parsed.Host == "" || (parsed.Scheme != "https" && parsed.Scheme != "http") {
 		writeJSON(w, http.StatusBadRequest, map[string]any{
 			"error":   "invalid_issuer_url",
-			"message": "Issuer URL must be a valid http:// or https:// URL (e.g. https://ca.wimotek.com).",
+			"message": "Issuer URL must be a valid http:// or https:// URL (e.g. https://auth.example.com).",
 		})
 		return
 	}
@@ -376,6 +400,7 @@ func (s *appServer) handleUpdateIssuerURL(w http.ResponseWriter, r *http.Request
 	s.mu.Lock()
 	cfg := s.cfgMgr.Get()
 	cfg.IssuerURL = clean
+	cfg.IssuerLocked = true
 	if err := s.cfgMgr.Update(cfg); err != nil {
 		s.mu.Unlock()
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "persist_failed", "message": err.Error()})

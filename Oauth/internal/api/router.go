@@ -44,6 +44,8 @@ type apiConfigPayload struct {
 	RedisSimulatedDown  bool   `json:"redisSimulatedDown"`
 	ActiveCacheMode     string `json:"activeCacheMode"`
 	IssuerURL           string `json:"issuerUrl"`
+	ConfiguredIssuerURL string `json:"configuredIssuerUrl,omitempty"`
+	IssuerLocked        bool   `json:"issuerLocked"`
 	AdminEmail          string `json:"adminEmail"`
 	TLSSource           string `json:"tlsSource"`
 }
@@ -492,15 +494,43 @@ func isLocalHostName(host string) bool {
 	return h == "localhost" || h == "127.0.0.1" || h == "::1" || h == "0.0.0.0" || strings.HasSuffix(h, ".localhost")
 }
 
+func isPublicDomainHost(host string) bool {
+	h := extractHostName(host)
+	if h == "" || isLocalHostName(h) {
+		return false
+	}
+	if ip := net.ParseIP(h); ip != nil {
+		return !ip.IsLoopback() && !ip.IsPrivate() && !ip.IsLinkLocalUnicast() && !ip.IsLinkLocalMulticast() && !ip.IsUnspecified()
+	}
+	return strings.Contains(h, ".")
+}
+
 func detectRequestHost(r *http.Request) string {
-	host := strings.TrimSpace(r.Header.Get("X-Forwarded-Host"))
-	if idx := strings.Index(host, ","); idx != -1 {
-		host = strings.TrimSpace(host[:idx])
+	for _, hdr := range []string{"X-Forwarded-Host", "X-Original-Host"} {
+		if val := strings.TrimSpace(r.Header.Get(hdr)); val != "" {
+			if idx := strings.Index(val, ","); idx != -1 {
+				val = strings.TrimSpace(val[:idx])
+			}
+			if val != "" {
+				return val
+			}
+		}
 	}
-	if host == "" {
-		host = strings.TrimSpace(r.Host)
+	if fwd := r.Header.Get("Forwarded"); fwd != "" {
+		for _, part := range strings.Split(fwd, ";") {
+			p := strings.TrimSpace(part)
+			if len(p) > 5 && strings.EqualFold(p[:5], "host=") {
+				h := strings.Trim(strings.TrimSpace(p[5:]), `"`)
+				if idx := strings.Index(h, ","); idx != -1 {
+					h = strings.TrimSpace(h[:idx])
+				}
+				if h != "" {
+					return h
+				}
+			}
+		}
 	}
-	return host
+	return strings.TrimSpace(r.Host)
 }
 
 // detectRequestScheme accurately detects HTTPS behind Nginx, Caddy, Traefik, Cloudflare, 1Panel, BaoTa, Lucky, or multi-hop reverse proxies.
@@ -556,35 +586,69 @@ func (s *appServer) getIssuer(r *http.Request) string {
 	reqHost := detectRequestHost(r)
 	reqHostName := extractHostName(reqHost)
 
-	configured := strings.TrimRight(strings.TrimSpace(cfg.IssuerURL), "/")
-	if configured == "" || isLocalHostName(func() string {
-		if u, err := url.Parse(configured); err == nil {
-			return u.Host
-		}
-		return ""
-	}()) {
-		envIssuer := strings.TrimRight(strings.TrimSpace(defaultStr(
-			os.Getenv("WIMOTEK_ISSUER_URL"),
-			defaultStr(os.Getenv("ISSUER_URL"), os.Getenv("PUBLIC_URL")),
-		)), "/")
-		if envIssuer != "" {
-			configured = envIssuer
+	// 1. Explicit environment variable always takes precedence when set by operator.
+	envIssuer := strings.TrimRight(strings.TrimSpace(defaultStr(
+		os.Getenv("WIMOTEK_ISSUER_URL"),
+		defaultStr(os.Getenv("ISSUER_URL"), os.Getenv("PUBLIC_URL")),
+	)), "/")
+	if envIssuer != "" {
+		if u, err := url.Parse(envIssuer); err == nil && u.Host != "" && !isLocalHostName(u.Host) {
+			return envIssuer
 		}
 	}
 
+	configured := strings.TrimRight(strings.TrimSpace(cfg.IssuerURL), "/")
+	var configuredURL *url.URL
 	if configured != "" {
 		if u, err := url.Parse(configured); err == nil && u.Host != "" && !isLocalHostName(u.Host) {
-			// If config.json previously saved http://<domain> behind a reverse proxy, auto-upgrade to https:// when request arrives over HTTPS.
-			if strings.EqualFold(u.Scheme, "http") && reqScheme == "https" &&
-				(reqHostName == "" || isLocalHostName(reqHostName) || strings.EqualFold(extractHostName(u.Host), reqHostName)) {
-				u.Scheme = "https"
-				if u.Port() == "80" {
-					u.Host = u.Hostname()
-				}
-				return strings.TrimRight(u.String(), "/")
-			}
-			return configured
+			configuredURL = u
 		}
+	}
+
+	// 2. If admin explicitly locked a custom Issuer URL, respect it (still upgrading http->https on same-host HTTPS requests).
+	if cfg.IssuerLocked && configuredURL != nil {
+		if strings.EqualFold(configuredURL.Scheme, "http") && reqScheme == "https" &&
+			(reqHostName == "" || isLocalHostName(reqHostName) || strings.EqualFold(extractHostName(configuredURL.Host), reqHostName)) {
+			uCopy := *configuredURL
+			uCopy.Scheme = "https"
+			if uCopy.Port() == "80" {
+				uCopy.Host = uCopy.Hostname()
+			}
+			return strings.TrimRight(uCopy.String(), "/")
+		}
+		return configured
+	}
+
+	// 3. Auto-detect mode (default for fresh installs and legacy config.json without issuer_locked):
+	// Follow the incoming public domain & scheme from reverse proxy headers so changing domains (e.g. ca -> auth) works immediately.
+	if isPublicDomainHost(reqHost) {
+		effectiveScheme := reqScheme
+		// Preserve HTTPS if config.json already stored https:// for this exact same hostname (e.g. OAuth callback without X-Forwarded-Proto).
+		if effectiveScheme == "http" && configuredURL != nil &&
+			strings.EqualFold(configuredURL.Scheme, "https") &&
+			strings.EqualFold(extractHostName(configuredURL.Host), reqHostName) {
+			effectiveScheme = "https"
+		}
+		cleanHost := reqHost
+		if effectiveScheme == "https" {
+			if hostOnly, port, err := net.SplitHostPort(cleanHost); err == nil && port == "80" {
+				cleanHost = hostOnly
+			}
+		}
+		return fmt.Sprintf("%s://%s", effectiveScheme, cleanHost)
+	}
+
+	// 4. For internal/localhost requests (e.g. container-to-container calls), fall back to saved non-local IssuerURL if present.
+	if configuredURL != nil {
+		if strings.EqualFold(configuredURL.Scheme, "http") && reqScheme == "https" {
+			uCopy := *configuredURL
+			uCopy.Scheme = "https"
+			if uCopy.Port() == "80" {
+				uCopy.Host = uCopy.Hostname()
+			}
+			return strings.TrimRight(uCopy.String(), "/")
+		}
+		return configured
 	}
 
 	if reqHost == "" {
@@ -623,6 +687,8 @@ func (s *appServer) buildConfigPayloadLocked(r *http.Request) apiConfigPayload {
 		RedisSimulatedDown:  cfg.Redis.SimulatedDown,
 		ActiveCacheMode:     s.activeCacheModeLocked(),
 		IssuerURL:           s.getIssuer(r),
+		ConfiguredIssuerURL: cfg.IssuerURL,
+		IssuerLocked:        cfg.IssuerLocked,
 		AdminEmail:          cfg.AdminEmail,
 		TLSSource:           s.certSource,
 	}

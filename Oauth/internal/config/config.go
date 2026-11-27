@@ -24,6 +24,7 @@ type RedisConfig struct {
 type SystemConfig struct {
 	Initialized       bool        `json:"initialized"`
 	IssuerURL         string      `json:"issuer_url"`
+	IssuerLocked      bool        `json:"issuer_locked,omitempty"`
 	AdminEmail        string      `json:"admin_email"`
 	AdminPasswordHash string      `json:"admin_password_hash,omitempty"`
 	Database          DBConfig    `json:"database"`

@@ -6,6 +6,8 @@ export type CacheMode = 'redis' | 'sql_fallback';
 export interface SystemConfig {
   initialized: boolean;
   issuerUrl: string;
+  configuredIssuerUrl?: string;
+  issuerLocked?: boolean;
   dbDriver: DbDriver;
   dbDsn: string;
   sqliteWalEnabled: boolean;

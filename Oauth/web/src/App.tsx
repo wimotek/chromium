@@ -617,11 +617,11 @@ export default function App() {
     };
   }
 
-  async function handleUpdateIssuerUrl(nextIssuerUrl: string) {
+  async function handleUpdateIssuerUrl(nextIssuerUrl: string, autoDetect = false) {
     const res = await authFetch('/api/system/issuer', {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ issuerUrl: nextIssuerUrl }),
+      body: JSON.stringify({ issuerUrl: nextIssuerUrl, autoDetect }),
     });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) {
@@ -630,7 +630,9 @@ export default function App() {
     if (data.config) {
       setConfig(data.config);
     } else if (typeof data.issuerUrl === 'string') {
-      setConfig((prev) => (prev ? { ...prev, issuerUrl: data.issuerUrl } : prev));
+      setConfig((prev) =>
+        prev ? { ...prev, issuerUrl: data.issuerUrl, issuerLocked: !autoDetect } : prev
+      );
     }
   }
 
@@ -1243,6 +1245,8 @@ export default function App() {
                   <ConnectorsView
                     locale={locale}
                     issuerUrl={effectiveIssuerUrl}
+                    rawServerIssuerUrl={config.issuerUrl}
+                    issuerLocked={config.issuerLocked}
                     connectors={connectors}
                     onUpdateConnector={handleUpdateConnector}
                     onAddCustomConnector={handleAddCustomConnector}
@@ -1299,6 +1303,7 @@ export default function App() {
                     locale={locale}
                     issuerUrl={effectiveIssuerUrl}
                     rawServerIssuerUrl={config.issuerUrl}
+                    issuerLocked={config.issuerLocked}
                     sessionToken={sessionToken}
                     connectors={connectors}
                     applications={applications}

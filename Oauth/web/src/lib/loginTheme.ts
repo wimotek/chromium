@@ -255,6 +255,67 @@ export function resolveEffectiveIssuerUrl(issuerUrl?: string, browserOrigin?: st
   return rawIssuer;
 }
 
+export interface IssuerMismatchInfo {
+  browserOrigin: string;
+  isBrowserPublic: boolean;
+  hostMismatch: boolean;
+  protocolMismatch: boolean;
+  isNonLocalHttp: boolean;
+  recommendedIssuer: string;
+}
+
+/**
+ * Inspects whether the server-reported Issuer URL differs from the browser's current origin
+ * (either stale domain saved in config.json or http:// behind an HTTPS reverse proxy).
+ */
+export function getIssuerMismatchInfo(serverIssuerUrl?: string, browserOrigin?: string): IssuerMismatchInfo {
+  const cleanBrowser = (browserOrigin !== undefined ? browserOrigin : typeof window !== 'undefined' ? window.location.origin : '')
+    .trim()
+    .replace(/\/+$/, '');
+  const cleanServer = (serverIssuerUrl || '').trim().replace(/\/+$/, '');
+  const nonLocalHttp = isNonLocalHttpUrl(cleanServer);
+
+  let isBrowserPublic = false;
+  let hostMismatch = false;
+  let protocolMismatch = false;
+  let recommendedIssuer = nonLocalHttp ? cleanServer.replace(/^http:\/\//i, 'https://') : cleanServer;
+
+  if (cleanBrowser) {
+    try {
+      const parsedBrowser = new URL(cleanBrowser);
+      isBrowserPublic = !isLocalHostname(parsedBrowser.hostname);
+      if (isBrowserPublic) {
+        recommendedIssuer = cleanBrowser;
+      }
+      if (cleanServer) {
+        const parsedServer = new URL(cleanServer);
+        if (isBrowserPublic && parsedServer.hostname.toLowerCase() !== parsedBrowser.hostname.toLowerCase()) {
+          hostMismatch = true;
+        }
+        if (
+          parsedBrowser.protocol === 'https:' &&
+          parsedServer.protocol === 'http:' &&
+          parsedServer.hostname.toLowerCase() === parsedBrowser.hostname.toLowerCase()
+        ) {
+          protocolMismatch = true;
+          recommendedIssuer = cleanBrowser;
+        }
+      }
+    } catch {
+      // ignore invalid URLs
+    }
+  }
+
+  return {
+    browserOrigin: cleanBrowser,
+    isBrowserPublic,
+    hostMismatch,
+    protocolMismatch,
+    isNonLocalHttp: nonLocalHttp,
+    recommendedIssuer,
+  };
+}
+
 export function buildAiThemeSyncPrompt(opts: {
   issuerUrl: string;
   clientId: string;

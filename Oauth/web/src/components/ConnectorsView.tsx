@@ -35,11 +35,14 @@ import {
   type ConnectorTemplate,
   type OidcDiscoveryResult,
 } from '../lib/connectorAutoConfig';
+import { getIssuerMismatchInfo } from '../lib/loginTheme';
 import { ProviderIcon } from './ProviderIcons';
 
 interface ConnectorsViewProps {
   locale: Locale;
   issuerUrl: string;
+  rawServerIssuerUrl?: string;
+  issuerLocked?: boolean;
   connectors: SocialConnector[];
   onUpdateConnector: (
     id: string,
@@ -67,7 +70,7 @@ interface ConnectorsViewProps {
     signInAudience: string;
     tenantId?: string;
   }) => Promise<{ appId: string; tenantId: string; callbackUri: string }>;
-  onUpdateIssuerUrl?: (nextIssuerUrl: string) => Promise<void>;
+  onUpdateIssuerUrl?: (nextIssuerUrl: string, autoDetect?: boolean) => Promise<void>;
 }
 
 type EditorTab = 'config' | 'import' | 'guide';
@@ -75,6 +78,8 @@ type EditorTab = 'config' | 'import' | 'guide';
 export function ConnectorsView({
   locale,
   issuerUrl,
+  rawServerIssuerUrl,
+  issuerLocked,
   connectors,
   onUpdateConnector,
   onAddCustomConnector,
@@ -983,34 +988,26 @@ export function ConnectorsView({
 
             {(() => {
               const cbUri = setupGuide.callbackInfo.callbackUri;
-              const isNonLocalHttp = (() => {
-                try {
-                  const u = new URL(cbUri);
-                  const h = u.hostname.toLowerCase();
-                  return (
-                    u.protocol === 'http:' &&
-                    h !== 'localhost' &&
-                    h !== '127.0.0.1' &&
-                    h !== '::1' &&
-                    !h.endsWith('.localhost')
-                  );
-                } catch {
-                  return false;
-                }
-              })();
-              const suggestedHttpsIssuer = issuerUrl.replace(/^http:\/\//i, 'https://').replace(/\/$/, '');
+              const serverIssuer = (rawServerIssuerUrl || issuerUrl).trim().replace(/\/+$/, '');
+              const mismatch = getIssuerMismatchInfo(serverIssuer);
+              const showMismatchBanner = mismatch.hostMismatch || mismatch.protocolMismatch || mismatch.isNonLocalHttp;
+              const syncTargetIssuer = mismatch.recommendedIssuer || issuerUrl.replace(/^http:\/\//i, 'https://').replace(/\/$/, '');
 
-              async function submitIssuerUrl(nextUrl: string) {
+              async function submitIssuerUrl(nextUrl: string, autoDetect = false) {
                 if (!onUpdateIssuerUrl) return;
                 setSavingIssuer(true);
                 setActionNotice(null);
                 try {
-                  await onUpdateIssuerUrl(nextUrl.trim());
+                  await onUpdateIssuerUrl(nextUrl.trim(), autoDetect);
                   setEditingIssuer(false);
                   setActionNotice({
-                    text: isZh
-                      ? `公开域名已更新为 ${nextUrl.trim()}，所有连接器 Callback URI 已同步生效。`
-                      : `Public Issuer URL updated to ${nextUrl.trim()}. All Callback URIs updated.`,
+                    text: autoDetect
+                      ? isZh
+                        ? '已恢复为自动跟随当前反代域名模式，所有连接器 Callback URI 已重新检测生效。'
+                        : 'Switched back to automatic reverse-proxy domain detection.'
+                      : isZh
+                        ? `公开域名已更新为 ${nextUrl.trim()}，所有连接器 Callback URI 已同步生效。`
+                        : `Public Issuer URL updated to ${nextUrl.trim()}. All Callback URIs updated.`,
                   });
                 } catch (err) {
                   setActionNotice({
@@ -1026,8 +1023,19 @@ export function ConnectorsView({
                 <div className="bg-slate-50/90 dark:bg-slate-900/60 border border-slate-200 dark:border-slate-800 rounded-lg p-3.5 space-y-2.5">
                   <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
                     <div className="min-w-0">
-                      <div className="text-xs font-medium text-slate-700 dark:text-slate-300">
-                        {isZh ? '自动生成的 Callback URI（复制到第三方应用回调白名单）' : 'Auto-Generated Callback URI (paste into provider console)'}
+                      <div className="text-xs font-medium text-slate-700 dark:text-slate-300 flex flex-wrap items-center gap-2">
+                        <span>
+                          {isZh ? '自动生成的 Callback URI（复制到第三方应用回调白名单）' : 'Auto-Generated Callback URI (paste into provider console)'}
+                        </span>
+                        <span className="text-[11px] font-normal text-slate-500 dark:text-slate-400">
+                          {issuerLocked
+                            ? isZh
+                              ? '· 手动锁定域名'
+                              : '· Manual pinned domain'
+                            : isZh
+                              ? '· 自动跟随反代域名'
+                              : '· Auto-detecting domain'}
+                        </span>
                       </div>
                       <div className="mt-1 text-xs font-mono text-indigo-700 dark:text-indigo-300 break-all">
                         {cbUri}
@@ -1055,37 +1063,49 @@ export function ConnectorsView({
                     </div>
                   </div>
 
-                  {isNonLocalHttp && (
+                  {showMismatchBanner && (
                     <div className="p-3 rounded-lg bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800/70 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 text-xs">
                       <div className="flex items-start gap-2 text-amber-900 dark:text-amber-200">
                         <AlertCircle className="w-4 h-4 text-amber-600 dark:text-amber-400 shrink-0 mt-0.5" />
                         <div className="space-y-0.5 leading-relaxed">
                           <div className="font-semibold">
-                            {isZh
-                              ? '检测到回调地址为 HTTP（常见于反向代理到 8080 端口）'
-                              : 'HTTP Callback URI detected on public domain (reverse proxy)'}
+                            {mismatch.hostMismatch
+                              ? isZh
+                                ? `服务端回调域名 (${serverIssuer}) 与当前浏览器访问域名 (${mismatch.browserOrigin}) 不一致`
+                                : `Server callback domain (${serverIssuer}) differs from current browser origin (${mismatch.browserOrigin})`
+                              : isZh
+                                ? '检测到回调地址为 HTTP（常见于反向代理到 8080 端口）'
+                                : 'HTTP Callback URI detected on public domain (reverse proxy)'}
                           </div>
                           <p className="text-[11px] text-amber-800/90 dark:text-amber-300/90">
-                            {isZh
-                              ? 'Microsoft Entra ID / Google / Apple 强制非本地域名使用 HTTPS（否则报 AADSTS50011）。请点击右侧按钮一键切换为 HTTPS，并建议在反代中透传 X-Forwarded-Proto: https。'
-                              : 'Microsoft Entra ID / Google / Apple require HTTPS for non-localhost domains (otherwise AADSTS50011). Switch Issuer URL to HTTPS below and forward X-Forwarded-Proto: https in your reverse proxy.'}
+                            {mismatch.hostMismatch
+                              ? isZh
+                                ? '这通常是因为 /data/config.json 中曾保存过旧域名，或反代未透传 Host / X-Forwarded-Host 与 X-Forwarded-Proto。点击右侧按钮可一键同步为当前访问地址，或点「修改域名 → 恢复自动检测」。'
+                                : 'This usually happens when an older domain was saved in /data/config.json, or the reverse proxy does not forward Host / X-Forwarded-Host and X-Forwarded-Proto. Click to sync immediately to your current origin.'
+                              : isZh
+                                ? 'Microsoft Entra ID / Google / Apple 强制非本地域名使用 HTTPS（否则报 AADSTS50011）。请点击右侧按钮一键同步为 HTTPS，并建议在反代中透传 Host 与 X-Forwarded-Proto: https。'
+                                : 'Microsoft Entra ID / Google / Apple require HTTPS for non-localhost domains (otherwise AADSTS50011). Switch Issuer URL to HTTPS below and forward Host & X-Forwarded-Proto: https in your reverse proxy.'}
                           </p>
                         </div>
                       </div>
-                      {onUpdateIssuerUrl && (
+                      {onUpdateIssuerUrl && syncTargetIssuer && (
                         <button
                           type="button"
                           disabled={savingIssuer}
-                          onClick={() => void submitIssuerUrl(suggestedHttpsIssuer)}
+                          onClick={() => void submitIssuerUrl(syncTargetIssuer)}
                           className="min-h-[34px] px-3 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-700 disabled:opacity-50 text-white text-xs font-medium whitespace-nowrap shrink-0 transition-colors"
                         >
                           {savingIssuer
                             ? isZh
-                              ? '切换中...'
-                              : 'Switching...'
-                            : isZh
-                              ? '一键切换为 HTTPS'
-                              : 'Switch to HTTPS'}
+                              ? '同步中...'
+                              : 'Syncing...'
+                            : mismatch.hostMismatch
+                              ? isZh
+                                ? `同步为 ${syncTargetIssuer}`
+                                : `Sync to ${syncTargetIssuer}`
+                              : isZh
+                                ? '一键切换为 HTTPS'
+                                : 'Switch to HTTPS'}
                         </button>
                       )}
                     </div>
@@ -1097,10 +1117,10 @@ export function ConnectorsView({
                         type="url"
                         value={draftIssuerUrl}
                         onChange={(e) => setDraftIssuerUrl(e.target.value)}
-                        placeholder="https://ca.wimotek.com"
+                        placeholder="https://auth.example.com"
                         className="flex-1 min-h-[36px] px-3 py-1.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-[#111827] text-xs font-mono text-slate-900 dark:text-slate-100"
                       />
-                      <div className="flex items-center gap-1.5 shrink-0">
+                      <div className="flex items-center gap-1.5 shrink-0 flex-wrap">
                         <button
                           type="button"
                           disabled={savingIssuer || !draftIssuerUrl.trim()}
@@ -1108,6 +1128,14 @@ export function ConnectorsView({
                           className="min-h-[36px] px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white text-xs font-medium"
                         >
                           {savingIssuer ? (isZh ? '保存中...' : 'Saving...') : isZh ? '保存公开域名' : 'Save Issuer URL'}
+                        </button>
+                        <button
+                          type="button"
+                          disabled={savingIssuer}
+                          onClick={() => void submitIssuerUrl('', true)}
+                          className="min-h-[36px] px-2.5 py-1.5 rounded-lg border border-emerald-300 dark:border-emerald-700 bg-emerald-50/70 dark:bg-emerald-950/30 hover:bg-emerald-100 dark:hover:bg-emerald-900/40 text-xs font-medium text-emerald-700 dark:text-emerald-300"
+                        >
+                          {isZh ? '恢复自动检测' : 'Auto-Detect'}
                         </button>
                         <button
                           type="button"
