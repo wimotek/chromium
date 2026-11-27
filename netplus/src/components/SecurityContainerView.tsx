@@ -32,6 +32,14 @@ const OAUTH_PROVIDER_INFO: Record<
   OAuthProviderId,
   { name: string; docsHintZh: string; docsHintEn: string; consoleUrl: string }
 > = {
+  wimotek: {
+    name: 'wimotek/Oauth (OIDC 1.0 + PKCE S256)',
+    docsHintZh:
+      '标准 OIDC 1.0 + OAuth 2.0 (PKCE S256 / RS256 JWKS)。启用后登录页直接使用 wimotek/Oauth（渲染 NetPulse 定制主题）；禁用后自动回退到本地登录页。Client Secret 支持环境变量 OAUTH_SECRET 或此处加密保存。',
+    docsHintEn:
+      'Standard OIDC 1.0 + OAuth 2.0 (PKCE S256 / RS256 JWKS). Uses wimotek/Oauth hosted NetPulse login when enabled and falls back to local login when disabled. Reads OAUTH_SECRET env or encrypted secret.',
+    consoleUrl: 'http://ca.wimotek.com',
+  },
   microsoft: {
     name: 'Microsoft (Entra ID / MSA)',
     docsHintZh: 'Azure Portal → 应用注册 → 添加 Web 重定向 URI，租户填 common 支持个人微软与工作账号。',
@@ -101,6 +109,11 @@ export function SecurityContainerView({
     enabled: boolean;
     clientId: string;
     clientSecret: string;
+    issuerUrl: string;
+    redirectUri: string;
+    directLogin: boolean;
+    adminEmail: string;
+    restrictToBoundOnly: boolean;
     tenantId: string;
     teamId: string;
     keyId: string;
@@ -109,12 +122,18 @@ export function SecurityContainerView({
     enabled: true,
     clientId: '',
     clientSecret: '',
+    issuerUrl: 'http://ca.wimotek.com',
+    redirectUri: '',
+    directLogin: true,
+    adminEmail: '',
+    restrictToBoundOnly: false,
     tenantId: 'common',
     teamId: '',
     keyId: '',
     privateKey: '',
   });
   const [savingOAuth, setSavingOAuth] = useState<OAuthProviderId | null>(null);
+  const [togglingOAuth, setTogglingOAuth] = useState<OAuthProviderId | null>(null);
   const [bindingOAuth, setBindingOAuth] = useState<OAuthProviderId | null>(null);
   const [unbindingId, setUnbindingId] = useState<string | null>(null);
   const [copiedCallback, setCopiedCallback] = useState<string | null>(null);
@@ -123,10 +142,11 @@ export function SecurityContainerView({
     try {
       const res = await apiRequest<{
         providers: OAuthProviderPublicConfig[];
-        boundAccounts: BoundOAuthAccount[];
+        boundAccounts?: BoundOAuthAccount[];
+        bindings?: BoundOAuthAccount[];
       }>('/api/security/oauth');
       setOauthProviders(res.providers || []);
-      setBoundAccounts(res.boundAccounts || []);
+      setBoundAccounts(res.boundAccounts || res.bindings || []);
     } catch {
       // ignore if endpoint unavailable
     }
@@ -152,6 +172,7 @@ export function SecurityContainerView({
   // Listen for OAuth bind popup postMessage
   useEffect(() => {
     const onMessage = (event: MessageEvent) => {
+      if (event.origin !== window.location.origin) return;
       const data = event.data as
         | {
             type?: string;
@@ -159,6 +180,7 @@ export function SecurityContainerView({
               mode?: 'login' | 'bind';
               provider?: OAuthProviderId;
               account?: BoundOAuthAccount;
+              boundAccount?: BoundOAuthAccount;
               error?: string;
             };
           }
@@ -168,7 +190,7 @@ export function SecurityContainerView({
       if (data.type === 'OAUTH_AUTH_SUCCESS' && data.payload?.mode === 'bind') {
         setBindingOAuth(null);
         void loadOAuthConfig();
-        const acct = data.payload.account;
+        const acct = data.payload.account || data.payload.boundAccount;
         toast.success(
           isZh
             ? `已成功绑定 ${data.payload.provider?.toUpperCase()} 账号：${acct?.email || acct?.displayName || ''}`
@@ -191,13 +213,50 @@ export function SecurityContainerView({
     setExpandedOAuth(p.provider);
     setOauthForm({
       enabled: p.enabled,
-      clientId: p.clientId || '',
+      clientId: p.clientId || (p.provider === 'wimotek' ? 'wimotek_ebb129ddb83c' : ''),
       clientSecret: '',
+      issuerUrl: p.issuerUrl || 'http://ca.wimotek.com',
+      redirectUri: p.redirectUri || '',
+      directLogin: p.directLogin !== false,
+      adminEmail: p.adminEmail || '',
+      restrictToBoundOnly: Boolean(p.restrictToBoundOnly),
       tenantId: p.tenantId || 'common',
       teamId: p.teamId || '',
       keyId: p.keyId || '',
       privateKey: '',
     });
+  };
+
+  const handleQuickToggleOAuth = async (prov: OAuthProviderPublicConfig) => {
+    setTogglingOAuth(prov.provider);
+    try {
+      const nextEnabled = !prov.enabled;
+      await apiRequest(`/api/security/oauth/${prov.provider}`, {
+        method: 'PUT',
+        body: JSON.stringify({ enabled: nextEnabled }),
+      });
+      await loadOAuthConfig();
+      if (expandedOAuth === prov.provider) {
+        setOauthForm((prev) => ({ ...prev, enabled: nextEnabled }));
+      }
+      toast.success(
+        prov.provider === 'wimotek'
+          ? nextEnabled
+            ? isZh
+              ? '已启用 wimotek/Oauth 登录：未登录访问将直接使用 wimotek/Oauth'
+              : 'wimotek/Oauth enabled for sign-in'
+            : isZh
+              ? '已禁用 wimotek/Oauth：已自动回退到本地密码登录页'
+              : 'wimotek/Oauth disabled — restored local password login'
+          : isZh
+            ? `${prov.provider.toUpperCase()} 已${nextEnabled ? '启用' : '禁用'}`
+            : `${prov.provider.toUpperCase()} ${nextEnabled ? 'enabled' : 'disabled'}`
+      );
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Toggle OAuth failed');
+    } finally {
+      setTogglingOAuth(null);
+    }
   };
 
   const handleSaveOAuthProvider = async (e: React.FormEvent, provider: OAuthProviderId) => {
@@ -210,6 +269,11 @@ export function SecurityContainerView({
           enabled: oauthForm.enabled,
           clientId: oauthForm.clientId.trim(),
           clientSecret: oauthForm.clientSecret.trim() || undefined,
+          issuerUrl: provider === 'wimotek' ? oauthForm.issuerUrl.trim() || 'http://ca.wimotek.com' : undefined,
+          redirectUri: provider === 'wimotek' ? oauthForm.redirectUri.trim() : undefined,
+          directLogin: provider === 'wimotek' ? oauthForm.directLogin : undefined,
+          adminEmail: provider === 'wimotek' ? oauthForm.adminEmail.trim() : undefined,
+          restrictToBoundOnly: provider === 'wimotek' ? oauthForm.restrictToBoundOnly : undefined,
           tenantId: provider === 'microsoft' ? oauthForm.tenantId.trim() || 'common' : undefined,
           teamId: provider === 'apple' ? oauthForm.teamId.trim() : undefined,
           keyId: provider === 'apple' ? oauthForm.keyId.trim() : undefined,
@@ -733,20 +797,20 @@ export function SecurityContainerView({
         </form>
       )}
 
-      {/* Third-Party OAuth Account Binding & SSO (Microsoft / GitHub / Google / Apple) */}
+      {/* Third-Party OAuth Account Binding & SSO (wimotek/Oauth / Microsoft / GitHub / Google / Apple) */}
       <div className="p-6 rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 space-y-5">
         <div className="flex flex-wrap items-center justify-between gap-2 pb-3 border-b border-slate-200 dark:border-slate-800">
           <div>
             <h2 className="font-display text-base font-semibold text-slate-900 dark:text-white flex items-center gap-2">
               <Link2 className="w-4 h-4 text-blue-600 dark:text-blue-400" />
               {isZh
-                ? '第三方账号登录与绑定（Microsoft / GitHub / Google / Apple）'
-                : 'Third-Party SSO & Account Binding (Microsoft / GitHub / Google / Apple)'}
+                ? '统一认证与第三方账号登录（wimotek/Oauth · Microsoft · GitHub · Google · Apple）'
+                : 'OIDC SSO & Third-Party Login (wimotek/Oauth · Microsoft · GitHub · Google · Apple)'}
             </h2>
             <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
               {isZh
-                ? '为管理员账号绑定 Microsoft、GitHub、Google 或 Apple 账号后，可在登录页一键授权登录（仅已绑定的白名单账号允许登录，未绑定账号会被自动拒绝）。'
-                : 'Bind your administrator account to Microsoft, GitHub, Google, or Apple to allow one-click OAuth sign-in. Only explicitly bound accounts can log in.'}
+                ? '启用 wimotek/Oauth（OIDC 1.0 + PKCE S256）后登录页将直接使用统一认证，禁用后自动回退到本地密码登录页；同时支持绑定 Microsoft、GitHub、Google 或 Apple 账号免密登录。'
+                : 'Enable wimotek/Oauth (OIDC 1.0 + PKCE S256) to sign in directly via hosted SSO and disable anytime to fall back to local password login. Also supports Microsoft, GitHub, Google, and Apple binding.'}
             </p>
           </div>
           <span className="font-mono text-xs text-slate-500 tabular-nums">
@@ -867,6 +931,21 @@ export function SecurityContainerView({
                   </div>
 
                   <div className="flex flex-wrap items-center gap-2 shrink-0">
+                    {prov.configured && (
+                      <button
+                        type="button"
+                        disabled={togglingOAuth === prov.provider}
+                        onClick={() => void handleQuickToggleOAuth(prov)}
+                        className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border font-medium whitespace-nowrap transition-colors disabled:opacity-50 ${
+                          prov.enabled
+                            ? 'border-amber-300 dark:border-amber-800 text-amber-700 dark:text-amber-300 hover:bg-amber-50 dark:hover:bg-amber-950/30'
+                            : 'border-emerald-300 dark:border-emerald-800 text-emerald-700 dark:text-emerald-300 hover:bg-emerald-50 dark:hover:bg-emerald-950/30'
+                        }`}
+                      >
+                        {togglingOAuth === prov.provider && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+                        {prov.enabled ? (isZh ? '禁用' : 'Disable') : isZh ? '启用' : 'Enable'}
+                      </button>
+                    )}
                     <button
                       type="button"
                       disabled={!prov.configured || Boolean(bindingOAuth)}
@@ -918,6 +997,19 @@ export function SecurityContainerView({
                     </div>
 
                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                      {prov.provider === 'wimotek' && (
+                        <div>
+                          <label className="block font-medium mb-1">OIDC Issuer URL *</label>
+                          <input
+                            required
+                            value={oauthForm.issuerUrl}
+                            onChange={(e) => setOauthForm({ ...oauthForm, issuerUrl: e.target.value })}
+                            placeholder="http://ca.wimotek.com"
+                            className="w-full px-3 py-2 font-mono rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950"
+                          />
+                        </div>
+                      )}
+
                       <div>
                         <label className="block font-medium mb-1">
                           {prov.provider === 'apple' ? 'Services ID (Client ID) *' : 'Client ID *'}
@@ -927,7 +1019,9 @@ export function SecurityContainerView({
                           value={oauthForm.clientId}
                           onChange={(e) => setOauthForm({ ...oauthForm, clientId: e.target.value })}
                           placeholder={
-                            prov.provider === 'apple'
+                            prov.provider === 'wimotek'
+                              ? 'wimotek_ebb129ddb83c'
+                              : prov.provider === 'apple'
                               ? 'com.example.netplus.signin'
                               : 'OAuth Client ID'
                           }
@@ -939,9 +1033,14 @@ export function SecurityContainerView({
                         <div>
                           <label className="block font-medium mb-1">
                             Client Secret{' '}
+                            {prov.provider === 'wimotek' && (
+                              <span className="text-slate-400 font-normal">
+                                (ENV: OAUTH_SECRET)
+                              </span>
+                            )}{' '}
                             {prov.hasClientSecret && (
                               <span className="text-emerald-600 dark:text-emerald-400 font-normal">
-                                ({isZh ? '已加密保存，留空不改' : 'stored; blank to keep'})
+                                ({isZh ? '已配置，留空不改' : 'configured; blank to keep'})
                               </span>
                             )}
                           </label>
@@ -950,10 +1049,68 @@ export function SecurityContainerView({
                             required={!prov.hasClientSecret}
                             value={oauthForm.clientSecret}
                             onChange={(e) => setOauthForm({ ...oauthForm, clientSecret: e.target.value })}
-                            placeholder={prov.hasClientSecret ? '••••••••' : 'OAuth Client Secret'}
+                            placeholder={
+                              prov.hasClientSecret
+                                ? '••••••••'
+                                : prov.provider === 'wimotek'
+                                ? '读取 OAUTH_SECRET 或在此加密保存'
+                                : 'OAuth Client Secret'
+                            }
                             className="w-full px-3 py-2 font-mono rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950"
                           />
                         </div>
+                      )}
+
+                      {prov.provider === 'wimotek' && (
+                        <>
+                          <div>
+                            <label className="block font-medium mb-1">
+                              Redirect URI ({isZh ? '留空自动使用当前域名 /auth/callback' : 'blank = auto /auth/callback'})
+                            </label>
+                            <input
+                              value={oauthForm.redirectUri}
+                              onChange={(e) => setOauthForm({ ...oauthForm, redirectUri: e.target.value })}
+                              placeholder="https://jp3.wimotek.com/auth/callback"
+                              className="w-full px-3 py-2 font-mono rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950"
+                            />
+                          </div>
+                          <div>
+                            <label className="block font-medium mb-1">
+                              {isZh ? '旧账号关联邮箱（仅 email_verified=true 时匹配）' : 'Legacy Admin Email (linked only if email_verified=true)'}
+                            </label>
+                            <input
+                              type="email"
+                              value={oauthForm.adminEmail}
+                              onChange={(e) => setOauthForm({ ...oauthForm, adminEmail: e.target.value })}
+                              placeholder="admin@wimotek.com"
+                              className="w-full px-3 py-2 font-mono rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950"
+                            />
+                          </div>
+                          <div className="sm:col-span-2 flex flex-wrap items-center gap-5 pt-1">
+                            <label className="inline-flex items-center gap-2 text-slate-700 dark:text-slate-300">
+                              <input
+                                type="checkbox"
+                                checked={oauthForm.directLogin}
+                                onChange={(e) => setOauthForm({ ...oauthForm, directLogin: e.target.checked })}
+                                className="rounded accent-blue-600"
+                              />
+                              {isZh
+                                ? '开启后直接跳转 wimotek/Oauth 托管登录页（禁用后自动回退本地登录）'
+                                : 'Auto-redirect to wimotek/Oauth hosted login when enabled'}
+                            </label>
+                            <label className="inline-flex items-center gap-2 text-slate-700 dark:text-slate-300">
+                              <input
+                                type="checkbox"
+                                checked={oauthForm.restrictToBoundOnly}
+                                onChange={(e) =>
+                                  setOauthForm({ ...oauthForm, restrictToBoundOnly: e.target.checked })
+                                }
+                                className="rounded accent-blue-600"
+                              />
+                              {isZh ? '仅限已手动绑定账号登录（严格白名单）' : 'Restrict to pre-bound accounts only'}
+                            </label>
+                          </div>
+                        </>
                       )}
 
                       {prov.provider === 'microsoft' && (

@@ -130,18 +130,22 @@ function executeSingleHttpRequest(
     const isHttps = parsed.protocol === 'https:';
     const transport = isHttps ? https : http;
     const hostname = parsed.hostname.replace(/^\[|\]$/g, '');
+    const numericPort = parsed.port ? Number(parsed.port) : isHttps ? 443 : 80;
+    const isDefaultPort = (isHttps && numericPort === 443) || (!isHttps && numericPort === 80);
+    const hostHeader = isDefaultPort ? parsed.hostname : `${parsed.hostname}:${numericPort}`;
     const reqOptions: https.RequestOptions = {
       protocol: parsed.protocol,
       hostname,
-      port: parsed.port || (isHttps ? 443 : 80),
+      port: Number.isFinite(numericPort) && numericPort > 0 && numericPort <= 65535 ? numericPort : isHttps ? 443 : 80,
       path: `${parsed.pathname || '/'}${parsed.search || ''}`,
       method,
       agent: false,
       timeout: Math.max(500, remainingMs),
       lookup: safeExternalLookup,
       headers: {
-        'User-Agent': 'NetPlus-Monitor/1.0',
-        Accept: '*/*',
+        Host: hostHeader,
+        'User-Agent': 'Mozilla/5.0 (compatible; NetPulse-Monitor/1.0)',
+        Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
         Connection: 'close',
       },
     };
@@ -166,14 +170,14 @@ function executeSingleHttpRequest(
       const isRedirect = Boolean(location && [301, 302, 303, 307, 308].includes(status));
 
       if (!readBody || isRedirect || method === 'HEAD') {
-        res.resume();
-        req.destroy();
         done(null, {
           status,
           location,
           bodyText: '',
           finalProtocol: isHttps ? 'https:' : 'http:',
         });
+        res.resume();
+        req.destroy();
         return;
       }
 
@@ -189,13 +193,13 @@ function executeSingleHttpRequest(
           totalBytes += buf.length;
         }
         if (totalBytes >= MAX_BODY_BYTES) {
-          res.destroy();
           done(null, {
             status,
             location,
             bodyText: Buffer.concat(chunks).toString('utf8'),
             finalProtocol: isHttps ? 'https:' : 'http:',
           });
+          res.destroy();
         }
       });
 
@@ -244,16 +248,16 @@ async function probeHttp(
   }
 
   const started = Date.now();
-  const maxTimeout = Math.min(12_000, Math.max(1000, timeoutMs));
+  const maxTimeout = Math.min(30_000, Math.max(1000, timeoutMs));
   const keyword = (options?.httpKeyword || '').trim();
-  const method: 'GET' | 'HEAD' = options?.httpMethod === 'HEAD' && !keyword ? 'HEAD' : 'GET';
+  const requestedMethod: 'GET' | 'HEAD' = options?.httpMethod === 'HEAD' && !keyword ? 'HEAD' : 'GET';
   const ignoreTlsErrors = Boolean(options?.ignoreTlsErrors);
   const MAX_REDIRECTS = 5;
 
-  try {
-    let currentParsed = initialCheck.parsed;
-    let res: SingleHttpFetchResult | null = null;
-
+  const runProbeWithMethod = async (
+    method: 'GET' | 'HEAD'
+  ): Promise<{ res: SingleHttpFetchResult; blockedMsg?: string }> => {
+    let currentParsed = initialCheck.parsed!;
     for (let hop = 0; hop <= MAX_REDIRECTS; hop += 1) {
       const elapsed = Date.now() - started;
       const remaining = maxTimeout - elapsed;
@@ -277,27 +281,54 @@ async function probeHttp(
         const redirectCheck = validateSafeExternalUrl(nextUrl);
         if (!redirectCheck.valid || !redirectCheck.parsed) {
           return {
-            timestamp: new Date().toISOString(),
-            status: 'down',
-            latencyMs: Date.now() - started,
-            message: `Blocked redirect target: ${redirectCheck.reason || 'Unsafe URL'}`,
+            res: hopResult,
+            blockedMsg: `Blocked redirect target: ${redirectCheck.reason || 'Unsafe URL'}`,
           };
         }
         currentParsed = redirectCheck.parsed;
         continue;
       }
 
-      res = hopResult;
-      break;
+      return { res: hopResult };
+    }
+    throw new Error('HTTP probe did not receive a response');
+  };
+
+  try {
+    let usedFallbackGet = false;
+    let outcome = await runProbeWithMethod(requestedMethod);
+    if (outcome.blockedMsg) {
+      return {
+        timestamp: new Date().toISOString(),
+        status: 'down',
+        latencyMs: Date.now() - started,
+        message: outcome.blockedMsg,
+      };
     }
 
-    if (!res) {
-      throw new Error('HTTP probe did not receive a response');
+    let res = outcome.res;
+
+    // Many web panels / APIs do not implement HEAD and respond 405 or 501; fall back to GET automatically
+    if (
+      requestedMethod === 'HEAD' &&
+      (res.status === 405 || res.status === 501) &&
+      !matchesExpectedHttpStatus(res.status, options?.expectedStatusCodes)
+    ) {
+      const remaining = maxTimeout - (Date.now() - started);
+      if (remaining > 500) {
+        const retry = await runProbeWithMethod('GET');
+        if (!retry.blockedMsg) {
+          res = retry.res;
+          usedFallbackGet = true;
+        }
+      }
     }
 
     const rtt = Date.now() - started;
     const protoLabel = res.finalProtocol === 'https:' ? 'HTTPS' : 'HTTP';
     const tlsTag = res.finalProtocol === 'https:' && ignoreTlsErrors ? ' · TLS ignored' : '';
+    const methodTag = usedFallbackGet ? ' · HEAD→GET' : '';
+    const expectedLabel = (options?.expectedStatusCodes || '').trim() || '200-399';
 
     const statusOk = matchesExpectedHttpStatus(res.status, options?.expectedStatusCodes);
     if (!statusOk) {
@@ -305,7 +336,7 @@ async function probeHttp(
         timestamp: new Date().toISOString(),
         status: 'down',
         latencyMs: rtt,
-        message: `${protoLabel} ${res.status} unexpected status${tlsTag}`,
+        message: `${protoLabel} ${res.status} (expected ${expectedLabel})${methodTag}${tlsTag}`,
       };
     }
 
@@ -324,15 +355,20 @@ async function probeHttp(
       latencyMs: rtt,
       message: keyword
         ? `${protoLabel} ${res.status} · keyword matched (${rtt}ms)${tlsTag}`
-        : `${protoLabel} ${res.status} (${rtt}ms)${tlsTag}`,
+        : `${protoLabel} ${res.status} (${rtt}ms)${methodTag}${tlsTag}`,
     };
   } catch (err) {
     const rawMsg = err instanceof Error ? err.message : 'HTTP probe failed';
+    const isTlsErr =
+      !ignoreTlsErrors &&
+      /self[- ]signed|unable to verify|cert|tls|altnames|hostname\/ip does not match|expired/i.test(rawMsg);
     return {
       timestamp: new Date().toISOString(),
       status: 'down',
       latencyMs: Date.now() - started,
-      message: rawMsg,
+      message: isTlsErr
+        ? `${rawMsg} (可开启「忽略 TLS/SSL 证书错误」后重试)`
+        : rawMsg,
     };
   }
 }

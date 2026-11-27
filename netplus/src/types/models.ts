@@ -653,7 +653,7 @@ export interface CaptchaChallengeResponse {
   expiresAt: number;
 }
 
-export type OAuthProviderId = 'microsoft' | 'github' | 'google' | 'apple';
+export type OAuthProviderId = 'wimotek' | 'microsoft' | 'github' | 'google' | 'apple';
 
 export interface OAuthProviderPublicConfig {
   provider: OAuthProviderId;
@@ -661,6 +661,11 @@ export interface OAuthProviderPublicConfig {
   configured: boolean;
   envManaged: boolean;
   clientId?: string;
+  issuerUrl?: string; // wimotek OIDC issuer (default http://ca.wimotek.com)
+  redirectUri?: string; // custom redirect URI override (e.g. https://jp3.wimotek.com/auth/callback)
+  directLogin?: boolean; // when enabled, auto-use wimotek hosted login directly (disable -> fallback to local login)
+  adminEmail?: string; // optional legacy admin email for verified email auto-linking
+  restrictToBoundOnly?: boolean; // when true, only pre-bound wimotek subjects/emails can log in
   tenantId?: string; // Microsoft Entra tenant (default 'common')
   teamId?: string; // Apple Team ID
   keyId?: string; // Apple Key ID
@@ -682,10 +687,22 @@ export interface BoundOAuthAccount {
   lastLoginAt?: string;
 }
 
+export interface WimotekOAuthPublicStatus {
+  enabled: boolean;
+  configured: boolean;
+  directLogin: boolean;
+  issuerUrl: string;
+  clientId: string;
+  loginPath: string;
+  logoutPath: string;
+}
+
 export interface AuthStatusResponse {
   envManagedAdmin: boolean;
   authenticated: boolean;
   username?: string;
+  loginMethod?: string;
+  wimotekOAuth?: WimotekOAuthPublicStatus;
   oauthProviders?: Array<{
     provider: OAuthProviderId;
     configured: boolean;

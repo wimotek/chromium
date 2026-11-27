@@ -242,12 +242,26 @@ export function DnsRecordsPanel({
   const [deleteBusy, setDeleteBusy] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
 
-  const loadPullMeta = useCallback(async () => {
+  const loadPullMeta = useCallback(async (providerId?: string, domain?: string) => {
+    const cleanProv = (providerId || '').trim();
+    const cleanDom = (domain || '').trim().toLowerCase().replace(/\.$/, '');
+    if (!cleanProv || !cleanDom) {
+      setPullPolicy({
+        filterMode: 'none',
+        patterns: [],
+        whitelistPatterns: [],
+        blacklistPatterns: [],
+        recordTypes: [],
+      });
+      setPullSnapshots([]);
+      return;
+    }
     setSnapshotsLoading(true);
     try {
+      const qs = `providerId=${encodeURIComponent(cleanProv)}&domain=${encodeURIComponent(cleanDom)}`;
       const [policyRes, snapsRes] = await Promise.all([
-        apiRequest<DnsPullPolicy>('/api/dns/pull-policy'),
-        apiRequest<DnsPullSnapshot[]>('/api/dns/pull-snapshots'),
+        apiRequest<DnsPullPolicy>(`/api/dns/pull-policy?${qs}`),
+        apiRequest<DnsPullSnapshot[]>(`/api/dns/pull-snapshots?${qs}`),
       ]);
       if (policyRes && typeof policyRes === 'object') {
         const legacyPatterns = Array.isArray(policyRes.patterns) ? policyRes.patterns : [];
@@ -272,6 +286,8 @@ export function DnsRecordsPanel({
       }
       if (Array.isArray(snapsRes)) {
         setPullSnapshots(snapsRes.slice(0, 3));
+      } else {
+        setPullSnapshots([]);
       }
     } catch {
       // Non-blocking background metadata load
@@ -279,10 +295,6 @@ export function DnsRecordsPanel({
       setSnapshotsLoading(false);
     }
   }, []);
-
-  useEffect(() => {
-    void loadPullMeta();
-  }, [loadPullMeta]);
 
   const effectiveWhitelist = useMemo(() => {
     if (pullPolicy.filterMode === 'blacklist') return [];
@@ -356,6 +368,7 @@ export function DnsRecordsPanel({
 
   const handleSavePolicy = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!activeDomainRow) return;
     const parseLines = (txt: string) =>
       Array.from(
         new Set(
@@ -391,6 +404,8 @@ export function DnsRecordsPanel({
       const saved = await apiRequest<DnsPullPolicy>('/api/dns/pull-policy', {
         method: 'PUT',
         body: JSON.stringify({
+          providerId: activeDomainRow.providerId,
+          domain: activeDomainRow.domain,
           filterMode,
           patterns,
           whitelistPatterns,
@@ -401,7 +416,9 @@ export function DnsRecordsPanel({
       setPullPolicy(saved);
       setShowPolicyModal(false);
       onNotify(
-        isZh ? 'DNS 拉取过滤策略已保存，后续拉取将自动生效' : 'DNS pull filter policy saved',
+        isZh
+          ? `已保存 ${activeDomainRow.domain} 的独立拉取策略，后续拉取将自动生效`
+          : `Saved pull policy for ${activeDomainRow.domain}`,
         'success'
       );
     } catch (err) {
@@ -412,9 +429,11 @@ export function DnsRecordsPanel({
   };
 
   const openSnapshotsModal = () => {
+    if (!activeDomainRow) return;
     setConfirmRestoreId(null);
+    setExpandedSnapshotId(null);
     setShowSnapshotsModal(true);
-    void loadPullMeta();
+    void loadPullMeta(activeDomainRow.providerId, activeDomainRow.domain);
   };
 
   const handleRestoreSnapshot = async (snap: DnsPullSnapshot) => {
@@ -427,10 +446,16 @@ export function DnsRecordsPanel({
         message: string;
       }>(`/api/dns/pull-snapshots/${encodeURIComponent(snap.id)}/restore`, {
         method: 'POST',
+        body: JSON.stringify({
+          domain: activeDomainRow?.domain,
+        }),
       });
       setConfirmRestoreId(null);
       setShowSnapshotsModal(false);
-      await Promise.all([onReload(), loadPullMeta()]);
+      await Promise.all([
+        onReload(),
+        loadPullMeta(activeDomainRow?.providerId, activeDomainRow?.domain),
+      ]);
       onNotify(
         res.message ||
           (isZh
@@ -561,6 +586,17 @@ export function DnsRecordsPanel({
       setSelectedDomainKey(null);
     }
   }, [selectedDomainKey, activeDomainRow]);
+
+  // Load independent Pull Policy & latest-3 Snapshots whenever entering a specific domain
+  useEffect(() => {
+    if (activeDomainRow) {
+      void loadPullMeta(activeDomainRow.providerId, activeDomainRow.domain);
+    } else {
+      void loadPullMeta();
+      setShowPolicyModal(false);
+      setShowSnapshotsModal(false);
+    }
+  }, [activeDomainRow?.providerId, activeDomainRow?.domain, loadPullMeta]);
 
   // Reset Level 2 filters & inline editors whenever entering a different domain
   const enterDomain = (key: string) => {
@@ -695,7 +731,14 @@ export function DnsRecordsPanel({
           zoneId: row.zoneId,
         }),
       });
-      await Promise.all([onReload(), loadPullMeta()]);
+      await Promise.all([
+        onReload(),
+        activeDomainRow &&
+        activeDomainRow.providerId === row.providerId &&
+        activeDomainRow.domain === row.domain
+          ? loadPullMeta(row.providerId, row.domain)
+          : Promise.resolve(),
+      ]);
       const filteredSuffix =
         res.filteredOutCount && res.filteredOutCount > 0
           ? isZh
@@ -764,7 +807,7 @@ export function DnsRecordsPanel({
         });
         setShowPullModal(false);
         setSelectedDomainKey(null);
-        await Promise.all([onReload(), loadPullMeta()]);
+        await onReload();
         const errSuffix =
           res.errors.length > 0
             ? isZh
@@ -816,7 +859,14 @@ export function DnsRecordsPanel({
         }),
       });
       setShowPullModal(false);
-      await Promise.all([onReload(), loadPullMeta()]);
+      await Promise.all([
+        onReload(),
+        activeDomainRow &&
+        activeDomainRow.providerId === pullProviderId &&
+        activeDomainRow.domain === cleanDom
+          ? loadPullMeta(pullProviderId, cleanDom)
+          : Promise.resolve(),
+      ]);
       const filteredSuffix =
         res.filteredOutCount && res.filteredOutCount > 0
           ? isZh
@@ -1178,30 +1228,6 @@ export function DnsRecordsPanel({
               </div>
 
               <div className="flex flex-wrap items-center gap-2 shrink-0">
-                <button
-                  type="button"
-                  onClick={openPolicyModal}
-                  title={pullPolicySummary}
-                  className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg border whitespace-nowrap shrink-0 transition-colors ${
-                    isPullPolicyActive
-                      ? 'border-blue-300 dark:border-blue-700 bg-blue-50/70 dark:bg-blue-950/30 text-blue-700 dark:text-blue-300 hover:bg-blue-100/70 dark:hover:bg-blue-950/50'
-                      : 'border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800'
-                  }`}
-                >
-                  <Filter className="w-3.5 h-3.5" />
-                  {isZh ? '拉取策略' : 'Pull Policy'}
-                  {isPullPolicyActive && (
-                    <span className="w-1.5 h-1.5 rounded-full bg-blue-600 dark:bg-blue-400" />
-                  )}
-                </button>
-                <button
-                  type="button"
-                  onClick={openSnapshotsModal}
-                  className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 whitespace-nowrap shrink-0 tabular-nums"
-                >
-                  <History className="w-3.5 h-3.5" />
-                  {isZh ? `历史快照 (${pullSnapshots.length}/3)` : `Snapshots (${pullSnapshots.length}/3)`}
-                </button>
                 <button
                   type="button"
                   onClick={openPullModal}
@@ -2495,28 +2521,36 @@ export function DnsRecordsPanel({
                   />
                 </div>
 
-                {/* Active Pull Filter Policy Summary */}
-                <div className="rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50/80 dark:bg-slate-950/70 px-3 py-2.5 flex items-center justify-between gap-2">
-                  <div className="min-w-0">
-                    <div className="text-[11px] font-medium text-slate-700 dark:text-slate-200 flex items-center gap-1.5">
-                      <Filter className="w-3.5 h-3.5 text-blue-600 dark:text-blue-400 shrink-0" />
-                      {isZh ? '当前拉取过滤策略' : 'Active Pull Filter Policy'}
+                {/* Per-Domain Pull Filter Policy Summary */}
+                {activeDomainRow ? (
+                  <div className="rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50/80 dark:bg-slate-950/70 px-3 py-2.5 flex items-center justify-between gap-2">
+                    <div className="min-w-0">
+                      <div className="text-[11px] font-medium text-slate-700 dark:text-slate-200 flex items-center gap-1.5">
+                        <Filter className="w-3.5 h-3.5 text-blue-600 dark:text-blue-400 shrink-0" />
+                        {isZh ? `${activeDomainRow.domain} 拉取过滤策略` : `Pull Policy (${activeDomainRow.domain})`}
+                      </div>
+                      <div className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5 truncate">
+                        {pullPolicySummary}
+                      </div>
                     </div>
-                    <div className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5 truncate">
-                      {pullPolicySummary}
-                    </div>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setShowPullModal(false);
+                        openPolicyModal();
+                      }}
+                      className="px-2.5 py-1 rounded-md border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-[11px] font-medium text-blue-600 dark:text-blue-400 hover:bg-blue-50 dark:hover:bg-blue-950/30 shrink-0"
+                    >
+                      {isZh ? '调整策略' : 'Edit Policy'}
+                    </button>
                   </div>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setShowPullModal(false);
-                      openPolicyModal();
-                    }}
-                    className="px-2.5 py-1 rounded-md border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-[11px] font-medium text-blue-600 dark:text-blue-400 hover:bg-blue-50 dark:hover:bg-blue-950/30 shrink-0"
-                  >
-                    {isZh ? '调整策略' : 'Edit Policy'}
-                  </button>
-                </div>
+                ) : (
+                  <div className="rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50/80 dark:bg-slate-950/70 px-3 py-2 text-[11px] text-slate-500 dark:text-slate-400">
+                    {isZh
+                      ? '各域名拥有独立的拉取过滤策略与最近 3 份快照备份，进入具体域名详情页后可分别配置与恢复。'
+                      : 'Each domain uses its own independent pull policy and latest-3 backup snapshots. Open a domain to configure its policy or restore snapshots.'}
+                  </div>
+                )}
 
                 <div className="flex justify-end gap-2 pt-3 border-t border-slate-200 dark:border-slate-800">
                   <button
@@ -2873,20 +2907,23 @@ export function DnsRecordsPanel({
         </div>
       )}
 
-      {/* ==================== MODAL 5: DNS PULL POLICY (MUTUALLY EXCLUSIVE WHITELIST / BLACKLIST) ==================== */}
-      {showPolicyModal && (
+      {/* ==================== MODAL 5: PER-DOMAIN DNS PULL POLICY (MUTUALLY EXCLUSIVE WHITELIST / BLACKLIST) ==================== */}
+      {showPolicyModal && activeDomainRow && (
         <div className="fixed inset-0 z-50 bg-slate-950/55 flex items-center justify-center p-4">
           <div className="w-full max-w-2xl rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-6 max-h-[90vh] overflow-y-auto">
             <div className="flex items-start justify-between gap-3 pb-4 border-b border-slate-200 dark:border-slate-800">
               <div>
-                <h3 className="font-display text-base font-semibold text-slate-900 dark:text-white flex items-center gap-2">
+                <h3 className="font-display text-base font-semibold text-slate-900 dark:text-white flex flex-wrap items-center gap-2">
                   <Filter className="w-4 h-4 text-blue-600 dark:text-blue-400" />
-                  {isZh ? 'DNS 拉取策略（黑白名单二选一）' : 'DNS Pull Policy (Whitelist or Blacklist)'}
+                  <span>{isZh ? '域名拉取策略' : 'Domain Pull Policy'}</span>
+                  <span className="font-mono text-sm text-blue-600 dark:text-blue-400">
+                    {activeDomainRow.domain}
+                  </span>
                 </h3>
                 <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-1">
                   {isZh
-                    ? '白名单与黑名单互斥（二选一）：设置白名单后黑名单将自动禁用，设置黑名单后白名单将自动禁用；清空当前列表即可切换。'
-                    : 'Whitelist and blacklist are mutually exclusive: filling one automatically disables the other. Clear the active list to switch.'}
+                    ? `仅对 ${activeDomainRow.domain} 生效（各域名策略独立）。白名单与黑名单互斥（二选一），清空当前列表即可切换。`
+                    : `Applies exclusively to ${activeDomainRow.domain}. Whitelist and blacklist are mutually exclusive; clear the active list to switch.`}
                 </p>
               </div>
               <button type="button" onClick={() => setShowPolicyModal(false)} className="p-1 text-slate-400 hover:text-slate-600">
@@ -3093,20 +3130,23 @@ export function DnsRecordsPanel({
         </div>
       )}
 
-      {/* ==================== MODAL 6: LATEST 3 PULL SNAPSHOTS RECOVERY ==================== */}
-      {showSnapshotsModal && (
+      {/* ==================== MODAL 6: PER-DOMAIN LATEST 3 PULL SNAPSHOTS RECOVERY ==================== */}
+      {showSnapshotsModal && activeDomainRow && (
         <div className="fixed inset-0 z-50 bg-slate-950/55 flex items-center justify-center p-4">
           <div className="w-full max-w-2xl max-h-[85vh] flex flex-col rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900">
             <div className="flex items-start justify-between gap-3 px-6 py-4 border-b border-slate-200 dark:border-slate-800">
               <div>
-                <h3 className="font-display text-base font-semibold text-slate-900 dark:text-white flex items-center gap-2">
+                <h3 className="font-display text-base font-semibold text-slate-900 dark:text-white flex flex-wrap items-center gap-2">
                   <History className="w-4 h-4 text-blue-600 dark:text-blue-400" />
-                  {isZh ? '本地 Pull 历史快照（自动保留最新 3 份）' : 'Local Pull Snapshots (Latest 3 Kept)'}
+                  <span>{isZh ? '域名历史快照' : 'Domain Pull Snapshots'}</span>
+                  <span className="font-mono text-sm text-blue-600 dark:text-blue-400">
+                    {activeDomainRow.domain}
+                  </span>
                 </h3>
                 <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-1">
                   {isZh
-                    ? '每次从远端 Pull 拉取解析记录后都会在本地归档一份快照；若拉取策略误过滤或本地记录需要回退，可一键恢复任意一份快照。'
-                    : 'Every DNS Pull automatically archives a local snapshot (latest 3 retained). Restore any snapshot to roll back local records.'}
+                    ? `仅展示 ${activeDomainRow.domain} 的独立本地备份（自动保留最新 3 份）；恢复仅影响当前域名的本地解析记录。`
+                    : `Independent local backups for ${activeDomainRow.domain} (latest 3 retained). Restoring rolls back only this domain's local records.`}
                 </p>
               </div>
               <button type="button" onClick={() => setShowSnapshotsModal(false)} className="p-1 text-slate-400 hover:text-slate-600">

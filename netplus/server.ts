@@ -62,12 +62,18 @@ import {
 import { probeTcp, runMonitorCheck } from './server/services/monitor.ts';
 import {
   buildOAuthCallbackUri,
+  buildWimotekLogoutUrl,
+  clearOidcTxCookie,
   completeOAuthCallback,
   createOAuthAuthorizationUrl,
   getPublicOAuthStatus,
+  getWimotekPublicStatus,
   isOAuthProviderId,
   listOAuthProviderConfigs,
+  OIDC_TX_COOKIE_NAME,
   renderOAuthPopupResultHtml,
+  resolveOAuthCredentials,
+  sanitizeSafeReturnPath,
 } from './server/services/oauth.ts';
 import {
   CLOUD_INSTANCE_ID_REGEX,
@@ -385,6 +391,8 @@ export async function createServer(options: CreateServerOptions = {}) {
       envManagedAdmin: store.isEnvAdminConfigured(),
       authenticated: Boolean(validSession),
       username: validSession?.username,
+      loginMethod: validSession?.loginMethod,
+      wimotekOAuth: getWimotekPublicStatus(),
       oauthProviders: getPublicOAuthStatus(),
       security: {
         captchaDifficulty: sec.captchaDifficulty,
@@ -512,26 +520,83 @@ export async function createServer(options: CreateServerOptions = {}) {
     res.json({ token: sess.token, username: credCheck.canonicalUsername, expiresAt: sess.expiresAt });
   });
 
-  app.post('/api/auth/logout', requireAuth, (req: AuthedRequest, res) => {
+  app.post('/api/auth/logout', requireAuth, async (req: AuthedRequest, res) => {
+    const existingSession = req.sessionToken ? sessions.get(req.sessionToken) : undefined;
+    const usedWimotek = existingSession?.loginMethod === 'oauth:wimotek';
     if (req.sessionToken) {
       sessions.delete(req.sessionToken);
       persistSessionsToDisk();
     }
     clearSessionCookie(req, res);
+    clearOidcTxCookie(req, res);
     store.appendAudit({
       category: 'auth',
       severity: 'info',
       action: 'LOGOUT',
       actor: req.sessionUser || 'admin',
       ip: getClientIp(req),
-      details: 'Administrator signed out and invalidated session cookie/token',
+      details: usedWimotek
+        ? 'Administrator signed out of wimotek/Oauth session'
+        : 'Administrator signed out and invalidated session cookie/token',
     });
-    res.json({ ok: true });
+    const oidcLogoutUrl = usedWimotek ? await buildWimotekLogoutUrl(req) : null;
+    res.json({ ok: true, oidcLogoutUrl: oidcLogoutUrl || undefined });
   });
 
-  // ---- Third-Party OAuth Login & Admin Account Binding (Microsoft / GitHub / Google / Apple) ----
+  // ---- Standard OIDC Entry Routes: /login, /callback, /auth/callback, /logout (wimotek/Oauth) ----
+  app.get(['/login', '/auth/login'], async (req, res) => {
+    const wimotek = resolveOAuthCredentials('wimotek');
+    const returnTo = sanitizeSafeReturnPath(typeof req.query.returnTo === 'string' ? req.query.returnTo : '/');
+    if (!wimotek.enabled || !wimotek.configured) {
+      res.redirect(302, '/');
+      return;
+    }
+    const built = await createOAuthAuthorizationUrl({
+      req,
+      res,
+      provider: 'wimotek',
+      mode: 'login',
+      flow: 'redirect',
+      returnTo,
+    });
+    if (!built.ok) {
+      res.redirect(302, `/?local=1&oauth_error=${encodeURIComponent(built.error)}`);
+      return;
+    }
+    res.redirect(302, built.url);
+  });
+
+  app.all(['/logout', '/auth/logout'], async (req, res) => {
+    const { token } = extractAuthToken(req);
+    const existingSession = token ? sessions.get(token) : undefined;
+    const usedWimotek = existingSession?.loginMethod === 'oauth:wimotek';
+    if (token) {
+      sessions.delete(token);
+      persistSessionsToDisk();
+    }
+    clearSessionCookie(req, res);
+    clearOidcTxCookie(req, res);
+    if (existingSession) {
+      store.appendAudit({
+        category: 'auth',
+        severity: 'info',
+        action: 'LOGOUT',
+        actor: existingSession.username || 'admin',
+        ip: getClientIp(req),
+        details: 'Signed out via /logout route',
+      });
+    }
+    const wimotekLogout = usedWimotek || req.query.oidc === '1' ? await buildWimotekLogoutUrl(req) : null;
+    if (wimotekLogout) {
+      res.redirect(302, wimotekLogout);
+      return;
+    }
+    res.redirect(302, '/?logged_out=1');
+  });
+
+  // ---- Third-Party OAuth Login & Admin Account Binding (wimotek / Microsoft / GitHub / Google / Apple) ----
   app.get('/api/auth/oauth/providers', (_req, res) => {
-    res.json({ providers: getPublicOAuthStatus() });
+    res.json({ providers: getPublicOAuthStatus(), wimotekOAuth: getWimotekPublicStatus() });
   });
 
   app.get('/api/security/oauth', requireAuth, (req, res) => {
@@ -539,9 +604,11 @@ export async function createServer(options: CreateServerOptions = {}) {
       ...p,
       callbackUri: buildOAuthCallbackUri(req, p.provider),
     }));
+    const bindings = store.getState().boundOAuthAccounts;
     res.json({
       providers,
-      bindings: store.getState().boundOAuthAccounts,
+      bindings,
+      boundAccounts: bindings,
     });
   });
 
@@ -560,6 +627,43 @@ export async function createServer(options: CreateServerOptions = {}) {
     }
     if (b.enabled !== undefined) cfg.enabled = Boolean(b.enabled);
     if (b.clientId !== undefined) cfg.clientId = String(b.clientId).trim() || undefined;
+    if (providerParam === 'wimotek') {
+      if (b.issuerUrl !== undefined) {
+        const rawIssuer = String(b.issuerUrl).trim().replace(/\/+$/, '');
+        if (rawIssuer) {
+          try {
+            const parsed = new URL(rawIssuer);
+            if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+              res.status(400).json({ error: 'Issuer URL must start with http:// or https://' });
+              return;
+            }
+          } catch {
+            res.status(400).json({ error: 'Invalid Issuer URL format' });
+            return;
+          }
+        }
+        cfg.issuerUrl = rawIssuer || undefined;
+      }
+      if (b.redirectUri !== undefined) {
+        const rawRedirect = String(b.redirectUri).trim();
+        if (rawRedirect) {
+          try {
+            const parsed = new URL(rawRedirect);
+            if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+              res.status(400).json({ error: 'Redirect URI must start with http:// or https://' });
+              return;
+            }
+          } catch {
+            res.status(400).json({ error: 'Invalid Redirect URI format' });
+            return;
+          }
+        }
+        cfg.redirectUri = rawRedirect || undefined;
+      }
+      if (b.directLogin !== undefined) cfg.directLogin = Boolean(b.directLogin);
+      if (b.adminEmail !== undefined) cfg.adminEmail = String(b.adminEmail).trim().toLowerCase() || undefined;
+      if (b.restrictToBoundOnly !== undefined) cfg.restrictToBoundOnly = Boolean(b.restrictToBoundOnly);
+    }
     if (b.tenantId !== undefined) cfg.tenantId = String(b.tenantId).trim() || 'common';
     if (b.teamId !== undefined) cfg.teamId = String(b.teamId).trim() || undefined;
     if (b.keyId !== undefined) cfg.keyId = String(b.keyId).trim() || undefined;
@@ -577,12 +681,15 @@ export async function createServer(options: CreateServerOptions = {}) {
       actor: req.sessionUser || 'admin',
       ip: getClientIp(req),
       target: providerParam.toUpperCase(),
-      details: `Updated OAuth provider config (enabled=${cfg.enabled})`,
+      details: `Updated OAuth provider config (enabled=${cfg.enabled}${
+        providerParam === 'wimotek' ? `, directLogin=${cfg.directLogin !== false}` : ''
+      })`,
     });
 
     const updated = listOAuthProviderConfigs().find((p) => p.provider === providerParam);
     res.json({
       provider: updated ? { ...updated, callbackUri: buildOAuthCallbackUri(req, providerParam) } : null,
+      wimotekOAuth: getWimotekPublicStatus(),
     });
   });
 
@@ -607,13 +714,15 @@ export async function createServer(options: CreateServerOptions = {}) {
     res.json({ ok: true });
   });
 
-  app.get('/api/auth/oauth/:provider/url', (req, res) => {
+  app.get('/api/auth/oauth/:provider/url', async (req, res) => {
     const providerParam = String(req.params.provider || '').toLowerCase();
     if (!isOAuthProviderId(providerParam)) {
       res.status(400).json({ error: 'Unsupported OAuth provider' });
       return;
     }
     const mode = req.query.mode === 'bind' ? 'bind' : 'login';
+    const flow = req.query.flow === 'redirect' ? 'redirect' : 'popup';
+    const returnTo = typeof req.query.returnTo === 'string' ? req.query.returnTo : '/';
     let actor: string | undefined;
 
     if (mode === 'bind') {
@@ -626,10 +735,13 @@ export async function createServer(options: CreateServerOptions = {}) {
       actor = sess.username;
     }
 
-    const built = createOAuthAuthorizationUrl({
+    const built = await createOAuthAuthorizationUrl({
       req,
+      res,
       provider: providerParam,
       mode,
+      flow,
+      returnTo,
       actor,
     });
     if (!built.ok) {
@@ -639,12 +751,16 @@ export async function createServer(options: CreateServerOptions = {}) {
     res.json({ url: built.url, callbackUri: built.callbackUri });
   });
 
-  const handleOAuthCallback = async (req: Request, res: Response) => {
-    const providerParam = String(req.params.provider || '').toLowerCase();
+  const handleOAuthCallback = async (req: Request, res: Response, forcedProvider?: OAuthProviderId) => {
+    const providerParam = (forcedProvider || String(req.params.provider || '').toLowerCase());
     if (!isOAuthProviderId(providerParam)) {
       res.status(400).send('Unsupported OAuth provider');
       return;
     }
+
+    const cookies = parseCookies(req);
+    const txCookieRaw = cookies[OIDC_TX_COOKIE_NAME];
+    clearOidcTxCookie(req, res);
 
     const queryOrBody = req.method === 'POST' ? (req.body ?? {}) : (req.query ?? {});
     const errCode = String(queryOrBody.error_description || queryOrBody.error || '').trim();
@@ -652,29 +768,29 @@ export async function createServer(options: CreateServerOptions = {}) {
     const state = String(queryOrBody.state || '').trim();
     const appleUserJson = typeof queryOrBody.user === 'string' ? queryOrBody.user : undefined;
 
-    if (errCode) {
+    const sendErrorResult = (flow: 'popup' | 'redirect', message: string) => {
+      if (flow === 'redirect') {
+        res.redirect(302, `/?local=1&oauth_error=${encodeURIComponent(message)}`);
+        return;
+      }
       res.setHeader('Content-Type', 'text/html; charset=utf-8');
       res.send(
         renderOAuthPopupResultHtml({
           ok: false,
           mode: 'login',
           provider: providerParam,
-          error: `授权被取消或拒绝：${errCode}`,
+          error: message,
         })
       );
+    };
+
+    if (errCode) {
+      sendErrorResult(forcedProvider === 'wimotek' ? 'redirect' : 'popup', `授权被取消或拒绝：${errCode}`);
       return;
     }
 
     if (!code || !state) {
-      res.setHeader('Content-Type', 'text/html; charset=utf-8');
-      res.send(
-        renderOAuthPopupResultHtml({
-          ok: false,
-          mode: 'login',
-          provider: providerParam,
-          error: '缺少授权码 (code) 或状态参数 (state)',
-        })
-      );
+      sendErrorResult(forcedProvider === 'wimotek' ? 'redirect' : 'popup', '缺少授权码 (code) 或状态参数 (state)');
       return;
     }
 
@@ -682,19 +798,12 @@ export async function createServer(options: CreateServerOptions = {}) {
       provider: providerParam,
       code,
       state,
+      txCookieRaw,
       appleUserJson,
     });
 
     if (!result.ok) {
-      res.setHeader('Content-Type', 'text/html; charset=utf-8');
-      res.send(
-        renderOAuthPopupResultHtml({
-          ok: false,
-          mode: 'login',
-          provider: providerParam,
-          error: result.error,
-        })
-      );
+      sendErrorResult(result.flow, result.error);
       return;
     }
 
@@ -748,10 +857,61 @@ export async function createServer(options: CreateServerOptions = {}) {
       return;
     }
 
-    // Login mode: ONLY allow accounts explicitly bound by the administrator
-    const matched = appState.boundOAuthAccounts.find(
+    // Login mode:
+    // 1. Always map by (provider, sub) first
+    let matched = appState.boundOAuthAccounts.find(
       (b) => b.provider === providerParam && b.subject === result.identity.subject
     );
+    let mappingNote = `Signed in via bound ${providerParam.toUpperCase()} account`;
+
+    // 2. For wimotek/Oauth OIDC: link legacy accounts via email ONLY when email_verified === true,
+    //    and support immediate SSO use when enabled without requiring manual pre-binding
+    if (!matched && providerParam === 'wimotek') {
+      const wimotekCreds = resolveOAuthCredentials('wimotek');
+      const normalizedEmail = result.identity.email?.trim().toLowerCase();
+      const adminUsername = store.getAdminInitSummary().username;
+
+      if (normalizedEmail && result.identity.emailVerified === true) {
+        const legacyEmailMatch =
+          appState.boundOAuthAccounts.find(
+            (b) => b.email && b.email.trim().toLowerCase() === normalizedEmail
+          ) ||
+          (wimotekCreds.adminEmail && wimotekCreds.adminEmail.trim().toLowerCase() === normalizedEmail) ||
+          adminUsername.trim().toLowerCase() === normalizedEmail;
+
+        if (legacyEmailMatch) {
+          matched = {
+            id: `oauth-${crypto.randomBytes(5).toString('hex')}`,
+            provider: 'wimotek',
+            subject: result.identity.subject,
+            email: result.identity.email,
+            displayName: result.identity.displayName,
+            avatarUrl: result.identity.avatarUrl,
+            boundAt: now,
+            lastLoginAt: now,
+          };
+          appState.boundOAuthAccounts.unshift(matched);
+          mappingNote = `Auto-linked legacy account via verified email (${normalizedEmail}) to wimotek sub ${result.identity.subject}`;
+        }
+      }
+
+      if (!matched && !wimotekCreds.restrictToBoundOnly) {
+        // Direct wimotek/Oauth SSO mode: auto-map sub so enabling wimotek works immediately
+        matched = {
+          id: `oauth-${crypto.randomBytes(5).toString('hex')}`,
+          provider: 'wimotek',
+          subject: result.identity.subject,
+          email: result.identity.email,
+          displayName: result.identity.displayName,
+          avatarUrl: result.identity.avatarUrl,
+          boundAt: now,
+          lastLoginAt: now,
+        };
+        appState.boundOAuthAccounts.unshift(matched);
+        mappingNote = `Mapped wimotek/Oauth user via sub (${result.identity.subject})`;
+      }
+    }
+
     if (!matched) {
       store.appendAudit({
         category: 'auth',
@@ -762,14 +922,9 @@ export async function createServer(options: CreateServerOptions = {}) {
         target: providerParam.toUpperCase(),
         details: 'Rejected OAuth sign-in because external identity is not bound to admin',
       });
-      res.setHeader('Content-Type', 'text/html; charset=utf-8');
-      res.send(
-        renderOAuthPopupResultHtml({
-          ok: false,
-          mode: 'login',
-          provider: providerParam,
-          error: `该 ${providerParam.toUpperCase()} 账号 (${result.identity.email || result.identity.displayName || result.identity.subject}) 尚未绑定到管理员账户。请先使用管理员密码登录后，在「安全与容器设置」中绑定此账号。`,
-        })
+      sendErrorResult(
+        result.flow,
+        `该 ${providerParam.toUpperCase()} 账号 (${result.identity.email || result.identity.displayName || result.identity.subject}) 尚未绑定到管理员账户。请先使用管理员密码登录后，在「安全与容器设置」中绑定此账号。`
       );
       return;
     }
@@ -777,9 +932,13 @@ export async function createServer(options: CreateServerOptions = {}) {
     matched.lastLoginAt = now;
     if (result.identity.email) matched.email = result.identity.email;
     if (result.identity.displayName) matched.displayName = result.identity.displayName;
+    if (result.identity.avatarUrl) matched.avatarUrl = result.identity.avatarUrl;
     store.save();
 
-    const adminUser = store.getAdminInitSummary().username;
+    const adminUser =
+      providerParam === 'wimotek'
+        ? result.identity.preferredUsername || result.identity.email || result.identity.displayName || store.getAdminInitSummary().username
+        : store.getAdminInitSummary().username;
     const sess = createSession(adminUser, ip, `oauth:${providerParam}`);
     setSessionCookie(req, res, sess.token, sess.expiresAtMs);
 
@@ -790,8 +949,13 @@ export async function createServer(options: CreateServerOptions = {}) {
       actor: adminUser,
       ip,
       target: `${providerParam}:${matched.email || matched.displayName || matched.subject}`,
-      details: `Signed in via bound ${providerParam.toUpperCase()} account`,
+      details: mappingNote,
     });
+
+    if (result.flow === 'redirect') {
+      res.redirect(302, result.returnTo || '/');
+      return;
+    }
 
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
     res.send(
@@ -802,9 +966,14 @@ export async function createServer(options: CreateServerOptions = {}) {
         token: sess.token,
         username: adminUser,
         expiresAt: sess.expiresAtMs,
+        returnTo: result.returnTo,
       })
     );
   };
+
+  app.all(['/auth/callback', '/auth/callback/', '/callback', '/callback/'], (req, res) => {
+    void handleOAuthCallback(req, res, 'wimotek');
+  });
 
   app.all(['/api/auth/oauth/:provider/callback', '/api/auth/oauth/:provider/callback/'], (req, res) => {
     void handleOAuthCallback(req, res);
@@ -1420,7 +1589,7 @@ export async function createServer(options: CreateServerOptions = {}) {
       checkTlsCert: isHttpsTarget ? b.checkTlsCert !== false : false,
       tlsCertWarningDays: Math.min(365, Math.max(1, Number(b.tlsCertWarningDays) || 14)),
       intervalSeconds: Math.max(15, Number(b.intervalSeconds) || 60),
-      timeoutMs: Math.min(12_000, Math.max(1000, Number(b.timeoutMs) || 5000)),
+      timeoutMs: Math.min(30_000, Math.max(1000, Number(b.timeoutMs) || 5000)),
       failureThreshold: Math.min(10, Math.max(1, Number(b.failureThreshold) || 2)),
       enabled: b.enabled !== false,
       notifyOnAlert: notifyOnDown || notifyOnRecover,
@@ -1487,7 +1656,7 @@ export async function createServer(options: CreateServerOptions = {}) {
       mon.tlsCertWarningDays = Math.min(365, Math.max(1, Number(b.tlsCertWarningDays) || 14));
     }
     if (b.intervalSeconds !== undefined) mon.intervalSeconds = Math.max(15, Number(b.intervalSeconds) || 60);
-    if (b.timeoutMs !== undefined) mon.timeoutMs = Math.min(12_000, Math.max(1000, Number(b.timeoutMs) || 5000));
+    if (b.timeoutMs !== undefined) mon.timeoutMs = Math.min(30_000, Math.max(1000, Number(b.timeoutMs) || 5000));
     if (b.failureThreshold !== undefined) mon.failureThreshold = Math.min(10, Math.max(1, Number(b.failureThreshold) || 2));
     if (b.enabled !== undefined) mon.enabled = Boolean(b.enabled);
     if (b.notifyOnDown !== undefined) mon.notifyOnDown = Boolean(b.notifyOnDown);
@@ -2220,29 +2389,6 @@ export async function createServer(options: CreateServerOptions = {}) {
     return true;
   }
 
-  function domainShouldBeFetched(domain: string, policy: DnsPullPolicy): boolean {
-    const { whitelist, blacklist } = resolvePolicyLists(policy);
-    const d = domain.trim().toLowerCase();
-
-    if (whitelist.length > 0) {
-      // Fetch if any whitelist pattern matches the domain, a subdomain of it, or is a bare host label (e.g. "www", "api*")
-      return whitelist.some((pat) => {
-        if (matchesWildcardPattern(d, pat)) return true;
-        if (pat.endsWith(`.${d}`)) return true;
-        if (!pat.includes('.')) return true;
-        return false;
-      });
-    }
-
-    if (blacklist.length > 0) {
-      // Skip entire domain only if a blacklist pattern directly blocks the root domain itself
-      const rootBlocked = blacklist.some((pat) => matchesWildcardPattern(d, pat));
-      if (rootBlocked) return false;
-    }
-
-    return true;
-  }
-
   function summarizePullPolicy(policy: DnsPullPolicy): string {
     const parts: string[] = [];
     const { whitelist, blacklist } = resolvePolicyLists(policy);
@@ -2257,17 +2403,75 @@ export async function createServer(options: CreateServerOptions = {}) {
     return parts.length > 0 ? parts.join(' · ') : '无过滤（全量拉取）';
   }
 
-  function savePullSnapshot(snapshot: DnsPullSnapshot) {
-    const state = store.getState();
-    state.dnsPullSnapshots = [snapshot, ...(state.dnsPullSnapshots ?? [])].slice(0, MAX_DNS_PULL_SNAPSHOTS);
+  function createEmptyPullPolicy(): DnsPullPolicy {
+    return {
+      filterMode: 'none',
+      patterns: [],
+      whitelistPatterns: [],
+      blacklistPatterns: [],
+      recordTypes: [],
+    };
   }
 
-  app.get('/api/dns/pull-policy', requireAuth, (_req, res) => {
-    res.json(store.getState().dnsPullPolicy);
+  function getDomainPolicyKey(providerId: string, domain: string): string {
+    return `${providerId.trim().toLowerCase()}::${domain.trim().toLowerCase().replace(/\.$/, '')}`;
+  }
+
+  function getDomainPullPolicy(providerId: string, domain: string): DnsPullPolicy {
+    const state = store.getState();
+    const cleanProv = providerId.trim();
+    const cleanDom = domain.trim().toLowerCase().replace(/\.$/, '');
+    if (!cleanProv || !cleanDom) return createEmptyPullPolicy();
+    const key = getDomainPolicyKey(cleanProv, cleanDom);
+    return state.dnsPullPolicies?.[key] ?? createEmptyPullPolicy();
+  }
+
+  function getSnapshotBucketKey(snap: DnsPullSnapshot): string {
+    const dom = (
+      snap.domain ||
+      (Array.isArray(snap.domains) && snap.domains.length === 1 ? snap.domains[0] : '') ||
+      '__all__'
+    )
+      .trim()
+      .toLowerCase()
+      .replace(/\.$/, '');
+    return `${String(snap.providerId || '').trim().toLowerCase()}::${dom}`;
+  }
+
+  function savePullSnapshot(snapshot: DnsPullSnapshot) {
+    const state = store.getState();
+    const combined = [snapshot, ...(state.dnsPullSnapshots ?? [])];
+    const counts = new Map<string, number>();
+    const kept: DnsPullSnapshot[] = [];
+    for (const item of combined) {
+      const key = getSnapshotBucketKey(item);
+      const count = counts.get(key) ?? 0;
+      if (count < MAX_DNS_PULL_SNAPSHOTS) {
+        counts.set(key, count + 1);
+        kept.push(item);
+      }
+    }
+    state.dnsPullSnapshots = kept;
+  }
+
+  app.get('/api/dns/pull-policy', requireAuth, (req, res) => {
+    const providerId = String(req.query.providerId || '').trim();
+    const domain = String(req.query.domain || '').trim().toLowerCase().replace(/\.$/, '');
+    if (providerId && domain) {
+      res.json(getDomainPullPolicy(providerId, domain));
+      return;
+    }
+    res.json(createEmptyPullPolicy());
   });
 
   app.put('/api/dns/pull-policy', requireAuth, (req: AuthedRequest, res) => {
     const body = (req.body && typeof req.body === 'object' ? req.body : {}) as Record<string, unknown>;
+    const providerId = String(body.providerId ?? req.query.providerId ?? '').trim();
+    const domain = String(body.domain ?? req.query.domain ?? '').trim().toLowerCase().replace(/\.$/, '');
+    if (!providerId || !domain) {
+      res.status(400).json({ error: '缺少 providerId 或 domain 参数，请进入具体域名后再设置拉取策略。' });
+      return;
+    }
     const reqWhitelist = 'whitelistPatterns' in body ? parsePatternList(body.whitelistPatterns) : [];
     const reqBlacklist = 'blacklistPatterns' in body ? parsePatternList(body.blacklistPatterns) : [];
     if (reqWhitelist.length > 0 && reqBlacklist.length > 0) {
@@ -2277,7 +2481,12 @@ export async function createServer(options: CreateServerOptions = {}) {
       return;
     }
     const state = store.getState();
-    state.dnsPullPolicy = sanitizeDnsPullPolicy(req.body, state.dnsPullPolicy);
+    if (!state.dnsPullPolicies || typeof state.dnsPullPolicies !== 'object') {
+      state.dnsPullPolicies = {};
+    }
+    const key = getDomainPolicyKey(providerId, domain);
+    const updatedPolicy = sanitizeDnsPullPolicy(req.body, state.dnsPullPolicies[key]);
+    state.dnsPullPolicies[key] = updatedPolicy;
     store.save();
     store.appendAudit({
       category: 'dns',
@@ -2285,14 +2494,45 @@ export async function createServer(options: CreateServerOptions = {}) {
       action: 'DNS_PULL_POLICY_UPDATED',
       actor: req.sessionUser || 'admin',
       ip: getClientIp(req),
-      target: 'dns_pull_policy',
-      details: summarizePullPolicy(state.dnsPullPolicy),
+      target: `${domain} (${providerId})`,
+      details: summarizePullPolicy(updatedPolicy),
     });
-    res.json(state.dnsPullPolicy);
+    res.json(updatedPolicy);
   });
 
-  app.get('/api/dns/pull-snapshots', requireAuth, (_req, res) => {
-    res.json((store.getState().dnsPullSnapshots ?? []).slice(0, MAX_DNS_PULL_SNAPSHOTS));
+  app.get('/api/dns/pull-snapshots', requireAuth, (req, res) => {
+    const providerId = String(req.query.providerId || '').trim();
+    const domain = String(req.query.domain || '').trim().toLowerCase().replace(/\.$/, '');
+    const all = store.getState().dnsPullSnapshots ?? [];
+    if (providerId && domain) {
+      const scoped = all
+        .filter((s) => {
+          if (s.providerId !== providerId) return false;
+          const snapDomain = (s.domain || '').trim().toLowerCase().replace(/\.$/, '');
+          if (snapDomain === domain) return true;
+          return Array.isArray(s.domains) && s.domains.some((d) => d.trim().toLowerCase().replace(/\.$/, '') === domain);
+        })
+        .map((s) => {
+          // If a legacy multi-domain snapshot is matched, present only records for the active domain
+          const snapDomain = (s.domain || '').trim().toLowerCase().replace(/\.$/, '');
+          if (snapDomain === domain || (s.domains.length === 1 && s.domains[0].toLowerCase() === domain)) {
+            return s;
+          }
+          const filteredRecs = s.records.filter((r) => r.domain.toLowerCase() === domain);
+          return {
+            ...s,
+            scope: 'single' as const,
+            domain,
+            domains: [domain],
+            recordCount: filteredRecs.length,
+            records: filteredRecs,
+          };
+        })
+        .slice(0, MAX_DNS_PULL_SNAPSHOTS);
+      res.json(scoped);
+      return;
+    }
+    res.json([]);
   });
 
   app.post('/api/dns/pull-snapshots/:id/restore', requireAuth, (req: AuthedRequest, res) => {
@@ -2303,15 +2543,25 @@ export async function createServer(options: CreateServerOptions = {}) {
       return;
     }
 
-    const domainSet = new Set(snap.domains.map((d) => d.toLowerCase()));
-    // Replace local records for the snapshot's provider & domains with the exact snapshot records
+    const reqDomain = String(req.body?.domain || req.query.domain || '').trim().toLowerCase().replace(/\.$/, '');
+    const targetDomains = reqDomain
+      ? [reqDomain]
+      : snap.domain
+        ? [snap.domain.toLowerCase()]
+        : snap.domains.map((d) => d.toLowerCase());
+    const domainSet = new Set(targetDomains);
+
+    // Replace local records only for the snapshot's provider & target domain(s)
     state.dnsRecords = state.dnsRecords.filter((r) => {
       if (r.providerId !== snap.providerId) return true;
       return !domainSet.has(r.domain.toLowerCase());
     });
 
     const now = new Date().toISOString();
-    const clonedRecords: ManagedDnsRecord[] = snap.records.map((rec) => ({
+    const scopedSourceRecords = reqDomain
+      ? snap.records.filter((rec) => rec.domain.toLowerCase() === reqDomain)
+      : snap.records;
+    const clonedRecords: ManagedDnsRecord[] = scopedSourceRecords.map((rec) => ({
       ...rec,
       updatedAt: now,
     }));
@@ -2324,15 +2574,15 @@ export async function createServer(options: CreateServerOptions = {}) {
       action: 'DNS_SNAPSHOT_RESTORED',
       actor: req.sessionUser || 'admin',
       ip: getClientIp(req),
-      target: `${snap.providerName} (${snap.domains.join(', ')})`,
+      target: `${snap.providerName} (${targetDomains.join(', ')})`,
       details: `Restored ${clonedRecords.length} DNS record(s) from snapshot ${snap.id} (${snap.createdAt})`,
     });
 
     res.json({
       ok: true,
       restoredCount: clonedRecords.length,
-      domains: snap.domains,
-      message: `已从历史快照恢复 ${clonedRecords.length} 条本地 DNS 记录（涉及 ${snap.domains.length} 个域名）`,
+      domains: targetDomains,
+      message: `已从 ${targetDomains.join(', ')} 历史快照恢复 ${clonedRecords.length} 条本地 DNS 记录`,
     });
   });
 
@@ -2343,9 +2593,10 @@ export async function createServer(options: CreateServerOptions = {}) {
     const domain = String(b.domain || '').trim().toLowerCase().replace(/\.$/, '');
     const zoneId = b.zoneId ? String(b.zoneId).trim() : undefined;
     const defaultGroupName = String(b.defaultGroupName || '').trim() || domain || '默认分组';
+    const domainPolicy = getDomainPullPolicy(providerId, domain);
     const effectivePolicy = b.policy
-      ? sanitizeDnsPullPolicy(b.policy, state.dnsPullPolicy)
-      : state.dnsPullPolicy;
+      ? sanitizeDnsPullPolicy(b.policy, domainPolicy)
+      : domainPolicy;
 
     const provider = state.dnsProviders.find((p) => p.id === providerId);
     if (!provider) {
@@ -2433,7 +2684,7 @@ export async function createServer(options: CreateServerOptions = {}) {
     });
     const removedCount = beforeCount - state.dnsRecords.length;
 
-    // Save snapshot of this pull result (strictly keeps latest 3 locally for recovery)
+    // Save per-domain snapshot of this pull result (strictly keeps latest 3 locally per domain)
     const snapshotRecords = state.dnsRecords
       .filter((r) => r.providerId === provider.id && r.domain.toLowerCase() === domain)
       .map((r) => ({ ...r }));
@@ -2482,9 +2733,6 @@ export async function createServer(options: CreateServerOptions = {}) {
     const b = req.body ?? {};
     const providerId = String(b.providerId || '').trim();
     const defaultGroupOverride = String(b.defaultGroupName || '').trim();
-    const effectivePolicy = b.policy
-      ? sanitizeDnsPullPolicy(b.policy, state.dnsPullPolicy)
-      : state.dnsPullPolicy;
     const requestedDomains = Array.isArray(b.domains)
       ? b.domains
           .map((d: unknown) => String(d || '').trim().toLowerCase().replace(/\.$/, ''))
@@ -2504,18 +2752,16 @@ export async function createServer(options: CreateServerOptions = {}) {
       return;
     }
 
-    const baseTargets =
+    const targets =
       requestedDomains.length > 0
         ? listed.domains.filter((d) => requestedDomains.includes(d.name.toLowerCase()))
         : listed.domains;
-    const targets = baseTargets.filter((d) => domainShouldBeFetched(d.name, effectivePolicy));
-    const skippedDomainsCount = baseTargets.length - targets.length;
 
     if (targets.length === 0) {
       res.json({
         ok: true,
         domainCount: 0,
-        skippedDomainsCount,
+        skippedDomainsCount: 0,
         totalRecords: 0,
         filteredOutCount: 0,
         addedCount: 0,
@@ -2523,7 +2769,6 @@ export async function createServer(options: CreateServerOptions = {}) {
         removedCount: 0,
         domains: [],
         errors: [],
-        policySummary: summarizePullPolicy(effectivePolicy),
       });
       return;
     }
@@ -2539,6 +2784,11 @@ export async function createServer(options: CreateServerOptions = {}) {
 
     for (const dom of targets) {
       const cleanDomain = dom.name.toLowerCase();
+      const domainPolicy = getDomainPullPolicy(provider.id, cleanDomain);
+      const effectivePolicy = b.policy
+        ? sanitizeDnsPullPolicy(b.policy, domainPolicy)
+        : domainPolicy;
+
       const pulled = await pullProviderDnsRecords(provider, secrets, cleanDomain, dom.id);
       if (!pulled.ok) {
         errors.push({ domain: cleanDomain, error: pulled.error || '拉取失败' });
@@ -2546,7 +2796,8 @@ export async function createServer(options: CreateServerOptions = {}) {
       }
 
       const filteredRecords = pulled.records.filter((item) => recordMatchesPolicy(item, effectivePolicy));
-      totalFilteredOut += pulled.records.length - filteredRecords.length;
+      const domFilteredOut = pulled.records.length - filteredRecords.length;
+      totalFilteredOut += domFilteredOut;
 
       const existingForDomain = state.dnsRecords.filter(
         (r) => r.providerId === provider.id && r.domain.toLowerCase() === cleanDomain
@@ -2616,6 +2867,24 @@ export async function createServer(options: CreateServerOptions = {}) {
       });
       const removed = beforeCount - state.dnsRecords.length;
 
+      // Save an independent local snapshot for each pulled domain (latest 3 per domain)
+      const domSnapshotRecords = state.dnsRecords
+        .filter((r) => r.providerId === provider.id && r.domain.toLowerCase() === cleanDomain)
+        .map((r) => ({ ...r }));
+      savePullSnapshot({
+        id: `snap-${crypto.randomBytes(5).toString('hex')}`,
+        createdAt: now,
+        providerId: provider.id,
+        providerName: provider.name,
+        scope: 'single',
+        domain: cleanDomain,
+        domains: [cleanDomain],
+        recordCount: domSnapshotRecords.length,
+        filteredOutCount: domFilteredOut,
+        filterSummary: summarizePullPolicy(effectivePolicy),
+        records: domSnapshotRecords,
+      });
+
       totalRecords += filteredRecords.length;
       totalAdded += added;
       totalUpdated += updated;
@@ -2629,27 +2898,6 @@ export async function createServer(options: CreateServerOptions = {}) {
       });
     }
 
-    const pulledDomainNames = domainSummaries.map((d) => d.domain);
-    const pulledDomainSet = new Set(pulledDomainNames);
-    const snapshotRecords = state.dnsRecords
-      .filter((r) => r.providerId === provider.id && pulledDomainSet.has(r.domain.toLowerCase()))
-      .map((r) => ({ ...r }));
-    const snapshotId = `snap-${crypto.randomBytes(5).toString('hex')}`;
-    if (pulledDomainNames.length > 0) {
-      savePullSnapshot({
-        id: snapshotId,
-        createdAt: now,
-        providerId: provider.id,
-        providerName: provider.name,
-        scope: 'all',
-        domains: pulledDomainNames,
-        recordCount: snapshotRecords.length,
-        filteredOutCount: totalFilteredOut,
-        filterSummary: summarizePullPolicy(effectivePolicy),
-        records: snapshotRecords,
-      });
-    }
-
     store.save();
 
     store.appendAudit({
@@ -2659,13 +2907,13 @@ export async function createServer(options: CreateServerOptions = {}) {
       actor: req.sessionUser || 'admin',
       ip: getClientIp(req),
       target: `${provider.name} (${domainSummaries.length} domains)`,
-      details: `Pulled ${totalRecords} records across ${domainSummaries.length} domain(s) (added=${totalAdded}, updated=${totalUpdated}, removed=${totalRemoved}, filteredOut=${totalFilteredOut}, skippedDomains=${skippedDomainsCount}, errors=${errors.length})`,
+      details: `Pulled ${totalRecords} records across ${domainSummaries.length} domain(s) using per-domain policies (added=${totalAdded}, updated=${totalUpdated}, removed=${totalRemoved}, filteredOut=${totalFilteredOut}, errors=${errors.length})`,
     });
 
     res.json({
       ok: true,
       domainCount: domainSummaries.length,
-      skippedDomainsCount,
+      skippedDomainsCount: 0,
       totalRecords,
       filteredOutCount: totalFilteredOut,
       addedCount: totalAdded,
@@ -2673,8 +2921,6 @@ export async function createServer(options: CreateServerOptions = {}) {
       removedCount: totalRemoved,
       domains: domainSummaries,
       errors,
-      snapshotId,
-      policySummary: summarizePullPolicy(effectivePolicy),
     });
   });
 

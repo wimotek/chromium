@@ -178,14 +178,40 @@ export default function App() {
   }, [currentUser, loadWorkspaceData]);
 
   const handleLogout = async () => {
+    let oidcLogoutUrl: string | undefined;
     try {
-      await apiRequest('/api/auth/logout', { method: 'POST' });
+      const res = await apiRequest<{ ok: boolean; oidcLogoutUrl?: string }>('/api/auth/logout', {
+        method: 'POST',
+      });
+      oidcLogoutUrl = res?.oidcLogoutUrl;
     } catch {
       // ignore
     }
     setAuthToken(null);
     setCurrentUser(null);
     setOverview(null);
+
+    let inIframe = false;
+    try {
+      inIframe = window.self !== window.top;
+    } catch {
+      inIframe = true;
+    }
+
+    if (oidcLogoutUrl && !inIframe) {
+      window.location.assign(oidcLogoutUrl);
+      return;
+    }
+
+    if (authStatus?.wimotekOAuth?.enabled) {
+      try {
+        const url = new URL(window.location.href);
+        url.searchParams.set('logged_out', '1');
+        window.history.replaceState({}, '', url.toString());
+      } catch {
+        // ignore history error
+      }
+    }
     await checkAuthStatus();
   };
 

@@ -66,6 +66,11 @@ export interface StoredOAuthProviderConfig {
   clientId?: string;
   clientSecretEncrypted?: string;
   secretPreview?: string;
+  issuerUrl?: string; // wimotek OIDC issuer (default http://ca.wimotek.com)
+  redirectUri?: string; // wimotek OIDC redirect URI override
+  directLogin?: boolean; // auto-use wimotek hosted login directly when enabled
+  adminEmail?: string; // optional legacy admin email for email_verified auto-linking
+  restrictToBoundOnly?: boolean; // optional strict whitelist mode for wimotek
   tenantId?: string; // Microsoft Entra tenant (default 'common')
   teamId?: string; // Apple Team ID
   keyId?: string; // Apple Key ID
@@ -92,6 +97,7 @@ export interface PersistedState {
   dnsRecords: ManagedDnsRecord[];
   managedDomains: ManagedDomain[];
   dnsPullPolicy: DnsPullPolicy;
+  dnsPullPolicies: Record<string, DnsPullPolicy>;
   dnsPullSnapshots: DnsPullSnapshot[];
   ociProfiles: StoredOciProfile[];
   ociSniperTasks: StoredOciSniperTask[];
@@ -202,6 +208,7 @@ function createDefaultState(): PersistedState {
       recordTypes: [],
       updatedAt: now,
     },
+    dnsPullPolicies: {},
     dnsPullSnapshots: [],
     ociProfiles: [],
     ociSniperTasks: [],
@@ -363,46 +370,74 @@ class DataStore {
             j.type === 'audit_cleanup' ||
             j.type === 'monitor_sweep',
         }));
-        const parsedPullPolicy = parsed.dnsPullPolicy ?? defaults.dnsPullPolicy;
-        const legacyMode =
-          parsedPullPolicy.filterMode === 'whitelist' || parsedPullPolicy.filterMode === 'blacklist'
-            ? parsedPullPolicy.filterMode
-            : 'none';
-        const legacyPatterns = Array.isArray(parsedPullPolicy.patterns)
-          ? parsedPullPolicy.patterns.map(String).filter(Boolean)
-          : [];
-        const rawWhitelist = Array.isArray(parsedPullPolicy.whitelistPatterns)
-          ? parsedPullPolicy.whitelistPatterns.map(String).filter(Boolean)
-          : legacyMode === 'whitelist'
-            ? legacyPatterns
+        const normalizePullPolicy = (raw?: Partial<DnsPullPolicy>): DnsPullPolicy => {
+          const src = raw ?? defaults.dnsPullPolicy;
+          const legacyMode =
+            src.filterMode === 'whitelist' || src.filterMode === 'blacklist'
+              ? src.filterMode
+              : 'none';
+          const legacyPatterns = Array.isArray(src.patterns)
+            ? src.patterns.map(String).filter(Boolean)
             : [];
-        const rawBlacklist = Array.isArray(parsedPullPolicy.blacklistPatterns)
-          ? parsedPullPolicy.blacklistPatterns.map(String).filter(Boolean)
-          : legacyMode === 'blacklist'
-            ? legacyPatterns
-            : [];
-        // Enforce strict mutual exclusion: whitelist and blacklist cannot both be active
-        let finalMode: DnsPullPolicy['filterMode'] = 'none';
-        let whitelistPatterns: string[] = [];
-        let blacklistPatterns: string[] = [];
-        if (legacyMode === 'blacklist' && rawBlacklist.length > 0) {
-          finalMode = 'blacklist';
-          blacklistPatterns = rawBlacklist;
-        } else if (rawWhitelist.length > 0) {
-          finalMode = 'whitelist';
-          whitelistPatterns = rawWhitelist;
-        } else if (rawBlacklist.length > 0) {
-          finalMode = 'blacklist';
-          blacklistPatterns = rawBlacklist;
-        }
-        const mergedPullPolicy: DnsPullPolicy = {
-          filterMode: finalMode,
-          patterns: finalMode === 'whitelist' ? whitelistPatterns : finalMode === 'blacklist' ? blacklistPatterns : [],
-          whitelistPatterns,
-          blacklistPatterns,
-          recordTypes: Array.isArray(parsedPullPolicy.recordTypes) ? parsedPullPolicy.recordTypes : [],
-          updatedAt: parsedPullPolicy.updatedAt,
+          const rawWhitelist = Array.isArray(src.whitelistPatterns)
+            ? src.whitelistPatterns.map(String).filter(Boolean)
+            : legacyMode === 'whitelist'
+              ? legacyPatterns
+              : [];
+          const rawBlacklist = Array.isArray(src.blacklistPatterns)
+            ? src.blacklistPatterns.map(String).filter(Boolean)
+            : legacyMode === 'blacklist'
+              ? legacyPatterns
+              : [];
+          // Enforce strict mutual exclusion: whitelist and blacklist cannot both be active
+          let finalMode: DnsPullPolicy['filterMode'] = 'none';
+          let whitelistPatterns: string[] = [];
+          let blacklistPatterns: string[] = [];
+          if (legacyMode === 'blacklist' && rawBlacklist.length > 0) {
+            finalMode = 'blacklist';
+            blacklistPatterns = rawBlacklist;
+          } else if (rawWhitelist.length > 0) {
+            finalMode = 'whitelist';
+            whitelistPatterns = rawWhitelist;
+          } else if (rawBlacklist.length > 0) {
+            finalMode = 'blacklist';
+            blacklistPatterns = rawBlacklist;
+          }
+          return {
+            filterMode: finalMode,
+            patterns: finalMode === 'whitelist' ? whitelistPatterns : finalMode === 'blacklist' ? blacklistPatterns : [],
+            whitelistPatterns,
+            blacklistPatterns,
+            recordTypes: Array.isArray(src.recordTypes) ? src.recordTypes : [],
+            updatedAt: src.updatedAt,
+          };
         };
+
+        const mergedPullPolicy = normalizePullPolicy(parsed.dnsPullPolicy);
+        const mergedPullPolicies: Record<string, DnsPullPolicy> = {};
+        if (parsed.dnsPullPolicies && typeof parsed.dnsPullPolicies === 'object') {
+          for (const [key, val] of Object.entries(parsed.dnsPullPolicies)) {
+            if (!key || !val || typeof val !== 'object') continue;
+            mergedPullPolicies[key.toLowerCase()] = normalizePullPolicy(val);
+          }
+        }
+        // Retain up to 3 latest snapshots independently per (providerId, domain)
+        const perDomainSnapCounts = new Map<string, number>();
+        const mergedSnapshots: DnsPullSnapshot[] = [];
+        for (const snap of Array.isArray(parsed.dnsPullSnapshots) ? parsed.dnsPullSnapshots : []) {
+          if (!snap || typeof snap !== 'object') continue;
+          const domKey = (
+            snap.domain ||
+            (Array.isArray(snap.domains) && snap.domains.length === 1 ? snap.domains[0] : '') ||
+            '__all__'
+          ).toLowerCase();
+          const bucketKey = `${snap.providerId || ''}::${domKey}`;
+          const count = perDomainSnapCounts.get(bucketKey) ?? 0;
+          if (count < 3) {
+            perDomainSnapCounts.set(bucketKey, count + 1);
+            mergedSnapshots.push(snap);
+          }
+        }
         return {
           ...defaults,
           ...parsed,
@@ -413,7 +448,8 @@ class DataStore {
           dnsRecords: Array.isArray(parsed.dnsRecords) ? parsed.dnsRecords : [],
           managedDomains: Array.isArray(parsed.managedDomains) ? parsed.managedDomains : [],
           dnsPullPolicy: mergedPullPolicy,
-          dnsPullSnapshots: Array.isArray(parsed.dnsPullSnapshots) ? parsed.dnsPullSnapshots.slice(0, 3) : [],
+          dnsPullPolicies: mergedPullPolicies,
+          dnsPullSnapshots: mergedSnapshots,
           ociProfiles: Array.isArray(parsed.ociProfiles) ? parsed.ociProfiles : [],
           cloudAccounts: Array.isArray(parsed.cloudAccounts) ? parsed.cloudAccounts : [],
           cloudHosts: cleanedHosts,

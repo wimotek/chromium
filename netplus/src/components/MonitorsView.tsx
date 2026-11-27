@@ -831,6 +831,11 @@ export function MonitorsView({
                                 setConfirmDeleteId(null);
                                 setHoveredSampleIdx(null);
                               }}
+                              onDoubleClick={() => {
+                                setSelectedId(m.id);
+                                openEditModal(m);
+                              }}
+                              title={isZh ? '单击查看详情 · 双击直接编辑监控项' : 'Click to inspect · Double-click to edit'}
                               className={`w-full text-left px-2.5 py-2 rounded-lg transition-colors flex items-center justify-between gap-2 ${
                                 active
                                   ? 'bg-emerald-50/90 dark:bg-emerald-950/35 ring-1 ring-emerald-200 dark:ring-emerald-800/70'
@@ -919,6 +924,11 @@ export function MonitorsView({
                       setConfirmDeleteId(null);
                       setHoveredSampleIdx(null);
                     }}
+                    onDoubleClick={() => {
+                      setSelectedId(m.id);
+                      openEditModal(m);
+                    }}
+                    title={isZh ? '单击查看详情 · 双击直接编辑监控项' : 'Click to inspect · Double-click to edit'}
                     className={`w-full text-left px-2.5 py-2.5 rounded-lg transition-colors flex items-center justify-between gap-2 ${
                       active
                         ? 'bg-emerald-50/90 dark:bg-emerald-950/35 ring-1 ring-emerald-200 dark:ring-emerald-800/70'
@@ -990,7 +1000,15 @@ export function MonitorsView({
           <div className="lg:col-span-8 space-y-4">
             {selectedMonitor && (
               <>
-                <div className="p-6 rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 space-y-5">
+                <div
+                  onDoubleClick={(e) => {
+                    const target = e.target as HTMLElement | null;
+                    if (target?.closest('button, a, input, select, textarea')) return;
+                    openEditModal(selectedMonitor);
+                  }}
+                  title={isZh ? '双击卡片空白处可快速编辑监控项' : 'Double-click card to edit monitor'}
+                  className="p-6 rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 space-y-5"
+                >
                   {/* Monitor Title + Action Toolbar */}
                   <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-4">
                     <div className="min-w-0 space-y-1.5">
@@ -1503,7 +1521,7 @@ export function MonitorsView({
                       form.type === 'http'
                         ? 'http://example.com:8080/health'
                         : form.type === 'https'
-                        ? 'https://example.com/health'
+                        ? 'https://example.com:3443/health'
                         : form.type === 'tcp'
                         ? '138.2.45.109 or db.example.com'
                         : 'api.example.com'
@@ -1554,6 +1572,12 @@ export function MonitorsView({
                       />
                     </div>
                   </div>
+
+                  <p className="text-[11px] text-slate-500 dark:text-slate-400 leading-relaxed">
+                    {isZh
+                      ? '支持自定义端口（如 https://host:3443）。GET 拉取响应头与正文（兼容性最好，支持关键词校验）；HEAD 仅拉取响应头更省流量，若站点返回 405/501 会自动回退为 GET 重试。'
+                      : 'Custom ports (e.g. https://host:3443) are supported. GET fetches headers + body (best compatibility & required for keyword checks); HEAD fetches headers only and auto-falls back to GET on HTTP 405/501.'}
+                  </p>
 
                   {(form.type === 'https' || form.target.trim().toLowerCase().startsWith('https://')) && (
                     <div className="p-3.5 rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-950/60 space-y-3">

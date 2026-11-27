@@ -5,6 +5,7 @@ import { ApiError, apiRequest, setAuthToken, solvePowChallenge } from '../lib/ap
 import type { AuthStatusResponse, CaptchaChallengeResponse, LanguageCode, OAuthProviderId } from '../types/models';
 
 const OAUTH_META: Record<OAuthProviderId, { label: string; shortLabel: string; accent: string }> = {
+  wimotek: { label: 'wimotek/Oauth', shortLabel: 'wimotek/Oauth', accent: 'border-blue-300 dark:border-blue-700 hover:bg-blue-50 dark:hover:bg-blue-950/40' },
   microsoft: { label: 'Microsoft', shortLabel: 'Microsoft', accent: 'border-sky-200 dark:border-sky-800/70 hover:bg-sky-50 dark:hover:bg-sky-950/30' },
   github: { label: 'GitHub', shortLabel: 'GitHub', accent: 'border-slate-300 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800' },
   google: { label: 'Google', shortLabel: 'Google', accent: 'border-blue-200 dark:border-blue-800/70 hover:bg-blue-50 dark:hover:bg-blue-950/30' },
@@ -12,6 +13,21 @@ const OAUTH_META: Record<OAuthProviderId, { label: string; shortLabel: string; a
 };
 
 function ProviderBrandIcon({ provider }: { provider: OAuthProviderId }) {
+  if (provider === 'wimotek') {
+    return (
+      <svg className="w-4 h-4 shrink-0" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+        <rect x="2" y="2" width="20" height="20" rx="5" fill="#2563EB" />
+        <path
+          d="M6.5 14.5L9.5 9.5L12.5 14L15 10.5L17.5 14.5"
+          stroke="#FFFFFF"
+          strokeWidth="2"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        />
+        <circle cx="17.5" cy="8.5" r="1.5" fill="#93C5FD" />
+      </svg>
+    );
+  }
   if (provider === 'microsoft') {
     return (
       <svg className="w-4 h-4 shrink-0" viewBox="0 0 21 21" aria-hidden="true">
@@ -80,21 +96,71 @@ export function AuthGate({
   const [powNonce, setPowNonce] = useState<string>('');
   const [powReady, setPowReady] = useState(false);
 
+  const [initialUrlParams] = useState(() => {
+    const params = new URLSearchParams(window.location.search);
+    return {
+      oauthError: params.get('oauth_error') || '',
+      preferLocal: params.get('local') === '1',
+      loggedOut: params.get('logged_out') === '1',
+    };
+  });
+
+  const [preferLocalForm, setPreferLocalForm] = useState<boolean>(initialUrlParams.preferLocal);
+  const [redirectingToOidc, setRedirectingToOidc] = useState(false);
+
   const [submitting, setSubmitting] = useState(false);
   const [oauthBusy, setOauthBusy] = useState<OAuthProviderId | null>(null);
-  const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [errorMsg, setErrorMsg] = useState<string | null>(initialUrlParams.oauthError || null);
   const [attemptsLeft, setAttemptsLeft] = useState<number | null>(null);
   const [lockoutSec, setLockoutSec] = useState<number>(0);
 
   const activeChallengeIdRef = useRef<string>('');
+  const redirectTriggeredRef = useRef<boolean>(false);
+
+  const isInIframe = (() => {
+    try {
+      return window.self !== window.top;
+    } catch {
+      return true;
+    }
+  })();
+
+  const wimotekActive = Boolean(status.wimotekOAuth?.enabled && status.wimotekOAuth?.configured);
+  const showWimotekPrimaryView = wimotekActive && !preferLocalForm;
 
   const enabledOAuthProviders = (status.oauthProviders ?? []).filter(
     (p) => p.enabled && p.configured
   );
 
-  // Listen for OAuth popup completion via postMessage
+  // When wimotek/Oauth is enabled with directLogin (default), automatically redirect standalone
+  // sessions to /login (unless user explicitly requested local login, just logged out, or returned with error)
+  useEffect(() => {
+    if (
+      wimotekActive &&
+      status.wimotekOAuth?.directLogin !== false &&
+      !preferLocalForm &&
+      !initialUrlParams.oauthError &&
+      !initialUrlParams.loggedOut &&
+      !isInIframe &&
+      !redirectTriggeredRef.current
+    ) {
+      redirectTriggeredRef.current = true;
+      setRedirectingToOidc(true);
+      window.location.assign('/login');
+    }
+  }, [
+    wimotekActive,
+    status.wimotekOAuth?.directLogin,
+    preferLocalForm,
+    initialUrlParams.oauthError,
+    initialUrlParams.loggedOut,
+    isInIframe,
+  ]);
+
+  // Listen for OAuth popup completion via postMessage (same-origin callback page)
   useEffect(() => {
     const onMessage = (event: MessageEvent) => {
+      if (event.origin !== window.location.origin) return;
       const data = event.data as
         | {
             type?: string;
@@ -129,10 +195,18 @@ export function AuthGate({
   const handleOAuthLogin = async (provider: OAuthProviderId) => {
     if (oauthBusy) return;
     setErrorMsg(null);
+
+    // For wimotek/Oauth in standalone browser tab, navigate directly to /login (standard OIDC redirect)
+    if (provider === 'wimotek' && !isInIframe) {
+      setOauthBusy('wimotek');
+      window.location.assign('/login');
+      return;
+    }
+
     setOauthBusy(provider);
     try {
-      const res = await apiRequest<{ ok: boolean; url: string }>(
-        `/api/auth/oauth/${provider}/url?mode=login`
+      const res = await apiRequest<{ ok?: boolean; url: string }>(
+        `/api/auth/oauth/${provider}/url?mode=login&flow=popup`
       );
       const width = 560;
       const height = 680;
@@ -205,6 +279,7 @@ export function AuthGate({
   }, [lang, t]);
 
   useEffect(() => {
+    if (showWimotekPrimaryView) return;
     void loadCaptcha();
     return () => {
       setCaptchaBlobUrl((prev) => {
@@ -212,7 +287,7 @@ export function AuthGate({
         return '';
       });
     };
-  }, [loadCaptcha]);
+  }, [loadCaptcha, showWimotekPrimaryView]);
 
   useEffect(() => {
     if (lockoutSec <= 0) return;
@@ -393,6 +468,120 @@ export function AuthGate({
 
           {/* Right Sign-in Form */}
           <div className="lg:col-span-7 p-8 rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900">
+            {showWimotekPrimaryView ? (
+              <div className="h-full flex flex-col justify-between space-y-6">
+                <div className="space-y-5">
+                  <div className="flex items-center justify-between gap-2 pb-4 border-b border-slate-200 dark:border-slate-800">
+                    <div>
+                      <div className="text-xs font-mono uppercase tracking-wide text-blue-600 dark:text-blue-400">
+                        OIDC 1.0 · OAuth 2.0 PKCE (S256)
+                      </div>
+                      <h2 className="mt-1 font-display text-xl font-bold text-slate-900 dark:text-white">
+                        {lang === 'zh-CN' ? '使用 wimotek/Oauth 统一登录' : 'Sign in with wimotek/Oauth'}
+                      </h2>
+                    </div>
+                    <ProviderBrandIcon provider="wimotek" />
+                  </div>
+
+                  {errorMsg && (
+                    <div
+                      role="alert"
+                      className="p-3.5 rounded-lg border border-red-200 dark:border-red-900/60 bg-red-50 dark:bg-red-950/40 text-sm text-red-700 dark:text-red-300"
+                    >
+                      {errorMsg}
+                    </div>
+                  )}
+
+                  {redirectingToOidc ? (
+                    <div className="py-10 flex flex-col items-center justify-center gap-3 text-center">
+                      <Loader2 className="w-7 h-7 animate-spin text-blue-600 dark:text-blue-400" />
+                      <p className="text-sm font-medium text-slate-800 dark:text-slate-200">
+                        {lang === 'zh-CN'
+                          ? '正在跳转至 wimotek/Oauth 统一认证页面...'
+                          : 'Redirecting to wimotek/Oauth hosted sign-in...'}
+                      </p>
+                      <p className="text-xs font-mono text-slate-400">
+                        {status.wimotekOAuth?.issuerUrl || 'http://ca.wimotek.com'}
+                      </p>
+                    </div>
+                  ) : (
+                    <div className="space-y-4">
+                      <p className="text-sm text-slate-600 dark:text-slate-400 leading-relaxed">
+                        {lang === 'zh-CN'
+                          ? '当前控制台已启用 wimotek/Oauth 单点登录，将通过 Authorization Code + PKCE (S256) 与 RS256 ID Token 校验完成安全登录。'
+                          : 'wimotek/Oauth SSO is active. Authentication uses Authorization Code + PKCE (S256) with RS256 JWKS ID Token verification.'}
+                      </p>
+
+                      <button
+                        type="button"
+                        disabled={Boolean(oauthBusy)}
+                        onClick={() => void handleOAuthLogin('wimotek')}
+                        className="w-full inline-flex items-center justify-center gap-2.5 px-5 py-3 rounded-lg text-sm font-semibold text-white bg-blue-600 hover:bg-blue-700 disabled:opacity-50 transition-colors"
+                      >
+                        {oauthBusy === 'wimotek' ? (
+                          <Loader2 className="w-4 h-4 animate-spin" />
+                        ) : (
+                          <ProviderBrandIcon provider="wimotek" />
+                        )}
+                        <span>
+                          {lang === 'zh-CN'
+                            ? '前往 wimotek/Oauth 授权登录'
+                            : 'Continue with wimotek/Oauth'}
+                        </span>
+                      </button>
+
+                      <div className="p-3.5 rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50/80 dark:bg-slate-950/60 space-y-1 text-[11px] font-mono text-slate-500 dark:text-slate-400">
+                        <div className="flex items-center justify-between gap-2">
+                          <span>Issuer</span>
+                          <span className="text-slate-700 dark:text-slate-200 truncate">
+                            {status.wimotekOAuth?.issuerUrl || 'http://ca.wimotek.com'}
+                          </span>
+                        </div>
+                        <div className="flex items-center justify-between gap-2">
+                          <span>Client ID</span>
+                          <span className="text-slate-700 dark:text-slate-200 truncate">
+                            {status.wimotekOAuth?.clientId || 'wimotek_ebb129ddb83c'}
+                          </span>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                <div className="pt-4 border-t border-slate-200 dark:border-slate-800 flex flex-wrap items-center justify-between gap-3 text-xs">
+                  <span className="text-slate-400 dark:text-slate-500">
+                    {lang === 'zh-CN'
+                      ? '在「安全设置」关闭 wimotek/Oauth 后将自动恢复本地登录页'
+                      : 'Disabling wimotek/Oauth in Security Settings restores local login'}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setRedirectingToOidc(false);
+                      setPreferLocalForm(true);
+                    }}
+                    className="font-medium text-blue-600 dark:text-blue-400 hover:underline whitespace-nowrap"
+                  >
+                    {lang === 'zh-CN' ? '使用本地管理员密码登录 →' : 'Use local admin password →'}
+                  </button>
+                </div>
+              </div>
+            ) : (
+            <>
+            {wimotekActive && (
+              <div className="mb-4 pb-3 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between gap-2 text-xs">
+                <span className="text-slate-500 dark:text-slate-400">
+                  {lang === 'zh-CN' ? '本地管理员回退登录' : 'Local administrator fallback'}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setPreferLocalForm(false)}
+                  className="font-medium text-blue-600 dark:text-blue-400 hover:underline whitespace-nowrap"
+                >
+                  {lang === 'zh-CN' ? '← 返回 wimotek/Oauth 登录' : '← Back to wimotek/Oauth'}
+                </button>
+              </div>
+            )}
             <form onSubmit={handleSubmit} className="space-y-5" autoComplete="on">
               {status.envManagedAdmin && (
                 <div className="p-3 rounded-lg bg-slate-100 dark:bg-slate-800/70 text-xs text-slate-700 dark:text-slate-300">
@@ -641,12 +830,14 @@ export function AuthGate({
                 <div className="p-3 rounded-lg bg-slate-50 dark:bg-slate-950/60 border border-slate-200/80 dark:border-slate-800 text-[11px] leading-relaxed text-slate-500 dark:text-slate-400 flex flex-wrap items-center justify-between gap-2">
                   <span>
                     {lang === 'zh-CN'
-                      ? '支持绑定 Microsoft、GitHub、Google、Apple 账号免密登录。登录后前往「安全设置 → 第三方账号登录与绑定」配置并绑定即可启用。'
-                      : 'Supports Microsoft, GitHub, Google, and Apple sign-in. Sign in once and configure & bind your account under Security Settings.'}
+                      ? '支持接入 wimotek/Oauth（OIDC 1.0 + PKCE）以及 Microsoft、GitHub、Google、Apple 账号免密登录。登录后前往「安全设置 → 第三方账号登录与绑定」开启即可。'
+                      : 'Supports wimotek/Oauth (OIDC 1.0 + PKCE) as well as Microsoft, GitHub, Google, and Apple sign-in. Configure under Security Settings.'}
                   </span>
                 </div>
               )}
             </div>
+            </>
+            )}
           </div>
         </div>
       </main>
