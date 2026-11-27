@@ -122,7 +122,7 @@ oauthClient := &wimotekoauth.Client{
     Issuer:       os.Getenv("WIMOTEK_OAUTH_ISSUER"),
     ClientID:     os.Getenv("WIMOTEK_OAUTH_CLIENT_ID"),
     ClientSecret: os.Getenv("WIMOTEK_OAUTH_CLIENT_SECRET"),
-    RedirectURI:  baseURL + "/api/auth/oauth/wimotek/callback",
+    RedirectURI:  baseURL + "/auth/callback",
 }
 loginURL, state, verifier := oauthClient.BuildLoginURL()
 // Callback verifies CSRF state + PKCE code_verifier & returns res.User["name"], res.User["email"]`;
@@ -459,36 +459,21 @@ loginURL, state, verifier := oauthClient.BuildLoginURL()
                       provider: 'wimotek' as const,
                       label: 'wimotek/OAuth (Primary)',
                       configured: false,
-                      callback_url: `${baseUrl}/api/auth/oauth/wimotek/callback`,
+                      callback_url: `${baseUrl}/auth/callback`,
                     },
                   ]
               ).map((p) => (
                 <div
                   key={p.provider}
-                  className="flex items-center justify-between gap-2 bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-xs"
+                  className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-xs"
                 >
-                  <span className="font-semibold text-slate-800 w-44 shrink-0 truncate">{p.label}</span>
-                  <code dir="ltr" className="font-mono text-slate-700 truncate flex-1">{p.callback_url}</code>
-                  <CopyButton compact value={p.callback_url} label={t.common.copy} copiedLabel={t.common.copied} />
+                  <span className="font-semibold text-slate-800 sm:w-44 shrink-0 truncate">{p.label}</span>
+                  <div className="flex items-center justify-between gap-2 min-w-0 flex-1">
+                    <code dir="ltr" className="font-mono text-slate-700 truncate flex-1">{p.callback_url}</code>
+                    <CopyButton compact value={p.callback_url} label={t.common.copy} copiedLabel={t.common.copied} />
+                  </div>
                 </div>
               ))}
-              {(() => {
-                const wimotekMeta = providers.find((p) => p.provider === 'wimotek');
-                const aliasUrl = (() => {
-                  try {
-                    return `${new URL(wimotekMeta?.callback_url || baseUrl).origin}/callback`;
-                  } catch {
-                    return `${baseUrl}/callback`;
-                  }
-                })();
-                return (
-                  <div className="flex items-center justify-between gap-2 bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-xs">
-                    <span className="font-semibold text-slate-800 w-44 shrink-0 truncate">wimotek/OAuth Alias</span>
-                    <code dir="ltr" className="font-mono text-slate-700 truncate flex-1">{aliasUrl}</code>
-                    <CopyButton compact value={aliasUrl} label={t.common.copy} copiedLabel={t.common.copied} />
-                  </div>
-                );
-              })()}
             </div>
           </div>
 

@@ -17,6 +17,7 @@ import {
   BellRing,
   BookOpen,
   CloudCog,
+  KeyRound,
 } from 'lucide-react';
 import {
   api,
@@ -37,6 +38,7 @@ import { ProfileView, UsersManagementView } from './components/UsersAndProfileVi
 import { NotificationsView } from './components/NotificationsView';
 import { HelpView } from './components/HelpView';
 import { ManagedSSLView } from './components/ManagedSSLView';
+import { OAuthSettingsView } from './components/OAuthSettingsView';
 
 export type TabKey =
   | 'overview'
@@ -46,6 +48,7 @@ export type TabKey =
   | 'trust'
   | 'notifications'
   | 'users'
+  | 'oauth'
   | 'profile'
   | 'automation'
   | 'help'
@@ -59,6 +62,7 @@ const VALID_TABS: readonly TabKey[] = [
   'trust',
   'notifications',
   'users',
+  'oauth',
   'profile',
   'automation',
   'help',
@@ -75,6 +79,7 @@ export default function App() {
   const [locale, setLocale] = useState<LocaleCode>('en');
   const [token, setToken] = useState<string | null>(null);
   const [checkingSession, setCheckingSession] = useState(true);
+  const [justSignedOut, setJustSignedOut] = useState(false);
   const [username, setUsername] = useState<string>('admin');
   const [currentUser, setCurrentUser] = useState<UserProfile | null>(null);
   const [previewMode, setPreviewMode] = useState(false);
@@ -188,6 +193,7 @@ export default function App() {
   ) => {
     api.setToken(newToken);
     setToken(newToken);
+    setJustSignedOut(false);
     setUsername(user);
     setPreviewMode(isPreview);
     if (profile) {
@@ -201,6 +207,7 @@ export default function App() {
     api.logout().catch(() => {});
     api.setToken(null);
     setToken(null);
+    setJustSignedOut(true);
     setCurrentUser(null);
     setOverview(null);
     setCertificates([]);
@@ -222,6 +229,7 @@ export default function App() {
       <AuthGate
         t={t}
         locale={locale}
+        justSignedOut={justSignedOut}
         onLocaleChange={setLocale}
         onAuthenticated={handleAuthenticated}
       />
@@ -238,7 +246,12 @@ export default function App() {
     { key: 'trust', label: t.nav.trust, icon: Shield },
     { key: 'notifications', label: t.nav.notifications, icon: BellRing },
     { key: 'automation', label: t.nav.automation, icon: Terminal },
-    ...(isAdmin ? [{ key: 'users' as TabKey, label: t.nav.users, icon: Users }] : []),
+    ...(isAdmin
+      ? [
+          { key: 'users' as TabKey, label: t.nav.users, icon: Users },
+          { key: 'oauth' as TabKey, label: t.nav.oauth, icon: KeyRound },
+        ]
+      : []),
     { key: 'profile', label: t.nav.profile, icon: UserCircle2 },
     { key: 'help', label: t.nav.help, icon: BookOpen },
     { key: 'audit', label: t.nav.audit, icon: ScrollText },
@@ -486,6 +499,14 @@ export default function App() {
           )}
           {activeTab === 'users' && isAdmin && (
             <UsersManagementView t={t} currentUsername={username} />
+          )}
+          {activeTab === 'oauth' && isAdmin && (
+            <OAuthSettingsView
+              t={t}
+              user={currentUser}
+              previewMode={previewMode}
+              onUpdated={(updated) => setCurrentUser(updated)}
+            />
           )}
           {activeTab === 'profile' && (
             <ProfileView

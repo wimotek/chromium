@@ -30,6 +30,7 @@ type storedOAuthGateway struct {
 	Issuer                string   `json:"issuer"`
 	ClientID              string   `json:"client_id"`
 	ClientSecretEnc       string   `json:"client_secret_enc,omitempty"`
+	RedirectURI           string   `json:"redirect_uri,omitempty"`
 	Scopes                []string `json:"scopes,omitempty"`
 	AuthorizationEndpoint string   `json:"authorization_endpoint,omitempty"`
 	TokenEndpoint         string   `json:"token_endpoint,omitempty"`
@@ -135,22 +136,24 @@ func (s *Server) loadStoredOAuthGateway(ctx context.Context) (*storedOAuthGatewa
 	return &rec, true
 }
 
-func (s *Server) wimotekOAuthClient(ctx context.Context, callbackPath string) (*wimotekoauth.Client, bool, string) {
+func (s *Server) wimotekOAuthClient(ctx context.Context, callbackPath string) (*wimotekoauth.Client, bool, string, string, string) {
 	var (
-		issuer       string
-		clientID     string
-		clientSecret string
-		scopes       []string
-		authURL      string
-		tokenURL     string
-		userinfoURL  string
-		source       = "unconfigured"
+		issuer         string
+		clientID       string
+		clientSecret   string
+		customRedirect string
+		scopes         []string
+		authURL        string
+		tokenURL       string
+		userinfoURL    string
+		source         = "unconfigured"
 	)
 
-	if saved, ok := s.loadStoredOAuthGateway(ctx); ok && (saved.Issuer != "" || saved.ClientID != "" || saved.ClientSecretEnc != "") {
+	if saved, ok := s.loadStoredOAuthGateway(ctx); ok && (saved.Issuer != "" || saved.ClientID != "" || saved.ClientSecretEnc != "" || saved.RedirectURI != "" || saved.AuthorizationEndpoint != "" || saved.TokenEndpoint != "" || saved.UserinfoEndpoint != "") {
 		issuer = strings.TrimSpace(saved.Issuer)
 		clientID = strings.TrimSpace(saved.ClientID)
 		clientSecret = s.decryptOAuthSecret(ctx, saved.ClientSecretEnc)
+		customRedirect = strings.TrimSpace(saved.RedirectURI)
 		scopes = saved.Scopes
 		authURL = strings.TrimSpace(saved.AuthorizationEndpoint)
 		tokenURL = strings.TrimSpace(saved.TokenEndpoint)
@@ -163,6 +166,7 @@ func (s *Server) wimotekOAuthClient(ctx context.Context, callbackPath string) (*
 		if clientSecret == "" {
 			clientSecret = strings.TrimSpace(os.Getenv("WIMOTEK_OAUTH_CLIENT_SECRET"))
 		}
+		customRedirect = strings.TrimSpace(os.Getenv("WIMOTEK_OAUTH_REDIRECT_URI"))
 		rawScopes := strings.TrimSpace(os.Getenv("WIMOTEK_OAUTH_SCOPES"))
 		if rawScopes != "" {
 			scopes = strings.Fields(strings.ReplaceAll(rawScopes, ",", " "))
@@ -170,7 +174,7 @@ func (s *Server) wimotekOAuthClient(ctx context.Context, callbackPath string) (*
 		authURL = strings.TrimSpace(os.Getenv("WIMOTEK_OAUTH_AUTH_URL"))
 		tokenURL = strings.TrimSpace(os.Getenv("WIMOTEK_OAUTH_TOKEN_URL"))
 		userinfoURL = strings.TrimSpace(os.Getenv("WIMOTEK_OAUTH_USERINFO_URL"))
-		if issuer != "" || clientID != "" || clientSecret != "" {
+		if issuer != "" || clientID != "" || clientSecret != "" || customRedirect != "" {
 			source = "env"
 		}
 	}
@@ -188,15 +192,15 @@ func (s *Server) wimotekOAuthClient(ctx context.Context, callbackPath string) (*
 	if base == "" {
 		base = "http://localhost:8443"
 	}
+	defaultCallback := base + "/auth/callback"
 	redirectURI := ""
 	if callbackPath == "" {
-		if envRedirect := strings.TrimSpace(os.Getenv("WIMOTEK_OAUTH_REDIRECT_URI")); envRedirect != "" {
-			redirectURI = envRedirect
+		if customRedirect != "" {
+			redirectURI = customRedirect
 		} else {
-			callbackPath = "/auth/callback"
+			redirectURI = defaultCallback
 		}
-	}
-	if redirectURI == "" {
+	} else {
 		redirectURI = base + callbackPath
 	}
 	c := &wimotekoauth.Client{
@@ -210,11 +214,11 @@ func (s *Server) wimotekOAuthClient(ctx context.Context, callbackPath string) (*
 		UserinfoEndpoint:      userinfoURL,
 	}
 	configured := issuer != "" && clientID != "" && clientSecret != ""
-	return c, configured, source
+	return c, configured, source, customRedirect, defaultCallback
 }
 
 func (s *Server) oauthProvidersMeta(ctx context.Context) []oauthProviderMeta {
-	c, configured, _ := s.wimotekOAuthClient(ctx, "/api/auth/oauth/wimotek/callback")
+	c, configured, _, _, _ := s.wimotekOAuthClient(ctx, "")
 	return []oauthProviderMeta{
 		{
 			Provider:    "wimotek",
@@ -229,9 +233,7 @@ func (s *Server) oauthProvidersMeta(ctx context.Context) []oauthProviderMeta {
 func (s *Server) registerOAuthGatewayRoutes() {
 	s.mux.HandleFunc("GET /api/auth/oauth/providers", s.handleOAuthProviders)
 	s.mux.HandleFunc("GET /api/auth/oauth/wimotek/url", s.handleWimotekOAuthURL)
-	s.mux.HandleFunc("GET /api/auth/oauth/wimotek/callback", s.handleWimotekOAuthCallback)
 	s.mux.HandleFunc("GET /auth/callback", s.handleWimotekOAuthCallback)
-	s.mux.HandleFunc("GET /callback", s.handleWimotekOAuthCallback)
 	s.mux.HandleFunc("GET /login", s.handleWimotekOAuthDirectLogin)
 	s.mux.HandleFunc("GET /logout", s.handleWimotekOAuthLogout)
 
@@ -241,26 +243,24 @@ func (s *Server) registerOAuthGatewayRoutes() {
 }
 
 func (s *Server) handleGetOAuthGatewayConfig(w http.ResponseWriter, r *http.Request, _ *auth.SessionInfo) {
-	c, configured, source := s.wimotekOAuthClient(r.Context(), "/api/auth/oauth/wimotek/callback")
-	base := strings.TrimRight(s.base, "/")
-	if base == "" {
-		base = "http://localhost:8443"
-	}
+	c, configured, source, customRedirect, defaultCallback := s.wimotekOAuthClient(r.Context(), "")
 	writeJSON(w, http.StatusOK, map[string]any{
 		"gateway": map[string]any{
 			"issuer":                 c.Issuer,
 			"client_id":              c.ClientID,
 			"has_client_secret":      c.ClientSecret != "",
 			"client_secret_masked":   maskOAuthSecret(c.ClientSecret),
+			"redirect_uri":           customRedirect,
 			"scopes":                 strings.Join(c.Scopes, " "),
 			"authorization_endpoint": c.AuthorizationEndpoint,
 			"token_endpoint":         c.TokenEndpoint,
 			"userinfo_endpoint":      c.UserinfoEndpoint,
-			"callback_url":           base + "/auth/callback",
-			"alias_callback_url":     base + "/api/auth/oauth/wimotek/callback",
+			"callback_url":           c.RedirectURI,
+			"default_callback_url":   defaultCallback,
 			"configured":             configured,
 			"source":                 source,
 		},
+		"providers": s.oauthProvidersMeta(r.Context()),
 	})
 }
 
@@ -270,6 +270,7 @@ func (s *Server) handleSaveOAuthGatewayConfig(w http.ResponseWriter, r *http.Req
 		ClientID              string `json:"client_id"`
 		ClientSecret          string `json:"client_secret"`
 		ClearSecret           bool   `json:"clear_secret"`
+		RedirectURI           string `json:"redirect_uri"`
 		Scopes                string `json:"scopes"`
 		AuthorizationEndpoint string `json:"authorization_endpoint"`
 		TokenEndpoint         string `json:"token_endpoint"`
@@ -290,6 +291,11 @@ func (s *Server) handleSaveOAuthGatewayConfig(w http.ResponseWriter, r *http.Req
 		issuer = norm
 	}
 
+	redirectURI, err := validateOptionalHTTPURL(body.RedirectURI)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "redirect_uri: "+err.Error())
+		return
+	}
 	authURL, err := validateOptionalHTTPURL(body.AuthorizationEndpoint)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, "authorization_endpoint: "+err.Error())
@@ -330,6 +336,7 @@ func (s *Server) handleSaveOAuthGatewayConfig(w http.ResponseWriter, r *http.Req
 		Issuer:                issuer,
 		ClientID:              strings.TrimSpace(body.ClientID),
 		ClientSecretEnc:       secretEnc,
+		RedirectURI:           redirectURI,
 		Scopes:                scopes,
 		AuthorizationEndpoint: authURL,
 		TokenEndpoint:         tokenURL,
@@ -347,7 +354,7 @@ func (s *Server) handleSaveOAuthGatewayConfig(w http.ResponseWriter, r *http.Req
 		Actor:      sess.Username,
 		Action:     "oauth.gateway_update",
 		ClientIP:   clientIP(r),
-		DetailJSON: fmt.Sprintf(`{"issuer":%q,"client_id":%q}`, rec.Issuer, rec.ClientID),
+		DetailJSON: fmt.Sprintf(`{"issuer":%q,"client_id":%q,"redirect_uri":%q}`, rec.Issuer, rec.ClientID, rec.RedirectURI),
 		CreatedAt:  time.Now().Unix(),
 	})
 
@@ -361,11 +368,7 @@ func (s *Server) handleOAuthProviders(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleWimotekOAuthURL(w http.ResponseWriter, r *http.Request) {
-	callbackPath := "/auth/callback"
-	if strings.TrimSpace(os.Getenv("WIMOTEK_OAUTH_REDIRECT_URI")) != "" {
-		callbackPath = ""
-	}
-	client, configured, _ := s.wimotekOAuthClient(r.Context(), callbackPath)
+	client, configured, _, _, _ := s.wimotekOAuthClient(r.Context(), "")
 	if !configured {
 		writeJSON(w, http.StatusOK, map[string]any{
 			"configured":   false,
@@ -375,14 +378,27 @@ func (s *Server) handleWimotekOAuthURL(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	mode := "login"
+	actor := ""
 	if r.URL.Query().Get("mode") == "bind" {
 		mode = "bind"
+		tok, _ := extractSessionToken(r)
+		if tok == "" {
+			writeErr(w, http.StatusUnauthorized, "sign in required to bind SSO account")
+			return
+		}
+		sess, err := s.auth.VerifySession(tok)
+		if err != nil {
+			writeErr(w, http.StatusUnauthorized, "invalid session")
+			return
+		}
+		actor = sess.Username
 	}
 	loginURL, state, verifier := client.BuildLoginURL()
 	payload, _ := json.Marshal(map[string]string{
 		"state":        state,
 		"verifier":     verifier,
 		"mode":         mode,
+		"actor":        actor,
 		"redirect_uri": client.RedirectURI,
 	})
 	_ = s.cache.Set(r.Context(), "oauth:pkce:"+state, payload, 10*time.Minute)
@@ -402,11 +418,7 @@ func (s *Server) handleWimotekOAuthDirectLogin(w http.ResponseWriter, r *http.Re
 		http.Redirect(w, r, "/?auth=local", http.StatusFound)
 		return
 	}
-	callbackPath := "/auth/callback"
-	if strings.TrimSpace(os.Getenv("WIMOTEK_OAUTH_REDIRECT_URI")) != "" {
-		callbackPath = ""
-	}
-	client, configured, _ := s.wimotekOAuthClient(r.Context(), callbackPath)
+	client, configured, _, _, _ := s.wimotekOAuthClient(r.Context(), "")
 	if !configured {
 		http.Redirect(w, r, "/?auth=local", http.StatusFound)
 		return
@@ -439,7 +451,7 @@ func (s *Server) handleWimotekOAuthLogout(w http.ResponseWriter, r *http.Request
 		http.Redirect(w, r, "/", http.StatusFound)
 		return
 	}
-	client, configured, _ := s.wimotekOAuthClient(r.Context(), "/auth/callback")
+	client, configured, _, _, _ := s.wimotekOAuthClient(r.Context(), "")
 	if configured {
 		logoutURL := client.BuildLogoutURL(r.Context(), base+"/")
 		if logoutURL != "" {
@@ -451,13 +463,7 @@ func (s *Server) handleWimotekOAuthLogout(w http.ResponseWriter, r *http.Request
 }
 
 func (s *Server) handleWimotekOAuthCallback(w http.ResponseWriter, r *http.Request) {
-	callbackPath := "/auth/callback"
-	if strings.HasPrefix(r.URL.Path, "/callback") {
-		callbackPath = "/callback"
-	} else if strings.HasPrefix(r.URL.Path, "/api/auth/oauth/wimotek/callback") {
-		callbackPath = "/api/auth/oauth/wimotek/callback"
-	}
-	client, configured, _ := s.wimotekOAuthClient(r.Context(), callbackPath)
+	client, configured, _, _, _ := s.wimotekOAuthClient(r.Context(), "")
 	if !configured {
 		writeOAuthPopupHTML(w, map[string]any{"type": "OAUTH_AUTH_ERROR", "error": "wimotek/OAuth is not configured"})
 		return
@@ -478,7 +484,7 @@ func (s *Server) handleWimotekOAuthCallback(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	var expectedState, verifier string
+	var expectedState, verifier, bindActor string
 	mode := "login"
 
 	if raw, hit, _ := s.cache.Get(r.Context(), "oauth:pkce:"+state); hit && len(raw) > 0 {
@@ -490,6 +496,7 @@ func (s *Server) handleWimotekOAuthCallback(w http.ResponseWriter, r *http.Reque
 			if saved["mode"] != "" {
 				mode = saved["mode"]
 			}
+			bindActor = strings.TrimSpace(saved["actor"])
 			if saved["redirect_uri"] != "" {
 				client.RedirectURI = saved["redirect_uri"]
 			}
@@ -514,7 +521,7 @@ func (s *Server) handleWimotekOAuthCallback(w http.ResponseWriter, r *http.Reque
 
 	res, err := client.HandleCallback(r.Context(), code, state, expectedState, verifier)
 	if err != nil {
-		writeOAuthPopupHTML(w, map[string]any{"type": "OAUTH_AUTH_ERROR", "error": err.Error()})
+		writeOAuthPopupHTML(w, map[string]any{"type": "OAUTH_AUTH_ERROR", "mode": mode, "error": err.Error()})
 		return
 	}
 
@@ -540,12 +547,32 @@ func (s *Server) handleWimotekOAuthCallback(w http.ResponseWriter, r *http.Reque
 		sub = ""
 	}
 	if sub == "" {
-		writeOAuthPopupHTML(w, map[string]any{"type": "OAUTH_AUTH_ERROR", "error": "OAuth provider returned no subject identifier"})
+		writeOAuthPopupHTML(w, map[string]any{"type": "OAUTH_AUTH_ERROR", "mode": mode, "error": "OAuth provider returned no subject identifier"})
 		return
 	}
 
 	subHash := fmt.Sprintf("%x", sha256.Sum256([]byte(sub)))
 	subKey := "oauth:sub:wimotek:" + subHash[:32]
+	now := time.Now().Unix()
+
+	if mode == "bind" && bindActor != "" {
+		if actorRec, err := s.store.GetUser(r.Context(), bindActor); err == nil && actorRec != nil {
+			_ = s.store.SetSetting(r.Context(), subKey, actorRec.Username)
+			_ = s.store.AppendAudit(r.Context(), store.AuditRecord{
+				Actor:     actorRec.Username,
+				Action:    "profile.social_bind",
+				ClientIP:  clientIP(r),
+				CreatedAt: now,
+			})
+			writeOAuthPopupHTML(w, map[string]any{
+				"type":     "OAUTH_AUTH_SUCCESS",
+				"mode":     "bind",
+				"provider": "wimotek",
+				"user":     actorRec,
+			})
+			return
+		}
+	}
 
 	var userRec *store.UserRecord
 	// 1. Primary mapping: resolve by stable OIDC `sub`
@@ -566,7 +593,6 @@ func (s *Server) handleWimotekOAuthCallback(w http.ResponseWriter, r *http.Reque
 		}
 	}
 
-	now := time.Now().Unix()
 	if userRec == nil {
 		baseUsername := strings.TrimSpace(fmt.Sprintf("%v", res.User["preferred_username"]))
 		if baseUsername == "" || baseUsername == "<nil>" {
@@ -651,11 +677,19 @@ func writeOAuthPopupHTML(w http.ResponseWriter, payload map[string]any) {
   if (window.opener) {
     window.opener.postMessage(data, window.location.origin);
     window.close();
+  } else if (data && data.mode === 'bind') {
+    if (data.type === 'OAUTH_AUTH_SUCCESS') {
+      var prov = encodeURIComponent(String(data.provider || 'wimotek'));
+      window.location.replace('/?oauth_linked=' + prov + '#oauth');
+    } else {
+      var bErr = encodeURIComponent(String((data && data.error) || 'oauth_bind_failed'));
+      window.location.replace('/?oauth_bind_error=' + bErr + '#oauth');
+    }
   } else if (data && data.type === 'OAUTH_AUTH_SUCCESS') {
     window.location.replace('/');
   } else {
     var msg = (data && data.error) ? encodeURIComponent(data.error) : 'oauth_failed';
-    window.location.replace('/?auth=local&oauth_error=' + msg);
+    window.location.replace('/?oauth_error=' + msg);
   }
 })();
 </script>

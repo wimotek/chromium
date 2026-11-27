@@ -49,6 +49,7 @@ function bufferToBase64Url(buf: ArrayBuffer): string {
 interface AuthGateProps {
   t: LocaleDict;
   locale: LocaleCode;
+  justSignedOut?: boolean;
   onLocaleChange: (code: LocaleCode) => void;
   onAuthenticated: (
     token: string,
@@ -61,6 +62,7 @@ interface AuthGateProps {
 export const AuthGate: React.FC<AuthGateProps> = ({
   t,
   locale,
+  justSignedOut = false,
   onLocaleChange,
   onAuthenticated,
 }) => {
@@ -127,6 +129,13 @@ export const AuthGate: React.FC<AuthGateProps> = ({
     const params = new URLSearchParams(window.location.search);
     return params.get('auth') === 'local' || params.get('mode') === 'local';
   });
+  const [skipAutoRedirect, setSkipAutoRedirect] = useState<boolean>(() => {
+    if (typeof window === 'undefined') return false;
+    const params = new URLSearchParams(window.location.search);
+    const inIframe = window.self !== window.top;
+    return inIframe || Boolean(params.get('oauth_error')) || params.get('logged_out') === '1';
+  });
+  const [autoRedirecting, setAutoRedirecting] = useState(false);
   const [oauthProviders, setOauthProviders] = useState<OAuthProviderInfo[]>([]);
 
   // Registration + Email verification state
@@ -544,6 +553,27 @@ export const AuthGate: React.FC<AuthGateProps> = ({
   const wimotekMeta = oauthProviders.find((p) => p.provider === 'wimotek');
   const wimotekConfigured = Boolean(wimotekMeta?.configured);
   const showOAuthPrimary = wimotekConfigured && !useLocalFallback;
+
+  // When wimotek/OAuth is enabled in a standalone browser, redirect immediately to /login (no extra click)
+  useEffect(() => {
+    if (
+      loadingStatus ||
+      needsSetup ||
+      !wimotekConfigured ||
+      useLocalFallback ||
+      skipAutoRedirect ||
+      justSignedOut ||
+      Boolean(error)
+    ) {
+      return;
+    }
+    setAutoRedirecting(true);
+    const timer = window.setTimeout(() => {
+      window.location.replace('/login');
+    }, 60);
+    return () => window.clearTimeout(timer);
+  }, [loadingStatus, needsSetup, wimotekConfigured, useLocalFallback, skipAutoRedirect, justSignedOut, error]);
+
   const issuerHost = (() => {
     if (!wimotekMeta?.issuer) return '';
     try {
@@ -1222,8 +1252,40 @@ export const AuthGate: React.FC<AuthGateProps> = ({
                 ← {t.auth.mfaBack}
               </button>
             </div>
+          ) : showOAuthPrimary && autoRedirecting ? (
+            /* Seamless Direct Redirect to wimotek/OAuth Hosted Login (with instant local fallback) */
+            <div className="space-y-6 py-2">
+              <div className="space-y-2">
+                <div className="inline-flex items-center gap-2 text-teal-700 text-xs font-semibold">
+                  <ShieldCheck className="w-4 h-4 animate-pulse shrink-0" aria-hidden="true" />
+                  <span>OIDC · PKCE S256</span>
+                </div>
+                <h2 className="font-display text-xl font-bold text-slate-900">
+                  {t.auth.redirectingToOAuth}
+                </h2>
+                {issuerHost && (
+                  <p className="text-xs font-mono text-slate-500 truncate">{issuerHost}</p>
+                )}
+              </div>
+
+              <div className="pt-4 border-t border-slate-200 text-center">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setAutoRedirecting(false);
+                    setSkipAutoRedirect(true);
+                    setUseLocalFallback(true);
+                    setError('');
+                  }}
+                  className="inline-flex items-center gap-1.5 text-xs font-medium text-slate-600 hover:text-teal-700 transition-colors cursor-pointer"
+                >
+                  <Lock className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
+                  <span>{t.auth.oauthUnavailableSwitchLocal}</span>
+                </button>
+              </div>
+            </div>
           ) : showOAuthPrimary ? (
-            /* Separated OAuth-First View when wimotek/OAuth is enabled */
+            /* Separated OAuth View (shown after sign-out, OAuth error, or inside iframe preview) */
             <div className="space-y-5">
               <div className="space-y-2">
                 <h2 className="font-display text-2xl font-bold text-slate-900 wrap-anywhere">
@@ -1287,6 +1349,7 @@ export const AuthGate: React.FC<AuthGateProps> = ({
                 <button
                   type="button"
                   onClick={() => {
+                    setSkipAutoRedirect(true);
                     setUseLocalFallback(true);
                     setError('');
                   }}
