@@ -155,6 +155,7 @@ func (s *appServer) loadExtensionSettingsLocked(ctx context.Context) {
 			s.backupCfg = bs
 		}
 	}
+	s.loadAdminTokensLocked(ctx)
 }
 
 func (s *appServer) persistAppLocksLocked() {

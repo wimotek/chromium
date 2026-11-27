@@ -228,6 +228,7 @@ type appServer struct {
 
 	policy       authPolicyConfig
 	backupCfg    backupSettings
+	adminTokens  []adminApiToken
 	apps         []oauthApplication
 	connectors   []storedConnector
 	users        []identityUser
@@ -421,6 +422,13 @@ func NewRouter(cfgMgr *config.Manager, keys *crypto.KeyManager, certSources ...s
 	mux.HandleFunc("POST /api/security/risk/test-bruteforce", s.requireAdmin(s.handleTestBruteForce))
 	mux.HandleFunc("POST /api/security/signing-key/rotate", s.requireAdmin(s.handleRotateSigningKey))
 	mux.HandleFunc("POST /api/security/signing-key/purge-retiring", s.requireAdmin(s.handlePurgeRetiringKeys))
+
+	// Admin API Tokens (Personal Access Tokens) & MCP JSON-RPC 2.0 Server
+	mux.HandleFunc("GET /api/admin/tokens", s.requireAdmin(s.handleListAdminTokens))
+	mux.HandleFunc("POST /api/admin/tokens", s.requireAdmin(s.handleCreateAdminToken))
+	mux.HandleFunc("DELETE /api/admin/tokens/{id}", s.requireAdmin(s.handleDeleteAdminToken))
+	mux.HandleFunc("GET /api/mcp", s.requireAdmin(s.handleMCPInfo))
+	mux.HandleFunc("POST /api/mcp", s.requireAdmin(s.handleMCPRequest))
 
 	// Embedded React SPA with clean index.html fallback
 	subFS, err := fs.Sub(web.DistFS, "dist")

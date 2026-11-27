@@ -1265,6 +1265,7 @@ export default function App() {
               locale={locale}
               policy={authPolicy}
               sessionToken={sessionToken}
+              issuerUrl={config.issuerUrl}
               onSavePolicy={handleSavePolicy}
             />
           )}
@@ -1273,6 +1274,7 @@ export default function App() {
             <LoginLabView
               locale={locale}
               issuerUrl={config.issuerUrl}
+              sessionToken={sessionToken}
               connectors={connectors}
               applications={applications}
               authPolicy={authPolicy}

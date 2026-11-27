@@ -17,10 +17,27 @@
 curl "https://auth.your-domain.com/api/public/theme?client_id=wimotek_erp_portal"
 ```
 
-### 2. 更新指定应用的登录页主题（需管理员 Bearer Token）
+### 2. 获取管理员 API Token (`$WIMOTEK_ADMIN_TOKEN`) 与接入 MCP Server
+在管理控制台 **「安全策略 -> Admin API Tokens」** 或 **「托管登录页调试 -> AI 提示词 & API/MCP」** 中点击 **生成 Admin Token**，即可签发 `wmk_pat_...` 长期令牌（服务端仅存 SHA-256 哈希，支持随时吊销）。
+
+- **MCP Server 端点**（Streamable HTTP JSON-RPC 2.0，可直接配置到 Cursor / Claude Desktop / Windsurf 的 `mcp.json`）：
+  ```json
+  {
+    "mcpServers": {
+      "wimotek-oauth": {
+        "url": "https://auth.your-domain.com/api/mcp",
+        "headers": {
+          "Authorization": "Bearer $WIMOTEK_ADMIN_TOKEN"
+        }
+      }
+    }
+  }
+  ```
+
+### 3. 更新指定应用的登录页主题（需管理员 Bearer Token）
 ```bash
 curl -X PUT "https://auth.your-domain.com/api/applications/wimotek_erp_portal/theme" \
-  -H "Authorization: Bearer <ADMIN_SESSION_TOKEN>" \
+  -H "Authorization: Bearer $WIMOTEK_ADMIN_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
     "layout": "split_left",

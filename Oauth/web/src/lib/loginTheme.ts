@@ -209,7 +209,8 @@ export function buildAiThemeSyncPrompt(opts: {
 - **Client ID**: ${opts.clientId}
 - **样式配置接口 (PUT)**: \`PUT ${issuer}/api/applications/${opts.clientId}/theme\`
 - **公开读取接口 (GET)**: \`GET ${issuer}/api/public/theme?client_id=${opts.clientId}\`
-- **认证请求头**: \`Authorization: Bearer <WIMOTEK_ADMIN_SESSION_TOKEN>\`
+- **MCP Server 端点 (JSON-RPC 2.0)**: \`POST ${issuer}/api/mcp\`（支持 \`list_applications\` / \`get_login_theme\` / \`update_login_theme\` 等工具）
+- **认证请求头**: \`Authorization: Bearer $WIMOTEK_ADMIN_TOKEN\`（可在控制台「安全策略 → Admin API Tokens」或本页点击“生成 Admin Token”签发 \`wmk_pat_...\` 令牌）
 
 ### 2. 请求体 JSON Schema（所有字段均支持按需修改）
 \`\`\`json
@@ -252,7 +253,8 @@ ${JSON.stringify(opts.currentTheme, null, 2)}
 - **Client ID**: ${opts.clientId}
 - **Update Theme API**: \`PUT ${issuer}/api/applications/${opts.clientId}/theme\`
 - **Public Read API**: \`GET ${issuer}/api/public/theme?client_id=${opts.clientId}\`
-- **Auth Header**: \`Authorization: Bearer <WIMOTEK_ADMIN_SESSION_TOKEN>\`
+- **MCP Server Endpoint (JSON-RPC 2.0)**: \`POST ${issuer}/api/mcp\` (exposes \`list_applications\`, \`get_login_theme\`, \`update_login_theme\`, etc.)
+- **Auth Header**: \`Authorization: Bearer $WIMOTEK_ADMIN_TOKEN\` (mint a \`wmk_pat_...\` token in Console -> Security Policy -> Admin API Tokens or via "Generate / Manage Token" here)
 
 ### 2. Theme JSON Schema
 \`\`\`json

@@ -628,6 +628,9 @@ func (s *appServer) persistSessionLocked(tok string, u authUser) {
 }
 
 func (s *appServer) resolveSessionLocked(tok string) (authUser, bool) {
+	if strings.HasPrefix(tok, "wmk_pat_") {
+		return s.verifyAdminAPITokenLocked(tok)
+	}
 	if u, ok := s.sessions[tok]; ok {
 		return u, true
 	}

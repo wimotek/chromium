@@ -13,6 +13,8 @@ import {
   Copy,
   Check,
   Globe,
+  KeyRound,
+  Cpu,
 } from 'lucide-react';
 import type {
   AuthPolicyConfig,
@@ -35,12 +37,14 @@ import {
   normalizeLoginTheme,
 } from '../lib/loginTheme';
 import { HostedLoginCard } from './HostedLoginCard';
+import { AdminTokenManagerModal, buildMcpClientConfigJson } from './AdminApiTokensSection';
 
 type LabRightTab = 'theme' | 'ai_api' | 'trace';
 
 interface LoginLabViewProps {
   locale: Locale;
   issuerUrl: string;
+  sessionToken?: string;
   connectors: SocialConnector[];
   applications: OAuthApplication[];
   authPolicy?: AuthPolicyConfig;
@@ -56,6 +60,7 @@ interface LoginLabViewProps {
 export function LoginLabView({
   locale,
   issuerUrl,
+  sessionToken = '',
   connectors,
   applications,
   authPolicy,
@@ -88,6 +93,9 @@ export function LoginLabView({
   const [saveNotice, setSaveNotice] = useState<string | null>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [copiedId, setCopiedId] = useState<string | null>(null);
+  const [tokenModalOpen, setTokenModalOpen] = useState(false);
+  const [mintedTokenInMem, setMintedTokenInMem] = useState<string | null>(null);
+  const [fillMintedToken, setFillMintedToken] = useState(true);
 
   const prevClientIdRef = useRef<string | undefined>(selectedApp?.clientId);
   useEffect(() => {
@@ -128,13 +136,20 @@ export function LoginLabView({
     [cleanIssuer, activeClientId, activeAppName, activeRedirectUri, locale]
   );
 
+  const activeTokenDisplay = mintedTokenInMem && fillMintedToken ? mintedTokenInMem : '$WIMOTEK_ADMIN_TOKEN';
+
   const curlSyncCommand = useMemo(
     () =>
       `curl -X PUT "${cleanIssuer}/api/applications/${activeClientId}/theme" \\\n` +
-      `  -H "Authorization: Bearer $WIMOTEK_ADMIN_TOKEN" \\\n` +
+      `  -H "Authorization: Bearer ${activeTokenDisplay}" \\\n` +
       `  -H "Content-Type: application/json" \\\n` +
       `  -d '${JSON.stringify(draftTheme, null, 2)}'`,
-    [cleanIssuer, activeClientId, draftTheme]
+    [cleanIssuer, activeClientId, draftTheme, activeTokenDisplay]
+  );
+
+  const mcpClientConfig = useMemo(
+    () => buildMcpClientConfigJson(`${cleanIssuer}/api/mcp`, activeTokenDisplay),
+    [cleanIssuer, activeTokenDisplay]
   );
 
   const hasCustomCanvasBg =
@@ -669,6 +684,64 @@ export function LoginLabView({
                 </div>
 
                 <div className="border border-slate-200 dark:border-slate-800 rounded-lg overflow-hidden">
+                  <div className="px-3.5 py-2.5 bg-slate-50 dark:bg-[#0D1321] border-b border-slate-200 dark:border-slate-800 flex flex-wrap items-center justify-between gap-2">
+                    <div className="flex items-center gap-1.5 font-semibold text-slate-900 dark:text-white">
+                      <KeyRound className="w-3.5 h-3.5 text-indigo-600 dark:text-indigo-400" />
+                      <span>
+                        {isZh ? '$WIMOTEK_ADMIN_TOKEN & MCP 接入' : '$WIMOTEK_ADMIN_TOKEN & MCP Server'}
+                      </span>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setTokenModalOpen(true)}
+                      className="px-2.5 py-1 rounded-md bg-indigo-600 hover:bg-indigo-700 text-white text-[11px] font-medium flex items-center gap-1 transition-colors"
+                    >
+                      <KeyRound className="w-3 h-3" />
+                      <span>{isZh ? '生成 / 管理 Admin Token' : 'Generate / Manage Token'}</span>
+                    </button>
+                  </div>
+                  <div className="p-3 space-y-2.5">
+                    <p className="text-[11px] text-slate-600 dark:text-slate-400 leading-relaxed">
+                      {isZh
+                        ? '点击右上角“生成 / 管理 Admin Token”签发长期 API 令牌（wmk_pat_...），也可随时在「安全策略 → Admin API Tokens」中管理或吊销。支持直接用于下方 curl 及 MCP 客户端。'
+                        : 'Click "Generate / Manage Token" to mint a long-lived personal admin token (wmk_pat_...), or manage/revoke tokens anytime under Security Policy. Works with both REST APIs and the built-in MCP Server.'}
+                    </p>
+                    {mintedTokenInMem && (
+                      <label className="flex items-center gap-2 text-[11px] text-emerald-700 dark:text-emerald-400 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={fillMintedToken}
+                          onChange={(e) => setFillMintedToken(e.target.checked)}
+                          className="rounded border-slate-300 dark:border-slate-700"
+                        />
+                        <span>
+                          {isZh
+                            ? '在下方 MCP / curl 示例中自动填入本次新生成的 Token（仅存于当前页面内存）'
+                            : 'Populate newly generated token in MCP / curl snippets below (kept in memory only)'}
+                        </span>
+                      </label>
+                    )}
+                    <div className="flex items-center justify-between gap-2 pt-1">
+                      <span className="flex items-center gap-1.5 font-mono text-[11px] text-slate-700 dark:text-slate-300 break-all">
+                        <Cpu className="w-3.5 h-3.5 text-indigo-500 shrink-0" />
+                        <span>POST {cleanIssuer}/api/mcp</span>
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => handleCopy('mcp_cfg', mcpClientConfig)}
+                        className="px-2 py-1 rounded border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-[11px] font-medium flex items-center gap-1 hover:bg-slate-50 dark:hover:bg-slate-800 shrink-0"
+                      >
+                        {copiedId === 'mcp_cfg' ? <Check className="w-3 h-3 text-emerald-600" /> : <Copy className="w-3 h-3" />}
+                        <span>{copiedId === 'mcp_cfg' ? (isZh ? '已复制' : 'Copied') : 'Copy mcp.json'}</span>
+                      </button>
+                    </div>
+                    <pre className="p-2.5 rounded-md bg-slate-950 text-slate-100 font-mono text-[10.5px] overflow-x-auto leading-relaxed">
+                      {mcpClientConfig}
+                    </pre>
+                  </div>
+                </div>
+
+                <div className="border border-slate-200 dark:border-slate-800 rounded-lg overflow-hidden">
                   <div className="px-3.5 py-2.5 bg-slate-50 dark:bg-[#0D1321] border-b border-slate-200 dark:border-slate-800 flex items-center justify-between gap-2">
                     <span className="font-semibold text-slate-900 dark:text-white">
                       {isZh ? 'Theme REST API（供 AI / CI 自动同步）' : 'Theme REST API (AI / CI Sync)'}
@@ -825,6 +898,18 @@ export function LoginLabView({
           </div>
         </section>
       </div>
+
+      <AdminTokenManagerModal
+        open={tokenModalOpen}
+        onClose={() => setTokenModalOpen(false)}
+        locale={locale}
+        sessionToken={sessionToken}
+        issuerUrl={cleanIssuer}
+        onTokenCreated={(plain) => {
+          setMintedTokenInMem(plain);
+          setFillMintedToken(true);
+        }}
+      />
     </div>
   );
 }

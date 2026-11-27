@@ -11,11 +11,13 @@ import {
 import type { AuthPolicyConfig, CaptchaProvider, Locale } from '../types';
 import { TRANSLATIONS } from '../lib/i18n';
 import { TotpEnrollModal, type TotpEnrollDraft } from './QrCodeSvg';
+import { AdminApiTokensSection } from './AdminApiTokensSection';
 
 interface SecurityPolicyViewProps {
   locale: Locale;
   policy: AuthPolicyConfig;
   sessionToken: string;
+  issuerUrl?: string;
   onSavePolicy: (next: AuthPolicyConfig) => Promise<void>;
 }
 
@@ -23,6 +25,7 @@ export function SecurityPolicyView({
   locale,
   policy,
   sessionToken,
+  issuerUrl,
   onSavePolicy,
 }: SecurityPolicyViewProps) {
   const t = TRANSLATIONS[locale];
@@ -429,6 +432,13 @@ export function SecurityPolicyView({
           </div>
         )}
       </section>
+
+      {/* Admin API Tokens ($WIMOTEK_ADMIN_TOKEN) & MCP Server */}
+      <AdminApiTokensSection
+        locale={locale}
+        sessionToken={sessionToken}
+        issuerUrl={issuerUrl}
+      />
 
       <TotpEnrollModal
         open={Boolean(totpEnroll)}
