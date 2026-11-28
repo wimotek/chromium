@@ -15,14 +15,12 @@ import (
 	"time"
 )
 
-// LoadOrGenerate inspects read-only /certs for fullchain.pem & privkey.pem (or fullchain / prikey).
+// LoadOrGenerate inspects read-only /certs for fullchain.pem & privkey.pem (or cert.pem & key.pem).
 // If empty, unmounted, or unreadable, it automatically generates and persists an ECDSA P-256
 // self-signed certificate inside the writable fallbackDir (/data/certs).
 func LoadOrGenerate(mountedDir, fallbackDir, hostname string) (*tls.Config, string, error) {
 	candidates := [][2]string{
 		{"fullchain.pem", "privkey.pem"},
-		{"fullchain.pem", "prikey.pem"},
-		{"fullchain", "prikey"},
 		{"cert.pem", "key.pem"},
 	}
 

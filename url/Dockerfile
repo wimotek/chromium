@@ -69,7 +69,7 @@ VOLUME ["/data"]
 EXPOSE 8080 8443
 
 # Strictly non-root execution (UID/GID 10001).
-# /certs may be mounted read-only (:ro) with fullchain.pem & privkey.pem (or fullchain & prikey).
+# /certs may be mounted read-only (:ro) with fullchain.pem & privkey.pem.
 # Ensure host cert files are readable by UID 10001 (e.g., mode 0644 or group 10001).
 # If /certs is empty or unmounted, wimotek-url automatically generates self-signed TLS certs in /data/certs.
 USER 10001:10001

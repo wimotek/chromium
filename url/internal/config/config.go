@@ -64,6 +64,14 @@ type InterstitialConfig struct {
 	CustomHtml        string `json:"custom_html"`
 }
 
+type CronTaskConfig struct {
+	Key             string `json:"key"`
+	Name            string `json:"name"`
+	CronExpression  string `json:"cron_expression"`
+	RetentionPolicy string `json:"retention_policy"`
+	Enabled         bool   `json:"enabled"`
+}
+
 type Config struct {
 	Initialized          bool               `json:"initialized"`
 	IssuerURL            string             `json:"issuer_url"`
@@ -83,6 +91,7 @@ type Config struct {
 	Turnstile            TurnstileConfig    `json:"turnstile"`
 	AntiBot              AntiBotConfig      `json:"anti_bot"`
 	Interstitial         InterstitialConfig `json:"interstitial"`
+	CronTasks            []CronTaskConfig   `json:"cron_tasks"`
 }
 
 func (c Config) IssuerHostname() string {
@@ -178,6 +187,32 @@ func DefaultInterstitialConfig() InterstitialConfig {
 	}
 }
 
+func DefaultCronTasks() []CronTaskConfig {
+	return []CronTaskConfig{
+		{
+			Key:             "db_backup",
+			Name:            "数据库一致性自动备份",
+			CronExpression:  "0 3 * * *",
+			RetentionPolicy: "保留最近 14 份备份快照",
+			Enabled:         true,
+		},
+		{
+			Key:             "audit_rotate",
+			Name:            "审计日志滚动归档与清理",
+			CronExpression:  "30 3 * * *",
+			RetentionPolicy: "保留最近 30 天 JSONL 归档",
+			Enabled:         true,
+		},
+		{
+			Key:             "expired_cleanup",
+			Name:            "过期短链停用与缓存清理",
+			CronExpression:  "0 * * * *",
+			RetentionPolicy: "每小时清理过期缓存键值",
+			Enabled:         true,
+		},
+	}
+}
+
 type Manager struct {
 	mu         sync.RWMutex
 	configPath string
@@ -240,6 +275,7 @@ func DefaultConfig(dataDir string) Config {
 			RedirectRatePerMin: 120,
 		},
 		Interstitial: DefaultInterstitialConfig(),
+		CronTasks:    DefaultCronTasks(),
 	}
 }
 
@@ -291,6 +327,9 @@ func (m *Manager) Load() (Config, error) {
 	}
 	if cfg.Interstitial.Preset == "" {
 		cfg.Interstitial = DefaultInterstitialConfig()
+	}
+	if len(cfg.CronTasks) == 0 {
+		cfg.CronTasks = DefaultCronTasks()
 	}
 	if _, err := os.Stat(m.lockPath); err == nil {
 		cfg.Initialized = true

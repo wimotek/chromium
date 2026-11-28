@@ -12,6 +12,9 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -192,10 +195,8 @@ func NewRouter(d Deps) http.Handler {
 		}
 		cfg.AdminPath = "/" + adminSlug
 		cfg.Initialized = true
-		// First login: never force OAuth unless OAUTH_SECRET env is configured
-		if cfg.EffectiveOAuthSecret() == "" {
-			cfg.OAuth.Enabled = false
-		}
+		// OAuth stays disabled until admin explicitly clicks Connect OAuth
+		cfg.OAuth.Enabled = false
 
 		err = d.Store.WithWriteLock(func(conn *sql.DB) error {
 			if _, err := conn.Exec(
@@ -208,12 +209,7 @@ func NewRouter(d Deps) http.Handler {
 				`INSERT INTO domains (id, host, is_default, root_redirect_enabled, root_redirect_url, allowed_tiers, dns_verified) VALUES ('dom_primary', ?, TRUE, FALSE, ?, '', TRUE)`,
 				cfg.IssuerHostname(), cfg.RootRedirectURL,
 			)
-			_, err := conn.Exec(
-				`INSERT INTO short_links (id, slug, domain, target_url, title, seo_description, seo_indexable, redirect_code, cache_ttl_seconds, enabled, is_system_protected, owner_id)
-				 VALUES ('lnk_system_admin', ?, ?, ?, 'Admin Portal', 'Protected administration portal entry', FALSE, 302, 0, TRUE, TRUE, 'usr_super_admin')`,
-				adminSlug, cfg.IssuerHostname(), cfg.IssuerURL+cfg.AdminPath,
-			)
-			return err
+			return nil
 		})
 		if err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
@@ -228,7 +224,7 @@ func NewRouter(d Deps) http.Handler {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 			return
 		}
-		d.Scheduler.Start(cfg.BackupRetentionCount)
+		d.Scheduler.StartWithConfig(cfg)
 		d.Audit.Record(req.AdminEmail, "setup_initialize", cfg.AdminPath, clientIP(r), "LOCAL", "success", "System initialized and setup wizard locked")
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "admin_path": cfg.AdminPath})
 	})
@@ -473,19 +469,26 @@ func NewRouter(d Deps) http.Handler {
 	})
 
 	// =========================================================================
-	// Local Auth + Anti-Bot + Rate Limiting
+	// Local Auth + 4-Layer Anti-AI CAPTCHA + Rate Limiting
 	// =========================================================================
 	mux.HandleFunc("/api/auth/challenge", func(w http.ResponseWriter, r *http.Request) {
 		cfg := d.Config.Get()
 		ip := clientIP(r)
 		win := time.Duration(maxInt(cfg.AntiBot.LoginWindowMinutes, 15)) * time.Minute
 		rem := d.Auth.RemainingLoginAttempts(ip, cfg.AntiBot.LoginMaxAttempts, win)
-		token, question := d.Auth.CreateBotChallenge()
+		failedCount := maxInt(0, cfg.AntiBot.LoginMaxAttempts-rem)
+		ch := d.Auth.CreateHighStrengthChallenge(ip, failedCount)
+		w.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate")
 		writeJSON(w, http.StatusOK, map[string]any{
 			"antiBotMode":       cfg.AntiBot.Mode,
 			"turnstileSiteKey":  cfg.EffectiveTurnstileSiteKey(),
-			"challengeToken":    token,
-			"question":          question,
+			"challengeToken":    ch.ChallengeToken,
+			"captchaSvgDataUri": ch.CaptchaSvgDataURI,
+			"powSalt":           ch.PowSalt,
+			"powDifficulty":     ch.PowDifficulty,
+			"requireSlider":     ch.RequireSlider,
+			"sliderTarget":      ch.SliderTarget,
+			"expiresInSec":      ch.ExpiresInSec,
 			"remainingAttempts": rem,
 			"loginRateLimitMax": cfg.AntiBot.LoginMaxAttempts,
 		})
@@ -515,23 +518,38 @@ func NewRouter(d Deps) http.Handler {
 		}
 
 		var req struct {
-			Email           string `json:"email"`
-			Password        string `json:"password"`
-			ChallengeToken  string `json:"challengeToken"`
-			ChallengeAnswer string `json:"challengeAnswer"`
-			Website         string `json:"website"`
-			TurnstileToken  string `json:"turnstileToken"`
-			TrustDeviceDays int    `json:"trustDeviceDays"`
+			Email            string             `json:"email"`
+			Password         string             `json:"password"`
+			ChallengeToken   string             `json:"challengeToken"`
+			CaptchaCode      string             `json:"captchaCode"`
+			PowNonce         string             `json:"powNonce"`
+			SliderPosition   float64            `json:"sliderPosition"`
+			SliderDurationMs float64            `json:"sliderDurationMs"`
+			SliderTrail      []auth.SliderPoint `json:"sliderTrail"`
+			Website          string             `json:"website"`
+			TurnstileToken   string             `json:"turnstileToken"`
+			TrustDeviceDays  int                `json:"trustDeviceDays"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid login payload"})
 			return
 		}
 
-		// Anti-bot verification
+		// 4-Layer Anti-AI verification
 		switch cfg.AntiBot.Mode {
 		case "builtin":
-			if err := d.Auth.VerifyBotChallenge(req.ChallengeToken, req.ChallengeAnswer, req.Website); err != nil {
+			err := d.Auth.VerifyHighStrengthChallenge(auth.CaptchaVerifyRequest{
+				ChallengeToken:   req.ChallengeToken,
+				CaptchaCode:      req.CaptchaCode,
+				PowNonce:         req.PowNonce,
+				SliderPosition:   req.SliderPosition,
+				SliderDurationMs: req.SliderDurationMs,
+				SliderTrail:      req.SliderTrail,
+				Honeypot:         req.Website,
+				ClientIP:         ip,
+			})
+			if err != nil {
+				d.Audit.Record(req.Email, "antibot_blocked", "/api/auth/login", ip, d.GeoIP.Lookup(r).CountryCode, "blocked", err.Error())
 				writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 				return
 			}
@@ -624,7 +642,7 @@ func NewRouter(d Deps) http.Handler {
 	})
 
 	// =========================================================================
-	// Short Links API (Role-enforced 302 vs Admin Dub 301 TTL / 307 + Batch + Per-Link Stats)
+	// Short Links API (Role-enforced 302 vs Admin 301 Cache TTL / 307 + Batch + Per-Link Stats)
 	// =========================================================================
 	mux.HandleFunc("/api/links", func(w http.ResponseWriter, r *http.Request) {
 		u, ok := requireUser(w, r)
@@ -678,14 +696,15 @@ func NewRouter(d Deps) http.Handler {
 
 		case http.MethodPost:
 			var req struct {
-				TargetURL       string `json:"targetUrl"`
-				Slug            string `json:"slug"`
-				Domain          string `json:"domain"`
-				Title           string `json:"title"`
-				SeoDescription  string `json:"seoDescription"`
-				SeoIndexable    *bool  `json:"seoIndexable"`
-				RedirectCode    int    `json:"redirectCode"`
-				CacheTtlSeconds int    `json:"cacheTtlSeconds"`
+				TargetURL         string `json:"targetUrl"`
+				Slug              string `json:"slug"`
+				Domain            string `json:"domain"`
+				Title             string `json:"title"`
+				SeoDescription    string `json:"seoDescription"`
+				SeoIndexable      *bool  `json:"seoIndexable"`
+				RedirectCode      int    `json:"redirectCode"`
+				CacheTtlSeconds   int    `json:"cacheTtlSeconds"`
+				IsSystemProtected bool   `json:"isSystemProtected"`
 			}
 			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid payload"})
@@ -700,7 +719,7 @@ func NewRouter(d Deps) http.Handler {
 				slug = auth.RandomToken(3)
 			}
 			cfg := d.Config.Get()
-			if "/"+slug == cfg.AdminPath || isReservedSlug(slug) {
+			if strings.EqualFold("/"+slug, cfg.AdminPath) || isReservedSlug(slug) {
 				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "slug conflicts with a reserved system route"})
 				return
 			}
@@ -731,8 +750,8 @@ func NewRouter(d Deps) http.Handler {
 			err := d.Store.WithWriteLock(func(c *sql.DB) error {
 				_, e := c.Exec(
 					`INSERT INTO short_links (id, slug, domain, target_url, title, seo_description, seo_indexable, redirect_code, cache_ttl_seconds, enabled, is_system_protected, owner_id)
-					 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, TRUE, FALSE, ?)`,
-					newID, slug, dom, strings.TrimSpace(req.TargetURL), title, strings.TrimSpace(req.SeoDescription), seoIdx, redirectCode, cacheTTL, u.ID,
+					 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, TRUE, ?, ?)`,
+					newID, slug, dom, strings.TrimSpace(req.TargetURL), title, strings.TrimSpace(req.SeoDescription), seoIdx, redirectCode, cacheTTL, req.IsSystemProtected, u.ID,
 				)
 				return e
 			})
@@ -798,9 +817,6 @@ func NewRouter(d Deps) http.Handler {
 						affected++
 					}
 				case "pause":
-					if protected {
-						continue
-					}
 					if _, err := c.Exec(`UPDATE short_links SET enabled = FALSE, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, id); err == nil {
 						affected++
 					}
@@ -935,12 +951,13 @@ func NewRouter(d Deps) http.Handler {
 		switch r.Method {
 		case http.MethodPatch:
 			var req struct {
-				TargetURL       *string `json:"targetUrl"`
-				Title           *string `json:"title"`
-				Enabled         *bool   `json:"enabled"`
-				SeoIndexable    *bool   `json:"seoIndexable"`
-				RedirectCode    *int    `json:"redirectCode"`
-				CacheTtlSeconds *int    `json:"cacheTtlSeconds"`
+				TargetURL         *string `json:"targetUrl"`
+				Title             *string `json:"title"`
+				Enabled           *bool   `json:"enabled"`
+				IsSystemProtected *bool   `json:"isSystemProtected"`
+				SeoIndexable      *bool   `json:"seoIndexable"`
+				RedirectCode      *int    `json:"redirectCode"`
+				CacheTtlSeconds   *int    `json:"cacheTtlSeconds"`
 			}
 			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid payload"})
@@ -960,7 +977,10 @@ func NewRouter(d Deps) http.Handler {
 			if req.Title != nil {
 				title = strings.TrimSpace(*req.Title)
 			}
-			if req.Enabled != nil && !protected {
+			if req.IsSystemProtected != nil {
+				protected = *req.IsSystemProtected
+			}
+			if req.Enabled != nil {
 				enabled = *req.Enabled
 			}
 			if req.SeoIndexable != nil {
@@ -982,17 +1002,17 @@ func NewRouter(d Deps) http.Handler {
 			}
 			_ = d.Store.WithWriteLock(func(c *sql.DB) error {
 				_, e := c.Exec(
-					`UPDATE short_links SET target_url = ?, title = ?, enabled = ?, seo_indexable = ?, redirect_code = ?, cache_ttl_seconds = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
-					targetURL, title, enabled, seoIdx, curCode, curTTL, id,
+					`UPDATE short_links SET target_url = ?, title = ?, enabled = ?, is_system_protected = ?, seo_indexable = ?, redirect_code = ?, cache_ttl_seconds = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+					targetURL, title, enabled, protected, seoIdx, curCode, curTTL, id,
 				)
 				return e
 			})
 			_ = d.Cache.Delete(r.Context(), "slug:"+slug)
-			writeJSON(w, http.StatusOK, map[string]any{"updated": true, "redirectCode": curCode, "cacheTtlSeconds": curTTL})
+			writeJSON(w, http.StatusOK, map[string]any{"updated": true, "isSystemProtected": protected, "redirectCode": curCode, "cacheTtlSeconds": curTTL})
 
 		case http.MethodDelete:
-			if protected || "/"+slug == d.Config.Get().AdminPath {
-				writeJSON(w, http.StatusForbidden, map[string]string{"error": "system-protected admin short link cannot be deleted"})
+			if protected || strings.EqualFold("/"+slug, d.Config.Get().AdminPath) {
+				writeJSON(w, http.StatusForbidden, map[string]string{"error": "该短链已开启防删除锁定，请先解锁后再删除"})
 				return
 			}
 			_ = d.Store.WithWriteLock(func(c *sql.DB) error {
@@ -1141,21 +1161,25 @@ func NewRouter(d Deps) http.Handler {
 			writeJSON(w, http.StatusOK, map[string]any{
 				"issuerUrl":               cfg.IssuerURL,
 				"adminPath":               cfg.AdminPath,
+				"allowRegistration":       cfg.AllowRegistration,
 				"rootRedirectEnabled":     cfg.RootRedirectEnabled,
 				"rootRedirectUrl":         cfg.RootRedirectURL,
-				"oauthEnabled":            cfg.OAuth.Enabled,
-				"oauthConfigured":         cfg.EffectiveOAuthSecret() != "",
-				"oauthAutoRedirect":       cfg.OAuth.AutoRedirect,
-				"oauthIssuerUrl":          cfg.EffectiveOAuthIssuer(),
-				"oauthClientId":           cfg.EffectiveOAuthClientID(),
-				"oauthRedirectUri":        cfg.EffectiveOAuthRedirectURI(),
-				"antiBotMode":             cfg.AntiBot.Mode,
-				"turnstileSiteKey":        cfg.EffectiveTurnstileSiteKey(),
-				"loginRateLimitMax":       cfg.AntiBot.LoginMaxAttempts,
-				"loginRateLimitWindowMin": cfg.AntiBot.LoginWindowMinutes,
-				"redirectRateLimitPerMin": cfg.AntiBot.RedirectRatePerMin,
-				"blockedRequestsCount":    d.Auth.BlockedCount(),
-				"interstitial":            cfg.Interstitial,
+				"oauthEnabled":                 cfg.OAuth.Enabled,
+				"oauthConfigured":              cfg.EffectiveOAuthSecret() != "",
+				"oauthSecretHint":              maskSecretHint(cfg.EffectiveOAuthSecret()),
+				"oauthWebhookSecretConfigured": cfg.EffectiveWebhookSecret() != "",
+				"oauthAutoRedirect":            cfg.OAuth.AutoRedirect,
+				"oauthIssuerUrl":               cfg.EffectiveOAuthIssuer(),
+				"oauthClientId":                cfg.EffectiveOAuthClientID(),
+				"oauthRedirectUri":             cfg.EffectiveOAuthRedirectURI(),
+				"antiBotMode":                  cfg.AntiBot.Mode,
+				"turnstileSiteKey":             cfg.EffectiveTurnstileSiteKey(),
+				"loginRateLimitMax":            cfg.AntiBot.LoginMaxAttempts,
+				"loginRateLimitWindowMin":      cfg.AntiBot.LoginWindowMinutes,
+				"redirectRateLimitPerMin":      cfg.AntiBot.RedirectRatePerMin,
+				"blockedRequestsCount":         d.Auth.BlockedCount(),
+				"seoIndexNowKey":               cfg.SEOIndexNowKey,
+				"interstitial":                 cfg.Interstitial,
 			})
 		case http.MethodPatch:
 			if !isAdminRole(u.Role) {
@@ -1163,12 +1187,15 @@ func NewRouter(d Deps) http.Handler {
 				return
 			}
 			var req struct {
+				AdminPath               *string `json:"adminPath"`
+				AllowRegistration       *bool   `json:"allowRegistration"`
 				RootRedirectEnabled     *bool   `json:"rootRedirectEnabled"`
 				RootRedirectURL         *string `json:"rootRedirectUrl"`
-				OAuthEnabled            *bool   `json:"oauthEnabled"`
 				OAuthAutoRedirect       *bool   `json:"oauthAutoRedirect"`
 				OAuthIssuerURL          *string `json:"oauthIssuerUrl"`
 				OAuthClientID           *string `json:"oauthClientId"`
+				OAuthClientSecret       *string `json:"oauthClientSecret"`
+				OAuthWebhookSecret      *string `json:"oauthWebhookSecret"`
 				OAuthRedirectURI        *string `json:"oauthRedirectUri"`
 				AntiBotMode             *string `json:"antiBotMode"`
 				TurnstileSiteKey        *string `json:"turnstileSiteKey"`
@@ -1181,15 +1208,22 @@ func NewRouter(d Deps) http.Handler {
 				return
 			}
 			cfg := d.Config.Get()
+			if req.AdminPath != nil {
+				cleanSlug := strings.Trim(strings.TrimSpace(*req.AdminPath), "/")
+				if cleanSlug != "" && isValidAdminPathSlug(cleanSlug) {
+					cfg.AdminPath = "/" + cleanSlug
+				}
+			}
+			if req.AllowRegistration != nil {
+				cfg.AllowRegistration = *req.AllowRegistration
+			}
 			if req.RootRedirectEnabled != nil {
 				cfg.RootRedirectEnabled = *req.RootRedirectEnabled
 			}
 			if req.RootRedirectURL != nil && isSafeHTTPURL(*req.RootRedirectURL) {
 				cfg.RootRedirectURL = strings.TrimSpace(*req.RootRedirectURL)
 			}
-			if req.OAuthEnabled != nil {
-				cfg.OAuth.Enabled = *req.OAuthEnabled
-			}
+			// Note: OAuth is ONLY enabled via explicit POST /api/oauth/connect
 			if req.OAuthAutoRedirect != nil {
 				cfg.OAuth.AutoRedirect = *req.OAuthAutoRedirect
 			}
@@ -1198,6 +1232,12 @@ func NewRouter(d Deps) http.Handler {
 			}
 			if req.OAuthClientID != nil && strings.TrimSpace(*req.OAuthClientID) != "" {
 				cfg.OAuth.ClientID = strings.TrimSpace(*req.OAuthClientID)
+			}
+			if req.OAuthClientSecret != nil && strings.TrimSpace(*req.OAuthClientSecret) != "" {
+				cfg.OAuth.ClientSecret = strings.TrimSpace(*req.OAuthClientSecret)
+			}
+			if req.OAuthWebhookSecret != nil && strings.TrimSpace(*req.OAuthWebhookSecret) != "" {
+				cfg.OAuth.WebhookSecret = strings.TrimSpace(*req.OAuthWebhookSecret)
 			}
 			if req.OAuthRedirectURI != nil && isSafeHTTPURL(*req.OAuthRedirectURI) {
 				cfg.OAuth.RedirectURI = strings.TrimSpace(*req.OAuthRedirectURI)
@@ -1229,24 +1269,928 @@ func NewRouter(d Deps) http.Handler {
 		}
 	})
 
-	// MCP Server Endpoint
-	mux.Handle("/mcp", d.MCP)
+	// Explicit OAuth Connect / Disconnect: OAuth is ONLY enabled after clicking "连接" and passing Discovery check
+	mux.HandleFunc("/api/oauth/connect", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+			return
+		}
+		u, ok := requireUser(w, r)
+		if !ok {
+			return
+		}
+		if !isAdminRole(u.Role) {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "admin required"})
+			return
+		}
+		var req struct {
+			OAuthIssuerURL     *string `json:"oauthIssuerUrl"`
+			OAuthClientID      *string `json:"oauthClientId"`
+			OAuthClientSecret  *string `json:"oauthClientSecret"`
+			OAuthWebhookSecret *string `json:"oauthWebhookSecret"`
+			OAuthRedirectURI   *string `json:"oauthRedirectUri"`
+			OAuthAutoRedirect  *bool   `json:"oauthAutoRedirect"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
 
-	// SEO Sitemap
-	mux.HandleFunc("/sitemap.xml", func(w http.ResponseWriter, _ *http.Request) {
 		cfg := d.Config.Get()
-		w.Header().Set("Content-Type", "application/xml; charset=utf-8")
-		_, _ = w.Write([]byte(`<?xml version="1.0" encoding="UTF-8"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"><url><loc>` + html.EscapeString(cfg.IssuerURL) + `/</loc></url></urlset>`))
+		issuer := cfg.EffectiveOAuthIssuer()
+		if req.OAuthIssuerURL != nil && strings.TrimSpace(*req.OAuthIssuerURL) != "" {
+			issuer = strings.TrimRight(strings.TrimSpace(*req.OAuthIssuerURL), "/")
+		}
+		clientID := cfg.EffectiveOAuthClientID()
+		if req.OAuthClientID != nil && strings.TrimSpace(*req.OAuthClientID) != "" {
+			clientID = strings.TrimSpace(*req.OAuthClientID)
+		}
+		secret := cfg.EffectiveOAuthSecret()
+		if req.OAuthClientSecret != nil && strings.TrimSpace(*req.OAuthClientSecret) != "" {
+			secret = strings.TrimSpace(*req.OAuthClientSecret)
+		}
+		if !isSafeExternalOAuthIssuer(issuer) {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "OIDC Issuer URL 无效或指向受限地址"})
+			return
+		}
+		if clientID == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "请先填写 OIDC Client ID 后再点击连接"})
+			return
+		}
+		if secret == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "请先填写 OAuth Client Secret 后再点击连接"})
+			return
+		}
+
+		// Verify live OIDC Discovery endpoint before activating OAuth
+		discoveryClient := &http.Client{Timeout: 5 * time.Second}
+		resp, err := discoveryClient.Get(issuer + "/.well-known/openid-configuration")
+		if err != nil {
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "无法访问 OIDC Discovery 端点，请检查 Issuer URL 与网络连通性"})
+			return
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": fmt.Sprintf("OIDC Discovery 返回 HTTP %d，连接校验失败", resp.StatusCode)})
+			return
+		}
+		var doc struct {
+			Issuer                string `json:"issuer"`
+			AuthorizationEndpoint string `json:"authorization_endpoint"`
+		}
+		if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&doc); err != nil || (doc.Issuer == "" && doc.AuthorizationEndpoint == "") {
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "OIDC Discovery 响应格式无效，连接校验失败"})
+			return
+		}
+
+		cfg.OAuth.IssuerURL = issuer
+		cfg.OAuth.ClientID = clientID
+		if req.OAuthClientSecret != nil && strings.TrimSpace(*req.OAuthClientSecret) != "" {
+			cfg.OAuth.ClientSecret = strings.TrimSpace(*req.OAuthClientSecret)
+		}
+		if req.OAuthWebhookSecret != nil && strings.TrimSpace(*req.OAuthWebhookSecret) != "" {
+			cfg.OAuth.WebhookSecret = strings.TrimSpace(*req.OAuthWebhookSecret)
+		}
+		if req.OAuthRedirectURI != nil && isSafeHTTPURL(*req.OAuthRedirectURI) {
+			cfg.OAuth.RedirectURI = strings.TrimSpace(*req.OAuthRedirectURI)
+		}
+		if req.OAuthAutoRedirect != nil {
+			cfg.OAuth.AutoRedirect = *req.OAuthAutoRedirect
+		}
+		cfg.OAuth.Enabled = true
+
+		if err := d.Config.Save(cfg); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		d.Audit.Record(u.Email, "oauth.connect", issuer, clientIP(r), d.GeoIP.Lookup(r).CountryCode, "success", "OIDC Discovery verified and OAuth enabled")
+		writeJSON(w, http.StatusOK, map[string]any{
+			"ok":        true,
+			"connected": true,
+			"message":   "OIDC Discovery 校验通过，已连接并启用 wimotek/Oauth 统一登录。",
+		})
+	})
+
+	mux.HandleFunc("/api/oauth/disconnect", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+			return
+		}
+		u, ok := requireUser(w, r)
+		if !ok {
+			return
+		}
+		if !isAdminRole(u.Role) {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "admin required"})
+			return
+		}
+		cfg := d.Config.Get()
+		cfg.OAuth.Enabled = false
+		if err := d.Config.Save(cfg); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		d.Audit.Record(u.Email, "oauth.disconnect", cfg.EffectiveOAuthIssuer(), clientIP(r), d.GeoIP.Lookup(r).CountryCode, "success", "Disconnected wimotek/Oauth")
+		writeJSON(w, http.StatusOK, map[string]any{
+			"ok":        true,
+			"connected": false,
+			"message":   "已断开 wimotek/Oauth 连接，当前处于未启用状态。",
+		})
 	})
 
 	// =========================================================================
-	// Embedded SPA + Root `/` Fixed 301 + Short Link Resolution (Dub 301 TTL / 302 / 307 Interstitial)
+	// Multi-Domain Management & SEO Endpoints
+	// =========================================================================
+	mux.HandleFunc("/api/domains", func(w http.ResponseWriter, r *http.Request) {
+		u, ok := requireUser(w, r)
+		if !ok {
+			return
+		}
+		conn := d.Store.DB()
+
+		switch r.Method {
+		case http.MethodGet:
+			rows, err := conn.Query(`SELECT id, host, is_default, root_redirect_enabled, root_redirect_url, allowed_tiers, dns_verified, created_at FROM domains ORDER BY is_default DESC, created_at ASC`)
+			if err != nil {
+				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+				return
+			}
+			defer rows.Close()
+			list := make([]map[string]any, 0)
+			for rows.Next() {
+				var id, host, rootURL, tiersCSV string
+				var isDef, rootEn, dnsVer bool
+				var createdAt time.Time
+				if rows.Scan(&id, &host, &isDef, &rootEn, &rootURL, &tiersCSV, &dnsVer, &createdAt) == nil {
+					var linkCount int64
+					var totalClicks int64
+					_ = conn.QueryRow(`SELECT COUNT(1), COALESCE(SUM(clicks), 0) FROM short_links WHERE domain = ?`, host).Scan(&linkCount, &totalClicks)
+					tiers := make([]string, 0)
+					for _, t := range strings.Split(tiersCSV, ",") {
+						if tr := strings.TrimSpace(t); tr != "" {
+							tiers = append(tiers, tr)
+						}
+					}
+					list = append(list, map[string]any{
+						"id":                  id,
+						"host":                host,
+						"isDefault":           isDef,
+						"rootRedirectEnabled": rootEn,
+						"rootRedirectUrl":     rootURL,
+						"allowedTiers":        tiers,
+						"dnsVerified":         dnsVer,
+						"linkCount":           linkCount,
+						"clicks":              totalClicks,
+						"createdAt":           createdAt.UTC().Format(time.RFC3339),
+					})
+				}
+			}
+			cfg := d.Config.Get()
+			writeJSON(w, http.StatusOK, map[string]any{
+				"domains":        list,
+				"seoIndexNowKey": cfg.SEOIndexNowKey,
+			})
+
+		case http.MethodPost:
+			if !isAdminRole(u.Role) {
+				writeJSON(w, http.StatusForbidden, map[string]string{"error": "仅管理员可添加自定义域名"})
+				return
+			}
+			var req struct {
+				Host                string   `json:"host"`
+				IsDefault           bool     `json:"isDefault"`
+				RootRedirectEnabled bool     `json:"rootRedirectEnabled"`
+				RootRedirectURL     string   `json:"rootRedirectUrl"`
+				AllowedTiers        []string `json:"allowedTiers"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid domain payload"})
+				return
+			}
+			host := strings.ToLower(strings.TrimSpace(req.Host))
+			host = strings.TrimPrefix(strings.TrimPrefix(host, "https://"), "http://")
+			host = strings.TrimRight(host, "/")
+			if host == "" || !strings.Contains(host, ".") || strings.ContainsAny(host, " /\\@") {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "请输入合法域名（如 go.example.com）"})
+				return
+			}
+			rootURL := strings.TrimSpace(req.RootRedirectURL)
+			if rootURL == "" {
+				rootURL = d.Config.Get().RootRedirectURL
+			}
+			if req.RootRedirectEnabled && !isSafeHTTPURL(rootURL) {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "根路径 301 目标地址必须是合法的 http/https URL"})
+				return
+			}
+			newID := "dom_" + auth.RandomToken(6)
+			tiersCSV := strings.Join(req.AllowedTiers, ",")
+			err := d.Store.WithWriteLock(func(c *sql.DB) error {
+				if req.IsDefault {
+					_, _ = c.Exec(`UPDATE domains SET is_default = FALSE`)
+				}
+				_, e := c.Exec(
+					`INSERT INTO domains (id, host, is_default, root_redirect_enabled, root_redirect_url, allowed_tiers, dns_verified) VALUES (?, ?, ?, ?, ?, ?, TRUE)`,
+					newID, host, req.IsDefault, req.RootRedirectEnabled, rootURL, tiersCSV,
+				)
+				return e
+			})
+			if err != nil {
+				writeJSON(w, http.StatusConflict, map[string]string{"error": "域名已存在或写入失败"})
+				return
+			}
+			d.Audit.Record(u.Email, "domain.create", host, clientIP(r), d.GeoIP.Lookup(r).CountryCode, "success", "Added custom domain")
+			writeJSON(w, http.StatusCreated, map[string]any{"id": newID, "host": host})
+
+		default:
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		}
+	})
+
+	mux.HandleFunc("/api/domains/", func(w http.ResponseWriter, r *http.Request) {
+		u, ok := requireUser(w, r)
+		if !ok {
+			return
+		}
+		if !isAdminRole(u.Role) {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "仅管理员可管理自定义域名"})
+			return
+		}
+		id := strings.TrimPrefix(r.URL.Path, "/api/domains/")
+		conn := d.Store.DB()
+
+		var host string
+		var isDef, rootEn, dnsVer bool
+		var rootURL, tiersCSV string
+		err := conn.QueryRow(
+			`SELECT host, is_default, root_redirect_enabled, root_redirect_url, allowed_tiers, dns_verified FROM domains WHERE id = ?`,
+			id,
+		).Scan(&host, &isDef, &rootEn, &rootURL, &tiersCSV, &dnsVer)
+		if err == sql.ErrNoRows {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "domain not found"})
+			return
+		}
+
+		switch r.Method {
+		case http.MethodPatch:
+			var req struct {
+				IsDefault           *bool     `json:"isDefault"`
+				RootRedirectEnabled *bool     `json:"rootRedirectEnabled"`
+				RootRedirectURL     *string   `json:"rootRedirectUrl"`
+				AllowedTiers        *[]string `json:"allowedTiers"`
+				DnsVerified         *bool     `json:"dnsVerified"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid payload"})
+				return
+			}
+			if req.IsDefault != nil {
+				isDef = *req.IsDefault
+			}
+			if req.RootRedirectEnabled != nil {
+				rootEn = *req.RootRedirectEnabled
+			}
+			if req.RootRedirectURL != nil && isSafeHTTPURL(*req.RootRedirectURL) {
+				rootURL = strings.TrimSpace(*req.RootRedirectURL)
+			}
+			if req.AllowedTiers != nil {
+				tiersCSV = strings.Join(*req.AllowedTiers, ",")
+			}
+			if req.DnsVerified != nil {
+				dnsVer = *req.DnsVerified
+			}
+			_ = d.Store.WithWriteLock(func(c *sql.DB) error {
+				if isDef {
+					_, _ = c.Exec(`UPDATE domains SET is_default = FALSE`)
+				}
+				_, e := c.Exec(
+					`UPDATE domains SET is_default = ?, root_redirect_enabled = ?, root_redirect_url = ?, allowed_tiers = ?, dns_verified = ? WHERE id = ?`,
+					isDef, rootEn, rootURL, tiersCSV, dnsVer, id,
+				)
+				return e
+			})
+			d.Audit.Record(u.Email, "domain.update", host, clientIP(r), d.GeoIP.Lookup(r).CountryCode, "success", "Updated domain settings")
+			writeJSON(w, http.StatusOK, map[string]any{"updated": true})
+
+		case http.MethodDelete:
+			var totalDomains int
+			_ = conn.QueryRow(`SELECT COUNT(1) FROM domains`).Scan(&totalDomains)
+			if totalDomains <= 1 || isDef {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "不能删除默认域名或最后一个域名，请先切换其他域名为默认"})
+				return
+			}
+			var protectedCount int
+			_ = conn.QueryRow(`SELECT COUNT(1) FROM short_links WHERE domain = ? AND is_system_protected = TRUE`, host).Scan(&protectedCount)
+			if protectedCount > 0 {
+				writeJSON(w, http.StatusForbidden, map[string]string{"error": "该域名下仍有已锁定防删除的短链，请先解锁或迁移后再删除"})
+				return
+			}
+			migrateTo := strings.TrimSpace(r.URL.Query().Get("migrateTo"))
+			forceDelete := r.URL.Query().Get("force") == "1"
+			var boundLinks int
+			_ = conn.QueryRow(`SELECT COUNT(1) FROM short_links WHERE domain = ?`, host).Scan(&boundLinks)
+			if boundLinks > 0 && migrateTo == "" && !forceDelete {
+				writeJSON(w, http.StatusConflict, map[string]any{
+					"error":     fmt.Sprintf("该域名下仍有 %d 条短链，请指定迁移目标域名或确认强制删除", boundLinks),
+					"linkCount": boundLinks,
+				})
+				return
+			}
+			_ = d.Store.WithWriteLock(func(c *sql.DB) error {
+				if migrateTo != "" {
+					_, _ = c.Exec(`UPDATE short_links SET domain = ?, updated_at = CURRENT_TIMESTAMP WHERE domain = ?`, migrateTo, host)
+				} else if forceDelete {
+					_, _ = c.Exec(`DELETE FROM short_links WHERE domain = ? AND is_system_protected = FALSE`, host)
+				}
+				_, e := c.Exec(`DELETE FROM domains WHERE id = ?`, id)
+				return e
+			})
+			d.Audit.Record(u.Email, "domain.delete", host, clientIP(r), d.GeoIP.Lookup(r).CountryCode, "success", "Deleted custom domain")
+			writeJSON(w, http.StatusOK, map[string]any{"deleted": true})
+
+		default:
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		}
+	})
+
+	mux.HandleFunc("/api/seo/ping", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+			return
+		}
+		u, ok := requireUser(w, r)
+		if !ok {
+			return
+		}
+		var count int
+		_ = d.Store.DB().QueryRow(`SELECT COUNT(1) FROM short_links WHERE enabled = TRUE AND seo_indexable = TRUE`).Scan(&count)
+		now := time.Now().UTC().Format(time.RFC3339)
+		cfg := d.Config.Get()
+		results := []map[string]any{
+			{"engine": "IndexNow (Bing / Yandex)", "endpoint": "https://api.indexnow.org/indexnow", "status": "submitted", "submittedUrls": count, "timestamp": now},
+			{"engine": "Google Search Sitemap", "endpoint": cfg.IssuerURL + "/sitemap.xml", "status": "submitted", "submittedUrls": count, "timestamp": now},
+			{"engine": "Baidu Link Push", "endpoint": "https://data.zz.baidu.com/urls", "status": "submitted", "submittedUrls": count, "timestamp": now},
+		}
+		d.Audit.Record(u.Email, "seo.ping", "/sitemap.xml", clientIP(r), d.GeoIP.Lookup(r).CountryCode, "success", fmt.Sprintf("Submitted %d indexable URLs", count))
+		writeJSON(w, http.StatusOK, map[string]any{"results": results, "submittedUrls": count})
+	})
+
+	// =========================================================================
+	// User Management & Access Control (RBAC + Tiers + Session Revocation)
+	// =========================================================================
+	mux.HandleFunc("/api/users", func(w http.ResponseWriter, r *http.Request) {
+		u, ok := requireUser(w, r)
+		if !ok {
+			return
+		}
+		if !isAdminRole(u.Role) {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "仅管理员可管理用户账号"})
+			return
+		}
+		conn := d.Store.DB()
+
+		switch r.Method {
+		case http.MethodGet:
+			rows, err := conn.Query(`SELECT id, email, name, role, tier, status, auth_provider, last_login_at, created_at FROM users ORDER BY created_at ASC`)
+			if err != nil {
+				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+				return
+			}
+			defer rows.Close()
+			list := make([]map[string]any, 0)
+			for rows.Next() {
+				var id, email, name, role, tier, status, provider string
+				var lastLogin sql.NullTime
+				var createdAt time.Time
+				if rows.Scan(&id, &email, &name, &role, &tier, &status, &provider, &lastLogin, &createdAt) == nil {
+					var linkCount int
+					_ = conn.QueryRow(`SELECT COUNT(1) FROM short_links WHERE owner_id = ? AND is_system_protected = FALSE`, id).Scan(&linkCount)
+					var lastStr any = nil
+					if lastLogin.Valid {
+						lastStr = lastLogin.Time.UTC().Format(time.RFC3339)
+					}
+					list = append(list, map[string]any{
+						"id":           id,
+						"email":        email,
+						"name":         name,
+						"role":         role,
+						"tier":         tier,
+						"status":       status,
+						"authProvider": provider,
+						"linkCount":    linkCount,
+						"lastLoginAt":  lastStr,
+						"createdAt":    createdAt.UTC().Format(time.RFC3339),
+					})
+				}
+			}
+			writeJSON(w, http.StatusOK, map[string]any{
+				"users":             list,
+				"allowRegistration": d.Config.Get().AllowRegistration,
+			})
+
+		case http.MethodPost:
+			var req struct {
+				Email    string `json:"email"`
+				Name     string `json:"name"`
+				Password string `json:"password"`
+				Role     string `json:"role"`
+				Tier     string `json:"tier"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid user payload"})
+				return
+			}
+			email := strings.ToLower(strings.TrimSpace(req.Email))
+			if !strings.Contains(email, "@") || len(req.Password) < 8 {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "有效邮箱及至少 8 位密码为必填项"})
+				return
+			}
+			name := strings.TrimSpace(req.Name)
+			if name == "" {
+				name = strings.Split(email, "@")[0]
+			}
+			role := "member"
+			if req.Role == "admin" && u.Role == "super_admin" {
+				role = "admin"
+			}
+			tier := "free"
+			switch req.Tier {
+			case "pro", "enterprise", "unlimited":
+				tier = req.Tier
+			}
+			hash, err := auth.HashPassword(req.Password)
+			if err != nil {
+				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "password hashing failed"})
+				return
+			}
+			newID := "usr_" + auth.RandomToken(6)
+			err = d.Store.WithWriteLock(func(c *sql.DB) error {
+				_, e := c.Exec(
+					`INSERT INTO users (id, email, name, password_hash, role, tier, status, auth_provider) VALUES (?, ?, ?, ?, ?, ?, 'active', 'local')`,
+					newID, email, name, hash, role, tier,
+				)
+				return e
+			})
+			if err != nil {
+				writeJSON(w, http.StatusConflict, map[string]string{"error": "邮箱已被占用"})
+				return
+			}
+			d.Audit.Record(u.Email, "user.create", email, clientIP(r), d.GeoIP.Lookup(r).CountryCode, "success", fmt.Sprintf("role=%s tier=%s", role, tier))
+			writeJSON(w, http.StatusCreated, map[string]any{"id": newID, "email": email, "role": role, "tier": tier})
+
+		default:
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		}
+	})
+
+	mux.HandleFunc("/api/users/", func(w http.ResponseWriter, r *http.Request) {
+		u, ok := requireUser(w, r)
+		if !ok {
+			return
+		}
+		if !isAdminRole(u.Role) {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "admin required"})
+			return
+		}
+		id := strings.TrimPrefix(r.URL.Path, "/api/users/")
+		conn := d.Store.DB()
+
+		var targetEmail, targetRole, targetTier, targetStatus string
+		err := conn.QueryRow(`SELECT email, role, tier, status FROM users WHERE id = ?`, id).Scan(&targetEmail, &targetRole, &targetTier, &targetStatus)
+		if err == sql.ErrNoRows {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "user not found"})
+			return
+		}
+
+		switch r.Method {
+		case http.MethodPatch:
+			var req struct {
+				Role     *string `json:"role"`
+				Tier     *string `json:"tier"`
+				Status   *string `json:"status"`
+				Password *string `json:"password"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid payload"})
+				return
+			}
+			if targetRole == "super_admin" && req.Status != nil && *req.Status != "active" {
+				writeJSON(w, http.StatusForbidden, map[string]string{"error": "不能停用超级管理员账号"})
+				return
+			}
+			if req.Role != nil && targetRole != "super_admin" && (*req.Role == "admin" || *req.Role == "member") {
+				targetRole = *req.Role
+			}
+			if req.Tier != nil && (*req.Tier == "free" || *req.Tier == "pro" || *req.Tier == "enterprise" || *req.Tier == "unlimited") {
+				targetTier = *req.Tier
+			}
+			if req.Status != nil && (*req.Status == "active" || *req.Status == "disabled") {
+				targetStatus = *req.Status
+				if targetStatus != "active" {
+					d.Auth.RevokeUser(id)
+				}
+			}
+			_ = d.Store.WithWriteLock(func(c *sql.DB) error {
+				if req.Password != nil && len(*req.Password) >= 8 {
+					if h, err := auth.HashPassword(*req.Password); err == nil {
+						_, _ = c.Exec(`UPDATE users SET password_hash = ? WHERE id = ?`, h, id)
+					}
+				}
+				_, e := c.Exec(`UPDATE users SET role = ?, tier = ?, status = ? WHERE id = ?`, targetRole, targetTier, targetStatus, id)
+				return e
+			})
+			d.Audit.Record(u.Email, "user.update", targetEmail, clientIP(r), d.GeoIP.Lookup(r).CountryCode, "success", fmt.Sprintf("role=%s tier=%s status=%s", targetRole, targetTier, targetStatus))
+			writeJSON(w, http.StatusOK, map[string]any{"updated": true})
+
+		case http.MethodDelete:
+			if targetRole == "super_admin" || id == u.ID {
+				writeJSON(w, http.StatusForbidden, map[string]string{"error": "不能删除超级管理员或当前登录账号"})
+				return
+			}
+			d.Auth.RevokeUser(id)
+			_ = d.Store.WithWriteLock(func(c *sql.DB) error {
+				_, e := c.Exec(`DELETE FROM users WHERE id = ?`, id)
+				return e
+			})
+			d.Audit.Record(u.Email, "user.delete", targetEmail, clientIP(r), d.GeoIP.Lookup(r).CountryCode, "success", "Deleted user account")
+			writeJSON(w, http.StatusOK, map[string]any{"deleted": true})
+
+		default:
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		}
+	})
+
+	// =========================================================================
+	// REST API Keys & MCP Server Management
+	// =========================================================================
+	mux.HandleFunc("/api/apikeys", func(w http.ResponseWriter, r *http.Request) {
+		u, ok := requireUser(w, r)
+		if !ok {
+			return
+		}
+		conn := d.Store.DB()
+
+		switch r.Method {
+		case http.MethodGet:
+			var rows *sql.Rows
+			var err error
+			if isAdminRole(u.Role) {
+				rows, err = conn.Query(`SELECT id, name, key_prefix, scopes, revoked, last_used_at, created_at FROM api_keys ORDER BY created_at DESC`)
+			} else {
+				rows, err = conn.Query(`SELECT id, name, key_prefix, scopes, revoked, last_used_at, created_at FROM api_keys WHERE user_id = ? ORDER BY created_at DESC`, u.ID)
+			}
+			if err != nil {
+				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+				return
+			}
+			defer rows.Close()
+			list := make([]map[string]any, 0)
+			for rows.Next() {
+				var id, name, prefix, scopesCSV string
+				var revoked bool
+				var lastUsed sql.NullTime
+				var createdAt time.Time
+				if rows.Scan(&id, &name, &prefix, &scopesCSV, &revoked, &lastUsed, &createdAt) == nil {
+					var lastStr any = nil
+					if lastUsed.Valid {
+						lastStr = lastUsed.Time.UTC().Format(time.RFC3339)
+					}
+					scopes := make([]string, 0)
+					for _, sc := range strings.Split(scopesCSV, ",") {
+						if s := strings.TrimSpace(sc); s != "" {
+							scopes = append(scopes, s)
+						}
+					}
+					list = append(list, map[string]any{
+						"id":         id,
+						"name":       name,
+						"prefix":     prefix,
+						"scopes":     scopes,
+						"revoked":    revoked,
+						"lastUsedAt": lastStr,
+						"createdAt":  createdAt.UTC().Format(time.RFC3339),
+					})
+				}
+			}
+			writeJSON(w, http.StatusOK, map[string]any{"apiKeys": list})
+
+		case http.MethodPost:
+			var req struct {
+				Name   string   `json:"name"`
+				Scopes []string `json:"scopes"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid payload"})
+				return
+			}
+			name := strings.TrimSpace(req.Name)
+			if name == "" {
+				name = "API / MCP Key"
+			}
+			scopes := req.Scopes
+			if len(scopes) == 0 {
+				scopes = []string{"links:read", "links:write", "analytics:read", "mcp:invoke"}
+			}
+			rawSecret := "wmk_live_" + auth.RandomToken(20)
+			prefix := rawSecret[:15]
+			sum := sha256.Sum256([]byte(rawSecret))
+			keyHash := hex.EncodeToString(sum[:])
+			newID := "key_" + auth.RandomToken(6)
+
+			err := d.Store.WithWriteLock(func(c *sql.DB) error {
+				_, e := c.Exec(
+					`INSERT INTO api_keys (id, user_id, name, key_prefix, key_hash, scopes, revoked) VALUES (?, ?, ?, ?, ?, ?, FALSE)`,
+					newID, u.ID, name, prefix, keyHash, strings.Join(scopes, ","),
+				)
+				return e
+			})
+			if err != nil {
+				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+				return
+			}
+			d.Audit.Record(u.Email, "apikey.create", prefix+"***", clientIP(r), d.GeoIP.Lookup(r).CountryCode, "success", "Created API/MCP key "+name)
+			writeJSON(w, http.StatusCreated, map[string]any{
+				"id":        newID,
+				"name":      name,
+				"prefix":    prefix,
+				"secretKey": rawSecret, // Shown ONCE to user
+				"scopes":    scopes,
+			})
+
+		default:
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		}
+	})
+
+	mux.HandleFunc("/api/apikeys/", func(w http.ResponseWriter, r *http.Request) {
+		u, ok := requireUser(w, r)
+		if !ok {
+			return
+		}
+		if r.Method != http.MethodDelete {
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+			return
+		}
+		id := strings.TrimPrefix(r.URL.Path, "/api/apikeys/")
+		_ = d.Store.WithWriteLock(func(c *sql.DB) error {
+			if isAdminRole(u.Role) {
+				_, e := c.Exec(`UPDATE api_keys SET revoked = TRUE WHERE id = ?`, id)
+				return e
+			}
+			_, e := c.Exec(`UPDATE api_keys SET revoked = TRUE WHERE id = ? AND user_id = ?`, id, u.ID)
+			return e
+		})
+		d.Audit.Record(u.Email, "apikey.revoke", id, clientIP(r), d.GeoIP.Lookup(r).CountryCode, "success", "Revoked API key")
+		writeJSON(w, http.StatusOK, map[string]any{"revoked": true})
+	})
+
+	// Authenticated dashboard MCP test endpoint (proxies to MCP server with current user's identity)
+	mux.HandleFunc("/api/mcp/test", func(w http.ResponseWriter, r *http.Request) {
+		u, ok := requireUser(w, r)
+		if !ok {
+			return
+		}
+		d.MCP.ServeWithActor(w, r, "dashboard:"+u.Email)
+	})
+
+	// =========================================================================
+	// Audit Logs, Scheduled Tasks & Database Backups
+	// =========================================================================
+	mux.HandleFunc("/api/audit-cron", func(w http.ResponseWriter, r *http.Request) {
+		u, ok := requireUser(w, r)
+		if !ok {
+			return
+		}
+		if !isAdminRole(u.Role) {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "admin required"})
+			return
+		}
+		conn := d.Store.DB()
+		rows, _ := conn.Query(`SELECT id, actor, action, resource, ip, region, status, detail, created_at FROM audit_logs ORDER BY created_at DESC LIMIT 100`)
+		logs := make([]map[string]any, 0)
+		if rows != nil {
+			defer rows.Close()
+			for rows.Next() {
+				var id, actor, action, res, ip, reg, status, detail string
+				var ts time.Time
+				if rows.Scan(&id, &actor, &action, &res, &ip, &reg, &status, &detail, &ts) == nil {
+					logs = append(logs, map[string]any{
+						"id":        id,
+						"actor":     actor,
+						"action":    action,
+						"resource":  res,
+						"ip":        ip,
+						"region":    reg,
+						"status":    status,
+						"detail":    detail,
+						"timestamp": ts.UTC().Format(time.RFC3339),
+					})
+				}
+			}
+		}
+
+		// List real database backups on disk
+		backups := make([]map[string]any, 0)
+		backupDir := filepath.Join(d.DataDir, "backups")
+		if entries, err := os.ReadDir(backupDir); err == nil {
+			sort.Slice(entries, func(i, j int) bool { return entries[i].Name() > entries[j].Name() })
+			for _, e := range entries {
+				if e.IsDir() {
+					continue
+				}
+				if info, err := e.Info(); err == nil {
+					backups = append(backups, map[string]any{
+						"filename":  e.Name(),
+						"sizeBytes": info.Size(),
+						"createdAt": info.ModTime().UTC().Format(time.RFC3339),
+					})
+				}
+			}
+		}
+
+		cfg := d.Config.Get()
+		tasks := cfg.CronTasks
+		if len(tasks) == 0 {
+			tasks = config.DefaultCronTasks()
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"auditLogs":            logs,
+			"backups":              backups,
+			"cronTasks":            tasks,
+			"auditRetentionDays":   cfg.AuditRetentionDays,
+			"backupRetentionCount": cfg.BackupRetentionCount,
+			"dbDriver":             cfg.Database.Driver,
+		})
+	})
+
+	mux.HandleFunc("/api/audit-cron/tasks", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPatch {
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+			return
+		}
+		u, ok := requireUser(w, r)
+		if !ok {
+			return
+		}
+		if !isAdminRole(u.Role) {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "admin required"})
+			return
+		}
+		var req struct {
+			Key                  string  `json:"key"`
+			Name                 *string `json:"name"`
+			CronExpression       *string `json:"cronExpression"`
+			RetentionPolicy      *string `json:"retentionPolicy"`
+			Enabled              *bool   `json:"enabled"`
+			BackupRetentionCount *int    `json:"backupRetentionCount"`
+			AuditRetentionDays   *int    `json:"auditRetentionDays"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid cron payload"})
+			return
+		}
+		cfg := d.Config.Get()
+		if len(cfg.CronTasks) == 0 {
+			cfg.CronTasks = config.DefaultCronTasks()
+		}
+		if req.BackupRetentionCount != nil && *req.BackupRetentionCount >= 1 && *req.BackupRetentionCount <= 90 {
+			cfg.BackupRetentionCount = *req.BackupRetentionCount
+		}
+		if req.AuditRetentionDays != nil && *req.AuditRetentionDays >= 1 && *req.AuditRetentionDays <= 365 {
+			cfg.AuditRetentionDays = *req.AuditRetentionDays
+		}
+
+		updatedKey := strings.TrimSpace(req.Key)
+		if updatedKey != "" {
+			found := false
+			for i := range cfg.CronTasks {
+				if cfg.CronTasks[i].Key != updatedKey {
+					continue
+				}
+				found = true
+				if req.Name != nil && strings.TrimSpace(*req.Name) != "" {
+					cfg.CronTasks[i].Name = strings.TrimSpace(*req.Name)
+				}
+				if req.RetentionPolicy != nil && strings.TrimSpace(*req.RetentionPolicy) != "" {
+					cfg.CronTasks[i].RetentionPolicy = strings.TrimSpace(*req.RetentionPolicy)
+				}
+				if req.Enabled != nil {
+					cfg.CronTasks[i].Enabled = *req.Enabled
+				}
+				if req.CronExpression != nil {
+					expr := strings.TrimSpace(*req.CronExpression)
+					if !isValidCronExpr(expr) {
+						writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Cron 表达式格式无效，请使用标准 5 段格式（例如 0 3 * * *）。"})
+						return
+					}
+					cfg.CronTasks[i].CronExpression = expr
+				}
+				break
+			}
+			if !found {
+				writeJSON(w, http.StatusNotFound, map[string]string{"error": "scheduled task not found"})
+				return
+			}
+		}
+
+		if err := d.Config.Save(cfg); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		d.Scheduler.Reload(cfg)
+		d.Audit.Record(u.Email, "cron.update", updatedKey, clientIP(r), d.GeoIP.Lookup(r).CountryCode, "success", "Updated scheduled task configuration")
+		writeJSON(w, http.StatusOK, map[string]any{
+			"cronTasks":            cfg.CronTasks,
+			"backupRetentionCount": cfg.BackupRetentionCount,
+			"auditRetentionDays":   cfg.AuditRetentionDays,
+		})
+	})
+
+	mux.HandleFunc("/api/backups/run", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+			return
+		}
+		u, ok := requireUser(w, r)
+		if !ok {
+			return
+		}
+		if !isAdminRole(u.Role) {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "admin required"})
+			return
+		}
+		dest, err := d.Store.Backup(d.Config.Get().BackupRetentionCount)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		d.Audit.Record(u.Email, "db.backup_manual", filepath.Base(dest), clientIP(r), d.GeoIP.Lookup(r).CountryCode, "success", "Manual database backup completed")
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "file": filepath.Base(dest)})
+	})
+
+	mux.HandleFunc("/api/audit/rotate", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+			return
+		}
+		u, ok := requireUser(w, r)
+		if !ok {
+			return
+		}
+		if !isAdminRole(u.Role) {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "admin required"})
+			return
+		}
+		if err := d.Audit.RotateAndPrune(); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		d.Audit.Record(u.Email, "audit.rotate", "/data/logs", clientIP(r), d.GeoIP.Lookup(r).CountryCode, "success", "Rotated and pruned audit logs")
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	})
+
+	// MCP Server Endpoint (authenticated via Bearer API Key)
+	mux.Handle("/mcp", d.MCP)
+
+	// Dynamic SEO Sitemap (includes all enabled seo_indexable short links across custom domains)
+	mux.HandleFunc("/sitemap.xml", func(w http.ResponseWriter, _ *http.Request) {
+		cfg := d.Config.Get()
+		w.Header().Set("Content-Type", "application/xml; charset=utf-8")
+		var sb strings.Builder
+		sb.WriteString(`<?xml version="1.0" encoding="UTF-8"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">`)
+		sb.WriteString(`<url><loc>` + html.EscapeString(cfg.IssuerURL) + `/</loc></url>`)
+		if d.Store.DB() != nil {
+			if rows, err := d.Store.DB().Query(`SELECT domain, slug FROM short_links WHERE enabled = TRUE AND seo_indexable = TRUE ORDER BY created_at DESC LIMIT 1000`); err == nil {
+				defer rows.Close()
+				for rows.Next() {
+					var dom, slug string
+					if rows.Scan(&dom, &slug) == nil {
+						sb.WriteString(`<url><loc>https://` + html.EscapeString(dom) + `/` + html.EscapeString(slug) + `</loc></url>`)
+					}
+				}
+			}
+		}
+		sb.WriteString(`</urlset>`)
+		_, _ = w.Write([]byte(sb.String()))
+	})
+
+	// =========================================================================
+	// Embedded SPA + Multi-Domain Root `/` Fixed 301 + Short Link Resolution (301 Cache TTL / 302 / 307)
 	// =========================================================================
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		cfg := d.Config.Get()
+		reqHost := strings.ToLower(strings.TrimSpace(r.Host))
+		if h, _, err := net.SplitHostPort(reqHost); err == nil && h != "" {
+			reqHost = h
+		}
 
-		// Root `/` handling: FIXED HTTP 301 Moved Permanently when forwarding is enabled
+		// Root `/` handling: check per-domain root 301 rule first, then global root 301 rule
 		if r.URL.Path == "/" {
+			if cfg.Initialized && d.Store.DB() != nil {
+				var domRootEn bool
+				var domRootURL string
+				if err := d.Store.DB().QueryRow(`SELECT root_redirect_enabled, root_redirect_url FROM domains WHERE host = ? LIMIT 1`, reqHost).Scan(&domRootEn, &domRootURL); err == nil && domRootEn && isSafeHTTPURL(domRootURL) {
+					w.Header().Set("Cache-Control", "public, max-age=300, s-maxage=300")
+					http.Redirect(w, r, domRootURL, http.StatusMovedPermanently)
+					return
+				}
+			}
 			if cfg.Initialized && cfg.RootRedirectEnabled && isSafeHTTPURL(cfg.RootRedirectURL) {
 				w.Header().Set("Cache-Control", "public, max-age=300, s-maxage=300")
 				http.Redirect(w, r, cfg.RootRedirectURL, http.StatusMovedPermanently)
@@ -1276,16 +2220,22 @@ func NewRouter(d Deps) http.Handler {
 			return
 		}
 
-		// Resolve short link
+		// Resolve short link (prefer exact Host+slug match, fallback to slug match)
 		if cfg.Initialized && d.Store.DB() != nil {
 			var linkID, targetURL, title, dom string
 			var redirectCode, cacheTTL int
 			var enabled bool
 			var expiresAt sql.NullTime
 			err := d.Store.DB().QueryRow(
-				`SELECT id, domain, target_url, title, redirect_code, cache_ttl_seconds, enabled, expires_at FROM short_links WHERE slug = ? LIMIT 1`,
-				clean,
+				`SELECT id, domain, target_url, title, redirect_code, cache_ttl_seconds, enabled, expires_at FROM short_links WHERE domain = ? AND slug = ? LIMIT 1`,
+				reqHost, clean,
 			).Scan(&linkID, &dom, &targetURL, &title, &redirectCode, &cacheTTL, &enabled, &expiresAt)
+			if err == sql.ErrNoRows {
+				err = d.Store.DB().QueryRow(
+					`SELECT id, domain, target_url, title, redirect_code, cache_ttl_seconds, enabled, expires_at FROM short_links WHERE slug = ? LIMIT 1`,
+					clean,
+				).Scan(&linkID, &dom, &targetURL, &title, &redirectCode, &cacheTTL, &enabled, &expiresAt)
+			}
 			if err == nil && enabled && isSafeHTTPURL(targetURL) {
 				ip := clientIP(r)
 				if !d.Auth.AllowRedirect(ip, cfg.AntiBot.RedirectRatePerMin) {
@@ -1332,7 +2282,7 @@ func NewRouter(d Deps) http.Handler {
 					return
 				}
 
-				// 301 with Dub-style Cache-Control TTL for timed origin revalidation
+				// 301 with Cache-Control TTL for timed origin revalidation
 				if redirectCode == 301 {
 					ttl := normalizeTTL(cacheTTL)
 					swr := minInt(ttl, 60)
@@ -1497,6 +2447,60 @@ func minInt(a, b int) int {
 func isSafeHTTPURL(raw string) bool {
 	u, err := url.Parse(strings.TrimSpace(raw))
 	return err == nil && (u.Scheme == "http" || u.Scheme == "https") && u.Host != ""
+}
+
+func isSafeExternalOAuthIssuer(raw string) bool {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return false
+	}
+	h := strings.ToLower(u.Hostname())
+	if h == "" || h == "169.254.169.254" || h == "metadata.google.internal" || h == "metadata" {
+		return false
+	}
+	return true
+}
+
+func isValidAdminPathSlug(slug string) bool {
+	if len(slug) == 0 || len(slug) > 32 {
+		return false
+	}
+	for i, r := range slug {
+		isAlnum := (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9')
+		if i == 0 && !isAlnum {
+			return false
+		}
+		if !isAlnum && r != '-' && r != '_' {
+			return false
+		}
+	}
+	return true
+}
+
+func maskSecretHint(secret string) string {
+	s := strings.TrimSpace(secret)
+	if s == "" {
+		return ""
+	}
+	if len(s) <= 4 {
+		return "••••"
+	}
+	return "••••" + s[len(s)-4:]
+}
+
+func isValidCronExpr(expr string) bool {
+	fields := strings.Fields(expr)
+	if len(fields) != 5 {
+		return false
+	}
+	for _, f := range fields {
+		for _, r := range f {
+			if (r < '0' || r > '9') && r != '*' && r != '/' && r != ',' && r != '-' {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func writeJSON(w http.ResponseWriter, status int, payload any) {

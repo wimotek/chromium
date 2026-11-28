@@ -1,21 +1,47 @@
 import { useCallback, useEffect, useMemo, useState, type FormEvent } from 'react';
 import {
+  Activity,
   BarChart2,
   Check,
+  ChevronDown,
+  ChevronRight,
   Code2,
   Copy,
+  Cpu,
   Eye,
+  EyeOff,
   FileCode2,
+  Globe,
   Globe2,
   Link2,
+  Lock,
   LogOut,
-  RefreshCw,
+  Plug,
   Save,
   Settings,
   ShieldCheck,
+  SlidersHorizontal,
   Trash2,
+  Unlock,
+  Unplug,
+  Users,
   X,
 } from 'lucide-react';
+import {
+  AntiBotCaptcha,
+  EMPTY_ANTIBOT_SOLUTION,
+  type AntiBotChallengePayload,
+  type AntiBotSolution,
+} from './components/AntiBotCaptcha';
+import { DomainsPanel, type ProductionDomain } from './components/DomainsPanel';
+import { UsersPanel, type ProductionUser } from './components/UsersPanel';
+import { ApiMcpPanel, type ProductionApiKey } from './components/ApiMcpPanel';
+import {
+  AuditBackupPanel,
+  type ProductionAuditLog,
+  type ProductionBackupFile,
+  type ProductionCronTask,
+} from './components/AuditBackupPanel';
 
 interface SetupStatus {
   initialized: boolean;
@@ -101,6 +127,8 @@ interface SettingsState {
   rootRedirectUrl: string;
   oauthEnabled: boolean;
   oauthConfigured: boolean;
+  oauthSecretHint?: string;
+  oauthWebhookSecretConfigured?: boolean;
   oauthAutoRedirect: boolean;
   oauthIssuerUrl: string;
   oauthClientId: string;
@@ -111,9 +139,11 @@ interface SettingsState {
   loginRateLimitWindowMin: number;
   redirectRateLimitPerMin: number;
   blockedRequestsCount: number;
+  allowRegistration?: boolean;
+  seoIndexNowKey?: string;
 }
 
-type Tab = 'links' | 'analytics' | 'interstitial' | 'settings';
+type Tab = 'links' | 'analytics' | 'domains' | 'interstitial' | 'users' | 'api_mcp' | 'audit_cron' | 'settings';
 
 const PRESETS: { id: InterstitialConfig['preset']; label: string; desc: string; defaults: Partial<InterstitialConfig> }[] = [
   {
@@ -134,7 +164,7 @@ const PRESETS: { id: InterstitialConfig['preset']; label: string; desc: string; 
   },
   {
     id: 'branded_countdown',
-    label: '品牌倒计时过渡页（Dub/Bitly）',
+    label: '品牌倒计时过渡页',
     desc: '品牌标题 + 动态进度条倒计时自动跳转',
     defaults: {
       countdown_seconds: 4,
@@ -241,21 +271,37 @@ export default function App() {
   const [adminPassword, setAdminPassword] = useState('');
   const [feedback, setFeedback] = useState('');
 
-  // Login + Anti-bot challenge states
+  // Login + 4-Layer High-Strength Anti-AI CAPTCHA states
   const [loginEmail, setLoginEmail] = useState('');
   const [loginPassword, setLoginPassword] = useState('');
-  const [challengeToken, setChallengeToken] = useState('');
-  const [challengeQuestion, setChallengeQuestion] = useState('');
-  const [challengeAnswer, setChallengeAnswer] = useState('');
+  const [challenge, setChallenge] = useState<AntiBotChallengePayload | null>(null);
+  const [captchaSolution, setCaptchaSolution] = useState<AntiBotSolution>(EMPTY_ANTIBOT_SOLUTION);
   const [honeypot, setHoneypot] = useState('');
-  const [remainingAttempts, setRemainingAttempts] = useState(5);
-  const [maxAttempts, setMaxAttempts] = useState(5);
   const [loginBusy, setLoginBusy] = useState(false);
   const [loginError, setLoginError] = useState('');
 
   // Workspace states
   const [links, setLinks] = useState<ShortLinkItem[]>([]);
+  const [domains, setDomains] = useState<ProductionDomain[]>([]);
+  const [usersList, setUsersList] = useState<ProductionUser[]>([]);
+  const [apiKeys, setApiKeys] = useState<ProductionApiKey[]>([]);
+  const [auditData, setAuditData] = useState<{
+    auditLogs: ProductionAuditLog[];
+    backups: ProductionBackupFile[];
+    cronTasks: ProductionCronTask[];
+    auditRetentionDays: number;
+    backupRetentionCount: number;
+    dbDriver: string;
+  }>({
+    auditLogs: [],
+    backups: [],
+    cronTasks: [],
+    auditRetentionDays: 30,
+    backupRetentionCount: 7,
+    dbDriver: 'sqlite3',
+  });
   const [newTarget, setNewTarget] = useState('');
+  const [newDomain, setNewDomain] = useState('');
   const [newSlug, setNewSlug] = useState('');
   const [newTitle, setNewTitle] = useState('');
   const [newCode, setNewCode] = useState<301 | 302 | 307>(302);
@@ -291,7 +337,15 @@ export default function App() {
 
   // Settings state
   const [settings, setSettings] = useState<SettingsState | null>(null);
+  const [oauthClientSecret, setOauthClientSecret] = useState('');
+  const [showClientSecret, setShowClientSecret] = useState(false);
+  const [oauthWebhookSecret, setOauthWebhookSecret] = useState('');
+  const [showWebhookSecret, setShowWebhookSecret] = useState(false);
+  const [showOAuthAdvanced, setShowOAuthAdvanced] = useState(false);
   const [settingsMsg, setSettingsMsg] = useState('');
+  const [oauthConnecting, setOauthConnecting] = useState(false);
+  const [oauthConnectError, setOauthConnectError] = useState('');
+  const [oauthConnectMsg, setOauthConnectMsg] = useState('');
 
   const isLocalFallback = new URLSearchParams(window.location.search).get('local') === '1';
   const isAdmin = user?.role === 'super_admin' || user?.role === 'admin';
@@ -301,38 +355,77 @@ export default function App() {
       const res = await fetch('/api/auth/challenge');
       if (!res.ok) return;
       const d = await res.json();
-      setChallengeToken(d.challengeToken || '');
-      setChallengeQuestion(d.question || '');
-      setRemainingAttempts(typeof d.remainingAttempts === 'number' ? d.remainingAttempts : 5);
-      setMaxAttempts(typeof d.loginRateLimitMax === 'number' ? d.loginRateLimitMax : 5);
-      setChallengeAnswer('');
+      setChallenge({
+        antiBotMode: d.antiBotMode || 'builtin',
+        turnstileSiteKey: d.turnstileSiteKey || '',
+        challengeToken: d.challengeToken || '',
+        captchaSvgDataUri: d.captchaSvgDataUri || '',
+        powSalt: d.powSalt || '',
+        powDifficulty: typeof d.powDifficulty === 'number' ? d.powDifficulty : 16,
+        requireSlider: Boolean(d.requireSlider),
+        sliderTarget: typeof d.sliderTarget === 'number' ? d.sliderTarget : 60,
+        expiresInSec: typeof d.expiresInSec === 'number' ? d.expiresInSec : 120,
+        remainingAttempts: typeof d.remainingAttempts === 'number' ? d.remainingAttempts : 5,
+        loginRateLimitMax: typeof d.loginRateLimitMax === 'number' ? d.loginRateLimitMax : 5,
+      });
+      setCaptchaSolution(EMPTY_ANTIBOT_SOLUTION);
     } catch {
       // ignore
     }
   }, []);
 
   const loadWorkspace = useCallback(async () => {
-    const [lRes, aRes, iRes, sRes] = await Promise.all([
+    const requests = [
       fetch('/api/links', { credentials: 'include' }),
       fetch('/api/analytics', { credentials: 'include' }),
       fetch('/api/interstitial', { credentials: 'include' }),
       fetch('/api/settings', { credentials: 'include' }),
-    ]);
-    if (lRes.ok) {
+      fetch('/api/domains', { credentials: 'include' }),
+      fetch('/api/apikeys', { credentials: 'include' }),
+      isAdmin ? fetch('/api/users', { credentials: 'include' }) : Promise.resolve(null),
+      isAdmin ? fetch('/api/audit-cron', { credentials: 'include' }) : Promise.resolve(null),
+    ];
+    const [lRes, aRes, iRes, sRes, dRes, kRes, uRes, acRes] = await Promise.all(requests);
+    if (lRes && lRes.ok) {
       const d = await lRes.json();
       setLinks(d.links || []);
     }
-    if (aRes.ok) {
+    if (aRes && aRes.ok) {
       setAnalytics(await aRes.json());
     }
-    if (iRes.ok) {
+    if (iRes && iRes.ok) {
       const d = await iRes.json();
       if (d.interstitial) setInterstitial(d.interstitial);
     }
-    if (sRes.ok) {
+    if (sRes && sRes.ok) {
       setSettings(await sRes.json());
     }
-  }, []);
+    if (dRes && dRes.ok) {
+      const d = await dRes.json();
+      const list: ProductionDomain[] = d.domains || [];
+      setDomains(list);
+      setNewDomain((prev) => prev || list.find((item) => item.isDefault)?.host || list[0]?.host || '');
+    }
+    if (kRes && kRes.ok) {
+      const d = await kRes.json();
+      setApiKeys(d.apiKeys || []);
+    }
+    if (uRes && uRes.ok) {
+      const d = await uRes.json();
+      setUsersList(d.users || []);
+    }
+    if (acRes && acRes.ok) {
+      const d = await acRes.json();
+      setAuditData({
+        auditLogs: d.auditLogs || [],
+        backups: d.backups || [],
+        cronTasks: d.cronTasks || [],
+        auditRetentionDays: d.auditRetentionDays ?? 30,
+        backupRetentionCount: d.backupRetentionCount ?? 7,
+        dbDriver: d.dbDriver || 'sqlite3',
+      });
+    }
+  }, [isAdmin]);
 
   useEffect(() => {
     Promise.all([
@@ -399,6 +492,20 @@ export default function App() {
 
   async function handleLocalLogin(e: FormEvent) {
     e.preventDefault();
+    if (status?.antibot_mode !== 'off') {
+      if (!captchaSolution.powReady) {
+        setLoginError('SHA-256 算力校验尚未完成，请稍候 1 秒后再试。');
+        return;
+      }
+      if (captchaSolution.captchaCode.trim().length < 6) {
+        setLoginError('请输入图形验证码中的 6 位字符。');
+        return;
+      }
+      if (challenge?.requireSlider && !captchaSolution.sliderAligned) {
+        setLoginError('请拖动滑块对齐至蓝色目标槽位。');
+        return;
+      }
+    }
     setLoginBusy(true);
     setLoginError('');
     try {
@@ -409,8 +516,12 @@ export default function App() {
         body: JSON.stringify({
           email: loginEmail,
           password: loginPassword,
-          challengeToken,
-          challengeAnswer: challengeAnswer.trim(),
+          challengeToken: challenge?.challengeToken || '',
+          captchaCode: captchaSolution.captchaCode.trim().toUpperCase(),
+          powNonce: captchaSolution.powNonce,
+          sliderPosition: captchaSolution.sliderPosition,
+          sliderDurationMs: captchaSolution.sliderDurationMs,
+          sliderTrail: captchaSolution.sliderTrail,
           website: honeypot,
           trustDeviceDays: 14,
         }),
@@ -448,6 +559,7 @@ export default function App() {
       credentials: 'include',
       body: JSON.stringify({
         targetUrl: newTarget,
+        domain: newDomain,
         slug: newSlug.trim(),
         title: newTitle.trim(),
         redirectCode: isAdmin ? newCode : 302,
@@ -489,10 +601,25 @@ export default function App() {
     }
   }
 
+  async function handleToggleLockLink(link: ShortLinkItem) {
+    const res = await fetch(`/api/links/${link.id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({ isSystemProtected: !link.isSystemProtected }),
+    });
+    if (res.ok) {
+      await loadWorkspace();
+    }
+  }
+
   async function handleDeleteLink(id: string) {
     const res = await fetch(`/api/links/${id}`, { method: 'DELETE', credentials: 'include' });
     if (res.ok) {
       await loadWorkspace();
+    } else {
+      const b = await res.json().catch(() => ({}));
+      setLinkMsg(b.error || '删除失败');
     }
   }
 
@@ -528,18 +655,88 @@ export default function App() {
     }
   }
 
+  async function handleConnectOAuth() {
+    if (!settings || !isAdmin) return;
+    setOauthConnecting(true);
+    setOauthConnectError('');
+    setOauthConnectMsg('');
+    try {
+      const payload: Record<string, unknown> = {
+        oauthIssuerUrl: settings.oauthIssuerUrl,
+        oauthClientId: settings.oauthClientId,
+        oauthRedirectUri: settings.oauthRedirectUri,
+        oauthAutoRedirect: settings.oauthAutoRedirect,
+      };
+      if (oauthClientSecret.trim()) {
+        payload.oauthClientSecret = oauthClientSecret.trim();
+      }
+      if (oauthWebhookSecret.trim()) {
+        payload.oauthWebhookSecret = oauthWebhookSecret.trim();
+      }
+      const res = await fetch('/api/oauth/connect', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify(payload),
+      });
+      const b = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setOauthConnectError(b.error || '连接 OAuth 失败');
+        return;
+      }
+      setOauthClientSecret('');
+      setOauthWebhookSecret('');
+      setOauthConnectMsg(b.message || '已连接并启用 wimotek/Oauth。');
+      await loadWorkspace();
+    } finally {
+      setOauthConnecting(false);
+    }
+  }
+
+  async function handleDisconnectOAuth() {
+    if (!isAdmin) return;
+    setOauthConnecting(true);
+    setOauthConnectError('');
+    setOauthConnectMsg('');
+    try {
+      const res = await fetch('/api/oauth/disconnect', {
+        method: 'POST',
+        credentials: 'include',
+      });
+      const b = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setOauthConnectError(b.error || '断开连接失败');
+        return;
+      }
+      setOauthConnectMsg(b.message || '已断开 wimotek/Oauth 连接。');
+      await loadWorkspace();
+    } finally {
+      setOauthConnecting(false);
+    }
+  }
+
   async function handleSaveSettings(e: FormEvent) {
     e.preventDefault();
     if (!settings || !isAdmin) return;
     setSettingsMsg('');
+    const { oauthEnabled: _ignoreOAuthEnabled, ...restSettings } = settings;
+    const payload: Record<string, unknown> = { ...restSettings };
+    if (oauthClientSecret.trim()) {
+      payload.oauthClientSecret = oauthClientSecret.trim();
+    }
+    if (oauthWebhookSecret.trim()) {
+      payload.oauthWebhookSecret = oauthWebhookSecret.trim();
+    }
     const res = await fetch('/api/settings', {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       credentials: 'include',
-      body: JSON.stringify(settings),
+      body: JSON.stringify(payload),
     });
     if (res.ok) {
-      setSettingsMsg('系统配置已保存。');
+      setOauthClientSecret('');
+      setOauthWebhookSecret('');
+      setSettingsMsg('系统配置已保存（注意：OAuth 登录仅在点击「连接 OAuth」成功后启用）。');
       await loadWorkspace();
     } else {
       const b = await res.json().catch(() => ({}));
@@ -725,40 +922,24 @@ export default function App() {
             />
           </label>
 
-          {/* Visible Anti-Bot & Rate-Limit Protection */}
-          <div className="p-3 rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-950 space-y-2">
+          {/* 4-Layer High-Strength Anti-AI CAPTCHA & Rate-Limit Protection */}
+          <div className="p-3.5 rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-950 space-y-2.5">
             <div className="flex items-center justify-between text-xs">
               <span className="font-medium inline-flex items-center gap-1.5 text-slate-700 dark:text-slate-200">
                 <ShieldCheck className="w-3.5 h-3.5 text-blue-600" />
-                防机器人与防刷验证
+                高强度防AI四重验证
               </span>
               <span className="font-mono text-[11px] text-slate-500">
-                剩余尝试 {remainingAttempts}/{maxAttempts}
+                剩余尝试 {challenge?.remainingAttempts ?? 5}/{challenge?.loginRateLimitMax ?? 5}
               </span>
             </div>
-            {status.antibot_mode !== 'off' && (
-              <div className="flex items-center gap-2">
-                <span className="px-3 py-2 rounded-lg bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 font-mono text-xs font-semibold select-none">
-                  {challengeQuestion || '...'}
-                </span>
-                <input
-                  type="text"
-                  inputMode="numeric"
-                  required
-                  value={challengeAnswer}
-                  onChange={(e) => setChallengeAnswer(e.target.value)}
-                  placeholder="输入结果"
-                  className="flex-1 min-w-0 px-3 py-2 text-xs font-mono rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900"
-                />
-                <button
-                  type="button"
-                  onClick={loadChallenge}
-                  aria-label="Refresh challenge"
-                  className="p-2 rounded-lg border border-slate-300 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800"
-                >
-                  <RefreshCw className="w-3.5 h-3.5" />
-                </button>
-              </div>
+            {status.antibot_mode !== 'off' && challenge && (
+              <AntiBotCaptcha
+                challenge={challenge}
+                solution={captchaSolution}
+                onChange={setCaptchaSolution}
+                onRefresh={loadChallenge}
+              />
             )}
           </div>
 
@@ -793,33 +974,39 @@ export default function App() {
   return (
     <div className="min-h-screen bg-[#F8FAFC] dark:bg-[#090D16] text-slate-900 dark:text-slate-100 flex flex-col">
       <header className="h-14 px-4 sm:px-6 bg-white dark:bg-[#111827] border-b border-slate-200 dark:border-slate-800 flex items-center justify-between gap-4">
-        <div className="flex items-center gap-3">
-          <img src="/logo.svg" alt="wimotek/url" className="w-7 h-7" />
-          <span className="font-semibold text-sm">wimotek/url</span>
-          <nav className="flex items-center gap-1 ml-4 text-xs">
+        <div className="flex items-center gap-3 min-w-0 flex-1">
+          <img src="/logo.svg" alt="wimotek/url" className="w-7 h-7 shrink-0" />
+          <span className="font-semibold text-sm shrink-0">wimotek/url</span>
+          <nav className="flex items-center gap-1 ml-2 text-xs overflow-x-auto no-scrollbar">
             {[
-              { id: 'links' as Tab, label: '短链管理', icon: Link2 },
-              { id: 'analytics' as Tab, label: '统计与来源网站', icon: Globe2 },
-              { id: 'interstitial' as Tab, label: '307 中间页模板', icon: FileCode2 },
-              { id: 'settings' as Tab, label: 'OAuth / 防刷设置', icon: Settings },
-            ].map((item) => {
-              const Icon = item.icon;
-              return (
-                <button
-                  key={item.id}
-                  type="button"
-                  onClick={() => setActiveTab(item.id)}
-                  className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg font-medium whitespace-nowrap ${
-                    activeTab === item.id
-                      ? 'bg-blue-600/10 text-blue-700 dark:text-blue-300'
-                      : 'text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800'
-                  }`}
-                >
-                  <Icon className="w-3.5 h-3.5" />
-                  {item.label}
-                </button>
-              );
-            })}
+              { id: 'links' as Tab, label: '短链管理', icon: Link2, adminOnly: false },
+              { id: 'analytics' as Tab, label: '统计与来源', icon: Globe2, adminOnly: false },
+              { id: 'domains' as Tab, label: '多域名与 SEO', icon: Globe, adminOnly: false },
+              { id: 'interstitial' as Tab, label: '307 中间页', icon: FileCode2, adminOnly: false },
+              { id: 'users' as Tab, label: '用户管理', icon: Users, adminOnly: true },
+              { id: 'api_mcp' as Tab, label: 'API 与 MCP', icon: Cpu, adminOnly: false },
+              { id: 'audit_cron' as Tab, label: '审计与备份', icon: Activity, adminOnly: true },
+              { id: 'settings' as Tab, label: '系统 / OAuth', icon: Settings, adminOnly: false },
+            ]
+              .filter((item) => !item.adminOnly || isAdmin)
+              .map((item) => {
+                const Icon = item.icon;
+                return (
+                  <button
+                    key={item.id}
+                    type="button"
+                    onClick={() => setActiveTab(item.id)}
+                    className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg font-medium whitespace-nowrap ${
+                      activeTab === item.id
+                        ? 'bg-blue-600/10 text-blue-700 dark:text-blue-300'
+                        : 'text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800'
+                    }`}
+                  >
+                    <Icon className="w-3.5 h-3.5" />
+                    {item.label}
+                  </button>
+                );
+              })}
           </nav>
         </div>
 
@@ -851,13 +1038,26 @@ export default function App() {
                   value={newTarget}
                   onChange={(e) => setNewTarget(e.target.value)}
                   placeholder="目标长链接 https://..."
-                  className="md:col-span-5 px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-transparent text-sm"
+                  className="md:col-span-4 px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-transparent text-sm"
                 />
+                <select
+                  value={newDomain}
+                  onChange={(e) => setNewDomain(e.target.value)}
+                  aria-label="选择短链域名"
+                  className="md:col-span-2 px-2.5 py-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-transparent font-mono"
+                >
+                  {domains.map((d) => (
+                    <option key={d.id} value={d.host}>
+                      {d.host}
+                    </option>
+                  ))}
+                  {domains.length === 0 && <option value={window.location.host}>{window.location.host}</option>}
+                </select>
                 <input
                   value={newSlug}
                   onChange={(e) => setNewSlug(e.target.value)}
-                  placeholder="自定义后缀（留空自动生成）"
-                  className="md:col-span-3 px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-transparent font-mono"
+                  placeholder="自定义后缀（留空自动）"
+                  className="md:col-span-2 px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-transparent font-mono"
                 />
                 <input
                   value={newTitle}
@@ -878,7 +1078,7 @@ export default function App() {
                       className="px-3 py-1.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-transparent"
                     >
                       <option value={302}>HTTP 302 (实时回源统计)</option>
-                      <option value={301}>HTTP 301 + Cache TTL (Dub 定时回源)</option>
+                      <option value={301}>HTTP 301 + Cache TTL (定时回源)</option>
                       <option value={307}>HTTP 307 (本地中间页跳转)</option>
                     </select>
                     {newCode === 301 && (
@@ -888,7 +1088,7 @@ export default function App() {
                         className="px-3 py-1.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-transparent font-mono"
                       >
                         <option value={60}>回源 TTL 60s</option>
-                        <option value={300}>回源 TTL 300s (Dub 默认)</option>
+                        <option value={300}>回源 TTL 300s (默认)</option>
                         <option value={1800}>回源 TTL 1800s</option>
                         <option value={3600}>回源 TTL 3600s</option>
                         <option value={86400}>回源 TTL 86400s</option>
@@ -906,7 +1106,7 @@ export default function App() {
               <div className="p-3.5 rounded-[10px] bg-blue-50 dark:bg-blue-950/30 border border-blue-200 dark:border-blue-800 flex flex-wrap items-center gap-3 text-xs">
                 <span className="font-semibold">已选 {selectedIds.length} 条</span>
                 <select value={batchCode} onChange={(e) => setBatchCode(Number(e.target.value) as 301 | 302 | 307)} className="px-2.5 py-1 rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900">
-                  <option value={301}>批量改为 301 (Dub TTL)</option>
+                  <option value={301}>批量改为 301 (定时回源 TTL)</option>
                   <option value={302}>批量改为 302</option>
                   <option value={307}>批量改为 307 (本地中间页)</option>
                 </select>
@@ -953,6 +1153,11 @@ export default function App() {
                           <a href={`/${l.slug}`} target="_blank" rel="noopener noreferrer" className="hover:underline">
                             {l.domain}/{l.slug}
                           </a>
+                          {l.isSystemProtected && (
+                            <span title="已锁定防删除" className="inline-flex items-center text-amber-600 dark:text-amber-400">
+                              <Lock className="w-3 h-3" />
+                            </span>
+                          )}
                           <button
                             type="button"
                             onClick={() => {
@@ -970,7 +1175,7 @@ export default function App() {
                         <div className="font-mono truncate">{l.targetUrl}</div>
                         <div className="text-[11px] text-slate-500 mt-0.5">
                           HTTP {l.redirectCode}
-                          {l.redirectCode === 301 ? ` · Dub TTL ${l.cacheTtlSeconds || 300}s` : l.redirectCode === 307 ? ' · 本地中间页' : ' · 实时回源'}
+                          {l.redirectCode === 301 ? ` · TTL ${l.cacheTtlSeconds || 300}s` : l.redirectCode === 307 ? ' · 本地中间页' : ' · 实时回源'}
                         </div>
                       </td>
                       <td className="py-3 px-3 text-right font-mono whitespace-nowrap">
@@ -985,9 +1190,23 @@ export default function App() {
                         </button>
                         <button
                           type="button"
+                          onClick={() => handleToggleLockLink(l)}
+                          title={l.isSystemProtected ? '已锁定防删除，点击解锁' : '点击锁定防删除'}
+                          aria-label={l.isSystemProtected ? `解锁 ${l.slug}` : `锁定 ${l.slug}`}
+                          className={`p-1.5 rounded-md ${
+                            l.isSystemProtected
+                              ? 'text-amber-600 dark:text-amber-400 bg-amber-50 dark:bg-amber-950/40'
+                              : 'text-slate-400 hover:text-amber-600'
+                          }`}
+                        >
+                          {l.isSystemProtected ? <Lock className="w-4 h-4" /> : <Unlock className="w-4 h-4" />}
+                        </button>
+                        <button
+                          type="button"
                           disabled={l.isSystemProtected}
                           onClick={() => handleDeleteLink(l.id)}
-                          className="p-1.5 text-slate-500 hover:text-red-600 disabled:opacity-30"
+                          title={l.isSystemProtected ? '已锁定防删除，请先解锁' : '删除短链'}
+                          className="p-1.5 text-slate-500 hover:text-red-600 disabled:opacity-30 disabled:cursor-not-allowed"
                         >
                           <Trash2 className="w-4 h-4" />
                         </button>
@@ -1068,6 +1287,48 @@ export default function App() {
               </table>
             </section>
           </div>
+        )}
+
+        {/* Multi-Domain Management & SEO */}
+        {activeTab === 'domains' && (
+          <DomainsPanel
+            domains={domains}
+            seoIndexNowKey={settings?.seoIndexNowKey || ''}
+            isAdmin={isAdmin}
+            onRefresh={loadWorkspace}
+          />
+        )}
+
+        {/* Users, RBAC & Quota Tiers */}
+        {activeTab === 'users' && isAdmin && (
+          <UsersPanel
+            users={usersList}
+            allowRegistration={Boolean(settings?.allowRegistration)}
+            currentUserId={user.id}
+            onRefresh={loadWorkspace}
+          />
+        )}
+
+        {/* REST API Keys & MCP Server */}
+        {activeTab === 'api_mcp' && (
+          <ApiMcpPanel
+            apiKeys={apiKeys}
+            issuerUrl={settings?.issuerUrl || window.location.origin}
+            onRefresh={loadWorkspace}
+          />
+        )}
+
+        {/* Audit Logs & Scheduled Database Backups */}
+        {activeTab === 'audit_cron' && isAdmin && (
+          <AuditBackupPanel
+            auditLogs={auditData.auditLogs}
+            backups={auditData.backups}
+            cronTasks={auditData.cronTasks}
+            auditRetentionDays={auditData.auditRetentionDays}
+            backupRetentionCount={auditData.backupRetentionCount}
+            dbDriver={auditData.dbDriver}
+            onRefresh={loadWorkspace}
+          />
         )}
 
         {/* 307 Local Interstitial Online Template Editor */}
@@ -1163,13 +1424,78 @@ export default function App() {
               <div>
                 <h2 className="text-sm font-semibold">根路径 301 · wimotek/Oauth (PKCE S256) · 防机器人与限流</h2>
                 <p className="text-slate-500 mt-0.5">
-                  OAUTH_SECRET 环境变量: {settings.oauthConfigured ? '已配置' : '未配置（未配置前不会强制跳转 OAuth）'} · 已拦截异常请求: {settings.blockedRequestsCount}
+                  OAuth 状态:{' '}
+                  <strong className={settings.oauthEnabled ? 'text-emerald-600' : 'text-amber-600'}>
+                    {settings.oauthEnabled
+                      ? `已连接并启用 (${settings.oauthSecretHint || '••••'})`
+                      : '未连接 · 未启用'}
+                  </strong>{' '}
+                  · 已拦截异常请求: {settings.blockedRequestsCount}
                 </p>
               </div>
               {isAdmin && (
                 <button type="submit" className="px-4 py-2 rounded-lg bg-blue-600 text-white font-medium">
                   保存配置
                 </button>
+              )}
+            </div>
+
+            {/* Dedicated OAuth Connect / Disconnect Status Bar */}
+            <div
+              className={`p-3.5 rounded-lg border flex flex-wrap items-center justify-between gap-3 ${
+                settings.oauthEnabled
+                  ? 'border-emerald-200 dark:border-emerald-900/60 bg-emerald-50/60 dark:bg-emerald-950/20'
+                  : 'border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-900/50'
+              }`}
+            >
+              <div className="space-y-0.5 min-w-0">
+                <div className="font-semibold flex items-center gap-2">
+                  <span className={`inline-block w-2 h-2 rounded-full ${settings.oauthEnabled ? 'bg-emerald-500' : 'bg-slate-400'}`} />
+                  {settings.oauthEnabled ? 'wimotek/Oauth 已连接 · 启用状态' : 'wimotek/Oauth 未连接 · 未启用'}
+                </div>
+                <p className="text-slate-500">
+                  {settings.oauthEnabled
+                    ? `当前已连接 ${settings.oauthIssuerUrl} (Client ID: ${settings.oauthClientId})。`
+                    : '填写 Issuer URL、Client ID 与 Client Secret 后，点击右侧「连接 OAuth」校验通过才会启用。'}
+                </p>
+                {oauthConnectError && <p className="text-red-600 font-medium">{oauthConnectError}</p>}
+                {oauthConnectMsg && <p className="text-emerald-600 font-medium">{oauthConnectMsg}</p>}
+              </div>
+              {isAdmin && (
+                <div className="flex items-center gap-2 shrink-0">
+                  {settings.oauthEnabled ? (
+                    <>
+                      <button
+                        type="button"
+                        disabled={oauthConnecting}
+                        onClick={handleConnectOAuth}
+                        className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 font-medium"
+                      >
+                        <Plug className="w-3.5 h-3.5" />
+                        {oauthConnecting ? '校验中...' : '重新连接'}
+                      </button>
+                      <button
+                        type="button"
+                        disabled={oauthConnecting}
+                        onClick={handleDisconnectOAuth}
+                        className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-red-300 dark:border-red-900/70 bg-white dark:bg-slate-900 text-red-600 font-medium"
+                      >
+                        <Unplug className="w-3.5 h-3.5" />
+                        断开连接
+                      </button>
+                    </>
+                  ) : (
+                    <button
+                      type="button"
+                      disabled={oauthConnecting}
+                      onClick={handleConnectOAuth}
+                      className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white font-medium"
+                    >
+                      <Plug className="w-3.5 h-3.5" />
+                      {oauthConnecting ? '正在连接...' : '连接 OAuth'}
+                    </button>
+                  )}
+                </div>
               )}
             </div>
 
@@ -1187,42 +1513,122 @@ export default function App() {
                 <input disabled={!isAdmin} value={settings.rootRedirectUrl} onChange={(e) => setSettings({ ...settings, rootRedirectUrl: e.target.value })} className="w-full px-3 py-2 font-mono rounded-lg border border-slate-300 dark:border-slate-700 bg-transparent" />
               </label>
 
-              <label className="flex items-start gap-2.5 p-3 rounded-lg border border-slate-200 dark:border-slate-800">
-                <input type="checkbox" disabled={!isAdmin} checked={settings.oauthEnabled} onChange={(e) => setSettings({ ...settings, oauthEnabled: e.target.checked })} />
-                <span>
-                  <strong>启用 wimotek/Oauth 统一登录</strong>
-                  <span className="block text-slate-500 mt-0.5">需先在容器环境变量配置 OAUTH_SECRET，开启后生效。</span>
-                </span>
+              <label className="space-y-1">
+                <span>自定义管理后台入口路径</span>
+                <input disabled={!isAdmin} value={settings.adminPath} onChange={(e) => setSettings({ ...settings, adminPath: e.target.value })} placeholder="/admin" className="w-full px-3 py-2 font-mono rounded-lg border border-slate-300 dark:border-slate-700 bg-transparent" />
               </label>
 
               <label className="flex items-start gap-2.5 p-3 rounded-lg border border-slate-200 dark:border-slate-800">
                 <input type="checkbox" disabled={!isAdmin} checked={settings.oauthAutoRedirect} onChange={(e) => setSettings({ ...settings, oauthAutoRedirect: e.target.checked })} />
                 <span>
-                  <strong>方式 A：未登录直跳 wimotek/Oauth 托管登录页</strong>
+                  <strong>方式 A：已连接 OAuth 时未登录直跳托管登录页</strong>
                   <span className="block text-slate-500 mt-0.5">退出后停留 /logged-out 防循环；应急本地登录请访问 /?local=1。</span>
                 </span>
               </label>
 
               <label className="space-y-1">
-                <span>OIDC Issuer</span>
+                <span>OIDC Issuer URL</span>
                 <input disabled={!isAdmin} value={settings.oauthIssuerUrl} onChange={(e) => setSettings({ ...settings, oauthIssuerUrl: e.target.value })} className="w-full px-3 py-2 font-mono rounded-lg border border-slate-300 dark:border-slate-700 bg-transparent" />
               </label>
               <label className="space-y-1">
                 <span>OIDC Client ID</span>
                 <input disabled={!isAdmin} value={settings.oauthClientId} onChange={(e) => setSettings({ ...settings, oauthClientId: e.target.value })} className="w-full px-3 py-2 font-mono rounded-lg border border-slate-300 dark:border-slate-700 bg-transparent" />
               </label>
-              <label className="space-y-1">
-                <span>OAuth Redirect URI</span>
-                <input disabled={!isAdmin} value={settings.oauthRedirectUri} onChange={(e) => setSettings({ ...settings, oauthRedirectUri: e.target.value })} className="w-full px-3 py-2 font-mono rounded-lg border border-slate-300 dark:border-slate-700 bg-transparent" />
-              </label>
+
+              <div className="space-y-1">
+                <label htmlFor="prod-oauth-secret" className="block">OAuth Client Secret（留空保持已配置密钥不变）</label>
+                <div className="relative">
+                  <input
+                    id="prod-oauth-secret"
+                    type={showClientSecret ? 'text' : 'password'}
+                    autoComplete="new-password"
+                    disabled={!isAdmin}
+                    value={oauthClientSecret}
+                    onChange={(e) => setOauthClientSecret(e.target.value)}
+                    placeholder={settings.oauthConfigured ? `已配置 (${settings.oauthSecretHint || '••••'})，输入新密钥可覆盖` : '输入 OAuth Client Secret'}
+                    className="w-full px-3 py-2 pr-9 font-mono rounded-lg border border-slate-300 dark:border-slate-700 bg-transparent"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowClientSecret((v) => !v)}
+                    aria-label={showClientSecret ? '隐藏 Client Secret' : '显示 Client Secret'}
+                    className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-700"
+                  >
+                    {showClientSecret ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                  </button>
+                </div>
+              </div>
+
               <label className="space-y-1">
                 <span>防机器人校验模式</span>
                 <select disabled={!isAdmin} value={settings.antiBotMode} onChange={(e) => setSettings({ ...settings, antiBotMode: e.target.value as SettingsState['antiBotMode'] })} className="w-full px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-transparent">
-                  <option value="builtin">内置 HMAC 算术挑战 + 蜜罐 (零依赖默认)</option>
+                  <option value="builtin">内置防AI验证（矢量扭曲图形 + SHA-256 算力 + 失败触发滑块 + IP绑定）</option>
                   <option value="turnstile">Cloudflare Turnstile</option>
                   <option value="off">仅 IP 限流</option>
                 </select>
               </label>
+            </div>
+
+            {/* Collapsible Advanced OAuth Section (Hidden by Default) */}
+            <div className="rounded-lg border border-slate-200 dark:border-slate-800 overflow-hidden">
+              <button
+                type="button"
+                onClick={() => setShowOAuthAdvanced((v) => !v)}
+                aria-expanded={showOAuthAdvanced}
+                className="w-full px-4 py-2.5 bg-slate-50 dark:bg-slate-900/50 hover:bg-slate-100 dark:hover:bg-slate-800/60 flex items-center justify-between gap-2 text-left"
+              >
+                <span className="inline-flex items-center gap-2 font-semibold text-slate-800 dark:text-slate-200">
+                  {showOAuthAdvanced ? <ChevronDown className="w-4 h-4 text-slate-500" /> : <ChevronRight className="w-4 h-4 text-slate-500" />}
+                  <SlidersHorizontal className="w-3.5 h-3.5 text-blue-600" />
+                  高级配置 (Advanced · Redirect URI / Discovery / Webhook)
+                </span>
+                <span className="text-[11px] text-slate-500">反代或检测域名不一致时展开修改</span>
+              </button>
+
+              {showOAuthAdvanced && (
+                <div className="p-4 space-y-4 border-t border-slate-200 dark:border-slate-800">
+                  <p className="text-[11px] text-slate-500">
+                    仅当站点部署在反向代理后或自动检测的回调域名与认证中心登记不一致时，才需要手动覆盖 Redirect URI 或查看 OIDC 端点。
+                  </p>
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <label className="space-y-1">
+                      <span>OAuth Redirect URI (Callback 覆写)</span>
+                      <input disabled={!isAdmin} value={settings.oauthRedirectUri} onChange={(e) => setSettings({ ...settings, oauthRedirectUri: e.target.value })} className="w-full px-3 py-2 font-mono rounded-lg border border-slate-300 dark:border-slate-700 bg-transparent" />
+                    </label>
+                    <div className="space-y-1">
+                      <label htmlFor="prod-webhook-secret" className="block">Webhook Signing Secret（可选）</label>
+                      <div className="relative">
+                        <input
+                          id="prod-webhook-secret"
+                          type={showWebhookSecret ? 'text' : 'password'}
+                          autoComplete="new-password"
+                          disabled={!isAdmin}
+                          value={oauthWebhookSecret}
+                          onChange={(e) => setOauthWebhookSecret(e.target.value)}
+                          placeholder={settings.oauthWebhookSecretConfigured ? '已配置 Webhook Secret，留空保持不变' : '留空默认复用 Client Secret'}
+                          className="w-full px-3 py-2 pr-9 font-mono rounded-lg border border-slate-300 dark:border-slate-700 bg-transparent"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => setShowWebhookSecret((v) => !v)}
+                          aria-label={showWebhookSecret ? '隐藏 Webhook Secret' : '显示 Webhook Secret'}
+                          className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-700"
+                        >
+                          {showWebhookSecret ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                  <div className="p-3 rounded-lg bg-slate-50 dark:bg-slate-900/60 border border-slate-200 dark:border-slate-800 grid grid-cols-1 md:grid-cols-2 gap-1.5 text-[11px] font-mono text-slate-600 dark:text-slate-300">
+                    <div>Discovery: {settings.oauthIssuerUrl.replace(/\/+$/, '')}/.well-known/openid-configuration</div>
+                    <div>JWKS (RS256): {settings.oauthIssuerUrl.replace(/\/+$/, '')}/.well-known/jwks.json</div>
+                    <div>Authorize: {settings.oauthIssuerUrl.replace(/\/+$/, '')}/oauth/authorize</div>
+                    <div>Token: {settings.oauthIssuerUrl.replace(/\/+$/, '')}/oauth/token</div>
+                    <div>Userinfo: {settings.oauthIssuerUrl.replace(/\/+$/, '')}/oauth/userinfo</div>
+                    <div>Webhook: POST /webhooks/oauth-events</div>
+                  </div>
+                </div>
+              )}
             </div>
 
             <div className="grid grid-cols-3 gap-3">

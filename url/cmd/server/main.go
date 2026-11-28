@@ -67,7 +67,7 @@ func main() {
 	mcpServer := mcp.NewServer(store, cacheLayer, auditLogger)
 	sched := scheduler.New(store, auditLogger, dataDir)
 	if cfg.Initialized {
-		sched.Start(cfg.BackupRetentionCount)
+		sched.StartWithConfig(cfg)
 	}
 
 	staticFS, err := fs.Sub(embeddedFrontend, "web/dist")
