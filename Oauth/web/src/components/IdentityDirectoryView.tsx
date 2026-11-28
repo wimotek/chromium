@@ -41,6 +41,7 @@ import type {
 } from '../types';
 import { TRANSLATIONS } from '../lib/i18n';
 import { TotpEnrollModal, type TotpEnrollDraft } from './QrCodeSvg';
+import { CollapsibleCodeBlock } from './CollapsibleCodeBlock';
 
 type FactorTab = 'methods' | 'passkeys' | 'password' | 'totp';
 type RoleFilter = 'all' | 'super_admin' | 'member';
@@ -1387,11 +1388,13 @@ export function IdentityDirectoryView({
                 </div>
               </div>
 
-              <div className="space-y-1.5">
-                <div className="flex items-center justify-between">
-                  <span className="font-semibold text-slate-800 dark:text-slate-200">
-                    {isZh ? '推送报文示例（Header 带 X-Wimotek-Signature-256）' : 'Example POST Payload (Header: X-Wimotek-Signature-256)'}
-                  </span>
+              <CollapsibleCodeBlock
+                locale={locale}
+                title={isZh ? '推送报文示例（Header 带 X-Wimotek-Signature-256）' : 'Example POST Payload (Header: X-Wimotek-Signature-256)'}
+                language="json"
+                tone="dark"
+                code={WEBHOOK_PAYLOAD_EXAMPLE}
+                actions={
                   <button
                     type="button"
                     onClick={() => copySnippet('wh_payload', WEBHOOK_PAYLOAD_EXAMPLE)}
@@ -1400,18 +1403,18 @@ export function IdentityDirectoryView({
                     {copiedKey === 'wh_payload' ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />}
                     <span>{copiedKey === 'wh_payload' ? (isZh ? '已复制' : 'Copied') : isZh ? '复制' : 'Copy'}</span>
                   </button>
-                </div>
-                <pre className="p-2.5 rounded-lg bg-slate-900 text-slate-100 font-mono text-[11px] overflow-x-auto leading-relaxed">
-                  {WEBHOOK_PAYLOAD_EXAMPLE}
-                </pre>
-              </div>
+                }
+              />
 
-              <div className="space-y-1.5">
-                <div className="flex items-center justify-between gap-2">
+              <CollapsibleCodeBlock
+                locale={locale}
+                title={isZh ? '业务后端验签示例' : 'Receiver Verification Example'}
+                language={webhookLang === 'node' ? 'js' : 'go'}
+                tone="dark"
+                maxHeightClass="max-h-56 overflow-y-auto"
+                code={webhookLang === 'node' ? WEBHOOK_NODE_EXAMPLE : WEBHOOK_GO_EXAMPLE}
+                actions={
                   <div className="flex items-center gap-2">
-                    <span className="font-semibold text-slate-800 dark:text-slate-200">
-                      {isZh ? '业务后端验签示例：' : 'Receiver Verification Example:'}
-                    </span>
                     <div className="inline-flex rounded border border-slate-300 dark:border-slate-700 overflow-hidden text-[11px]">
                       <button
                         type="button"
@@ -1436,22 +1439,19 @@ export function IdentityDirectoryView({
                         Go
                       </button>
                     </div>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        copySnippet('wh_code', webhookLang === 'node' ? WEBHOOK_NODE_EXAMPLE : WEBHOOK_GO_EXAMPLE)
+                      }
+                      className="inline-flex items-center gap-1 text-[11px] text-indigo-600 dark:text-indigo-400 hover:underline"
+                    >
+                      {copiedKey === 'wh_code' ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />}
+                      <span>{copiedKey === 'wh_code' ? (isZh ? '已复制' : 'Copied') : isZh ? '复制代码' : 'Copy'}</span>
+                    </button>
                   </div>
-                  <button
-                    type="button"
-                    onClick={() =>
-                      copySnippet('wh_code', webhookLang === 'node' ? WEBHOOK_NODE_EXAMPLE : WEBHOOK_GO_EXAMPLE)
-                    }
-                    className="inline-flex items-center gap-1 text-[11px] text-indigo-600 dark:text-indigo-400 hover:underline"
-                  >
-                    {copiedKey === 'wh_code' ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />}
-                    <span>{copiedKey === 'wh_code' ? (isZh ? '已复制' : 'Copied') : isZh ? '复制代码' : 'Copy'}</span>
-                  </button>
-                </div>
-                <pre className="p-2.5 rounded-lg bg-slate-900 text-slate-100 font-mono text-[11px] overflow-x-auto leading-relaxed max-h-56">
-                  {webhookLang === 'node' ? WEBHOOK_NODE_EXAMPLE : WEBHOOK_GO_EXAMPLE}
-                </pre>
-              </div>
+                }
+              />
             </div>
           )}
 

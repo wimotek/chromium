@@ -13,6 +13,7 @@ import {
   Cpu,
 } from 'lucide-react';
 import type { Locale } from '../types';
+import { CollapsibleCodeBlock } from './CollapsibleCodeBlock';
 
 export interface AdminApiTokenDTO {
   id: string;
@@ -426,9 +427,13 @@ function TokenManagerBody({
               ? '内置 6 个 MCP 工具：list_applications、get_login_theme、update_login_theme、list_connectors、get_auth_policy、list_users。'
               : 'Exposes 6 MCP tools: list_applications, get_login_theme, update_login_theme, list_connectors, get_auth_policy, list_users.'}
           </div>
-          <pre className="p-3 rounded-lg bg-slate-950 text-slate-100 font-mono text-[11px] overflow-x-auto leading-relaxed">
-            {mcpSnippet}
-          </pre>
+          <CollapsibleCodeBlock
+            locale={locale}
+            title="mcp.json"
+            language="json"
+            tone="dark"
+            code={mcpSnippet}
+          />
         </div>
       </div>
     </div>

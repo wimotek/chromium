@@ -8,14 +8,13 @@ import {
   Webhook,
   Server,
   CheckCircle2,
-  ChevronRight,
-  ChevronDown,
   FileCode2,
 } from 'lucide-react';
 import type { Locale, OAuthApplication } from '../types';
 import { TRANSLATIONS } from '../lib/i18n';
 import { resolveEffectiveIssuerUrl } from '../lib/loginTheme';
 import { EMBEDDED_SDKS, SDK_ORDER, type SdkLang } from '../lib/sdkSources';
+import { CollapsibleCodeBlock } from './CollapsibleCodeBlock';
 
 type DocsSection = 'idp_guide' | 'sdks' | 'webhooks_jit' | 'deployment';
 
@@ -170,7 +169,6 @@ export function SdkDocsView({ locale, issuerUrl, applications }: SdkDocsViewProp
   const [section, setSection] = useState<DocsSection>('idp_guide');
   const [lang, setLang] = useState<SdkLang>('python');
   const [selectedAppId, setSelectedAppId] = useState(applications[0]?.id || '');
-  const [sdkSourceExpanded, setSdkSourceExpanded] = useState(false);
   const [copiedId, setCopiedId] = useState<string | null>(null);
 
   const selectedApp = applications.find((a) => a.id === selectedAppId) || applications[0];
@@ -416,43 +414,51 @@ app.post('/webhooks/oauth-events', express.text({ type: 'application/json' }), (
 
           {/* Curl + Decoded ID Token Claims Split */}
           <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
-            <section className="lg:col-span-7 bg-white dark:bg-[#111827] border border-slate-200 dark:border-slate-800 rounded-xl overflow-hidden">
-              <div className="px-5 py-3.5 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between gap-3">
-                <h2 className="text-sm font-semibold text-slate-900 dark:text-white">
-                  {isZh ? '标准 OIDC 授权码 + PKCE 换票示例' : 'OIDC Authorization Code + PKCE Flow (cURL)'}
-                </h2>
+            <CollapsibleCodeBlock
+              locale={locale}
+              variant="card"
+              className="lg:col-span-7"
+              title={isZh ? '标准 OIDC 授权码 + PKCE 换票示例' : 'OIDC Authorization Code + PKCE Flow (cURL)'}
+              language="bash"
+              code={tokenExchangeCurl}
+              actions={
                 <button
                   type="button"
                   onClick={() => copy('curl_oidc', tokenExchangeCurl)}
-                  className="px-2.5 py-1 text-xs font-medium rounded-md border border-slate-200 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800 flex items-center gap-1.5"
+                  className="px-2.5 py-1 text-xs font-medium rounded-md border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 hover:bg-slate-50 dark:hover:bg-slate-800 flex items-center gap-1.5"
                 >
                   {copiedId === 'curl_oidc' ? <Check className="w-3.5 h-3.5 text-emerald-600" /> : <Copy className="w-3.5 h-3.5" />}
                   <span>{copiedId === 'curl_oidc' ? t.copied : t.copyCode}</span>
                 </button>
-              </div>
-              <pre className="p-5 text-xs font-mono text-slate-800 dark:text-slate-200 bg-slate-50/70 dark:bg-[#0B0F19] overflow-x-auto leading-relaxed">
-                {tokenExchangeCurl}
-              </pre>
-            </section>
+              }
+            />
 
-            <section className="lg:col-span-5 bg-white dark:bg-[#111827] border border-slate-200 dark:border-slate-800 rounded-xl overflow-hidden">
-              <div className="px-5 py-3.5 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between gap-3">
-                <h2 className="text-sm font-semibold text-slate-900 dark:text-white">
-                  {isZh ? '签发的 RS256 id_token 声明示例' : 'Issued RS256 id_token Claims'}
-                </h2>
-              </div>
-              <pre className="p-5 text-xs font-mono text-slate-800 dark:text-slate-200 bg-slate-50/70 dark:bg-[#0B0F19] overflow-x-auto leading-relaxed">
-                {sampleIdTokenClaims}
-              </pre>
-              <div className="px-5 py-3 border-t border-slate-200 dark:border-slate-800 bg-white dark:bg-[#111827] text-xs text-slate-500 dark:text-slate-400">
-                <div className="font-medium text-slate-700 dark:text-slate-300 mb-1">
-                  {isZh ? 'RFC 8628 设备码请求（CLI / 跨端扫码）' : 'RFC 8628 Device Authorization Grant'}
-                </div>
-                <pre className="p-2.5 rounded bg-slate-50 dark:bg-[#0B0F19] font-mono text-[11px] overflow-x-auto">
-                  {deviceFlowCurl}
-                </pre>
-              </div>
-            </section>
+            <div className="lg:col-span-5 space-y-4">
+              <CollapsibleCodeBlock
+                locale={locale}
+                variant="card"
+                title={isZh ? '签发的 RS256 id_token 声明示例' : 'Issued RS256 id_token Claims'}
+                language="json"
+                code={sampleIdTokenClaims}
+              />
+              <CollapsibleCodeBlock
+                locale={locale}
+                variant="card"
+                title={isZh ? 'RFC 8628 设备码请求（CLI / 跨端扫码）' : 'RFC 8628 Device Authorization Grant'}
+                language="bash"
+                code={deviceFlowCurl}
+                actions={
+                  <button
+                    type="button"
+                    onClick={() => copy('device_curl', deviceFlowCurl)}
+                    className="px-2.5 py-1 text-xs font-medium rounded-md border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 hover:bg-slate-50 dark:hover:bg-slate-800 flex items-center gap-1.5"
+                  >
+                    {copiedId === 'device_curl' ? <Check className="w-3.5 h-3.5 text-emerald-600" /> : <Copy className="w-3.5 h-3.5" />}
+                    <span>{copiedId === 'device_curl' ? t.copied : t.copyCode}</span>
+                  </button>
+                }
+              />
+            </div>
           </div>
         </div>
       )}
@@ -469,10 +475,7 @@ app.post('/webhooks/oauth-events', express.text({ type: 'application/json' }), (
                   role="tab"
                   type="button"
                   aria-selected={lang === item.id}
-                  onClick={() => {
-                    setLang(item.id);
-                    setSdkSourceExpanded(false);
-                  }}
+                  onClick={() => setLang(item.id)}
                   className={`px-3.5 py-1.5 text-xs font-medium rounded-md transition-colors whitespace-nowrap ${
                     lang === item.id
                       ? 'bg-white dark:bg-[#111827] text-slate-900 dark:text-white shadow-xs'
@@ -522,7 +525,11 @@ app.post('/webhooks/oauth-events', express.text({ type: 'application/json' }), (
                       ? 'Go 就像前端的 npm：先执行 go mod init 初始化项目，再用 go get 拉取独立零依赖子模块 github.com/wimotek/oauth/sdk/go，接着把下方 main.go 复制运行即可。'
                       : 'Initialize go.mod, run go get to pull the standalone zero-dependency SDK submodule, then save and run the complete main.go below.'}
                   </p>
-                  <pre className="p-3.5 rounded-lg bg-slate-50 dark:bg-[#0B0F19] border border-slate-200 dark:border-slate-800 font-mono text-[11px] text-slate-800 dark:text-slate-200 overflow-x-auto leading-relaxed">{`mkdir my-go-app && cd my-go-app
+                  <CollapsibleCodeBlock
+                    locale={locale}
+                    title={isZh ? '终端命令（go mod & go get）' : 'Terminal Commands (go mod & go get)'}
+                    language="bash"
+                    code={`mkdir my-go-app && cd my-go-app
 go mod init my-go-app
 # 国内网络可选加速代理：
 go env -w GOPROXY=https://goproxy.cn,direct
@@ -530,7 +537,8 @@ go env -w GOPROXY=https://goproxy.cn,direct
 go get github.com/wimotek/oauth/sdk/go@latest
 # 运行下方完整 main.go：
 export OAUTH_SECRET="<CLIENT_SECRET>"
-go run main.go`}</pre>
+go run main.go`}
+                  />
                 </div>
 
                 <div className="p-5 space-y-2.5">
@@ -542,101 +550,72 @@ go run main.go`}</pre>
                       ? '如果尚未推送 Git 仓库或处于内网隔离环境，展开最下方 93 行 client.go 源码，直接保存为项目里的 pkg/wimotekoauth/client.go，把 import 路径改为 "my-go-app/pkg/wimotekoauth" 即可离线运行。'
                       : 'For private/offline environments or before publishing to Git, expand the 93-line client.go below, save it as pkg/wimotekoauth/client.go, and import "my-go-app/pkg/wimotekoauth".'}
                   </p>
-                  <pre className="p-3.5 rounded-lg bg-slate-50 dark:bg-[#0B0F19] border border-slate-200 dark:border-slate-800 font-mono text-[11px] text-slate-800 dark:text-slate-200 overflow-x-auto leading-relaxed">{`my-go-app/
+                  <CollapsibleCodeBlock
+                    locale={locale}
+                    title={isZh ? '离线目录结构示例' : 'Offline Directory Layout'}
+                    language="text"
+                    code={`my-go-app/
 ├── go.mod                      # module my-go-app
 ├── main.go                     # 下方可直接运行的完整示例
 └── pkg/
     └── wimotekoauth/
-        └── client.go           # 展开下方 SDK 源码复制至此`}</pre>
+        └── client.go           # 展开下方 SDK 源码复制至此`}
+                  />
                 </div>
               </div>
             </section>
           )}
 
-          <section className="bg-white dark:bg-[#111827] border border-slate-200 dark:border-slate-800 rounded-xl overflow-hidden">
-            <div className="px-5 py-3.5 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between gap-3">
-              <div className="flex items-center gap-2">
-                <Code2 className="w-4 h-4 text-indigo-600 dark:text-indigo-400" />
-                <h2 className="text-sm font-semibold text-slate-900 dark:text-white">
-                  {lang === 'go'
-                    ? isZh
-                      ? '完整可直接运行的 main.go 示例（含标准库 Cookie 会话）'
-                      : 'Complete Runnable main.go Example (Stdlib Cookie Session)'
-                    : `${t.quickStartLines} (${currentSdk.label})`}
-                </h2>
-              </div>
+          <CollapsibleCodeBlock
+            locale={locale}
+            variant="card"
+            resetKey={lang}
+            icon={<Code2 className="w-4 h-4 text-indigo-600 dark:text-indigo-400" />}
+            title={
+              lang === 'go'
+                ? isZh
+                  ? '完整可直接运行的 main.go 示例（含标准库 Cookie 会话）'
+                  : 'Complete Runnable main.go Example (Stdlib Cookie Session)'
+                : `${t.quickStartLines} (${currentSdk.label})`
+            }
+            language={lang}
+            headerBanner={isZh ? currentSdk.packageHintZh : currentSdk.packageHintEn}
+            code={quickSnippet}
+            actions={
               <button
                 type="button"
                 onClick={() => copy('quick', quickSnippet)}
-                className="px-2.5 py-1.5 text-xs font-medium rounded-md border border-slate-200 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800 flex items-center gap-1.5 whitespace-nowrap"
+                className="px-2.5 py-1.5 text-xs font-medium rounded-md border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 hover:bg-slate-50 dark:hover:bg-slate-800 flex items-center gap-1.5 whitespace-nowrap"
               >
                 {copiedId === 'quick' ? <Check className="w-3.5 h-3.5 text-emerald-600" /> : <Copy className="w-3.5 h-3.5" />}
                 <span>{copiedId === 'quick' ? t.copied : t.copyCode}</span>
               </button>
-            </div>
-            <div className="px-5 py-2.5 border-b border-slate-100 dark:border-slate-800/80 bg-indigo-50/40 dark:bg-indigo-950/20 text-xs text-slate-700 dark:text-slate-300 leading-relaxed">
-              {isZh ? currentSdk.packageHintZh : currentSdk.packageHintEn}
-            </div>
-            <pre className="p-5 text-xs font-mono text-slate-800 dark:text-slate-200 bg-slate-50/70 dark:bg-[#0B0F19] overflow-x-auto leading-relaxed">
-              {quickSnippet}
-            </pre>
-          </section>
+            }
+          />
 
           {/* Collapsible Minimalist SDK Source (Markdown-style disclosure, collapsed by default) */}
-          <section className="bg-white dark:bg-[#111827] border border-slate-200 dark:border-slate-800 rounded-xl overflow-hidden">
-            <div className="flex items-center justify-between gap-3 pr-5 hover:bg-slate-50/70 dark:hover:bg-slate-800/30 transition-colors">
-              <button
-                type="button"
-                aria-expanded={sdkSourceExpanded}
-                onClick={() => setSdkSourceExpanded((v) => !v)}
-                className="flex-1 px-5 py-3.5 text-left flex items-center gap-3 min-w-0"
-              >
-                {sdkSourceExpanded ? (
-                  <ChevronDown className="w-4 h-4 shrink-0 text-indigo-600 dark:text-indigo-400" />
-                ) : (
-                  <ChevronRight className="w-4 h-4 shrink-0 text-slate-500 dark:text-slate-400" />
-                )}
-                <FileCode2 className="w-4 h-4 shrink-0 text-slate-500 dark:text-slate-400" />
-                <div className="min-w-0">
-                  <div className="flex items-center gap-2 flex-wrap">
-                    <h2 className="text-sm font-semibold text-slate-900 dark:text-white">
-                      {t.fullMinimalSdk}
-                    </h2>
-                    <span className="text-xs font-mono text-slate-500 dark:text-slate-400">
-                      ({currentSdk.lineCount} {isZh ? '行 · 零第三方依赖' : 'lines · zero deps'})
-                    </span>
-                  </div>
-                  <p className="text-xs font-mono text-slate-500 dark:text-slate-400 truncate mt-0.5">
-                    {currentSdk.path} ·{' '}
-                    <span className="font-sans text-indigo-600 dark:text-indigo-400">
-                      {sdkSourceExpanded
-                        ? isZh
-                          ? '点击收起源码'
-                          : 'Click to collapse source'
-                        : isZh
-                          ? '点击展开完整源码'
-                          : 'Click to expand full source'}
-                    </span>
-                  </p>
-                </div>
-              </button>
-
+          <CollapsibleCodeBlock
+            locale={locale}
+            variant="card"
+            resetKey={lang}
+            icon={<FileCode2 className="w-4 h-4 text-slate-500 dark:text-slate-400" />}
+            title={t.fullMinimalSdk}
+            subtitle={`${currentSdk.path} · ${isZh ? '零第三方依赖' : 'zero deps'}`}
+            language={lang}
+            lineCountOverride={currentSdk.lineCount}
+            maxHeightClass="max-h-[520px] overflow-y-auto"
+            code={currentSdk.source}
+            actions={
               <button
                 type="button"
                 onClick={() => copy('sdk', currentSdk.source)}
-                className="px-2.5 py-1.5 text-xs font-medium rounded-md border border-slate-200 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800 flex items-center gap-1.5 whitespace-nowrap shrink-0"
+                className="px-2.5 py-1.5 text-xs font-medium rounded-md border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 hover:bg-slate-50 dark:hover:bg-slate-800 flex items-center gap-1.5 whitespace-nowrap shrink-0"
               >
                 {copiedId === 'sdk' ? <Check className="w-3.5 h-3.5 text-emerald-600" /> : <Copy className="w-3.5 h-3.5" />}
                 <span>{copiedId === 'sdk' ? t.copied : t.copyCode}</span>
               </button>
-            </div>
-
-            {sdkSourceExpanded && (
-              <pre className="p-5 border-t border-slate-200 dark:border-slate-800 text-xs font-mono text-slate-800 dark:text-slate-200 bg-slate-50/70 dark:bg-[#0B0F19] overflow-x-auto max-h-[520px] leading-relaxed">
-                {currentSdk.source}
-              </pre>
-            )}
-          </section>
+            }
+          />
         </div>
       )}
 
@@ -666,53 +645,47 @@ go run main.go`}</pre>
             </div>
           </div>
 
-          <section className="bg-white dark:bg-[#111827] border border-slate-200 dark:border-slate-800 rounded-xl overflow-hidden">
-            <div className="px-5 py-3.5 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between gap-3">
-              <h2 className="text-sm font-semibold text-slate-900 dark:text-white">
-                {isZh ? '下游业务站验签与踢人示例（Node.js / Express）' : 'Downstream Webhook Verification (Node.js / Express)'}
-              </h2>
+          <CollapsibleCodeBlock
+            locale={locale}
+            variant="card"
+            title={isZh ? '下游业务站验签与踢人示例（Node.js / Express）' : 'Downstream Webhook Verification (Node.js / Express)'}
+            language="ts"
+            code={webhookVerifyNode}
+            actions={
               <button
                 type="button"
                 onClick={() => copy('wh_code', webhookVerifyNode)}
-                className="px-2.5 py-1 text-xs font-medium rounded-md border border-slate-200 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800 flex items-center gap-1.5"
+                className="px-2.5 py-1 text-xs font-medium rounded-md border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 hover:bg-slate-50 dark:hover:bg-slate-800 flex items-center gap-1.5"
               >
                 {copiedId === 'wh_code' ? <Check className="w-3.5 h-3.5 text-emerald-600" /> : <Copy className="w-3.5 h-3.5" />}
                 <span>{copiedId === 'wh_code' ? t.copied : t.copyCode}</span>
               </button>
-            </div>
-            <pre className="p-5 text-xs font-mono text-slate-800 dark:text-slate-200 bg-slate-50/70 dark:bg-[#0B0F19] overflow-x-auto leading-relaxed">
-              {webhookVerifyNode}
-            </pre>
-          </section>
+            }
+          />
         </div>
       )}
 
       {/* SECTION 4: Deployment & Security */}
       {section === 'deployment' && (
         <div className="space-y-6">
-          <section className="bg-white dark:bg-[#111827] border border-slate-200 dark:border-slate-800 rounded-xl overflow-hidden">
-            <div className="px-5 py-3.5 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between gap-3">
-              <div>
-                <h2 className="text-sm font-semibold text-slate-900 dark:text-white">
-                  {isZh ? 'Docker Compose 生产部署示例（含 # 可选变量说明）' : 'Docker Compose Production Template (with # Optional Variables)'}
-                </h2>
-                <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
-                  Oauth/docker-compose.yml · {isZh ? '先执行 mkdir -p ./data && chown -R 1000:1000 ./data' : 'Run mkdir -p ./data && chown -R 1000:1000 ./data first'}
-                </p>
-              </div>
+          <CollapsibleCodeBlock
+            locale={locale}
+            variant="card"
+            title={isZh ? 'Docker Compose 生产部署示例（含 # 可选变量说明）' : 'Docker Compose Production Template (with # Optional Variables)'}
+            subtitle={`Oauth/docker-compose.yml · ${isZh ? '先执行 mkdir -p ./data && chown -R 1000:1000 ./data' : 'Run mkdir -p ./data && chown -R 1000:1000 ./data first'}`}
+            language="yaml"
+            code={dockerComposeSnippet}
+            actions={
               <button
                 type="button"
                 onClick={() => copy('docker_compose', dockerComposeSnippet)}
-                className="px-2.5 py-1 text-xs font-medium rounded-md border border-slate-200 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800 flex items-center gap-1.5 whitespace-nowrap"
+                className="px-2.5 py-1 text-xs font-medium rounded-md border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 hover:bg-slate-50 dark:hover:bg-slate-800 flex items-center gap-1.5 whitespace-nowrap"
               >
                 {copiedId === 'docker_compose' ? <Check className="w-3.5 h-3.5 text-emerald-600" /> : <Copy className="w-3.5 h-3.5" />}
                 <span>{copiedId === 'docker_compose' ? t.copied : t.copyCode}</span>
               </button>
-            </div>
-            <pre className="p-5 text-xs font-mono text-slate-800 dark:text-slate-200 bg-slate-50/70 dark:bg-[#0B0F19] overflow-x-auto leading-relaxed">
-              {dockerComposeSnippet}
-            </pre>
-          </section>
+            }
+          />
 
           <div className="grid grid-cols-1 md:grid-cols-3 border border-slate-200 dark:border-slate-800 rounded-xl bg-white dark:bg-[#111827] divide-y md:divide-y-0 md:divide-x divide-slate-200 dark:divide-slate-800 text-xs">
             <div className="p-5 space-y-1">

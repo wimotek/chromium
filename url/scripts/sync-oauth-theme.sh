@@ -6,8 +6,8 @@ set -euo pipefail
 #   export WIMOTEK_ADMIN_SESSION_TOKEN="your_admin_session_token"
 #   ./scripts/sync-oauth-theme.sh
 
-ISSUER_URL="${WIMOTEK_OAUTH_ISSUER:-http://ca.wimotek.com}"
-CLIENT_ID="${WIMOTEK_OAUTH_CLIENT_ID:-wimotek_c41ac24274c6}"
+ISSUER_URL="${OAUTH_ISSUER:-https://auth.wimotek.com}"
+CLIENT_ID="${OAUTH_CLIENT_ID:-wimotek_c41ac24274c6}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 THEME_FILE="${SCRIPT_DIR}/../oauth-theme.json"
 

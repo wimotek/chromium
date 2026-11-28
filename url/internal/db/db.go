@@ -21,12 +21,12 @@ import (
 // Store wraps SQLite3 (WAL + serialized writer mutex to prevent SQLITE_BUSY/deadlocks)
 // and MySQL (pooled connections) behind a unified concurrency-safe interface.
 type Store struct {
-	mu       sync.RWMutex
-	writeMu  sync.Mutex
-	db       *sql.DB
-	driver   string
-	dsn      string
-	dataDir  string
+	mu      sync.RWMutex
+	writeMu sync.Mutex
+	db      *sql.DB
+	driver  string
+	dsn     string
+	dataDir string
 }
 
 func NewStore(dataDir string) *Store {
@@ -60,7 +60,6 @@ func (s *Store) Connect(cfg config.DatabaseConfig) error {
 	}
 
 	if cfg.Driver == "sqlite3" {
-		// Serialize SQLite writes via MaxOpenConns(1) + WAL + busy_timeout to eliminate database locks.
 		conn.SetMaxOpenConns(1)
 		conn.SetMaxIdleConns(1)
 		conn.SetConnMaxLifetime(0)
@@ -163,6 +162,7 @@ func (s *Store) Migrate() error {
 				tier VARCHAR(32) NOT NULL DEFAULT 'free',
 				status VARCHAR(32) NOT NULL DEFAULT 'active',
 				auth_provider VARCHAR(32) NOT NULL DEFAULT 'local',
+				oauth_sub VARCHAR(128) NOT NULL DEFAULT '',
 				last_login_at TIMESTAMP NULL,
 				created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 			);`,
@@ -192,6 +192,7 @@ func (s *Store) Migrate() error {
 				seo_description TEXT NOT NULL,
 				seo_indexable BOOLEAN NOT NULL DEFAULT TRUE,
 				redirect_code INTEGER NOT NULL DEFAULT 302,
+				cache_ttl_seconds INTEGER NOT NULL DEFAULT 0,
 				password_hash VARCHAR(255) NOT NULL DEFAULT '',
 				expires_at TIMESTAMP NULL,
 				max_clicks INTEGER NULL,
@@ -212,6 +213,8 @@ func (s *Store) Migrate() error {
 				region VARCHAR(128) NOT NULL DEFAULT '',
 				city VARCHAR(128) NOT NULL DEFAULT '',
 				referrer VARCHAR(255) NOT NULL DEFAULT 'Direct',
+				referrer_host VARCHAR(255) NOT NULL DEFAULT 'direct',
+				referrer_url TEXT NOT NULL DEFAULT '',
 				device VARCHAR(64) NOT NULL DEFAULT 'Desktop',
 				browser VARCHAR(64) NOT NULL DEFAULT 'Other',
 				created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -257,6 +260,17 @@ func (s *Store) Migrate() error {
 				return fmt.Errorf("migration failed: %w", err)
 			}
 		}
+
+		// Idempotent additive migrations for existing databases
+		alters := []string{
+			`ALTER TABLE users ADD COLUMN oauth_sub VARCHAR(128) NOT NULL DEFAULT ''`,
+			`ALTER TABLE short_links ADD COLUMN cache_ttl_seconds INTEGER NOT NULL DEFAULT 0`,
+			`ALTER TABLE click_events ADD COLUMN referrer_host VARCHAR(255) NOT NULL DEFAULT 'direct'`,
+			`ALTER TABLE click_events ADD COLUMN referrer_url TEXT NOT NULL DEFAULT ''`,
+		}
+		for _, alter := range alters {
+			_, _ = conn.Exec(alter)
+		}
 		return nil
 	})
 }
@@ -272,7 +286,6 @@ func (s *Store) Backup(retentionCount int) (string, error) {
 	if s.Driver() == "sqlite3" {
 		dest := filepath.Join(backupDir, fmt.Sprintf("wimotek-url-sqlite-%s.db", ts))
 		err := s.WithWriteLock(func(conn *sql.DB) error {
-			// Flush WAL checkpoint before consistent file copy
 			_, _ = conn.Exec("PRAGMA wal_checkpoint(TRUNCATE);")
 			src, err := os.Open(s.dsn)
 			if err != nil {

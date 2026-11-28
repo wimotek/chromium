@@ -37,6 +37,7 @@ import {
 } from '../lib/connectorAutoConfig';
 import { getIssuerMismatchInfo } from '../lib/loginTheme';
 import { ProviderIcon } from './ProviderIcons';
+import { CollapsibleCodeBlock } from './CollapsibleCodeBlock';
 
 interface ConnectorsViewProps {
   locale: Locale;
@@ -1813,9 +1814,13 @@ export function ConnectorsView({
                       </button>
                     </div>
                   </div>
-                  <pre className="p-3.5 rounded-lg bg-slate-950 text-slate-200 text-xs font-mono overflow-x-auto leading-relaxed">
-                    {exportSnippet}
-                  </pre>
+                  <CollapsibleCodeBlock
+                    locale={locale}
+                    title={exportFormat === 'json' ? 'connector.json' : '.env'}
+                    language={exportFormat === 'json' ? 'json' : 'env'}
+                    tone="dark"
+                    code={exportSnippet}
+                  />
                 </div>
               </div>
             )}

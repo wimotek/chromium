@@ -44,10 +44,10 @@ import {
   normalizeLoginTheme,
   parseImportedLoginThemeJson,
   resolveEffectiveIssuerUrl,
-  type AiLoginEntryMode,
 } from '../lib/loginTheme';
 import { HostedLoginCard } from './HostedLoginCard';
 import { AdminTokenManagerModal, buildMcpClientConfigJson } from './AdminApiTokensSection';
+import { CollapsibleCodeBlock } from './CollapsibleCodeBlock';
 
 type LabRightTab = 'theme' | 'ai_api' | 'trace';
 
@@ -116,7 +116,6 @@ export function LoginLabView({
   const [jsonInputText, setJsonInputText] = useState('');
   const [jsonImportError, setJsonImportError] = useState<string | null>(null);
   const [importingSave, setImportingSave] = useState(false);
-  const [loginEntryMode, setLoginEntryMode] = useState<AiLoginEntryMode>('direct_redirect');
   const [editingIssuer, setEditingIssuer] = useState(false);
   const [draftIssuerUrl, setDraftIssuerUrl] = useState('');
   const [savingIssuer, setSavingIssuer] = useState(false);
@@ -200,9 +199,8 @@ export function LoginLabView({
         appName: activeAppName,
         redirectUri: activeRedirectUri,
         locale,
-        loginEntryMode,
       }),
-    [cleanIssuer, activeClientId, activeAppName, activeRedirectUri, locale, loginEntryMode]
+    [cleanIssuer, activeClientId, activeAppName, activeRedirectUri, locale]
   );
 
   const activeTokenDisplay = mintedTokenInMem && fillMintedToken ? mintedTokenInMem : '$WIMOTEK_ADMIN_TOKEN';
@@ -1024,23 +1022,27 @@ export function LoginLabView({
                         </span>
                       </label>
                     )}
-                    <div className="flex items-center justify-between gap-2 pt-1">
-                      <span className="flex items-center gap-1.5 font-mono text-[11px] text-slate-700 dark:text-slate-300 break-all">
-                        <Cpu className="w-3.5 h-3.5 text-indigo-500 shrink-0" />
-                        <span>POST {cleanIssuer}/api/mcp</span>
-                      </span>
-                      <button
-                        type="button"
-                        onClick={() => handleCopy('mcp_cfg', mcpClientConfig)}
-                        className="px-2 py-1 rounded border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-[11px] font-medium flex items-center gap-1 hover:bg-slate-50 dark:hover:bg-slate-800 shrink-0"
-                      >
-                        {copiedId === 'mcp_cfg' ? <Check className="w-3 h-3 text-emerald-600" /> : <Copy className="w-3 h-3" />}
-                        <span>{copiedId === 'mcp_cfg' ? (isZh ? '已复制' : 'Copied') : 'Copy mcp.json'}</span>
-                      </button>
+                    <div className="flex items-center gap-1.5 font-mono text-[11px] text-slate-700 dark:text-slate-300 break-all pt-1">
+                      <Cpu className="w-3.5 h-3.5 text-indigo-500 shrink-0" />
+                      <span>POST {cleanIssuer}/api/mcp</span>
                     </div>
-                    <pre className="p-2.5 rounded-md bg-slate-950 text-slate-100 font-mono text-[10.5px] overflow-x-auto leading-relaxed">
-                      {mcpClientConfig}
-                    </pre>
+                    <CollapsibleCodeBlock
+                      locale={locale}
+                      title="mcp.json"
+                      language="json"
+                      tone="dark"
+                      code={mcpClientConfig}
+                      actions={
+                        <button
+                          type="button"
+                          onClick={() => handleCopy('mcp_cfg', mcpClientConfig)}
+                          className="px-2 py-1 rounded border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-[11px] font-medium flex items-center gap-1 hover:bg-slate-50 dark:hover:bg-slate-800 shrink-0"
+                        >
+                          {copiedId === 'mcp_cfg' ? <Check className="w-3 h-3 text-emerald-600" /> : <Copy className="w-3 h-3" />}
+                          <span>{copiedId === 'mcp_cfg' ? (isZh ? '已复制' : 'Copied') : 'Copy mcp.json'}</span>
+                        </button>
+                      }
+                    />
                   </div>
                 </div>
 
@@ -1049,14 +1051,6 @@ export function LoginLabView({
                     <span className="font-semibold text-slate-900 dark:text-white">
                       {isZh ? 'Theme REST API（供 AI / CI 自动同步）' : 'Theme REST API (AI / CI Sync)'}
                     </span>
-                    <button
-                      type="button"
-                      onClick={() => handleCopy('curl', curlSyncCommand)}
-                      className="px-2 py-1 rounded border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-[11px] font-medium flex items-center gap-1 hover:bg-slate-50 dark:hover:bg-slate-800"
-                    >
-                      {copiedId === 'curl' ? <Check className="w-3 h-3 text-emerald-600" /> : <Copy className="w-3 h-3" />}
-                      <span>{copiedId === 'curl' ? (isZh ? '已复制' : 'Copied') : 'Copy curl'}</span>
-                    </button>
                   </div>
                   <div className="p-3 space-y-2">
                     <div className="font-mono text-[11px] text-slate-600 dark:text-slate-300 space-y-1 break-all">
@@ -1069,17 +1063,36 @@ export function LoginLabView({
                         {cleanIssuer}/api/applications/{activeClientId}/theme
                       </div>
                     </div>
-                    <pre className="p-2.5 rounded-md bg-slate-950 text-slate-100 font-mono text-[10.5px] overflow-x-auto max-h-40 leading-relaxed">
-                      {curlSyncCommand}
-                    </pre>
+                    <CollapsibleCodeBlock
+                      locale={locale}
+                      title={isZh ? 'curl 同步示例命令' : 'curl Sync Command'}
+                      language="bash"
+                      tone="dark"
+                      maxHeightClass="max-h-56 overflow-y-auto"
+                      code={curlSyncCommand}
+                      actions={
+                        <button
+                          type="button"
+                          onClick={() => handleCopy('curl', curlSyncCommand)}
+                          className="px-2 py-1 rounded border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-[11px] font-medium flex items-center gap-1 hover:bg-slate-50 dark:hover:bg-slate-800"
+                        >
+                          {copiedId === 'curl' ? <Check className="w-3 h-3 text-emerald-600" /> : <Copy className="w-3 h-3" />}
+                          <span>{copiedId === 'curl' ? (isZh ? '已复制' : 'Copied') : 'Copy curl'}</span>
+                        </button>
+                      }
+                    />
                   </div>
                 </div>
 
-                <div className="border border-slate-200 dark:border-slate-800 rounded-lg overflow-hidden">
-                  <div className="px-3.5 py-2.5 bg-slate-50 dark:bg-[#0D1321] border-b border-slate-200 dark:border-slate-800 flex items-center justify-between gap-2">
-                    <span className="font-semibold text-slate-900 dark:text-white">
-                      {isZh ? '提示词 1：让 AI 按业务站风格自动改样式' : 'Prompt 1: AI Auto Style & Layout Sync'}
-                    </span>
+                <CollapsibleCodeBlock
+                  locale={locale}
+                  variant="card"
+                  title={isZh ? '提示词 1：让 AI 按业务站风格自动改样式' : 'Prompt 1: AI Auto Style & Layout Sync'}
+                  language="markdown"
+                  wrap
+                  maxHeightClass="max-h-64 overflow-y-auto"
+                  code={aiThemePrompt}
+                  actions={
                     <button
                       type="button"
                       onClick={() => handleCopy('prompt_theme', aiThemePrompt)}
@@ -1088,17 +1101,18 @@ export function LoginLabView({
                       {copiedId === 'prompt_theme' ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />}
                       <span>{copiedId === 'prompt_theme' ? (isZh ? '已复制' : 'Copied') : isZh ? '复制提示词' : 'Copy Prompt'}</span>
                     </button>
-                  </div>
-                  <pre className="p-3 bg-slate-50/70 dark:bg-[#0B0F19] font-mono text-[11px] text-slate-700 dark:text-slate-300 whitespace-pre-wrap max-h-48 overflow-y-auto leading-relaxed">
-                    {aiThemePrompt}
-                  </pre>
-                </div>
+                  }
+                />
 
-                <div className="border border-slate-200 dark:border-slate-800 rounded-lg overflow-hidden">
-                  <div className="px-3.5 py-2.5 bg-slate-50 dark:bg-[#0D1321] border-b border-slate-200 dark:border-slate-800 flex items-center justify-between gap-2">
-                    <span className="font-semibold text-slate-900 dark:text-white">
-                      {isZh ? '提示词 2：让 AI 一键集成 OIDC 登录开发' : 'Prompt 2: AI Full OIDC Integration'}
-                    </span>
+                <CollapsibleCodeBlock
+                  locale={locale}
+                  variant="card"
+                  title={isZh ? '提示词 2：让 AI 一键集成 OIDC 登录开发' : 'Prompt 2: AI Full OIDC Integration'}
+                  language="markdown"
+                  wrap
+                  maxHeightClass="max-h-64 overflow-y-auto"
+                  code={aiIntegrationPrompt}
+                  actions={
                     <button
                       type="button"
                       onClick={() => handleCopy('prompt_oidc', aiIntegrationPrompt)}
@@ -1107,88 +1121,8 @@ export function LoginLabView({
                       {copiedId === 'prompt_oidc' ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />}
                       <span>{copiedId === 'prompt_oidc' ? (isZh ? '已复制' : 'Copied') : isZh ? '复制提示词' : 'Copy Prompt'}</span>
                     </button>
-                  </div>
-
-                  {/* Login Entry Mode Selector + Comparison Note */}
-                  <div className="p-3 border-b border-slate-200 dark:border-slate-800 bg-white dark:bg-[#111827] space-y-2.5">
-                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
-                      <span className="text-[11px] font-semibold text-slate-700 dark:text-slate-300">
-                        {isZh ? '选择未登录时的入口方式' : 'Unauthenticated Entry Behavior'}
-                      </span>
-                      <div
-                        role="radiogroup"
-                        aria-label={isZh ? '登录入口方式' : 'Login entry mode'}
-                        className="inline-flex p-0.5 rounded-lg bg-slate-100 dark:bg-slate-800/80 border border-slate-200 dark:border-slate-700 gap-0.5"
-                      >
-                        <button
-                          type="button"
-                          role="radio"
-                          aria-checked={loginEntryMode === 'direct_redirect'}
-                          onClick={() => setLoginEntryMode('direct_redirect')}
-                          className={`px-2.5 py-1 rounded-md text-[11px] font-medium transition-colors whitespace-nowrap ${
-                            loginEntryMode === 'direct_redirect'
-                              ? 'bg-white dark:bg-[#111827] text-indigo-700 dark:text-indigo-300 shadow-xs'
-                              : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
-                          }`}
-                        >
-                          {isZh ? '方式 A：直接跳转登录页（默认）' : 'Mode A: Direct Redirect (Default)'}
-                        </button>
-                        <button
-                          type="button"
-                          role="radio"
-                          aria-checked={loginEntryMode === 'button_trigger'}
-                          onClick={() => setLoginEntryMode('button_trigger')}
-                          className={`px-2.5 py-1 rounded-md text-[11px] font-medium transition-colors whitespace-nowrap ${
-                            loginEntryMode === 'button_trigger'
-                              ? 'bg-white dark:bg-[#111827] text-indigo-700 dark:text-indigo-300 shadow-xs'
-                              : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
-                          }`}
-                        >
-                          {isZh ? '方式 B：按钮点击后登录' : 'Mode B: Button Trigger'}
-                        </button>
-                      </div>
-                    </div>
-
-                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-[11px] leading-relaxed">
-                      <div
-                        className={`p-2.5 rounded-lg border transition-colors ${
-                          loginEntryMode === 'direct_redirect'
-                            ? 'border-indigo-300 dark:border-indigo-700 bg-indigo-50/60 dark:bg-indigo-950/30 text-slate-800 dark:text-slate-200'
-                            : 'border-slate-200 dark:border-slate-800 bg-slate-50/60 dark:bg-slate-900/40 text-slate-600 dark:text-slate-400'
-                        }`}
-                      >
-                        <div className="font-semibold text-slate-900 dark:text-white mb-0.5">
-                          {isZh ? '方式 A · 直接跳转登录页（默认）' : 'Mode A · Direct Auto-Redirect (Default)'}
-                        </div>
-                        <p>
-                          {isZh
-                            ? '打开网站未登录时直接 302 / 守卫跳转至认证中心登录页，不生成多余的「点击登录」中间页。适合后台系统、企业内部工具与纯 SaaS 工作台。'
-                            : 'Redirects unauthenticated visitors straight to the hosted login page with zero extra click. Best for admin panels, internal tools, and private SaaS apps.'}
-                        </p>
-                      </div>
-                      <div
-                        className={`p-2.5 rounded-lg border transition-colors ${
-                          loginEntryMode === 'button_trigger'
-                            ? 'border-indigo-300 dark:border-indigo-700 bg-indigo-50/60 dark:bg-indigo-950/30 text-slate-800 dark:text-slate-200'
-                            : 'border-slate-200 dark:border-slate-800 bg-slate-50/60 dark:bg-slate-900/40 text-slate-600 dark:text-slate-400'
-                        }`}
-                      >
-                        <div className="font-semibold text-slate-900 dark:text-white mb-0.5">
-                          {isZh ? '方式 B · 页面按钮点击后登录' : 'Mode B · Button-Triggered Entry'}
-                        </div>
-                        <p>
-                          {isZh
-                            ? '保留未登录公开浏览页，用户在导航栏或入口页点击「登录」按钮后再跳往认证中心。适合官网、博客、文档站、社区或电商等含公开内容的网站。'
-                            : 'Allows guests to browse public pages first and sign in via a navbar/page button. Best for landing sites, docs, blogs, forums, and storefronts.'}
-                        </p>
-                      </div>
-                    </div>
-                  </div>
-
-                  <pre className="p-3 bg-slate-50/70 dark:bg-[#0B0F19] font-mono text-[11px] text-slate-700 dark:text-slate-300 whitespace-pre-wrap max-h-56 overflow-y-auto leading-relaxed">
-                    {aiIntegrationPrompt}
-                  </pre>
-                </div>
+                  }
+                />
               </div>
             )}
 
@@ -1254,23 +1188,19 @@ export function LoginLabView({
                       </div>
                     </dl>
 
-                    <div>
-                      <div className="font-medium text-slate-700 dark:text-slate-300 mb-1.5">
-                        Decoded ID Token Payload (RS256 Signature Verified: {String(latestTrace.decodedIdToken.signatureVerified)})
-                      </div>
-                      <pre className="p-3.5 rounded-lg bg-slate-50 dark:bg-[#0B0F19] border border-slate-200 dark:border-slate-800 font-mono text-[11px] text-slate-800 dark:text-slate-200 overflow-x-auto leading-relaxed">
-                        {JSON.stringify(latestTrace.decodedIdToken.payload, null, 2)}
-                      </pre>
-                    </div>
+                    <CollapsibleCodeBlock
+                      locale={locale}
+                      title={`Decoded ID Token Payload (RS256 Verified: ${String(latestTrace.decodedIdToken.signatureVerified)})`}
+                      language="json"
+                      code={JSON.stringify(latestTrace.decodedIdToken.payload, null, 2)}
+                    />
 
-                    <div>
-                      <div className="font-medium text-slate-700 dark:text-slate-300 mb-1.5">
-                        GET /oauth/userinfo Response
-                      </div>
-                      <pre className="p-3.5 rounded-lg bg-slate-50 dark:bg-[#0B0F19] border border-slate-200 dark:border-slate-800 font-mono text-[11px] text-slate-800 dark:text-slate-200 overflow-x-auto leading-relaxed">
-                        {JSON.stringify(latestTrace.userInfo, null, 2)}
-                      </pre>
-                    </div>
+                    <CollapsibleCodeBlock
+                      locale={locale}
+                      title="GET /oauth/userinfo Response"
+                      language="json"
+                      code={JSON.stringify(latestTrace.userInfo, null, 2)}
+                    />
                   </div>
                 )}
               </div>

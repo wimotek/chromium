@@ -12,6 +12,13 @@ services:
       WIMOTEK_CERTS_DIR: /certs
       WIMOTEK_HTTP_ADDR: ":8080"
       WIMOTEK_HTTPS_ADDR: ":8443"
+      # Optional wimotek/Oauth (OIDC 1.0 + PKCE S256) configuration.
+      # Leave OAUTH_SECRET unset on first deployment to sign in locally first.
+      OAUTH_ISSUER: "https://auth.wimotek.com"
+      OAUTH_CLIENT_ID: "wimotek_c41ac24274c6"
+      OAUTH_SECRET: "${OAUTH_SECRET:-}"
+      OAUTH_REDIRECT_URI: "${OAUTH_REDIRECT_URI:-https://wimotek.com/auth/callback}"
+      OAUTH_WEBHOOK_SECRET: "${OAUTH_WEBHOOK_SECRET:-}"
     volumes:
       - ./data:/data
       # Optional read-only TLS certificate mount (fullchain.pem & privkey.pem or fullchain & prikey).
