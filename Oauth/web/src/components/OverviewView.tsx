@@ -7,7 +7,6 @@ import {
   Shield,
   ExternalLink,
   RefreshCw,
-  RotateCcw,
   Eye,
   EyeOff,
   KeyRound,
@@ -32,7 +31,6 @@ interface OverviewViewProps {
     graceMinutes?: number
   ) => Promise<{ ok: boolean; mode: 'graceful' | 'emergency'; previousKid: string; jwksKid: string; signingKeyStatus: SigningKeyStatus } | null>;
   onPurgeRetiringKeys: () => Promise<void>;
-  onRerunWizard: () => Promise<void>;
 }
 
 export function OverviewView({
@@ -45,7 +43,6 @@ export function OverviewView({
   onSimulateCacheFailover,
   onRotateSigningKey,
   onPurgeRetiringKeys,
-  onRerunWizard,
 }: OverviewViewProps) {
   const t = TRANSLATIONS[locale];
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
@@ -169,16 +166,6 @@ export function OverviewView({
           </p>
         </div>
 
-        <div className="flex items-center gap-2.5 flex-wrap">
-          <button
-            type="button"
-            onClick={onRerunWizard}
-            className="min-h-[40px] px-3.5 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-[#111827] hover:bg-slate-50 dark:hover:bg-slate-800 text-xs font-medium text-slate-700 dark:text-slate-200 flex items-center gap-1.5 whitespace-nowrap shrink-0 transition-colors"
-          >
-            <RotateCcw className="w-3.5 h-3.5" />
-            <span>{t.rerunSetupWizard}</span>
-          </button>
-        </div>
       </div>
 
       {/* Key Operational Summary Row */}

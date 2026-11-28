@@ -110,12 +110,3 @@ func (m *Manager) Update(cfg SystemConfig) error {
 	defer m.mu.Unlock()
 	return m.saveLocked(cfg)
 }
-
-// ResetSetup unlocks the Setup Wizard (admin-only action).
-func (m *Manager) ResetSetup() error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	cfg := m.current
-	cfg.Initialized = false
-	return m.saveLocked(cfg)
-}

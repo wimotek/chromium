@@ -349,12 +349,14 @@ func NewRouter(cfgMgr *config.Manager, keys *crypto.KeyManager, certSources ...s
 	mux.HandleFunc("POST /api/oauth/device/approve", s.requireAdmin(s.handleDeviceApprove))
 	mux.HandleFunc("POST /api/oauth/device/poll", s.handleDevicePoll)
 
-	// Setup Wizard
+	// Setup Wizard (mutation routes are unmounted at boot when already initialized
+	// and permanently return 404 immediately once CompleteSetup succeeds)
 	mux.HandleFunc("GET /api/setup/status", s.handleSetupStatus)
-	mux.HandleFunc("POST /api/setup/test-db", s.handleTestDB)
-	mux.HandleFunc("POST /api/setup/test-redis", s.handleTestRedis)
-	mux.HandleFunc("POST /api/setup/complete", s.handleSetupComplete)
-	mux.HandleFunc("POST /api/setup/reset", s.requireAdmin(s.handleSetupReset))
+	if !s.cfgMgr.Get().Initialized {
+		mux.HandleFunc("POST /api/setup/test-db", s.requireUninitialized(s.handleTestDB))
+		mux.HandleFunc("POST /api/setup/test-redis", s.requireUninitialized(s.handleTestRedis))
+		mux.HandleFunc("POST /api/setup/complete", s.requireUninitialized(s.handleSetupComplete))
+	}
 
 	// Authentication & Passkey Flows
 	mux.HandleFunc("POST /api/auth/login", s.handlePasswordLogin)
@@ -958,6 +960,19 @@ func (s *appServer) issueLiveTraceLocked(r *http.Request, clientID, email, name,
 	return s.issueSessionForUserLocked(r, matched, clientID, providerLabel, authMethod, jitAction)
 }
 
+func (s *appServer) requireUninitialized(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if s.cfgMgr.Get().Initialized {
+			writeJSON(w, http.StatusNotFound, map[string]any{
+				"error":   "not_found",
+				"message": "Setup wizard is permanently locked and disabled after installation.",
+			})
+			return
+		}
+		next(w, r)
+	}
+}
+
 func (s *appServer) requireAdmin(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		tok, fromCookie := extractSessionToken(r)
@@ -1496,11 +1511,6 @@ func (s *appServer) handleSetupComplete(w http.ResponseWriter, r *http.Request) 
 		"user":         u,
 		"sessionToken": tok,
 	})
-}
-
-func (s *appServer) handleSetupReset(w http.ResponseWriter, _ *http.Request) {
-	_ = s.cfgMgr.ResetSetup()
-	writeJSON(w, http.StatusOK, map[string]any{"initialized": false})
 }
 
 // ============================================================================

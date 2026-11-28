@@ -668,14 +668,6 @@ export default function App() {
     }
   }
 
-  async function handleRerunWizard() {
-    if (!sessionToken) return;
-    await authFetch('/api/setup/reset', { method: 'POST' });
-    setConfig((prev) => (prev ? { ...prev, initialized: false } : prev));
-    setSessionToken(null);
-    setUser(null);
-  }
-
   async function handleSimulateJit(payload: {
     email: string;
     displayName: string;
@@ -1221,7 +1213,6 @@ export default function App() {
                     onSimulateCacheFailover={handleSimulateCacheFailover}
                     onRotateSigningKey={handleRotateSigningKey}
                     onPurgeRetiringKeys={handlePurgeRetiringKeys}
-                    onRerunWizard={handleRerunWizard}
                   />
                 )}
 

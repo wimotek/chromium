@@ -114,7 +114,6 @@ export interface TranslationSchema {
   cacheEngineTitle: string;
   simulateRedisFailover: string;
   restoreRedis: string;
-  rerunSetupWizard: string;
   appsTitle: string;
   appsSubtitle: string;
   createApp: string;
@@ -188,7 +187,6 @@ export const TRANSLATIONS: Record<Locale, TranslationSchema> = {
     cacheEngineTitle: '高可用缓存引擎',
     simulateRedisFailover: '模拟 Redis 断连降级',
     restoreRedis: '恢复 Redis 连接',
-    rerunSetupWizard: '重演安装向导',
     appsTitle: '业务应用管理',
     appsSubtitle: '创建标准 OIDC 客户端，业务站无需感知上游微软、苹果或微信登录细节。',
     createApp: '新建业务应用',
@@ -260,7 +258,6 @@ export const TRANSLATIONS: Record<Locale, TranslationSchema> = {
     cacheEngineTitle: '高可用快取引擎',
     simulateRedisFailover: '模擬 Redis 斷線降級',
     restoreRedis: '恢復 Redis 連線',
-    rerunSetupWizard: '重演安裝精靈',
     appsTitle: '業務應用管理',
     appsSubtitle: '建立標準 OIDC 用戶端，業務站無需感知上游微軟、蘋果或微信登入實作細節。',
     createApp: '新增業務應用',
@@ -332,7 +329,6 @@ export const TRANSLATIONS: Record<Locale, TranslationSchema> = {
     cacheEngineTitle: 'Resilient Cache Engine',
     simulateRedisFailover: 'Simulate Redis Outage',
     restoreRedis: 'Restore Redis',
-    rerunSetupWizard: 'Preview Setup Wizard',
     appsTitle: 'Business Applications',
     appsSubtitle: 'Register OIDC clients so downstream apps stay decoupled from upstream social identity providers.',
     createApp: 'New Application',
@@ -404,7 +400,6 @@ export const TRANSLATIONS: Record<Locale, TranslationSchema> = {
     cacheEngineTitle: '耐障害キャッシュエンジン',
     simulateRedisFailover: 'Redis 障害をシミュレート',
     restoreRedis: 'Redis 接続を復旧',
-    rerunSetupWizard: 'セットアップ再確認',
     appsTitle: '業務アプリケーション管理',
     appsSubtitle: 'OIDC クライアントを登録し、上位プロバイダーの差異を意識せずに統合認証を導入できます。',
     createApp: 'アプリを新規作成',
@@ -476,7 +471,6 @@ export const TRANSLATIONS: Record<Locale, TranslationSchema> = {
     cacheEngineTitle: 'Ausfallsichere Cache-Schicht',
     simulateRedisFailover: 'Redis-Ausfall simulieren',
     restoreRedis: 'Redis wiederherstellen',
-    rerunSetupWizard: 'Assistent erneut prüfen',
     appsTitle: 'Geschäftsanwendungen',
     appsSubtitle: 'Verwalten Sie OIDC-Clients unabhängig von den vorgeschalteten Sozialanbietern.',
     createApp: 'Neue Anwendung',
